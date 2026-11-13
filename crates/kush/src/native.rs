@@ -161,6 +161,7 @@ static void kush_stack_guard_init(void) {
 /* A program's main may run on a thread with a larger stack
    (`#[stack_size(N)]`). That thread gets its own signal stack, and the
    ceiling moves to its first frame. */
+#ifdef KUSH_MAIN_STACK
 static void kush_stack_guard_thread(void *signal_stack, size_t size) {
     stack_t stack;
     memset(&stack, 0, sizeof(stack));
@@ -169,12 +170,15 @@ static void kush_stack_guard_thread(void *signal_stack, size_t size) {
     if (sigaltstack(&stack, NULL) != 0) kush_panic();
     kush_stack_ceiling = (uintptr_t)__builtin_frame_address(0);
 }
+#endif
 #else
 static void kush_stack_guard_init(void) {}
+#ifdef KUSH_MAIN_STACK
 static void kush_stack_guard_thread(void *signal_stack, size_t size) {
     (void)signal_stack;
     (void)size;
 }
+#endif
 #endif
 int64_t kush_print_i64(int64_t value) {
     char buffer[32];
