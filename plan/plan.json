@@ -5748,6 +5748,196 @@
           "text": "done 88b2f46"
         }
       ]
+    },
+    {
+      "id": "PROOF-FUZZ",
+      "title": "Fuzz the obligations the prover leaves unproved",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Turn KUSH_PROOF_REPORT's unproved bounds/overflow checks into fuzz targets; counterexamples become bugs or lemmas. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "DP-GRADES",
+      "title": "Differential-privacy budgets as grades",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Sensitivity/epsilon grade algebra (Fuzz/Duet style) and a small private-metrics library. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SEMVER-CONTRACTS",
+      "title": "Semver checked by the compiler: types, effects, grades",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Extract public contracts; new signatures must be subtypes of old ones; kush semver and Kush.lock resolution enforce it. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SEMVER-ENSURES",
+      "title": "Semver v2: weaker preconditions, stronger ensures",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "SEMVER-CONTRACTS"
+      ],
+      "status": "todo",
+      "desc": "Prover checks contract implications; the failed implication explains the break. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STAGING-DESIGN",
+      "title": "Staging: design typed quotes and splices",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Code<T>, quote/splice, hygiene, effects and ownership of generated code. Design approval before STAGING. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STAGING",
+      "title": "Staging: Code<T>, quotes, splices, compile-time run",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "STAGING-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STAGING-RUNTIME",
+      "title": "Run staged code at run time through the native backend",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "STAGING"
+      ],
+      "status": "todo",
+      "desc": "In-process code generation; executable memory as a linear resource (writable or executable, never both). See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GB-STAGED",
+      "title": "Staged Game Boy: specialize the interpreter against a ROM",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "STAGING",
+        "GAMEBOY"
+      ],
+      "status": "todo",
+      "desc": "First Futamura projection on the emulator. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GB-JIT",
+      "title": "Game Boy JIT: SM83 blocks to x86-64 at run time",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "GB-STAGED",
+        "STAGING-RUNTIME"
+      ],
+      "status": "todo",
+      "desc": "Target ~1000x console speed; demo video against the interpreter. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FORMATS-ROUNDTRIP",
+      "title": "Write-once binary formats with a proved round trip",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "STAGING"
+      ],
+      "status": "todo",
+      "desc": "One format description; staged parser and serializer; prove parse(serialize(x)) == x. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "KERNEL-IN-KUSH",
+      "title": "Port the dependent kernel to Kush",
+      "size": "L",
+      "hard": true,
+      "deps": [],
+      "status": "todo",
+      "desc": "Lean4Lean-style: universes, J, indexed data, Prop in Kush; the Rust kernel checks its invariants. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "TACTICS-HANDLERS",
+      "title": "Proof assistant: tactics as effect handlers",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "KERNEL-IN-KUSH",
+        "EFF-CAP-RESUME-MULTISHOT"
+      ],
+      "status": "todo",
+      "desc": "Goal/Choose/Fail effects, backtracking as a multishot handler, terms checked by the Kush kernel. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SESSION-TYPES",
+      "title": "Session-typed channels between threads and tasks",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "CHANNEL-OWNED"
+      ],
+      "status": "todo",
+      "desc": "Protocols as linear channel types; violations are compile errors. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SESSION-NET",
+      "title": "Session types over TCP",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "SESSION-TYPES",
+        "FORMATS-ROUNDTRIP",
+        "STD-PROC-NET-IN-KUSH"
+      ],
+      "status": "todo",
+      "desc": "Write-once formats as the wire layer; a real protocol server as the example. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SELF-HOST",
+      "title": "Self-hosted compiler (later)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "KERNEL-IN-KUSH"
+      ],
+      "status": "todo",
+      "desc": "Parser, checker and backend in Kush. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
     }
   ]
 }
