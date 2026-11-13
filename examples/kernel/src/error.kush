@@ -1,0 +1,21 @@
+module kernel.error;
+
+// Kernel error codes. Each failing kernel operation returns one of these;
+// the command line maps them to the exchange answers `reject` and `budget`
+// (docs/kernel-exchange.md). TACTICS-HANDLERS will get structured errors
+// (KIK-API); codes keep the kernel's own signatures small for now.
+
+/// The step budget ran out (an inconclusive answer, not a verdict).
+
+pub const BUDGET: i64 = 1;
+/// The nesting budget ran out (also inconclusive).
+pub const DEPTH: i64 = 2;
+/// A universe level mentions a parameter that is not in scope.
+pub const UNBOUND_LEVEL: i64 = 3;
+/// A universe level would exceed the largest constant or offset.
+pub const LEVEL_OVERFLOW: i64 = 4;
+/// A variable or telescope position outside its context.
+pub const OUT_OF_RANGE: i64 = 5;
+
+/// Whether a code means "ran out of budget" rather than "rejected".
+pub fn inconclusive(code: i64) -> Bool ! {} { code == BUDGET || code == DEPTH }

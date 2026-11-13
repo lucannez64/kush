@@ -4,8 +4,9 @@
 (`crates/kush/src/kernel.rs`) to Kush, in the spirit of Lean4Lean. Design:
 [docs/kernel-in-kush.md](../../docs/kernel-in-kush.md).
 
-Status: the term store, reader and printer (KIK-STORE). Type checking comes
-next (KIK-SUBST, KIK-NORMAL, KIK-CHECK).
+Status: the term store, reader and printer (KIK-STORE) and binder operations
+(KIK-SUBST). Normalization and type checking come next (KIK-NORMAL,
+KIK-CHECK).
 
 ```sh
 kush core ../induction.kush > induction.kcore        # Rust: dump a checked module
@@ -20,6 +21,11 @@ kush test --manifest-path Kush.toml
 - `src/reader.kush`, `src/printer.kush`: the
   [exchange format](../../docs/kernel-exchange.md), printed exactly as the
   Rust side prints it.
+- `src/subst.kush`: shifting, substitution, parallel rewriting of outer
+  binders and universe instantiation, as one traversal that skips closed
+  subterms (each term records its free-variable range) and visits each shared
+  subterm once per binder depth.
+- `src/error.kush`: kernel error codes.
 - `src/main.kush`: the command line.
 
 The Rust test `crates/kush/tests/kernel_in_kush.rs` runs the package tests

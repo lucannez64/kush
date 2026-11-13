@@ -1,0 +1,217 @@
+module kernel.subst;
+
+// Binder operations over de Bruijn terms, with the same meaning as the Rust
+// kernel's `shift`, `substitute`, `rewrite_outer` and universe instantiation
+// (crates/kush/src/kernel.rs).
+//
+// All four are one traversal (`walk`) parameterized by an operation. Two
+// things keep it linear in the size of the term graph rather than of the
+// unfolded tree:
+//
+// - every term records one more than its largest free index (`term.range`),
+//   so a subterm with no free variable at or above the current depth is
+//   returned as is, without being visited;
+// - results are cached per (subterm, binder depth) for the duration of one
+//   traversal, so a subterm shared many times is rebuilt once.
+
+use std.result.Result;
+use kernel.error;
+use kernel.store;
+use kernel.store.Store;
+use kernel.term;
+
+const SHIFT: i64 = 0;
+const SUBST: i64 = 1;
+const REWRITE: i64 = 2;
+const LEVELS: i64 = 3;
+
+/// An operation: its kind and its operand (a shift amount, the substituted
+/// term, the list of replacement terms, or the list of universe levels).
+
+struct Op { kind: i64, operand: i64 }
+
+fn walk_list(s: &mut Store, op: Op, list: i64, depth: i64, generation: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let n = term.list_len(s, list);
+    let mut items: Vec<i64> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let item = term.list_at(s, list, i);
+        let walked = walk(s, op, item, depth, generation)?;
+        items = items.push(walked);
+        i = i + 1;
+    }
+    Result.Ok(term.list(s, &items))
+}
+
+fn levels_list(s: &mut Store, list: i64, levels: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let n = term.list_len(s, list);
+    let mut items: Vec<i64> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let level = term.list_at(s, list, i);
+        let instantiated = term.level_instantiate(s, level, levels)?;
+        items = items.push(instantiated);
+        i = i + 1;
+    }
+    Result.Ok(term.list(s, &items))
+}
+
+fn variable(s: &mut Store, op: Op, t: i64, depth: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let index = term.field(s, t, 0);
+    if index < depth || op.kind == LEVELS { return Result.Ok(t); }
+    if op.kind == SHIFT { return Result.Ok(term.var(s, index + op.operand)); }
+    if op.kind == SUBST {
+        if index == depth { return Result.Ok(shift(s, op.operand, depth, 0)); }
+        return Result.Ok(term.var(s, index - 1));
+    }
+    // REWRITE: the outermost removed binder is the last argument's position.
+    let count = term.list_len(s, op.operand);
+    let position = count - 1 - (index - depth);
+    if position < 0 { return Result.Err(error.OUT_OF_RANGE); }
+    Result.Ok(shift(s, term.list_at(s, op.operand, position), depth, 0))
+}
+
+fn walk(s: &mut Store, op: Op, t: i64, depth: i64, generation: i64) -> Result<i64, i64> ! {alloc, panic} {
+    if op.kind != LEVELS && term.range(s, t) <= depth { return Result.Ok(t); }
+    let hit = store.cached(s, generation, t, depth);
+    if hit >= 0 { return Result.Ok(hit); }
+    let tag = term.tag(s, t);
+    let result = if tag == term.VAR {
+        variable(s, op, t, depth)?
+    } else if tag == term.SORT {
+        if op.kind == LEVELS {
+            let level = term.level_instantiate(s, term.field(s, t, 0), op.operand)?;
+            term.sort(s, level)
+        } else {
+            t
+        }
+    } else if tag == term.GLOBAL {
+        if op.kind == LEVELS {
+            let levels = levels_list(s, term.field(s, t, 1), op.operand)?;
+            term.global(s, term.field(s, t, 0), levels)
+        } else {
+            t
+        }
+    } else if tag == term.PI || tag == term.LAM {
+        let domain = walk(s, op, term.field(s, t, 0), depth, generation)?;
+        let body = walk(s, op, term.field(s, t, 1), depth + 1, generation)?;
+        if tag == term.PI { term.pi(s, domain, body) } else { term.lam(s, domain, body) }
+    } else if tag == term.APP || tag == term.REFL {
+        let a = walk(s, op, term.field(s, t, 0), depth, generation)?;
+        let b = walk(s, op, term.field(s, t, 1), depth, generation)?;
+        if tag == term.APP { term.app(s, a, b) } else { term.reflexive(s, a, b) }
+    } else if tag == term.SUCC {
+        let a = walk(s, op, term.field(s, t, 0), depth, generation)?;
+        term.succ(s, a)
+    } else if tag == term.EQ {
+        let a = walk(s, op, term.field(s, t, 0), depth, generation)?;
+        let b = walk(s, op, term.field(s, t, 1), depth, generation)?;
+        let c = walk(s, op, term.field(s, t, 2), depth, generation)?;
+        term.eq(s, a, b, c)
+    } else if tag == term.NATELIM {
+        let a = walk(s, op, term.field(s, t, 0), depth, generation)?;
+        let b = walk(s, op, term.field(s, t, 1), depth, generation)?;
+        let c = walk(s, op, term.field(s, t, 2), depth, generation)?;
+        let d = walk(s, op, term.field(s, t, 3), depth, generation)?;
+        term.natelim(s, a, b, c, d)
+    } else if tag == term.TRANSPORT || tag == term.EQELIM {
+        let a = walk(s, op, term.field(s, t, 0), depth, generation)?;
+        let b = walk(s, op, term.field(s, t, 1), depth, generation)?;
+        let c = walk(s, op, term.field(s, t, 2), depth, generation)?;
+        let d = walk(s, op, term.field(s, t, 3), depth, generation)?;
+        let e = walk(s, op, term.field(s, t, 4), depth, generation)?;
+        let f = walk(s, op, term.field(s, t, 5), depth, generation)?;
+        if tag == term.TRANSPORT {
+            term.transport(s, a, b, c, d, e, f)
+        } else {
+            term.eqelim(s, a, b, c, d, e, f)
+        }
+    } else if tag == term.INDELIM {
+        let motive = walk(s, op, term.field(s, t, 1), depth, generation)?;
+        let branches = walk_list(s, op, term.field(s, t, 2), depth, generation)?;
+        let scrutinee = walk(s, op, term.field(s, t, 3), depth, generation)?;
+        term.indelim(s, term.field(s, t, 0), motive, branches, scrutinee)
+    } else {
+        // Leaves without variables or levels: prop, nat, zero, literals and
+        // scalars.
+        t
+    };
+    store.remember(s, generation, t, depth, result);
+    Result.Ok(result)
+}
+
+fn run(s: &mut Store, op: Op, t: i64, depth: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let generation = store.fresh_generation(s);
+    walk(s, op, t, depth, generation)
+}
+
+/// Add `amount` to every free index at or above `cutoff`.
+pub fn shift(s: &mut Store, t: i64, amount: i64, cutoff: i64) -> i64 ! {alloc, panic} {
+    if amount == 0 || term.range(s, t) <= cutoff { return t; }
+    match run(s, Op { kind: SHIFT, operand: amount }, t, cutoff) {
+        Result.Ok(result) => result,
+        // Shifting has no failure case.
+        Result.Err(_) => panic(),
+    }
+}
+
+/// Substitute `value` for index 0 of `body`, lowering the indices above it:
+/// the body of a binder applied to `value`.
+pub fn substitute(s: &mut Store, body: i64, value: i64) -> i64 ! {alloc, panic} {
+    match run(s, Op { kind: SUBST, operand: value }, body, 0) {
+        Result.Ok(result) => result,
+        Result.Err(_) => panic(),
+    }
+}
+
+/// Replace the outermost `list_len(arguments)` binders of `t` in one pass,
+/// outermost first: index `k` (counting from the innermost removed binder)
+/// becomes argument `len - 1 - k`. The arguments live in the target context.
+/// An index past the arguments is `OUT_OF_RANGE`.
+pub fn rewrite_outer(s: &mut Store, t: i64, arguments: i64) -> Result<i64, i64> ! {alloc, panic} {
+    run(s, Op { kind: REWRITE, operand: arguments }, t, 0)
+}
+
+/// Replace universe parameter `u_i` with element `i` of `levels` throughout.
+pub fn instantiate_levels(s: &mut Store, t: i64, levels: i64) -> Result<i64, i64> ! {alloc, panic} {
+    if term.list_len(s, levels) == 0 { return Result.Ok(t); }
+    run(s, Op { kind: LEVELS, operand: levels }, t, 0)
+}
+
+/// The head of an application spine.
+pub fn head(s: &Store, t: i64) -> i64 ! {panic} {
+    let mut current = t;
+    while term.tag(s, current) == term.APP {
+        current = term.field(s, current, 0);
+    }
+    current
+}
+
+/// The arguments of an application spine, in source order.
+pub fn arguments(s: &Store, t: i64) -> Vec<i64> ! {alloc, panic} {
+    let mut reversed: Vec<i64> = Vec.new();
+    let mut current = t;
+    while term.tag(s, current) == term.APP {
+        reversed = reversed.push(term.field(s, current, 1));
+        current = term.field(s, current, 0);
+    }
+    let n = reversed.len();
+    let mut out: Vec<i64> = Vec.with_capacity(n);
+    let mut i = n - 1;
+    while i >= 0 {
+        out = out.push(reversed[i]);
+        i = i - 1;
+    }
+    out
+}
+
+/// `head a0 a1 ...`.
+pub fn apply(s: &mut Store, head: i64, arguments: &Vec<i64>) -> i64 ! {alloc, panic} {
+    let mut result = head;
+    let mut i = 0;
+    while i < arguments.len() {
+        result = term.app(s, result, arguments[i]);
+        i = i + 1;
+    }
+    result
+}

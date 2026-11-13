@@ -3,10 +3,12 @@ module kernel.tests.main;
 use std.result.Result;
 use std.test;
 use std.text;
+use kernel.error;
 use kernel.printer;
 use kernel.reader;
 use kernel.store;
 use kernel.store.Store;
+use kernel.subst;
 use kernel.term;
 
 /// Read one term and print it back.
@@ -119,4 +121,133 @@ fn items_round_trip() -> Unit ! {io, alloc, panic} {
     same(&out, &source);
     let bad = Bytes.from("(def x 0 nat zero)\n(launch)\n");
     test.is_true(match reader.read(&mut s, &bad) { Result.Ok(_) => false, Result.Err(at) => at == 20 });
+}
+
+fn parse(s: &mut Store, source: &Bytes) -> i64 ! {alloc, panic} {
+    match reader.read_term(s, source) {
+        Result.Ok(id) => id,
+        Result.Err(_) => panic(),
+    }
+}
+
+fn shows(s: &Store, id: i64, expected: &Bytes) -> Unit ! {alloc, panic} {
+    same(&printer.term_into(s, Bytes.with_capacity(0), id), expected);
+}
+
+/// A list of terms parsed from `(t ...)` source.
+fn terms(s: &mut Store, items: &Bytes) -> i64 ! {alloc, panic} {
+    let wrapped = parse(s, items);
+    // `(app f a)` gives two items; build the list from an application spine.
+    let mut list: Vec<i64> = Vec.new();
+    list = list.push(term.field(s, wrapped, 0)).push(term.field(s, wrapped, 1));
+    term.list(s, &list)
+}
+
+#[test]
+fn shifting_moves_only_free_indices_at_or_above_the_cutoff() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let t = parse(&mut s, &Bytes.from("(lam nat (app (var 0) (var 1)))"));
+    let up = subst.shift(&mut s, t, 2, 0);
+    shows(&s, up, &Bytes.from("(lam nat (app (var 0) (var 3)))"));
+    let u = parse(&mut s, &Bytes.from("(app (var 0) (var 1))"));
+    let above = subst.shift(&mut s, u, 1, 1);
+    shows(&s, above, &Bytes.from("(app (var 0) (var 2))"));
+    // A closed term is returned as is, without building anything.
+    let closed = parse(&mut s, &Bytes.from("(pi nat (lam nat (var 1)))"));
+    test.equal_i64(term.range(&s, closed), 0);
+    let before = store.count(&s);
+    test.equal_i64(subst.shift(&mut s, closed, 5, 0), closed);
+    test.equal_i64(store.count(&s), before);
+}
+
+#[test]
+fn substitution_lowers_indices_and_never_captures() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let body = parse(&mut s, &Bytes.from("(app (var 0) (var 1))"));
+    let five = parse(&mut s, &Bytes.from("(lit 5)"));
+    let applied = subst.substitute(&mut s, body, five);
+    shows(&s, applied, &Bytes.from("(app (lit 5) (var 0))"));
+    // Under a binder the value is shifted, so its free variable still refers
+    // to the outer binder: (λz. y z w)[y := x] keeps x free.
+    let under = parse(&mut s, &Bytes.from("(lam nat (app (var 1) (var 2)))"));
+    let x = term.var(&mut s, 0);
+    let result = subst.substitute(&mut s, under, x);
+    shows(&s, result, &Bytes.from("(lam nat (app (var 1) (var 1)))"));
+    // The Rust kernel's capture test: λx. (λy. λz. y) x, reduced by hand.
+    let inner = parse(&mut s, &Bytes.from("(lam nat (var 1))"));
+    let reduced = subst.substitute(&mut s, inner, x);
+    shows(&s, reduced, &Bytes.from("(lam nat (var 1))"));
+}
+
+#[test]
+fn outer_binders_are_rewritten_in_parallel() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    // Arguments are outermost first: (var 1) is the first, (var 0) the second.
+    let args = terms(&mut s, &Bytes.from("(app (lit 1) (lit 2))"));
+    let t = parse(&mut s, &Bytes.from("(app (var 0) (var 1))"));
+    let r = match subst.rewrite_outer(&mut s, t, args) { Result.Ok(r) => r, Result.Err(_) => -1 };
+    shows(&s, r, &Bytes.from("(app (lit 2) (lit 1))"));
+    let under = parse(&mut s, &Bytes.from("(lam nat (app (var 0) (var 2)))"));
+    let r2 = match subst.rewrite_outer(&mut s, under, args) { Result.Ok(r) => r, Result.Err(_) => -1 };
+    shows(&s, r2, &Bytes.from("(lam nat (app (var 0) (lit 1)))"));
+    // Replacement terms are shifted under the binders they move below.
+    let open = terms(&mut s, &Bytes.from("(app (var 0) (var 5))"));
+    let r3 = match subst.rewrite_outer(&mut s, under, open) { Result.Ok(r) => r, Result.Err(_) => -1 };
+    shows(&s, r3, &Bytes.from("(lam nat (app (var 0) (var 1)))"));
+    let far = parse(&mut s, &Bytes.from("(var 2)"));
+    test.is_true(match subst.rewrite_outer(&mut s, far, args) {
+        Result.Ok(_) => false,
+        Result.Err(code) => code == error.OUT_OF_RANGE,
+    });
+}
+
+#[test]
+fn universe_parameters_are_instantiated_everywhere() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let t = parse(&mut s, &Bytes.from("(pi (sort (u 0)) (app (global id (max 1 (u 1))) (sort (succ (u 1)))))"));
+    let three = term.level_of(&mut s, 3);
+    let u0 = term.level_var(&mut s, 0);
+    let mut levels: Vec<i64> = Vec.new();
+    levels = levels.push(three).push(u0);
+    let list = term.list(&mut s, &levels);
+    let r = match subst.instantiate_levels(&mut s, t, list) { Result.Ok(r) => r, Result.Err(_) => -1 };
+    shows(&s, r, &Bytes.from("(pi (sort 3) (app (global id (max 1 (u 0))) (sort (succ (u 0)))))"));
+    let mut short: Vec<i64> = Vec.new();
+    short = short.push(three);
+    let one = term.list(&mut s, &short);
+    test.is_true(match subst.instantiate_levels(&mut s, t, one) {
+        Result.Ok(_) => false,
+        Result.Err(code) => code == error.UNBOUND_LEVEL,
+    });
+}
+
+#[test]
+fn shared_subterms_are_visited_once() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    // t(k+1) = app(t(k), t(k)): 2^60 nodes as a tree, 61 in the store.
+    let mut t = term.var(&mut s, 0);
+    let mut expected = term.var(&mut s, 1);
+    let mut k = 0;
+    while k < 60 {
+        t = term.app(&mut s, t, t);
+        expected = term.app(&mut s, expected, expected);
+        k = k + 1;
+    }
+    test.equal_i64(subst.shift(&mut s, t, 1, 0), expected);
+    let zero = term.zero(&mut s);
+    let replaced = subst.substitute(&mut s, t, zero);
+    test.equal_i64(term.range(&s, replaced), 0);
+}
+
+#[test]
+fn spines_split_and_rebuild_applications() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let t = parse(&mut s, &Bytes.from("(app (app (app (global f) zero) nat) (var 0))"));
+    let head = subst.head(&s, t);
+    shows(&s, head, &Bytes.from("(global f)"));
+    let args = subst.arguments(&s, t);
+    test.equal_i64(args.len(), 3);
+    shows(&s, args[0], &Bytes.from("zero"));
+    shows(&s, args[2], &Bytes.from("(var 0)"));
+    test.equal_i64(subst.apply(&mut s, head, &args), t);
 }
