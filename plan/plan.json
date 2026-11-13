@@ -5969,6 +5969,30 @@
       "desc": "HALT with IME=0 and a pending interrupt fails to increment PC on the next fetch. See examples/gameboy/README.md, Not yet.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "GRADE-ERASURE-ZEROSUM",
+      "title": "Reject grade algebras whose nonzero uses add or multiply to zero (erased slot read)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "GRADES"
+      ],
+      "status": "done",
+      "desc": "Z/2 algebra let an @[Parity.Even] binding be read twice and read an erased slot. Validation now requires zero-sum-free, no zero divisors.",
+      "commit": "66f0800",
+      "log": [
+        {
+          "time": "2026-11-13 03:31:42",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 03:31:42",
+          "who": "agent",
+          "text": "done 66f0800"
+        }
+      ]
     }
   ]
 }

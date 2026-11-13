@@ -698,6 +698,42 @@ fn lower_algebra(
             }
         }
     }
+    // Grade zero is erasure: a binding whose accumulated count is `zero` gets
+    // no runtime slot. That is sound only if `zero` is reached by no physical
+    // use, so nonzero counts must never sum or multiply back to zero (the
+    // semiring must be zero-sum-free and have no zero divisors). Z/2, for
+    // example, would let `x + x` on an erased `x` type-check and read an
+    // erased slot.
+    let erasure = |detail: String| {
+        Diagnostic::new(
+            declaration.span,
+            format!(
+                "grade algebra '{}' cannot erase grade zero soundly: {detail}; nonzero uses must never add or multiply back to '{}'",
+                declaration.name,
+                element(zero)
+            ),
+        )
+    };
+    for left in (0..count).filter(|&e| e != zero) {
+        for right in (0..count).filter(|&e| e != zero) {
+            if add[left][right] == zero {
+                return Err(erasure(format!(
+                    "'{}' + '{}' = '{}'",
+                    element(left),
+                    element(right),
+                    element(zero)
+                )));
+            }
+            if mul[left][right] == zero {
+                return Err(erasure(format!(
+                    "'{}' * '{}' = '{}'",
+                    element(left),
+                    element(right),
+                    element(zero)
+                )));
+            }
+        }
+    }
     use std::sync::{
         Arc,
         atomic::{AtomicU64, Ordering},

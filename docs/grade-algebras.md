@@ -47,6 +47,11 @@ table rows, and a wrong `zero`/`one` are rejected.
 - `zero` is the additive identity and `one` is the multiplicative identity.
 - The checker verifies commutativity and associativity of both operations,
   distributivity of `*` over `+`, the two identities, and zero annihilation.
+- The algebra must be **zero-sum-free with no zero divisors**: for nonzero
+  `a`, `b`, neither `a + b` nor `a * b` may be `zero`. Grade zero is erasure
+  (no runtime slot), so a count may reach `zero` only when nothing was
+  observed. Rings such as Z/n are rejected: in Z/2 `x + x` on an erased
+  `@[Parity.Even]` binding would type-check and read an erased slot.
 - Usage counting is performed in the declared algebra: a local graded by an
   element accumulates observed uses through `add`, and call-demand composition
   uses `mul`. An exact obligation compares the accumulated element with the
