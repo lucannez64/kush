@@ -5793,14 +5793,19 @@
       "deps": [
         "PF-DEMO"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Turn KUSH_PROOF_REPORT's unproved bounds/overflow checks into fuzz targets; counterexamples become bugs or lemmas. See docs/showcase-roadmap.md.",
-      "commit": null,
+      "commit": "5ee95eb",
       "log": [
         {
           "time": "2026-11-13 17:06:32",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 19:04:22",
+          "who": "agent",
+          "text": "done 5ee95eb"
         }
       ]
     },
@@ -6876,14 +6881,24 @@
         "PF-ENTRIES",
         "PF-COVERAGE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Run on examples/kernel and examples/gameboy; README before/after numbers.",
-      "commit": null,
+      "commit": "5ee95eb",
       "log": [
         {
           "time": "2026-11-13 18:38:56",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 19:04:22",
+          "who": "agent",
+          "text": "Game Boy: found and fixed the short-file crash in cartridge.title (193dfd7); 82% proved or attacked with entries, 4 local finds. Kernel: 63%, 4 local finds in reader helpers, no bug. Checker quirk seen while writing the kernel entry: matching on items[i] with several arms each passing &mut k to check.* was rejected ('cannot borrow an owner while an exclusive &mut [T] view of it is live'); moving the match into a helper taking &mut Kernel works."
+        },
+        {
+          "time": "2026-11-13 19:04:22",
+          "who": "agent",
+          "text": "done 5ee95eb"
         }
       ]
     },
@@ -6897,6 +6912,30 @@
       ],
       "status": "todo",
       "desc": "Optional: return a candidate point from the bounded integer search and seed the corpus.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PF-READER-LEMMAS",
+      "title": "Kernel reader: prove the offsets kush fuzz attacks",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PF-DEMO"
+      ],
+      "status": "todo",
+      "desc": "kush fuzz finds local counterexamples in reader.skip/atom_end/word (negative offsets). Add ensures { result >= 0 } to the parsers and erased 0 <= at preconditions, read with Bytes.at, so the checks are proved. docs/proof-fuzz.md section 5.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "MATCH-ARM-BORROW",
+      "title": "Investigate &mut borrows across match arms over a Vec element",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Seen in PF-DEMO: match items[i] { A(..) => f(&mut k, ..), B(..) => g(&mut k, ..) } rejected with 'exclusive &mut [T] view of it is live'; the same match inside a helper taking &mut Kernel is accepted.",
       "commit": null,
       "log": []
     }
