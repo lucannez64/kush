@@ -484,6 +484,16 @@ mod tests {
     }
 
     #[test]
+    fn operators_after_a_try_are_binary() {
+        // `?` is postfix: what follows it is a binary operator, not a borrow
+        // or a negation.
+        formats_to(
+            "fn f() -> Result<Bool, i64> ! {} { Ok(a()? && b()?) }\nfn g() -> Result<i64, i64> ! {} { Ok(c()? - 1) }\n",
+            "fn f() -> Result<Bool, i64> ! {} { Ok(a()? && b()?) }\nfn g() -> Result<i64, i64> ! {} { Ok(c()? - 1) }\n",
+        );
+    }
+
+    #[test]
     fn a_comment_alone_in_a_block_stays_inside_it() {
         formats_to(
             "fn f(c: i64) -> Unit ! {} {\n    if c > 3 {\n        // nothing yet\n    }\n}\n",

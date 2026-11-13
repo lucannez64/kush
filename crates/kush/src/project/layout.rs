@@ -380,7 +380,6 @@ fn expects_operand(prev: Option<&Kind>) -> bool {
                         | Kind::Let
                         | Kind::Mut
                         | Kind::Break
-                        | Kind::Question
                         | Kind::At
                 )
                 || ident_is(Some(kind), &["in", "as", "from"])

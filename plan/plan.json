@@ -6451,10 +6451,21 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "Kush programs run recursion on a fixed native stack (8 MB main thread) and abort with 'stack exhausted' past it; there is no way to request a larger stack. The Kush kernel therefore caps nesting at 8,000 where the Rust kernel (which moves to fresh 256 MiB stacks as it recurses) caps at 100,000. Add a stack size to Thread.spawn (and possibly the entry point), or segmented stack growth. See docs/kernel-in-kush.md.",
-      "commit": null,
-      "log": []
+      "commit": "8298dfd",
+      "log": [
+        {
+          "time": "2026-11-13 11:47:05",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 12:00:22",
+          "who": "agent",
+          "text": "done 8298dfd"
+        }
+      ]
     },
     {
       "id": "LSP-NESTED-PROJECTS",
