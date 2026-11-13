@@ -31,6 +31,15 @@ pub const AND: i64 = 2;
 pub const OR: i64 = 3;
 pub const FALSE: i64 = 4;
 
+/// Rules of an alternative (see `Query.Alternatives`): the code of an
+/// alternative is `rule * RULE + hypothesis`.
+pub const ASSUMPTION: i64 = 0;
+pub const CASES: i64 = 1;
+pub const APPLY: i64 = 2;
+pub const LEFT: i64 = 3;
+pub const RIGHT: i64 = 4;
+pub const RULE: i64 = 1000000;
+
 /// Pick one of `0..n`; the handler resumes once per alternative.
 pub effect Choose: i64 -> i64;
 
@@ -75,6 +84,13 @@ pub enum Query {
     ElimFalse(i64, i64),
     /// The search chose alternative `i` (statistics).
     Chosen(i64),
+    /// The rules that apply to a goal (in weak head normal form) in a
+    /// context, as a list of alternative codes: hypotheses whose type is
+    /// the goal, hypotheses `&`, `|` or `False` to eliminate, hypotheses
+    /// whose conclusion is the goal, and both sides of a disjunction.
+    Alternatives(i64, i64),
+    /// The code of alternative `i` of a list of alternatives.
+    At(i64, i64),
 }
 
 pub struct State {
@@ -292,6 +308,91 @@ fn elim_false(st: &mut State, h: i64, g: i64) -> i64 ! {alloc, panic} {
     term.indelim(s, name, motive, branches, h)
 }
 
+fn whnf_in(st: &mut State, items: &Vec<i64>, t: i64) -> i64 ! {alloc, panic} {
+    match api.whnf(&mut st.kernel, items, t) {
+        Result.Ok(n) => n,
+        Result.Err(_) => FAIL,
+    }
+}
+
+fn defeq_in(st: &mut State, items: &Vec<i64>, a: i64, b: i64) -> Bool ! {alloc, panic} {
+    match api.defeq(&mut st.kernel, items, a, b) {
+        Result.Ok(equal) => equal,
+        Result.Err(_) => false,
+    }
+}
+
+/// Whether a hypothesis type `A1 -> .. -> An -> B` (n >= 1) has the goal as
+/// its conclusion `B`.
+fn concludes(st: &mut State, context: i64, ty: i64, goal: i64) -> Bool ! {alloc, panic} {
+    let mut items = hypotheses(&st.kernel.store, context);
+    let mut t = ty;
+    let mut binders = 0;
+    loop {
+        let head = whnf_in(st, &items, t);
+        if head < 0 || shape(st, head) != PI {
+            return false;
+        }
+        items = items.push(term.field(&st.kernel.store, head, 0));
+        t = term.field(&st.kernel.store, head, 1);
+        binders = binders + 1;
+        let lifted = subst.shift(&mut st.kernel.store, goal, binders, 0);
+        if defeq_in(st, &items, t, lifted) {
+            return true;
+        }
+    }
+}
+
+fn alternatives(st: &mut State, context: i64, goal: i64) -> i64 ! {alloc, panic} {
+    let items = hypotheses(&st.kernel.store, context);
+    let n = items.len();
+    let mut out: Vec<i64> = Vec.new();
+    let mut types: Vec<i64> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let ty = term.list_at(&st.kernel.store, context, n - 1 - i);
+        types = types.push(subst.shift(&mut st.kernel.store, ty, i + 1, 0));
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        if defeq_in(st, &items, types[i], goal) {
+            out = out.push(ASSUMPTION * RULE + i);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        let head = whnf_in(st, &items, types[i]);
+        if head >= 0 {
+            let kind = shape(st, head);
+            if kind == AND || kind == OR || kind == FALSE {
+                out = out.push(CASES * RULE + i);
+            }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        if concludes(st, context, types[i], goal) {
+            out = out.push(APPLY * RULE + i);
+        }
+        i = i + 1;
+    }
+    if shape(st, goal) == OR {
+        out = out.push(LEFT * RULE);
+        out = out.push(RIGHT * RULE);
+    }
+    // A store list holds terms: each code is an `i64` literal term.
+    let mut terms: Vec<i64> = Vec.with_capacity(out.len());
+    i = 0;
+    while i < out.len() {
+        terms = terms.push(term.int(&mut st.kernel.store, out[i]));
+        i = i + 1;
+    }
+    term.list(&mut st.kernel.store, &terms)
+}
+
 /// Answer one `Goal` query.
 pub fn answer(st: &mut State, q: Query) -> i64 ! {alloc, panic} {
     match q {
@@ -350,6 +451,11 @@ pub fn answer(st: &mut State, q: Query) -> i64 ! {alloc, panic} {
         Query.ElimAnd(h, g) => elim_and(st, h, g),
         Query.ElimOr(h, g) => elim_or(st, h, g),
         Query.ElimFalse(h, g) => elim_false(st, h, g),
+        Query.Alternatives(context, goal) => alternatives(st, context, goal),
+        Query.At(list, i) => {
+            let item = term.list_at(&st.kernel.store, list, i);
+            term.field(&st.kernel.store, item, 0)
+        },
         Query.Chosen(i) => {
             st.choices = st.choices + 1;
             if i > 0 { st.backtracks = st.backtracks + 1; }

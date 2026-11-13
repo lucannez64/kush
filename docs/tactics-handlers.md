@@ -144,6 +144,14 @@ name; the scripts in the example are such functions.
   `And` and `Or` are eliminated through a motive whose value is the
   continuation type (`(P -> Q -> G) -> G`), because a `prop` family's
   branches bind its parameters afresh.
+- `auto` does not choose a rule and then a hypothesis: the engine lists
+  the alternatives that apply (`Alternatives(context, goal)`: hypotheses
+  equal to the goal, hypotheses to eliminate, hypotheses concluding in the
+  goal, sides of a disjunction) and `auto` makes one choice among them. A
+  first version chose blindly among all hypotheses, including the `Prop`
+  atoms, and reported 100 or more backtracks on three-line proofs; with
+  the list, `(A -> B) -> (B -> C) -> A -> C` takes 6 choices and none
+  backtracks.
 - Statistics are counted on the tactic side (`choose` reports each choice
   through `Goal`), since the search handler captures nothing.
 - `kush eval` is not supported for the demo: the evaluator's nesting budget

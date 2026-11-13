@@ -86,9 +86,20 @@ fn non_theorems_have_no_proof() -> Unit ! {io, alloc, panic} {
 #[test]
 fn the_search_backtracks() -> Unit ! {io, alloc, panic} {
     let mut st = state.new();
-    test.is_true(search(&mut st, &Bytes.from("(A -> B) -> (B -> C) -> A -> C")) >= 0);
+    // Which side of `B | A` to prove is only known after taking `A | B`
+    // apart, so the first tries fail and the search goes back.
+    test.is_true(search(&mut st, &Bytes.from("A | B -> B | A")) >= 0);
     test.is_true(st.choices > 0);
     test.is_true(st.backtracks > 0);
+}
+
+#[test]
+fn a_goal_with_one_way_to_prove_it_needs_no_backtracking() -> Unit ! {io, alloc, panic} {
+    // The engine lists only the alternatives that apply, so a proof with
+    // no real alternative is found without going back.
+    let mut st = state.new();
+    test.is_true(search(&mut st, &Bytes.from("(A -> B) -> (B -> C) -> A -> C")) >= 0);
+    test.equal_i64(st.backtracks, 0);
 }
 
 #[test]

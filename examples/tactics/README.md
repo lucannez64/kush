@@ -8,13 +8,13 @@ Design: [docs/tactics-handlers.md](../../docs/tactics-handlers.md).
 $ kush run --manifest-path examples/tactics/Kush.toml -- "(A -> B) -> (B -> C) -> A -> C"
 goal:    (A B C : Prop) -> (A -> B) -> (B -> C) -> A -> C
 proof:   fun A B C (h1 : A -> B) (h2 : B -> C) (h3 : A) => h2 (h1 h3)
-search:  128 choices, 100 backtracks, depth 3
+search:  6 choices, 0 backtracks, depth 3
 kernel:  checked by the Kush kernel
 
 $ kush run --manifest-path examples/tactics/Kush.toml -- "~(A | B) -> ~A & ~B"
 goal:    (A B : Prop) -> ~(A | B) -> ~A & ~B
 proof:   fun A B (h1 : ~(A | B)) => intro (fun (h2 : A) => h1 (left h2)) (fun (h3 : B) => h1 (right h3))
-search:  154 choices, 107 backtracks, depth 3
+search:  11 choices, 2 backtracks, depth 3
 kernel:  checked by the Kush kernel
 
 $ kush run --manifest-path examples/tactics/Kush.toml -- "((A -> B) -> A) -> A"
@@ -49,9 +49,14 @@ The tactics (`src/search.kush`) are plain functions: `assumption`, `apply`
 (a hypothesis whose conclusion is the goal, proving its premises), `cases`
 (eliminate a hypothesis `P & Q`, `P | Q` or `False` into the goal),
 `either` (one side of a disjunction), and `auto`, which introduces and
-splits eagerly and chooses among the others. The driver deepens the search
-from depth 1 to 8. The search may build any term; only the kernel's check of
-the closed proof against the closed goal is trusted.
+splits eagerly and then makes one choice among the alternatives that apply.
+The engine lists those (`Goal(Alternatives(context, goal))`): hypotheses
+whose type is the goal, hypotheses to take apart, hypotheses whose
+conclusion is the goal, and the two sides of a disjunction goal. So the
+search only branches where several candidates compete, and the counts above
+are real backtracking. The driver deepens the search from depth 1 to 8. The
+search may build any term; only the kernel's check of the closed proof
+against the closed goal is trusted.
 
 - `src/state.kush`: the kernel set-up (`And`, `Or` and `False` as `prop`
   data), the `Goal` queries and their handler, and the eliminator terms.
