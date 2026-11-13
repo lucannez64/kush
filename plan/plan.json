@@ -4970,6 +4970,23 @@
           "text": "done aad49d9"
         }
       ]
+    },
+    {
+      "id": "language-limits-pass",
+      "title": "Lift language limits found in the Game Boy example",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "refined params, loop invariants, join facts, shared cells, Option<&T> params, contextual keywords, saves/scale",
+      "commit": "88b2f46",
+      "log": [
+        {
+          "time": "2026-11-13 01:01:09",
+          "who": "agent",
+          "text": "done 88b2f46"
+        }
+      ]
     }
   ]
 }
