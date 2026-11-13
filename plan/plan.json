@@ -7000,14 +7000,19 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Kernel corpus seeds that reach universe levels, indexed families and table growth.",
-      "commit": null,
+      "commit": "74c69ae",
       "log": [
         {
           "time": "2026-11-14 00:42:38",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 00:42:38",
+          "who": "agent",
+          "text": "done 74c69ae"
         }
       ]
     },
