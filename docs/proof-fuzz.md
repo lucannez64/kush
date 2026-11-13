@@ -89,17 +89,15 @@ Flags:
 - `--list` prints the obligations with their kind, function, location, goal and
   generator status, without running anything (the "what would be attacked"
   view, and what `KUSH_PROOF_REPORT=verbose` becomes).
-- `--report` (PF-COVERAGE) prints the proved-or-attacked table of section 4
-  after the run.
+- `--report` prints the proved-or-attacked table of section 4 after the run.
 - `--save` writes each minimized reproduction into the project
   (section 3).
   Without it `kush fuzz` writes nothing outside `target/kush/fuzz/`.
-- `--json` (PF-COVERAGE) prints one JSON object per obligation, for editors
-  and CI.
+- `--json` prints one JSON object per check instead of the text report, for
+  editors and CI.
 
-Implemented so far: `FILTER`, `--manifest-path`, `--runs`, `--time`,
-`--seed`, `--list`, `--locked` (PF-ENGINE), `--save` (PF-SHRINK); seed
-inputs for entries come from `fuzz/corpus/<entry>/` (PF-ENTRIES).
+Every flag above is implemented; seed inputs for entries come from
+`fuzz/corpus/<entry>/`.
 
 Exit status: 0 when nothing was found, 1 when at least one counterexample was
 found, 2 for usage or compile errors. This matches `kush test`.
@@ -378,31 +376,37 @@ or a loop invariant) is visible.
 
 ## 4. Proved-or-attacked coverage
 
-Every obligation ends in exactly one state:
+Implemented (PF-COVERAGE). The checker records every check it discharges
+(element accesses proved in bounds, arithmetic proved in range) next to the
+obligations, so each check of the program ends in exactly one state:
 
 | state | meaning |
 |---|---|
 | proved | discharged by the checker; no run-time check |
 | found | at least one counterexample (bug or local) |
-| survived | reached at least `R` times (default 100) without failing |
+| survived | reached at least once, never failed |
 | unreached | generators and entries never reached it |
-| no generator | its function's parameters cannot be generated, and no `#[fuzz]` entry reached it |
+| no generator | its function's parameters cannot be generated, and no harness reached it |
 
-*Proved or attacked* means `proved + found + survived`. The other two states are
-the gap, and the report names them. `--report` prints one row per function
-that has any check, then a total per package:
+*Proved or attacked* means `proved + found + survived`; the other two states
+are the gap. "Survived" counts a check reached once; `--json` gives each
+check's hit count and smallest margin, so CI can demand more. `--report`
+prints one row per function that has any check (a function whose checks
+were all proved is included; generic instances count under their function),
+then the package total:
 
 ```text
-function                      checks proved found survived unreached no-gen
-kernel.reader.skip                 3      0     1        2         0      0
-kernel.store.get                   2      0     0        2         0      0
-gameboy.apu.square_period          1      0     0        1         0      0
+function                          checks  proved  found  survived  unreached  no-gen
+kernel.word                            2       0      0         2          0       0
+kernel.check.infer_step                4       1      0         0          0       3
 ...
-package kernel                   102     14     3       71        10      4   87% proved or attacked
+package kernel                       310      78      4         9          8     211  29% proved or attacked
 ```
 
-`--json` carries the same data for every obligation, so CI can fail when the
-percentage drops.
+`--json` prints one object per check instead of the text report: function,
+file, line, column, kind, goal, state, and for attacked checks the hits,
+smallest margin and finding (input, suggestion, test), so CI can fail when
+the percentage drops.
 
 ## 5. Showcase demo
 

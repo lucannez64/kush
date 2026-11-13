@@ -266,7 +266,7 @@ fn qualified(module: &[String], name: &str) -> String {
 }
 
 /// The declared module path of a unit (`module a.b;`), else its load path.
-fn unit_module(program: &Program, unit: &crate::program::Unit) -> Vec<String> {
+pub(super) fn unit_module(program: &Program, unit: &crate::program::Unit) -> Vec<String> {
     program.module.items[unit.items.clone()]
         .iter()
         .find_map(|item| match &item.item.kind {

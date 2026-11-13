@@ -316,6 +316,8 @@ pub struct Executable {
     pub(crate) bounds_checked: usize,
     /// PROOF-FUZZ: every run-time check left in place, in source order.
     pub(crate) obligations: Vec<Obligation>,
+    /// PROOF-FUZZ: every check the prover discharged (no run-time check).
+    pub(crate) discharged: Vec<Obligation>,
     /// Whether any checked body contains a structured-task operation. Task
     /// programs use the cooperative reference scheduler and buffered host I/O.
     pub(crate) uses_tasks: bool,
@@ -5023,6 +5025,8 @@ struct Functions<'a> {
     /// PROOF-FUZZ: run-time checks the prover could not discharge, keyed so a
     /// body checked twice records each check once.
     obligations: BTreeMap<(usize, usize, usize, ObligationKind), Obligation>,
+    /// Checks the prover discharged, keyed the same way.
+    discharged: BTreeMap<(usize, usize, usize, ObligationKind), Obligation>,
     /// The function instance whose body is being checked.
     checking: usize,
     /// Frozen recursive result-origin summaries, solved once before any body
@@ -5536,6 +5540,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         bounds_proved: 0,
         bounds_checked: 0,
         obligations: BTreeMap::new(),
+        discharged: BTreeMap::new(),
         checking: 0,
         summaries: recursive_lifetimes::Summaries::default(),
         signatures: Vec::new(),
@@ -6286,6 +6291,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         bounds_proved: functions.bounds_proved,
         bounds_checked: functions.bounds_checked,
         obligations: sorted_obligations(&functions.obligations),
+        discharged: sorted_obligations(&functions.discharged),
         uses_tasks: functions.uses_tasks,
         main_stack,
         // A channel type anywhere needs the threaded runtime (its drop glue).
@@ -18674,10 +18680,18 @@ impl Checker<'_, '_> {
     }
     /// PROOF-FUZZ: remember a run-time check the prover left in place.
     fn record_obligation(&mut self, kind: ObligationKind, span: Span, goal: String) {
+        self.record_check(kind, span, goal, false);
+    }
+    /// PROOF-FUZZ: remember a check, discharged (`proved`) or left in place.
+    fn record_check(&mut self, kind: ObligationKind, span: Span, goal: String, proved: bool) {
         let function = self.functions.checking;
         let function_name = self.functions.signatures[function].name.clone();
-        self.functions
-            .obligations
+        let table = if proved {
+            &mut self.functions.discharged
+        } else {
+            &mut self.functions.obligations
+        };
+        table
             .entry((function, span.start, span.end, kind))
             .or_insert(Obligation {
                 kind,
@@ -23999,6 +24013,8 @@ impl Checker<'_, '_> {
                                         Some(certificates) => {
                                             c.functions.certificates.extend(certificates);
                                             unchecked = true;
+                                            let goal = format!("the result of {} stays in {}", op_text(op), c.types.name(ty));
+                                            c.record_check(ObligationKind::Overflow, span, goal, true);
                                         }
                                         None => {
                                             c.require(PANIC, span)?;
@@ -29013,6 +29029,11 @@ impl Checker<'_, '_> {
         };
         if proved {
             self.functions.bounds_proved += 1;
+            let kind = ObligationKind::Bounds {
+                container: Container::Vec,
+                refined_length: length,
+            };
+            self.record_check(kind, span, "0 <= index && index < len".to_owned(), true);
         } else {
             self.functions.bounds_checked += 1;
             self.record_bounds(Container::Vec, length, span);
@@ -39403,6 +39424,11 @@ impl Executable {
     /// source order.
     pub fn obligations(&self) -> &[Obligation] {
         &self.obligations
+    }
+    /// PROOF-FUZZ: checks the prover discharged (bounds and overflow), one
+    /// per function instance, in source order.
+    pub fn discharged(&self) -> &[Obligation] {
+        &self.discharged
     }
     /// PROOF-FUZZ: obligation sites, one per source location and kind (the
     /// instances of a generic function share a site), in source order. A

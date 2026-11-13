@@ -105,6 +105,8 @@ pub fn fuzz_project(
     options: &engine::Options,
     list: bool,
     save: bool,
+    report: bool,
+    json: bool,
     out: &mut dyn std::io::Write,
 ) -> Result<usize, crate::project::Failure> {
     use crate::project::Failure;
@@ -143,26 +145,37 @@ pub fn fuzz_project(
         .filter(|&t| session.selected(t, options))
         .count();
     let checks = session.shown(options).len();
-    write(
-        out,
-        &format!(
-            "attacking {checks} unproved checks in {selected} functions of {} (seed {})\n",
-            project.package.name, options.seed
-        ),
-    )?;
+    if !json {
+        write(
+            out,
+            &format!(
+                "attacking {checks} unproved checks in {selected} functions of {} (seed {})\n",
+                project.package.name, options.seed
+            ),
+        )?;
+    }
     let regressions = project.root.join("fuzz").join("regressions");
     let mut options = options.clone();
     options.corpus = Some(project.root.join("fuzz").join("corpus"));
     let options = &options;
     session.replay(&regressions, options);
     session.fuzz(options);
-    write(out, &session.render(options))?;
+    if json {
+        write(out, &session.render_json(options))?;
+    } else {
+        write(out, &session.render(options))?;
+        if report {
+            write(out, &session.render_report(options, &project.package.name))?;
+        }
+    }
     if save {
         let written = session
             .save(project.test_target.as_deref(), &regressions)
             .map_err(Failure::new)?;
         for line in written {
-            write(out, &format!("{line}\n"))?;
+            if !json {
+                write(out, &format!("{line}\n"))?;
+            }
         }
     }
     Ok(session.found())

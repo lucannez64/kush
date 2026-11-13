@@ -147,6 +147,11 @@ pub struct Session {
     record: PathBuf,
     /// Element accesses the prover proved in bounds in the original program.
     pub bounds_proved: usize,
+    /// Checks the prover discharged in the original program, one per
+    /// location and kind: `(target, location, kind, goal, function)`, where
+    /// `function` names a function whose checks were all proved (it is no
+    /// target).
+    pub proved: Vec<(Option<usize>, Location, ObligationKind, String, String)>,
 }
 
 impl Session {
@@ -184,6 +189,56 @@ impl Session {
             .iter()
             .map(|target| (target.file.clone(), target.range.0, target.range.1))
             .collect();
+        let locate = |file: &crate::program::SourceFile, offset: usize| {
+            let before = &file.text[..offset.min(file.text.len())];
+            let shown = root
+                .and_then(|root| Path::new(&file.name).strip_prefix(root).ok())
+                .map_or_else(|| file.name.clone(), |path| path.display().to_string());
+            let location = Location {
+                file: shown,
+                line: before.matches('\n').count() + 1,
+                column: before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1,
+            };
+            let target = ranges
+                .iter()
+                .position(|(name, start, end)| *name == file.name && *start <= offset && offset < *end);
+            (location, target)
+        };
+        let mut proved = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for check in checked.discharged() {
+            let Some(file) = original.sources.file(check.span) else {
+                continue;
+            };
+            let offset = check.span.start - file.base;
+            if !seen.insert((file.name.clone(), offset, check.span.end - file.base, check.kind.label())) {
+                continue;
+            }
+            let (location, target) = locate(file, offset);
+            let module = original
+                .sources
+                .files
+                .iter()
+                .position(|f| f.name == file.name)
+                .and_then(|index| original.units.iter().find(|unit| unit.file == index))
+                .map(|unit| harness::unit_module(original, unit))
+                .unwrap_or_default();
+            if module.first().is_some_and(|first| first == "std") {
+                continue;
+            }
+            // Generic instances (`f::<T>`) count under their function.
+            let function = check
+                .function_name
+                .split("::<")
+                .next()
+                .unwrap_or(&check.function_name);
+            let name = if module.is_empty() {
+                function.to_owned()
+            } else {
+                format!("{}.{function}", module.join("."))
+            };
+            proved.push((target, location, check.kind, check.goal.clone(), name));
+        }
         let generated: BTreeMap<&str, usize> = assembled
             .sources
             .appended
@@ -249,6 +304,7 @@ impl Session {
             binary,
             assembled,
             bounds_proved: checked.bounds_report().0,
+            proved,
         })
     }
 
@@ -573,6 +629,125 @@ impl Session {
                     report.goal
                 ));
             }
+        }
+        out
+    }
+
+    /// `--report`: proved or attacked, per function and for the package
+    /// (docs/proof-fuzz.md, section 4).
+    pub fn render_report(&self, options: &Options, package: &str) -> String {
+        // Rows in source order: targets by index, then fully proved
+        // functions by name.
+        let mut rows: BTreeMap<(usize, String), [usize; 5]> = BTreeMap::new();
+        let filter = |name: &str| options.filter.as_ref().is_none_or(|f| name.contains(f.as_str()));
+        for (target, _, _, _, name) in &self.proved {
+            match *target {
+                Some(target) if self.selected(target, options) => {
+                    rows.entry((target, String::new())).or_default()[0] += 1;
+                }
+                None if filter(name) => {
+                    rows.entry((usize::MAX, name.clone())).or_default()[0] += 1;
+                }
+                _ => {}
+            }
+        }
+        for report in &self.reports {
+            let Some(target) = report.target else {
+                continue;
+            };
+            if !self.selected(target, options) {
+                continue;
+            }
+            let column = match report.state(&self.targets) {
+                State::Found => 1,
+                State::Survived => 2,
+                State::Unreached => 3,
+                State::NoGenerator => 4,
+            };
+            rows.entry((target, String::new())).or_default()[column] += 1;
+        }
+        let row_name = |(target, name): &(usize, String)| {
+            if *target == usize::MAX {
+                name.clone()
+            } else {
+                self.targets[*target].name.clone()
+            }
+        };
+        let width = rows
+            .keys()
+            .map(|key| row_name(key).len())
+            .chain([8, "package ".len() + package.len()])
+            .max()
+            .unwrap_or(8);
+        let mut out = format!(
+            "{:<width$}  checks  proved  found  survived  unreached  no-gen\n",
+            "function"
+        );
+        let mut total = [0usize; 5];
+        for (key, counts) in &rows {
+            let checks: usize = counts.iter().sum();
+            out.push_str(&format!(
+                "{:<width$}  {checks:>6}  {:>6}  {:>5}  {:>8}  {:>9}  {:>6}\n",
+                row_name(key), counts[0], counts[1], counts[2], counts[3], counts[4]
+            ));
+            for (sum, count) in total.iter_mut().zip(counts) {
+                *sum += count;
+            }
+        }
+        let checks: usize = total.iter().sum();
+        let attacked = total[0] + total[1] + total[2];
+        let percent = if checks == 0 { 100.0 } else { 100.0 * attacked as f64 / checks as f64 };
+        out.push_str(&format!(
+            "{:<width$}  {checks:>6}  {:>6}  {:>5}  {:>8}  {:>9}  {:>6}  {percent:.0}% proved or attacked\n",
+            format!("package {package}"),
+            total[0], total[1], total[2], total[3], total[4]
+        ));
+        out
+    }
+
+    /// `--json`: one object per check of the selected functions, proved or
+    /// not, plus every finding.
+    pub fn render_json(&self, options: &Options) -> String {
+        let mut out = String::new();
+        for (target, location, kind, goal, name) in &self.proved {
+            let selected = match target {
+                Some(t) => self.selected(*t, options),
+                None => options.filter.as_ref().is_none_or(|f| name.contains(f.as_str())),
+            };
+            if !selected {
+                continue;
+            }
+            let value = serde_json::json!({
+                "function": target.map_or_else(|| name.clone(), |t| self.targets[t].name.clone()),
+                "file": location.file, "line": location.line, "column": location.column,
+                "kind": kind.label(), "goal": goal, "state": "proved",
+            });
+            out.push_str(&format!("{value}\n"));
+        }
+        for report in self.shown(options) {
+            let state = match report.state(&self.targets) {
+                State::Found => "found",
+                State::Survived => "survived",
+                State::Unreached => "unreached",
+                State::NoGenerator => "no-generator",
+            };
+            let mut value = serde_json::json!({
+                "function": report.target.map(|t| self.targets[t].name.clone()),
+                "file": report.location.file, "line": report.location.line,
+                "column": report.location.column, "kind": report.kind.label(),
+                "goal": report.goal, "state": state, "hits": report.hits,
+                "margin": (report.hits > 0).then_some(report.margin),
+            });
+            if let Some(finding) = &report.finding {
+                value["finding"] = serde_json::json!({
+                    "through": self.targets[finding.target].name,
+                    "public": finding.public,
+                    "input": finding.inputs.iter().map(|(n, v)| serde_json::json!([n, v])).collect::<Vec<_>>(),
+                    "suggestion": finding.suggestion,
+                    "test": finding.reproduction,
+                });
+            }
+            out.push_str(&format!("{value}\n"));
         }
         out
     }

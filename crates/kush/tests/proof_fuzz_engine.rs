@@ -226,3 +226,62 @@ fn the_command_reports_and_exits_by_findings() {
     let _ = std::fs::remove_dir_all(&buggy);
     let _ = std::fs::remove_dir_all(&safe);
 }
+
+#[test]
+fn coverage_is_reported_per_function_and_as_json() {
+    let path = project("coverage");
+    std::fs::write(
+        path.join("src/main.kush"),
+        "module demo;
+fn next(x: i64) -> i64 ! {panic} { x + 1 }
+fn bounded(x: u8) -> u8 ! {} { if x < 255 { x + 1 } else { x } }
+fn mixed(x: u8, y: i64) -> i64 ! {panic} { let a: i64 = Int.convert(x); a + 1 + y }
+fn main() -> i64 ! {} { 0 }
+",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_kush"))
+        .args(["fuzz", "--runs", "200", "--report"])
+        .current_dir(&path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = |name: &str| -> Vec<String> {
+        stdout
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("no row {name}: {stdout}"))
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(row("function"), ["function", "checks", "proved", "found", "survived", "unreached", "no-gen"]);
+    // `next` overflows; `bounded` is fully proved; `mixed` has one proved
+    // addition (`a + 1`, a is at most 255) and one found (`+ y`).
+    assert_eq!(row("demo.next"), ["demo.next", "1", "0", "1", "0", "0", "0"]);
+    assert_eq!(row("demo.bounded"), ["demo.bounded", "1", "1", "0", "0", "0", "0"]);
+    assert_eq!(row("demo.mixed"), ["demo.mixed", "2", "1", "1", "0", "0", "0"]);
+    assert_eq!(
+        row("package").join(" "),
+        "package demo 4 2 2 0 0 0 100% proved or attacked"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kush"))
+        .args(["fuzz", "--runs", "200", "--json"])
+        .current_dir(&path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    let states: Vec<&str> = lines.iter().map(|v| v["state"].as_str().unwrap()).collect();
+    assert_eq!(states.iter().filter(|s| **s == "proved").count(), 2);
+    assert_eq!(states.iter().filter(|s| **s == "found").count(), 2);
+    let next = lines.iter().find(|v| v["function"] == "demo.next").unwrap();
+    assert_eq!(next["finding"]["input"][0], serde_json::json!(["x", "9223372036854775807"]));
+    assert_eq!(next["line"], 2);
+    let _ = std::fs::remove_dir_all(&path);
+}
