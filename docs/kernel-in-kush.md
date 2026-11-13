@@ -228,13 +228,25 @@ a different first error. A budget exhaustion on either side makes that item
 inconclusive; the harness counts inconclusive items and fails if they exceed a
 small fraction, so a slow port cannot hide behind them.
 
-### Harness
+### Harness (implemented, KIK-DIFF)
 
-`scripts/kernel-diff.sh` runs the whole comparison: build the Kush kernel once
-with `kush build`, dump each corpus file with `kush core`, generate mutants and
-random terms for a fixed list of seeds, run both, diff. A Rust integration test
-(`crates/kush/tests/kernel_in_kush.rs`) runs a small fixed slice of it in the
-normal test suite; the full run with more seeds is the script.
+Both kernels answer the same exchange files: `kush kernel FILE` (Rust) and
+`kernel check FILE` (the Kush package). The Rust tests compare them item by
+item:
+
+- `crates/kush/tests/kernel_in_kush.rs`: the package tests, the corpus
+  printed back byte for byte, normal forms of the corpus and of targeted
+  reductions, and checking of the corpus files without data families plus a
+  file of typing cases that are mostly rejections;
+- `crates/kush/tests/kernel_diff.rs`: mutants of every corpus definition
+  (index and level bumps, `zero` to `succ zero`, dropped or swapped
+  applications, `pi`/`lam` swaps, wrong universe arguments, swapped
+  branches), and seeded generated terms (beta redexes, `NatElim`,
+  `Transport`, `J`, higher-order functions) with their own mutants.
+
+`scripts/kernel-diff.sh [SEEDS]` runs both with more seeds (2000 by
+default). At KIK-DIFF it compared 171,236 generated items and 312 corpus
+mutants with no disagreement and no inconclusive item.
 
 ## 4. Invariants checked by the Rust kernel
 
