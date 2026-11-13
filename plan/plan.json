@@ -6705,14 +6705,19 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Obligation table (bounds incl. unrefined, overflow, division, shift) with kind/span/function/goal/terms; KUSH_PROOF_REPORT=verbose lists them. docs/proof-fuzz.md step 1.",
-      "commit": null,
+      "commit": "cfb1562",
       "log": [
         {
           "time": "2026-11-13 17:06:32",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 17:14:03",
+          "who": "agent",
+          "text": "done cfb1562"
         }
       ]
     },
@@ -6724,10 +6729,16 @@
       "deps": [
         "PF-OBLIGATIONS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Obligation ids in IR, inline margins, kush_fuzz_check, runtime table to KUSH_FUZZ_OUT, deferred overflow off. docs/proof-fuzz.md 2.3.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 17:14:03",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "PF-HARNESS",
