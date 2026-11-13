@@ -6462,14 +6462,19 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "The server found Kush.toml only from the workspace root, so files of a project in a subfolder (examples/kernel opened from the repository root) were analyzed alone and their imports failed ('a module cannot import itself'). Keep several projects; load the nearest manifest above each opened file; analyze each file with the innermost owning project.",
-      "commit": null,
+      "commit": "beef334",
       "log": [
         {
           "time": "2026-11-13 11:40:32",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 11:40:32",
+          "who": "agent",
+          "text": "done beef334"
         }
       ]
     }
