@@ -291,8 +291,17 @@ Conversion compares normal forms structurally after:
   eliminated recursively and non-recursive fields are passed through.
 
 Normal forms also normalize under binders. Eliminations on neutral variables
-remain neutral. There is no eta conversion, implicit coercion, algebraic
-subtyping, arithmetic solver, or theorem search.
+remain neutral. There is no implicit coercion, algebraic subtyping, arithmetic
+solver, or theorem search.
+
+Conversion includes **eta for functions**: when exactly one side of a
+comparison is a lambda, `Lam(A, b) ≡ f` holds if `b ≡ App(f↑, Var(0))` under
+`A`, where `f↑` is `f` shifted past the new binder. So `λx. f x ≡ f` for any
+function `f`, including variables and opaque or defined globals, and nested
+abstractions compare argument by argument. Eta is a conversion rule only:
+normalization never contracts or expands lambdas, so normal forms are
+unchanged. Two lambdas still compare domain and body structurally. There is no
+eta for records or logical data.
 
 Conversion is additionally type-directed for **proof irrelevance**: if both
 terms are inhabitants of propositions and their proposition types are

@@ -668,3 +668,21 @@ fn finite_indexed_data_can_be_eliminated_into_propositions() {
     "#;
     check(source).unwrap();
 }
+
+#[test]
+fn source_functions_are_equal_up_to_eta() {
+    // `apply<f>` normalizes to `λn. f n`, which is convertible with `f` only
+    // through eta.
+    check(
+        "type Arrow = fn(n: Nat) -> Nat ! {};
+         total fn apply(f: Arrow, n: Nat) -> Nat ! {} { f(n) }
+         total fn eta(f: Arrow) -> Eq<Arrow, apply<f>, f> ! {} { refl::<Arrow>(f) }",
+    )
+    .unwrap();
+    rejects(
+        "type Arrow = fn(n: Nat) -> Nat ! {};
+         total fn twice(f: Arrow, n: Nat) -> Nat ! {} { f(f(n)) }
+         total fn bad(f: Arrow) -> Eq<Arrow, twice<f>, f> ! {} { refl::<Arrow>(f) }",
+        "type mismatch",
+    );
+}

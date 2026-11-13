@@ -6009,10 +6009,16 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Eta conversion for functions in the Rust kernel (f = fun x => f x); tests; docs/kernel.md. Before the Kush port, see docs/kernel-in-kush.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 03:41:46",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "LOGIC-UNIVERSE-POLY",

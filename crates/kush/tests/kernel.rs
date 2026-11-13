@@ -1233,3 +1233,82 @@ fn machine_scalar_carriers_are_checked_symbolic_indices_not_proofs() {
     // A scalar value is not a valid hypothesis type either.
     assert!(k.sort_open(&T::Prop, &[T::i64(1)]).is_err());
 }
+
+#[test]
+fn functions_are_convertible_up_to_eta() {
+    let k = Kernel::default();
+    let arrow = T::pi(T::Nat, T::Nat);
+    // f : Nat -> Nat ⊢ refl(f) : Eq(Nat -> Nat, λx. f x, f), in both orders.
+    let eta = T::lam(T::Nat, T::app(T::Var(1), T::Var(0)));
+    let context = vec![arrow.clone()];
+    for (left, right) in [(eta.clone(), T::Var(0)), (T::Var(0), eta.clone())] {
+        k.check_open(
+            &T::refl(arrow.clone(), T::Var(0)),
+            &T::eq(arrow.clone(), left, right),
+            &context,
+        )
+        .unwrap();
+    }
+    // Nested: λx. λy. g x y ≡ g for g : Nat -> Nat -> Nat.
+    let binary = T::pi(T::Nat, T::pi(T::Nat, T::Nat));
+    let nested = T::lam(
+        T::Nat,
+        T::lam(T::Nat, T::app(T::app(T::Var(2), T::Var(1)), T::Var(0))),
+    );
+    k.check_open(
+        &T::refl(binary.clone(), T::Var(0)),
+        &T::eq(binary.clone(), nested, T::Var(0)),
+        std::slice::from_ref(&binary),
+    )
+    .unwrap();
+    // Eta through a global: λx. succ' x ≡ succ' for a defined function.
+    let mut k = Kernel::default();
+    k.define(
+        "succ'".into(),
+        arrow.clone(),
+        T::lam(T::Nat, T::succ(T::Var(0))),
+    )
+    .unwrap();
+    let global = T::Global("succ'".into());
+    k.check_closed(
+        &T::refl(arrow.clone(), global.clone()),
+        &T::eq(
+            arrow.clone(),
+            T::lam(T::Nat, T::app(global.clone(), T::Var(0))),
+            global,
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn eta_does_not_identify_different_functions() {
+    let k = Kernel::default();
+    let arrow = T::pi(T::Nat, T::Nat);
+    let context = vec![arrow.clone(), arrow.clone()];
+    // Context: f = Var(1), g = Var(0); under one more binder f = Var(2).
+    // λx. f x is not g, λx. f (succ x) is not f, and λx. f (f x) is not f.
+    for (left, right) in [
+        (T::lam(T::Nat, T::app(T::Var(2), T::Var(0))), T::Var(0)),
+        (
+            T::lam(T::Nat, T::app(T::Var(2), T::succ(T::Var(0)))),
+            T::Var(1),
+        ),
+        (
+            T::lam(T::Nat, T::app(T::Var(2), T::app(T::Var(2), T::Var(0)))),
+            T::Var(1),
+        ),
+    ] {
+        // Both sides are well-typed, so only conversion can fail.
+        k.check_open(&left, &arrow, &context).unwrap();
+        assert!(
+            k.check_open(
+                &T::refl(arrow.clone(), left.clone()),
+                &T::eq(arrow.clone(), left.clone(), right.clone()),
+                &context,
+            )
+            .is_err(),
+            "{left:?} ~ {right:?}"
+        );
+    }
+}

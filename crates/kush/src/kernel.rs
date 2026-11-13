@@ -1164,6 +1164,19 @@ impl Engine<'_> {
                 let right_type = e.infer(right, context)?;
                 return e.equal(&left_type, &right_type, context);
             }
+            // Eta for functions: `Lam(A, b) ≡ f` when `b ≡ f' 0` under `A`,
+            // where `f'` is `f` weakened past the new binder. Only fires when
+            // exactly one side is a lambda; two lambdas compare structurally.
+            match (left, right) {
+                (Term::Lam { domain, body }, other) | (other, Term::Lam { domain, body })
+                    if !matches!(other, Term::Lam { .. }) =>
+                {
+                    let expanded = Term::app(e.shift(other, 1, 0)?, Term::Var(0));
+                    let domain = domain.as_ref().clone();
+                    return e.under(context, &domain, |e, c| e.equal(body, &expanded, c));
+                }
+                _ => {}
+            }
             let equal = match (left, right) {
                 (
                     Term::Pi {
