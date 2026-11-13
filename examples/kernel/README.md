@@ -54,6 +54,28 @@ kush test --manifest-path Kush.toml
   typed so that they preserve scope, and their equational lemmas (up to
   `subst0(shift t, u) = t`). Both the Rust kernel and this kernel check it.
 
+## Proved or attacked
+
+`kush fuzz` ([proof fuzzing](../../docs/proof-fuzz.md)) attacks every check
+the prover leaves in place. Almost every kernel function takes the store or
+the kernel, which no generator can build, so two `#[fuzz]` entries in
+`tests/main.kush` read arbitrary bytes as an exchange file: `read_any`
+prints what it read, `check_any` admits and answers every item. Their
+seeds in `fuzz/corpus/` are `kush core` dumps of two examples; random bytes
+alone never get through the reader.
+
+```sh
+kush fuzz --runs 1000 --report     # about 30 seconds
+```
+
+Of 369 checks, 78 are proved and 156 attacked: 63% proved or attacked (29%
+without the entries). Nothing reached through the entries failed. The four
+counterexamples are local: reader helpers (`skip`, `atom_end`, `word`)
+called directly with a negative offset or with `start = i64::MIN`, values
+their callers never pass. Turning them into proofs needs `0 <= at` facts
+across the reader (an `ensures { result >= 0 }` on each parser), which is
+left for later.
+
 The Rust test `crates/kush/tests/kernel_in_kush.rs` runs the package tests
 and checks that every exchange file dumped from the example corpus prints back
 byte for byte.

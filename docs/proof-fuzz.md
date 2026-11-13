@@ -1,6 +1,6 @@
 # Proof-directed fuzzing (PROOF-FUZZ)
 
-Status: design approved 2026-11-13 (native engine); implementation in progress.
+Status: implemented (PF-OBLIGATIONS through PF-DEMO, 2026-11-13); seeding from the prover (PF-SEED) is not.
 
 *Every check is either proved or attacked.* The checker removes a run-time
 bounds or overflow check when the facts in scope prove it can never fail
@@ -410,27 +410,43 @@ the percentage drops.
 
 ## 5. Showcase demo
 
-The demo is the loop *report → attack → prove*, on code that was written
-before this feature existed:
+The loop *report → attack → prove*, on code written before this feature
+existed (PF-DEMO, 2026-11-13, `--runs 1000 --report`, seed 0):
 
-1. **Kernel.** Today, 0 of its 102 accesses are proved. Its reader functions
-   take `(src: &Bytes, at: i64)`, ideal for direct generation. Run `kush fuzz`
-   and expect local counterexamples at `at < 0` and `at > src.len()`. Apply
-   the suggested preconditions, re-run, and show how many checks are now
-   proved in their callers. Then add a `#[fuzz]` entry that parses arbitrary
-   bytes as a term and checks it. Any entry-level find is a real reader bug;
-   if none is found, report the survived count.
-2. **Game Boy.** 353 accesses are proved; 88 remain, plus the overflow checks
-   the new report will list. Add one `#[fuzz]` entry that runs a random 32 KiB
-   ROM through the plain cartridge for a few thousand instructions on a
-   headless machine. Report the coverage table, and either a real issue with
-   its reproduction or "every remaining check survived N attacks". The
-   native engine is what makes thousands of emulated instructions per run
-   affordable.
+| | checks | proved | found | survived | unreached | no generator | proved or attacked |
+|---|---|---|---|---|---|---|---|
+| Game Boy, functions only | 481 | 262 | 6 | 22 | 12 | 179 | 60% |
+| Game Boy, with entries | 535 | 262 | 4 | 172 | 40 | 57 | 82% |
+| kernel, functions only | 310 | 78 | 4 | 9 | 8 | 211 | 29% |
+| kernel, with entries | 369 | 78 | 4 | 152 | 36 | 99 | 63% |
 
-The README of each example gets the before and after numbers. The demo is
-honest either way: "no counterexample in N runs, these K are unreached" is
-a result too.
+(Totals grow with entries because the checks of `impl` methods and test
+helpers they reach are counted.)
+
+1. **Game Boy: one real bug, found and proved away.** `cartridge.title`
+   read the header at `0x134..0x144` with no length check, and `main` calls
+   it before `cartridge.kind` rejects short files: a 9-byte file crashed the
+   emulator (`panic: checked arithmetic, memory, or I/O failure`, core
+   dumped). `cartridge.ram_size` had the same unchecked read, though only
+   reached after `kind`'s check. Both now return early when the file is too
+   short and read with `Vec.at(rom, i, _)`, so the prover discharges those
+   accesses instead of the program checking them; a regression test pins
+   it. Two entries (`random_program`, `random_cartridge`, seeded with four
+   minimal headers) reach the CPU, video, sound and bank controllers; 172
+   checks survived their attack.
+2. **Game Boy: four local counterexamples**, in private helpers given
+   values no caller passes (`ppu.shade` with a palette index above 3,
+   `cpu.mask` with a shift of 8, `apu.analog` with a level near 2^62).
+3. **Kernel: no bug; four local counterexamples** in reader helpers
+   (`skip`, `atom_end`, `word`) given a negative offset or `start =
+   i64::MIN`. Pushing them outward needs `0 <= at` facts across the reader
+   (`ensures { result >= 0 }` on every parser), left as follow-up work.
+   Two entries (`read_any`, `check_any`) read arbitrary bytes as an exchange
+   file; random bytes never pass the reader, so their seeds are `kush core`
+   dumps of two examples. 152 checks survived.
+
+Run time on this machine: about 5 minutes for the Game Boy (68 harnesses),
+30 seconds for the kernel.
 
 ## 6. Tests
 

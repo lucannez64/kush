@@ -42,7 +42,10 @@ use std.test;
 use demo.lib;
 
 #[test]
-fn passes() -> Unit ! {panic} { test.is_true(true); }
+fn passes() -> Unit ! {panic} { test.is_true(1 + 1 == 2); }
+
+#[test]
+fn adds() -> Unit ! {panic} { let a = 40; test.is_true(a + 2 == 42); }
 
 #[fuzz]
 fn last_byte(input: &Bytes) -> Unit ! {panic} {
@@ -125,5 +128,17 @@ fn corpus_files_seed_an_entry() {
     let (status, output) = kush(&path, &["fuzz", "--runs", "5", "magic"]);
     assert_eq!(status, Some(1), "{output}");
     assert!(output.contains("FOUND  overflow demo.tests.main.magic"), "{output}");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn an_entry_reports_on_everything_it_reaches() {
+    let path = project("report", TESTS);
+    let (_, output) = kush(&path, &["fuzz", "--runs", "100", "--report", "last_byte"]);
+    // The library function the entry reaches has a row; the test target's
+    // own tests, which no entry runs, do not.
+    assert!(output.lines().any(|l| l.starts_with("demo.lib.peek ")), "{output}");
+    assert!(!output.contains("demo.tests.main.adds"), "{output}");
+    assert!(output.contains("package demo"), "{output}");
     let _ = std::fs::remove_dir_all(&path);
 }

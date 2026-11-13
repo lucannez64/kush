@@ -155,6 +155,31 @@ Some choices that show the language:
 - **Two-phase borrows.** `push(m, m.pc)` and `machine.write(m, hl(m), value)`
   read `m` in an argument while passing `m` exclusively.
 
+## Proved or attacked
+
+`kush fuzz` ([proof fuzzing](../../docs/proof-fuzz.md)) attacks every check
+the prover leaves in place. Each function with such a check is called
+directly with generated arguments, and two `#[fuzz]` entries in
+`tests/main.kush` reach the rest from raw bytes: `random_program` runs
+arbitrary code for two frames, and `random_cartridge` treats its input as a
+cartridge, seeded with four minimal headers in `fuzz/corpus/`.
+
+```sh
+kush fuzz --runs 1000 --report     # about 5 minutes
+```
+
+Of 535 checks, 262 are proved and 176 attacked: 82% proved or attacked
+(60% without the entries). It found one real bug: a file too short to hold
+a header crashed in `cartridge.title`, which `main` calls before
+`cartridge.kind` rejects the file. Both header readers now check the length
+first and read with `Vec.at`, so their checks are proved instead, and
+`a_file_without_a_header_is_rejected_not_a_crash` keeps it fixed. The other
+four counterexamples are local, in private helpers called with values no
+caller passes: `shade` with a palette index above 3, `mask` with a shift of
+8, `analog` with a sample level near 2^62. 40 checks stay unreached (mostly
+MBC3 clock and MBC5 paths no seed selects) and 57 are in functions only
+reachable through the windowed front end.
+
 ## What it needed from the compiler
 
 Writing it this way needed additions to Kush, made alongside it and

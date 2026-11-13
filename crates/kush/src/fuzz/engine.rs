@@ -88,6 +88,9 @@ pub struct SiteReport {
     pub location: Location,
     /// The source text of the checked expression.
     pub text: String,
+    /// The function the site is in, qualified by its module; for a method,
+    /// its own name (methods are not targets).
+    pub function: String,
     /// The target function the site is in, if it is in one.
     pub target: Option<usize>,
     pub hits: u64,
@@ -279,8 +282,24 @@ impl Session {
             let target = ranges
                 .iter()
                 .position(|(name, start, end)| *name == file.name && *start <= offset && offset < *end);
+            let module = assembled
+                .program
+                .sources
+                .files
+                .iter()
+                .position(|f| f.name == file.name)
+                .and_then(|index| assembled.program.units.iter().find(|unit| unit.file == index))
+                .map(|unit| harness::unit_module(&assembled.program, unit))
+                .unwrap_or_default();
+            let function = site.function_name.split("::<").next().unwrap_or(&site.function_name);
+            let function = if module.is_empty() {
+                function.to_owned()
+            } else {
+                format!("{}.{function}", module.join("."))
+            };
             sites.push(Some(reports.len()));
             reports.push(SiteReport {
+                function,
                 kind: site.kind,
                 goal: site.goal.clone(),
                 text: file
@@ -591,19 +610,33 @@ impl Session {
 }
 
 impl Session {
-    /// Reports of the sites in selected targets, plus every finding.
+    /// Reports of the sites in selected targets, plus every finding; every
+    /// site when an entry is selected (what it did not reach is the gap).
     pub fn shown(&self, options: &Options) -> Vec<&SiteReport> {
-        // An entry attacks the whole program: every site it reaches counts.
-        let entry = (0..self.targets.len())
-            .any(|t| self.targets[t].fuzz_entry && self.targets[t].harness.is_ok() && self.selected(t, options));
+        let entry = self.entry_selected(options);
+        // The test target is scaffolding, not the program under attack: its
+        // checks count only where an entry reaches them.
+        let in_test_target = |report: &SiteReport| {
+            self.targets.iter().any(|target| {
+                target.fuzz_entry && Path::new(&target.file).ends_with(&report.location.file)
+            })
+        };
         self.reports
             .iter()
             .filter(|report| {
                 report.finding.is_some()
                     || report.target.is_some_and(|target| self.selected(target, options))
-                    || (entry && report.hits > 0)
+                    || (entry && (report.hits > 0 || !in_test_target(report)))
             })
             .collect()
+    }
+
+    /// Whether a selected target is a `#[fuzz]` entry. An entry attacks the
+    /// whole program: every site it reaches counts.
+    fn entry_selected(&self, options: &Options) -> bool {
+        (0..self.targets.len()).any(|t| {
+            self.targets[t].fuzz_entry && self.targets[t].harness.is_ok() && self.selected(t, options)
+        })
     }
 
     pub fn found(&self) -> usize {
@@ -639,10 +672,12 @@ impl Session {
         // Rows in source order: targets by index, then fully proved
         // functions by name.
         let mut rows: BTreeMap<(usize, String), [usize; 5]> = BTreeMap::new();
-        let filter = |name: &str| options.filter.as_ref().is_none_or(|f| name.contains(f.as_str()));
+        let entry = self.entry_selected(options);
+        let filter =
+            |name: &str| entry || options.filter.as_ref().is_none_or(|f| name.contains(f.as_str()));
         for (target, _, _, _, name) in &self.proved {
             match *target {
-                Some(target) if self.selected(target, options) => {
+                Some(target) if entry || self.selected(target, options) => {
                     rows.entry((target, String::new())).or_default()[0] += 1;
                 }
                 None if filter(name) => {
@@ -651,20 +686,18 @@ impl Session {
                 _ => {}
             }
         }
-        for report in &self.reports {
-            let Some(target) = report.target else {
-                continue;
-            };
-            if !self.selected(target, options) {
-                continue;
-            }
+        for report in self.shown(options) {
             let column = match report.state(&self.targets) {
                 State::Found => 1,
                 State::Survived => 2,
                 State::Unreached => 3,
                 State::NoGenerator => 4,
             };
-            rows.entry((target, String::new())).or_default()[column] += 1;
+            let key = match report.target {
+                Some(target) => (target, String::new()),
+                None => (usize::MAX, report.function.clone()),
+            };
+            rows.entry(key).or_default()[column] += 1;
         }
         let row_name = |(target, name): &(usize, String)| {
             if *target == usize::MAX {
@@ -732,7 +765,7 @@ impl Session {
                 State::NoGenerator => "no-generator",
             };
             let mut value = serde_json::json!({
-                "function": report.target.map(|t| self.targets[t].name.clone()),
+                "function": report.target.map_or_else(|| report.function.clone(), |t| self.targets[t].name.clone()),
                 "file": report.location.file, "line": report.location.line,
                 "column": report.location.column, "kind": report.kind.label(),
                 "goal": report.goal, "state": state, "hits": report.hits,
