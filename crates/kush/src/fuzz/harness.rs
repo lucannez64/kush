@@ -130,6 +130,15 @@ pub struct Target {
     pub harness: Result<Layout, String>,
     /// Integer constants in the function body, for the mutation dictionary.
     pub constants: Vec<i128>,
+    /// The function's own name, whether it is `pub`, and whether this unit
+    /// is the program's entry file.
+    pub function: String,
+    pub public: bool,
+    pub entry: bool,
+    /// Every parameter's name and whether it is erased, in order.
+    pub parameters: Vec<(String, bool)>,
+    /// The declared effect row's text, as in `io, alloc, panic`.
+    pub effects: String,
 }
 
 /// Every top-level function of `program` containing at least one obligation
@@ -137,7 +146,7 @@ pub struct Target {
 pub fn plan(program: &Program, executable: &Executable) -> Vec<Target> {
     let sites = executable.obligation_sites();
     let mut targets = Vec::new();
-    for unit in &program.units {
+    for (unit_index, unit) in program.units.iter().enumerate() {
         let module = unit_module(program, unit);
         // The standard library is not the program under attack, and its
         // modules cannot take generated harnesses.
@@ -172,6 +181,20 @@ pub fn plan(program: &Program, executable: &Executable) -> Vec<Target> {
                 span: item.item.span,
                 harness: layout(function, text),
                 constants,
+                function: function.name.clone(),
+                public: item.public,
+                entry: unit_index == 0,
+                parameters: function
+                    .parameters
+                    .iter()
+                    .map(|p| (p.name.clone(), p.erased))
+                    .collect(),
+                effects: function
+                    .effects
+                    .iter()
+                    .map(|effect| slice(text, effect.span).trim().to_owned())
+                    .collect::<Vec<_>>()
+                    .join(", "),
             });
         }
     }

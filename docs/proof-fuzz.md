@@ -91,14 +91,14 @@ Flags:
   view, and what `KUSH_PROOF_REPORT=verbose` becomes).
 - `--report` (PF-COVERAGE) prints the proved-or-attacked table of section 4
   after the run.
-- `--save` (PF-SHRINK) writes each minimized reproduction into the project
+- `--save` writes each minimized reproduction into the project
   (section 3).
   Without it `kush fuzz` writes nothing outside `target/kush/fuzz/`.
 - `--json` (PF-COVERAGE) prints one JSON object per obligation, for editors
   and CI.
 
-Implemented so far (PF-ENGINE): `FILTER`, `--manifest-path`, `--runs`,
-`--time`, `--seed`, `--list`, `--locked`.
+Implemented so far: `FILTER`, `--manifest-path`, `--runs`, `--time`,
+`--seed`, `--list`, `--locked` (PF-ENGINE), `--save` (PF-SHRINK).
 
 Exit status: 0 when nothing was found, 1 when at least one counterexample was
 found, 2 for usage or compile errors. This matches `kush test`.
@@ -289,18 +289,22 @@ the mode.
 
 ## 3. What a counterexample produces
 
-**Minimization.** While the same obligation id still fails, shrink the tape:
-delete chunks, then move each decoded integer toward 0 or the nearest
-dictionary value, then shorten each decoded `Bytes`/`Vec`. The result is
-decoded once more and printed as source values.
+Implemented in `fuzz/shrink.rs` (PF-SHRINK).
+
+**Minimization.** While the same obligation site still fails (at most 300
+runs), work on the decoded values rather than the bytes: make each
+collection empty, then half as long, then one element shorter; then move
+every number to zero if that still fails, otherwise bisect between zero and
+its value. The result is the smallest failing input in that order: `v = [],
+i = 0` for an off-by-one index, `x = 255` for a `u8` increment.
 
 **Classification.** A counterexample is one of:
 
-1. **Entry-level bug.** Found through a `#[fuzz]` entry, or in a `pub`
-   function of the entry package whose preconditions the input satisfied.
-   Reported as `FOUND ... bug`.
-2. **Local counterexample.** Found in a private function. Nothing yet says a
-   caller can pass that input. It is reported as `FOUND ... local`, with the
+1. **Bug.** Found through a `pub` function (or, with PF-ENTRIES, a
+   `#[fuzz]` entry) with the input satisfying its preconditions. Reported as
+   `kind bug: reached through a public function`.
+2. **Local counterexample.** Found through a private function: nothing yet
+   says a caller can pass that input. Reported as `kind local`, with the
    suggestion to turn the check into a precondition. Applying it moves the
    obligation to the callers: each caller then proves it (the check is gone,
    proved one level up) or it becomes a new unproved obligation in the
@@ -308,37 +312,47 @@ decoded once more and printed as source values.
    obligation outward until it is proved or reaches a boundary where it is a
    real bug.
 
-**Suggestions**, chosen from the obligation's `terms`:
+**Suggestions**, from the checked expression and the parameters of the
+function the check is in:
 
-- every goal term is a parameter or a parameter's length: suggest an erased
-  precondition with exactly the goal (`erased in_text: { 0 <= at && at <
-  src.len() }`);
-- a goal term is the result of a call: suggest an `ensures` on that callee
-  stating the range the obligation needs;
-- a goal term is a loop variable: suggest the `invariant` that gives the
-  bound;
-- a `Vec` field is indexed by a constant range: suggest a length refinement
-  (`where len >= N`), which is how the Game Boy proves its memories.
+- an element access `c[i]` where `c` and `i` are parameters: `erased
+  in_bounds: { 0 <= i && i < Vec.len(c) }` (or `Bytes.len`, `Slice.len`)
+  and reading with `Vec.at(c, i, _)`. A plain `c[i]` stays checked even
+  under that precondition; `.at` is the form that uses it;
+- `a + b`, `a - b`, `c * a`, `-a` over parameters and constants: `erased
+  fits: { MIN <= a + b && a + b <= MAX }` with the type's range. Both are
+  tested: applied to the function, the check disappears and the callers
+  prove the precondition;
+- a product of two values: the prover does not reason about it; bound each
+  factor and keep the product checked;
+- an operand that is not a parameter (a local, a call's result, a field):
+  the prover has no fact bounding it there, so state it with an `ensures` on
+  the function that computes it, a loop `invariant`, or an earlier check;
+- a field without a stated length: a length refinement (`where len >=
+  N`), which is how the Game Boy proves its memories;
+- division: `erased nonzero: { d != 0 }` (division keeps its run-time
+  check); shifts: the amount must be below the width.
 
-**Reproduction.** For a target reachable from the test target (a `pub`
-function, or a `#[fuzz]` entry), the reproduction is a `kush test` case:
+**Reproduction.** For a `pub` function outside the entry file, the
+reproduction is a `kush test` case, printed under the finding:
 
 ```text
 #[test]
-fn fuzz_reader_skip_1() -> Unit ! {alloc, panic} {
-    // kush fuzz: bounds check src/reader.kush:81:12, seed 0
-    let src = Bytes.from_text("");
-    let _ = reader.skip(&src, 0);
+fn fuzz_next_line_2() -> Unit ! {io, alloc, panic} {
+    // kush fuzz: overflow check at src/lib.kush:2:40
+    let x: i64 = 9223372036854775807;
+    let _ = lib.next(x);
 }
 ```
 
-`--save` appends it to the test target, under one `// --- kush fuzz ---`
-marker so it is easy to review or delete. A private target cannot be called
-from the test target, so its minimized tape is saved under
-`fuzz/regressions/<module>.<function>/<obligation hash>` instead. `kush fuzz`
-replays every saved regression before it generates new inputs, so a fixed
-bug stays fixed. Without `--save`, the test text is printed and nothing is
-written.
+`--save` appends it to the test target, after one
+`// --- kush fuzz: reproductions ---` marker, and adds the `use` of the
+function's module if it is missing; a test already present is not added
+again. A private function cannot be called from the test target, so its
+minimized tape is saved as `fuzz/regressions/<module>.<function>/<hash>.tape`
+instead. `kush fuzz` replays every saved input of the selected functions
+before it generates new ones (shown as `saved input`), so a fixed bug stays
+fixed. Without `--save`, nothing is written.
 
 **Survived checks are lemma candidates.** A check that was reached many times
 with margin 0 but never failed is probably true, so the prover was missing

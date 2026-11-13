@@ -8,6 +8,7 @@ use crate::Diagnostic;
 
 pub mod engine;
 pub mod harness;
+pub mod shrink;
 use std::path::Path;
 
 /// The environment variable naming the file an instrumented program writes
@@ -103,6 +104,7 @@ pub fn fuzz_project(
     project: &crate::project::Project,
     options: &engine::Options,
     list: bool,
+    save: bool,
     out: &mut dyn std::io::Write,
 ) -> Result<usize, crate::project::Failure> {
     use crate::project::Failure;
@@ -131,7 +133,17 @@ pub fn fuzz_project(
             project.package.name, options.seed
         ),
     )?;
+    let regressions = project.root.join("fuzz").join("regressions");
+    session.replay(&regressions, options);
     session.fuzz(options);
     write(out, &session.render(options))?;
+    if save {
+        let written = session
+            .save(project.test_target.as_deref(), &regressions)
+            .map_err(Failure::new)?;
+        for line in written {
+            write(out, &format!("{line}\n"))?;
+        }
+    }
     Ok(session.found())
 }

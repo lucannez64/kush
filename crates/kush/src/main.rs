@@ -31,7 +31,7 @@ Projects (Kush.toml):\n\
   kush build [--manifest-path <Kush.toml>] [-o <executable>] [--stats] [--locked] [--lib]\n\
   kush run [--manifest-path <Kush.toml>] [--stats] [--locked] [-- <program args>...]\n\
   kush test [--manifest-path <Kush.toml>] [FILTER] [--exact] [--list] [--nocapture] [--locked]\n\
-  kush fuzz [--manifest-path <Kush.toml>] [FILTER] [--runs N] [--time SECONDS] [--seed N] [--list] [--locked]\n\
+  kush fuzz [--manifest-path <Kush.toml>] [FILTER] [--runs N] [--time SECONDS] [--seed N] [--list] [--save] [--locked]\n\
   kush fmt [--check] [--manifest-path <Kush.toml>] [FILE...]\n\n\
 Native adapters (Bridge.toml):\n\
   kush bindgen <Bridge.toml> [--check]\n\n\
@@ -403,6 +403,7 @@ fn fuzz_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, Stri
     let mut manifest = None;
     let mut options = kush::fuzz::engine::Options::default();
     let mut list = false;
+    let mut save = false;
     let mut locked = false;
     let mut index = 0;
     let number = |text: &OsString, what: &str| -> Result<u64, (u8, String)> {
@@ -422,6 +423,7 @@ fn fuzz_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, Stri
             }
             "--seed" => options.seed = number(value(args, &mut index, "fuzz")?, "--seed")?,
             "--list" => list = true,
+            "--save" => save = true,
             "--locked" => locked = true,
             other if other.starts_with('-') => return Err(usage_error("fuzz", other)),
             other => {
@@ -435,7 +437,7 @@ fn fuzz_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, Stri
     }
     let project = open_project(manifest)?;
     project::lock::verify_or_write(&project, locked).map_err(project_error)?;
-    let found = kush::fuzz::fuzz_project(&project, &options, list, out).map_err(project_error)?;
+    let found = kush::fuzz::fuzz_project(&project, &options, list, save, out).map_err(project_error)?;
     Ok(u8::from(found != 0))
 }
 

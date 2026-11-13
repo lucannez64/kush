@@ -61,8 +61,19 @@ pub struct Finding {
     pub tape: Vec<u8>,
     /// The decoded arguments, as `name = value` pairs.
     pub inputs: Vec<(String, String)>,
-    /// The run of that harness that found it (1-based).
+    /// The run of that harness that found it (1-based); 0 for a saved
+    /// regression input.
     pub run: usize,
+    /// Runs spent minimizing it.
+    pub shrink_runs: usize,
+    /// Whether it was found through a public function. A private function's
+    /// input may be one no caller ever passes: a *local* counterexample.
+    pub public: bool,
+    /// What would let the prover discharge the check.
+    pub suggestion: String,
+    /// A `#[test]` reproducing it, when the function can be called from the
+    /// test target.
+    pub reproduction: Option<String>,
 }
 
 /// What the session learned about one obligation site.
@@ -71,6 +82,8 @@ pub struct SiteReport {
     pub kind: ObligationKind,
     pub goal: String,
     pub location: Location,
+    /// The source text of the checked expression.
+    pub text: String,
     /// The target function the site is in, if it is in one.
     pub target: Option<usize>,
     pub hits: u64,
@@ -214,6 +227,11 @@ impl Session {
             reports.push(SiteReport {
                 kind: site.kind,
                 goal: site.goal.clone(),
+                text: file
+                    .text
+                    .get(offset..site.span.end - file.base)
+                    .unwrap_or("")
+                    .to_owned(),
                 location,
                 target,
                 hits: 0,
@@ -295,7 +313,134 @@ impl Session {
                     corpus.push(tape);
                 }
             }
+            self.finish_findings(number, options);
         }
+    }
+
+    /// Minimize the new findings of harness `number`, then attach their
+    /// suggestion and reproduction.
+    fn finish_findings(&mut self, number: usize, options: &Options) {
+        let target = self.assembled.sources.harnesses[number];
+        let Ok(layout) = self.targets[target].harness.clone() else {
+            return;
+        };
+        for report in 0..self.reports.len() {
+            let Some(finding) = &self.reports[report].finding else {
+                continue;
+            };
+            if finding.target != target || !finding.suggestion.is_empty() {
+                continue;
+            }
+            let (tape, shrink_runs) = super::shrink::shrink(&layout, &finding.tape, SHRINK_BUDGET, |tape| {
+                matches!(
+                    self.execute(number, tape, options.timeout).map(|r| r.outcome),
+                    Some(Outcome::Failed(site)) if self.sites.get(site).copied().flatten() == Some(report)
+                )
+            });
+            let site = &self.reports[report];
+            let owner = &self.targets[site.target.unwrap_or(target)];
+            let suggestion = super::shrink::suggestion(site.kind, &site.text, &site.goal, owner);
+            let what = format!("{} check at {}", site.kind.label(), site.location);
+            let values = super::shrink::values(&layout, &tape);
+            let reproduction = super::shrink::reproduction(
+                &self.targets[target],
+                &layout,
+                &values,
+                &what,
+                site.location.line,
+            );
+            let finding = self.reports[report].finding.as_mut().expect("checked above");
+            finding.inputs = decode(&layout, &tape);
+            finding.tape = tape;
+            finding.shrink_runs = shrink_runs;
+            finding.suggestion = suggestion;
+            finding.reproduction = reproduction;
+        }
+    }
+
+    /// Replay the saved regression inputs of the selected functions, before
+    /// any new input: a fixed bug shows as a survived check again.
+    pub fn replay(&mut self, directory: &Path, options: &Options) {
+        for number in 0..self.assembled.sources.harnesses.len() {
+            let target = self.assembled.sources.harnesses[number];
+            if !self.selected(target, options) {
+                continue;
+            }
+            let Ok(layout) = self.targets[target].harness.clone() else {
+                continue;
+            };
+            let Ok(entries) = std::fs::read_dir(directory.join(&self.targets[target].name)) else {
+                continue;
+            };
+            let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            paths.sort();
+            for path in paths {
+                let Ok(tape) = std::fs::read(&path) else {
+                    continue;
+                };
+                self.stats[target].runs += 1;
+                if let Some(record) = self.execute(number, &tape, options.timeout) {
+                    self.absorb(target, &layout, &tape, 0, &record);
+                }
+            }
+            self.finish_findings(number, options);
+        }
+    }
+
+    /// `--save`: write each finding's reproduction into the test target
+    /// (public functions) or its input under `regressions` (the others).
+    /// Returns one line per file written.
+    pub fn save(&self, test_target: Option<&Path>, regressions: &Path) -> Result<Vec<String>, String> {
+        let mut written = Vec::new();
+        let mut tests = Vec::new();
+        for report in &self.reports {
+            let Some(finding) = &report.finding else {
+                continue;
+            };
+            if finding.run == 0 {
+                continue;
+            }
+            let target = &self.targets[finding.target];
+            match (&finding.reproduction, test_target) {
+                (Some(test), Some(_)) => tests.push((target, test.clone())),
+                _ => {
+                    let directory = regressions.join(&target.name);
+                    std::fs::create_dir_all(&directory)
+                        .map_err(|e| format!("cannot create {}: {e}", directory.display()))?;
+                    let path = directory.join(format!("{:016x}.tape", fnv(&finding.tape)));
+                    std::fs::write(&path, &finding.tape)
+                        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                    written.push(format!("saved input {}", path.display()));
+                }
+            }
+        }
+        if let (Some(path), false) = (test_target, tests.is_empty()) {
+            let mut text = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let mut added = 0;
+            for (target, test) in tests {
+                let name = test.lines().nth(1).unwrap_or("").to_owned();
+                if text.contains(&name) {
+                    continue;
+                }
+                let module = target.module.join(".");
+                if !text.lines().any(|line| line.trim() == format!("use {module};")) {
+                    text = insert_use(&text, &module);
+                }
+                if !text.contains(SAVED_MARKER) {
+                    text.push_str(&format!("\n{SAVED_MARKER}\n"));
+                }
+                text.push('\n');
+                text.push_str(&test);
+                added += 1;
+            }
+            if added > 0 {
+                std::fs::write(path, &text)
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                written.push(format!("added {added} tests to {}", path.display()));
+            }
+        }
+        Ok(written)
     }
 
     /// Run harness `number` on one tape. `None` when the run left no record
@@ -366,6 +511,10 @@ impl Session {
                 tape: tape.to_vec(),
                 inputs: decode(layout, tape),
                 run,
+                shrink_runs: 0,
+                public: self.targets[target].public,
+                suggestion: String::new(),
+                reproduction: None,
             });
         }
         interesting
@@ -434,11 +583,30 @@ impl Session {
                 .map(|(name, value)| format!("{name} = {value}"))
                 .collect();
             let via = &self.targets[finding.target].name;
+            let origin = if finding.run == 0 {
+                "saved input".to_owned()
+            } else {
+                format!("run {}, minimized in {} runs", finding.run, finding.shrink_runs)
+            };
             out.push_str(&format!(
-                "       input    {}    (calling {via}, run {})\n",
+                "       input    {}    (calling {via}, {origin})\n",
                 if inputs.is_empty() { "(none)".to_owned() } else { inputs.join(", ") },
-                finding.run
             ));
+            out.push_str(&format!(
+                "       kind     {}\n       suggest  {}\n",
+                if finding.public {
+                    "bug: reached through a public function"
+                } else {
+                    "local: reached through a private function; no caller may pass this input"
+                },
+                finding.suggestion
+            ));
+            if let Some(test) = &finding.reproduction {
+                out.push_str("       test\n");
+                for line in test.lines() {
+                    out.push_str(&format!("           {line}\n"));
+                }
+            }
         }
         let mut counts = [0usize; 4];
         for report in &shown {
@@ -470,6 +638,43 @@ impl Session {
         ));
         out
     }
+}
+
+/// Runs spent minimizing one counterexample.
+const SHRINK_BUDGET: usize = 300;
+
+/// The comment `--save` puts before the tests it adds.
+pub const SAVED_MARKER: &str = "// --- kush fuzz: reproductions ---";
+
+/// Insert `use module;` after the last `use` line (or the module line).
+fn insert_use(text: &str, module: &str) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let at = lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with("use "))
+        .or_else(|| lines.iter().position(|line| line.trim_start().starts_with("module ")))
+        .map_or(0, |at| at + 1);
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index == at {
+            out.push_str(&format!("use {module};\n"));
+        }
+        out.push_str(line);
+    }
+    if at >= lines.len() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("use {module};\n"));
+    }
+    out
+}
+
+/// FNV-1a, for stable names of saved inputs.
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// Whether `text` declares `module <dotted>;`.
@@ -507,14 +712,14 @@ fn dictionary(constants: &[i128]) -> Vec<i128> {
 
 /// Write `value` into `width` little-endian bytes at `offset`, growing the
 /// tape with zeros if needed.
-fn put(tape: &mut Vec<u8>, offset: usize, width: usize, value: i128) {
+pub(super) fn put(tape: &mut Vec<u8>, offset: usize, width: usize, value: i128) {
     if tape.len() < offset + width {
         tape.resize(offset + width, 0);
     }
     tape[offset..offset + width].copy_from_slice(&value.to_le_bytes()[..width]);
 }
 
-fn get(tape: &[u8], offset: usize, width: usize) -> u128 {
+pub(super) fn get(tape: &[u8], offset: usize, width: usize) -> u128 {
     let mut bytes = [0u8; 16];
     for (k, byte) in bytes.iter_mut().take(width).enumerate() {
         *byte = tape.get(offset + k).copied().unwrap_or(0);
@@ -540,7 +745,7 @@ fn seeds(layout: &Layout, dictionary: &[i128]) -> Vec<Vec<u8>> {
 }
 
 /// Byte ranges of each collection's elements on this tape, by slot index.
-fn element_ranges(layout: &Layout, tape: &[u8]) -> Vec<(usize, usize, usize)> {
+pub(super) fn element_ranges(layout: &Layout, tape: &[u8]) -> Vec<(usize, usize, usize)> {
     let mut at = layout.fixed;
     let mut ranges = Vec::new();
     for (index, slot) in layout.slots.iter().enumerate() {
@@ -560,7 +765,7 @@ fn element_ranges(layout: &Layout, tape: &[u8]) -> Vec<(usize, usize, usize)> {
     ranges
 }
 
-fn element_width(collection: Collection) -> usize {
+pub(super) fn element_width(collection: Collection) -> usize {
     match collection {
         Collection::Bytes => 1,
         Collection::Vec(element) => element.width(),
@@ -662,7 +867,7 @@ fn pick_slot<'a>(layout: &'a Layout, random: &mut Random, scalar: bool) -> Optio
 }
 
 /// A tape word read as the scalar's value.
-fn signed(raw: u128, scalar: Scalar) -> i128 {
+pub(super) fn signed(raw: u128, scalar: Scalar) -> i128 {
     match scalar {
         Scalar::Int {
             bytes,
