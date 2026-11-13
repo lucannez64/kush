@@ -6055,10 +6055,16 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Limb-vector naturals in std (parse, print, compare, succ, pred) for the Kush kernel's literals.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 08:13:05",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "KIK-EXCHANGE",
@@ -6212,6 +6218,17 @@
       ],
       "status": "todo",
       "desc": "whnf, abstract, structured errors, documented for TACTICS-HANDLERS.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LANG-DROP-AFTER-BORROW",
+      "title": "Explicit drop after a call-scoped borrow",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "In std.natural.successor, 'let r = Natural { limbs: out }; if digits(&r) > max { drop(r); return Err }' was rejected with 'cannot move or drop an owner or view while a slice view derived from it is live', though the &r borrow ends with the call. Minimize, confirm whether it is a false positive, fix with tests. Worked around in std.natural by not dropping explicitly.",
       "commit": null,
       "log": []
     }
