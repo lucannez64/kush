@@ -80,6 +80,14 @@ impl Level {
     pub fn as_constant(&self) -> Option<u32> {
         self.params.is_empty().then_some(self.constant)
     }
+    /// The canonical constant part (0 when a parameter offset dominates it).
+    pub fn constant_part(&self) -> u32 {
+        self.constant
+    }
+    /// `(parameter, offset)` pairs of the canonical form, by parameter.
+    pub fn parameter_offsets(&self) -> &[(u32, u32)] {
+        &self.params
+    }
     /// The parameters a level mentions, in increasing order.
     pub fn parameters(&self) -> impl Iterator<Item = u32> + '_ {
         self.params.iter().map(|(index, _)| *index)
@@ -670,6 +678,14 @@ impl Kernel {
     }
     pub fn contains(&self, name: &str) -> bool {
         self.definitions.contains_key(name)
+    }
+    /// The value of an admitted definition (not of a data family or
+    /// constructor, which are opaque).
+    pub fn definition_value(&self, name: &str) -> Option<&Term> {
+        match self.definitions.get(name)? {
+            Global::Definition(definition) => Some(&definition.value),
+            _ => None,
+        }
     }
     pub fn definition_type(&self, name: &str) -> Option<&Term> {
         self.definitions.get(name).map(|global| match global {

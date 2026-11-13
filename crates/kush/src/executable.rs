@@ -5178,6 +5178,23 @@ pub fn check(source: &str) -> Result<Executable> {
     let program = crate::program::load_source("<input>", source).map_err(|(_, e)| e)?;
     check_program(&program)
 }
+/// The kernel-checked logical half of a program that may also contain
+/// executable code, exactly as `check_program` admits it, without checking
+/// executable bodies. Used by `kush core` to export the logical environment.
+pub fn logical_module(source: &str) -> Result<crate::check::CheckedModule> {
+    let program = crate::program::load_source("<input>", source).map_err(|(_, e)| e)?;
+    let injected = inject_allocator_protocol(&program)?;
+    let module = &injected.module;
+    let mut resolution = resolve::resolve_program(&injected)?;
+    collect_default_bindings(module, &mut resolution)?;
+    crate::grades::validate_algebras(&mut resolution)?;
+    let logical = crate::check::check_program(module, &resolution)?;
+    Ok(crate::check::CheckedModule {
+        resolution,
+        kernel: logical.kernel,
+        definitions: logical.definitions,
+    })
+}
 /// The checked allocator-instance protocol. It is an ordinary trait declaration
 /// injected ahead of user items, so impls are checked exactly like any other
 /// trait: receiver modes, parameter/result layouts, grades, and effect rows must

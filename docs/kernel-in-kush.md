@@ -185,6 +185,8 @@ Both sides print normal forms with the same canonical printer, so the
 comparison is a text diff. The Kush kernel still has a `normalize` entry point
 for these queries; only conversion is lazy.
 
+The format is specified in [kernel-exchange.md](kernel-exchange.md) (implemented).
+
 Rust side, behind a new subcommand `kush core <file.kush>`: check the file as
 `kush check` does, then print the admitted environment in admission order, one
 declaration per line, then a `normalize` query for every definition. This is a

@@ -22,6 +22,9 @@ Single files:\n\
   kush build <file.kush> --lib lib<name>.a [--release]   (static library + Rust bindings)\n\
   kush run <file.kush> [--stats] [-- <program args>...]\n\
   kush eval <file.kush> [--stats] [--fuel N] [-- <program args>...]\n\n\
+Kernel exchange (docs/kernel-exchange.md):\n\
+  kush core <file.kush>       print the checked logical environment and queries\n\
+  kush kernel <file.kcore>    answer an exchange file with the Rust kernel\n\n\
 Projects (Kush.toml):\n\
   kush new <directory> [--name <name>]\n\
   kush check [--manifest-path <Kush.toml>] [--locked]\n\
@@ -77,12 +80,40 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
         "fmt" => format_command(rest, out),
         "lint" => lint_command(rest, out),
         "test" => test_command(rest, out),
+        "core" | "kernel" => exchange_command(name.as_ref(), rest, out),
         "build" if rest.len() >= 3 && rest[1] == "--lib" => library_command(rest, out),
         "check" | "build" | "run" if is_project_invocation(rest) => {
             project_command(name.as_ref(), rest, out)
         }
         _ => single_file_command(&args, out),
     }
+}
+
+/// `kush core <file.kush>` dumps a logical module in the kernel exchange
+/// format; `kush kernel <file.kcore>` answers such a file with the Rust kernel.
+fn exchange_command(
+    command: &str,
+    args: &[OsString],
+    out: &mut impl Write,
+) -> Result<u8, (u8, String)> {
+    let [path] = args else {
+        return Err((2, format!("usage: kush {command} <file>")));
+    };
+    let path = Path::new(path);
+    let name = path.to_string_lossy();
+    let source = fs::read_to_string(path).map_err(|e| (1, format!("cannot read {name}: {e}")))?;
+    let text = if command == "core" {
+        // Logic-only files use the logical checker; files that also contain
+        // executable code export the logical half the executable checker admits.
+        let checked = kush::check(&source)
+            .or_else(|first| kush::executable::logical_module(&source).map_err(|_| first))
+            .map_err(|e| (1, e.render(&name, &source)))?;
+        kush::exchange::dump(&checked)
+    } else {
+        kush::exchange::answer(&source).map_err(|e| (1, format!("{name}: {e}")))?
+    };
+    out.write_all(text.as_bytes()).map_err(output_error)?;
+    Ok(0)
 }
 
 /// `kush build <file.kush> --lib lib<name>.a [codegen flags]` (KUSH-RUST-EXPORT).
