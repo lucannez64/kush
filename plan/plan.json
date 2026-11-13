@@ -4248,6 +4248,11 @@
           "time": "2026-11-13 14:54:15",
           "who": "agent",
           "text": "done 9506122"
+        },
+        {
+          "time": "2026-11-13 15:42:35",
+          "who": "agent",
+          "text": "Follow-ups done in 4711be4: capturing multishot handlers across calls (private reusable frames), multi tokens naming abortive operations, benchmarks/effects rows; cap-bound multishot handlers made capability-only (pure tail-resumptive ones now run in place)."
         }
       ]
     },
@@ -5979,6 +5984,11 @@
           "time": "2026-11-13 15:24:14",
           "who": "agent",
           "text": "done 488e7fd"
+        },
+        {
+          "time": "2026-11-13 15:42:35",
+          "who": "agent",
+          "text": "Goal-directed alternatives: cee7b19."
         }
       ]
     },
