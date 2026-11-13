@@ -6003,17 +6003,6 @@
       "log": []
     },
     {
-      "id": null,
-      "title": "",
-      "size": "M",
-      "hard": false,
-      "deps": [],
-      "status": "todo",
-      "desc": "",
-      "commit": null,
-      "log": []
-    },
-    {
       "id": "LOGIC-ETA",
       "title": "Eta for functions in the kernel",
       "size": "M",
