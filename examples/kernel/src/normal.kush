@@ -50,7 +50,7 @@ fn successor(k: &mut Kernel, lit: i64) -> Result<i64, i64> ! {alloc, panic} {
 }
 
 /// `n - 1` for a numeral `lit n` (never zero), as a numeral or `zero`.
-fn predecessor(k: &mut Kernel, lit: i64) -> Result<i64, i64> ! {alloc, panic} {
+pub fn predecessor(k: &mut Kernel, lit: i64) -> Result<i64, i64> ! {alloc, panic} {
     charge_numeral(k, lit)?;
     let value = term.to_natural(&k.store, term.field(&k.store, lit, 0));
     let previous = match natural.predecessor(&value) {

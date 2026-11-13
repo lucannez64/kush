@@ -23,3 +23,19 @@ pub fn inconclusive(code: i64) -> Bool ! {} { code == BUDGET || code == DEPTH }
 pub const UNKNOWN_GLOBAL: i64 = 6;
 /// An eliminator without a branch for the scrutinee's constructor.
 pub const MISSING_BRANCH: i64 = 7;
+/// A variable index past the context.
+pub const UNBOUND_VARIABLE: i64 = 8;
+/// An application of something that is not a function.
+pub const NOT_A_FUNCTION: i64 = 9;
+/// A term used as a type that is not a type or proposition.
+pub const NOT_A_TYPE: i64 = 10;
+/// A term whose type is not the expected one.
+pub const TYPE_MISMATCH: i64 = 11;
+/// A global given the wrong number of universe arguments.
+pub const LEVEL_ARITY: i64 = 12;
+/// A declaration whose name is already taken.
+pub const DUPLICATE: i64 = 13;
+/// A motive or type family of the wrong shape.
+pub const BAD_FAMILY: i64 = 14;
+/// A construct this kernel does not check yet.
+pub const UNSUPPORTED: i64 = 15;

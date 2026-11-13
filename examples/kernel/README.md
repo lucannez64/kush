@@ -5,11 +5,14 @@
 [docs/kernel-in-kush.md](../../docs/kernel-in-kush.md).
 
 Status: the term store, reader and printer (KIK-STORE), binder operations
-(KIK-SUBST) and reduction (KIK-NORMAL). Its normal forms agree with the Rust
-kernel's on the whole example corpus. Type checking comes next (KIK-CHECK).
+(KIK-SUBST), reduction (KIK-NORMAL) and type checking (KIK-CHECK). It checks
+every declaration of the corpus files without data families and gives the
+same answers as the Rust kernel on them and on a file of typing cases, most
+of them rejections; data families come next (KIK-DATA).
 
 ```sh
 kush core ../induction.kush > induction.kcore        # Rust: dump a checked module
+kush run --manifest-path Kush.toml -- check induction.kcore      # Kush: check and answer every item
 kush run --manifest-path Kush.toml -- print induction.kcore      # Kush: read and print it back
 kush run --manifest-path Kush.toml -- normalize induction.kcore  # Kush: answer normalize queries
 kush kernel induction.kcore                                      # Rust: the same answers
@@ -32,6 +35,8 @@ kush test --manifest-path Kush.toml
 - `src/normal.kush`: weak head and full normalization: beta, delta at the
   reference's universe levels, numerals, lazy `NatElim`, `Transport` and `J`
   on `refl`, and constructor reduction of `IndElim`.
+- `src/check.kush`: inference, checking and the lazy conversion check
+  (proof irrelevance, eta, numerals against `succ`), and `define`.
 - `src/error.kush`: kernel error codes.
 - `src/main.kush`: the command line.
 

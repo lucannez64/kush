@@ -137,6 +137,124 @@ fn normal_forms_agree_with_the_rust_kernel() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Compare `kernel check` (Kush) with `kush kernel` (Rust) line by line.
+/// A budget exhaustion on either side is inconclusive. Returns the number of
+/// lines compared.
+fn agree_on_answers(binary: &std::path::Path, file: &std::path::Path, text: &str) -> usize {
+    std::fs::write(file, text).unwrap();
+    let rust = kush::exchange::answer(text).unwrap();
+    let output = Command::new(binary)
+        .arg("check")
+        .arg(file)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let kush_answer = String::from_utf8(output.stdout).unwrap();
+    let rust_lines: Vec<&str> = rust.lines().collect();
+    let kush_lines: Vec<&str> = kush_answer.lines().collect();
+    assert_eq!(rust_lines.len(), kush_lines.len(), "{kush_answer}");
+    let mut compared = 0;
+    for (index, (rust_line, kush_line)) in rust_lines.iter().zip(&kush_lines).enumerate() {
+        if rust_line.starts_with("budget") || kush_line.starts_with("budget") {
+            continue;
+        }
+        assert_eq!(
+            rust_line,
+            kush_line,
+            "item {} of {}",
+            index + 1,
+            file.display()
+        );
+        compared += 1;
+    }
+    compared
+}
+
+/// Typing cases without data families, mostly rejections: the corpus only
+/// exercises acceptance.
+const TYPING: &str = "
+    (def two 0 nat (succ (succ zero)))
+    (def bad 0 nat (sort 0))
+    (def two 0 nat zero)
+    (check (refl nat (global two)) (eq nat (global two) (lit 2)))
+    (check (refl nat (global two)) (eq nat (global two) (lit 3)))
+    (check (refl nat (lit 3)) (eq nat (succ (succ (succ zero))) (lit 3)))
+    (check (sort 0) (sort 0))
+    (check nat (sort 1))
+    (check prop (sort 0))
+    (check prop prop)
+    (infer (pi nat prop))
+    (infer (pi prop (var 0)))
+    (infer (pi (sort 0) (var 0)))
+    (infer (pi (sort 3) (sort 1)))
+    (infer (lam (sort 0) (lam (var 0) (var 0))))
+    (infer (var 0))
+    (infer (app zero zero))
+    (infer (lam zero zero))
+    (infer (succ (sort 0)))
+    (check (lam prop (lam (var 0) (lam (var 1) (refl (var 2) (var 1)))))
+           (pi prop (pi (var 0) (pi (var 1) (eq (var 2) (var 1) (var 0))))))
+    (check (lam nat (lam nat (refl nat (var 1))))
+           (pi nat (pi nat (eq nat (var 1) (var 0)))))
+    (check (lam (pi nat nat) (refl (pi nat nat) (var 0)))
+           (pi (pi nat nat) (eq (pi nat nat) (lam nat (app (var 1) (var 0))) (var 0))))
+    (check (lam (pi nat nat) (refl (pi nat nat) (var 0)))
+           (pi (pi nat nat) (eq (pi nat nat) (lam nat (app (var 1) (succ (var 0)))) (var 0))))
+    (infer (eqelim nat zero zero (lam nat (lam (eq nat zero (var 0)) nat)) (lit 9) (refl nat zero)))
+    (infer (eqelim nat zero zero (lam nat nat) (lit 9) (refl nat zero)))
+    (infer (eqelim nat zero (lit 1) (lam nat (lam (eq nat zero (var 0)) nat)) (lit 9) (refl nat zero)))
+    (infer (eqelim nat zero zero (lam nat (lam (eq nat (var 0) (var 0)) nat)) (lit 9) (refl nat zero)))
+    (infer (transport nat zero zero (lam nat nat) (refl nat zero) (lit 5)))
+    (infer (transport nat zero (lit 1) (lam nat nat) (refl nat zero) (lit 5)))
+    (infer (transport nat zero zero (lam nat zero) (refl nat zero) (lit 5)))
+    (infer (natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 3)))
+    (infer (natelim (lam nat nat) zero (lam nat (succ (var 0))) (lit 3)))
+    (infer (natelim (lam nat nat) (sort 0) (lam nat (lam nat (succ (var 0)))) (lit 3)))
+    (normalize (natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 30)))
+    (normalize (natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 1000000)))
+    (def id 1 (pi (sort (u 0)) (pi (var 0) (var 1))) (lam (sort (u 0)) (lam (var 0) (var 0))))
+    (infer (global id 1))
+    (infer (global id))
+    (infer (global id (u 0)))
+    (infer (app (app (global id 0) (sort 0)) nat))
+    (def lifted 0 (sort 1) (sort (u 0)))
+    (def poly 2 (sort (succ (max (u 0) (u 1)))) (pi (sort (u 0)) (sort (u 1))))
+    (def poly_bad 2 (sort (succ (u 0))) (pi (sort (u 0)) (sort (u 1))))
+    (infer (i64 5))
+    (check (bool true) (scalar i64))
+    (infer (eq (scalar Bool) (bool true) (bool false)))
+    (check (refl (scalar Unit) unit) (eq (scalar Unit) unit unit))
+    (infer (global missing))
+";
+
+#[test]
+fn the_checker_agrees_with_the_rust_kernel() {
+    let dir = scratch("check");
+    let binary = build(&dir);
+    // The corpus files without data families, every item compared.
+    for name in ["proofs", "induction", "large-naturals"] {
+        let file = dir.join(format!("{name}.kcore"));
+        let text = dump(name);
+        assert_eq!(
+            agree_on_answers(&binary, &file, &text),
+            text.lines().count(),
+            "{name}"
+        );
+    }
+    let file = dir.join("typing.kcore");
+    let compared = agree_on_answers(&binary, &file, TYPING);
+    assert!(compared >= 45, "{compared}");
+    // The cases really include rejections.
+    assert!(
+        kush::exchange::answer(TYPING)
+            .unwrap()
+            .matches("reject")
+            .count()
+            >= 20
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn the_kush_kernel_prints_the_corpus_back_unchanged() {
     let dir = scratch("print");

@@ -2,8 +2,13 @@ module kernel;
 
 // The Kush kernel's command line (docs/kernel-in-kush.md).
 //
+//     kernel check FILE.kcore      check and answer every item
 //     kernel print FILE.kcore      read an exchange file and print it back
 //     kernel normalize FILE.kcore  answer its normalize queries
+//
+// `check` is the kernel: it admits each declaration only after checking it
+// and answers every query, in the format of `kush kernel` (Rust), so the two
+// outputs can be diffed (docs/kernel-exchange.md).
 //
 // `normalize` admits the file's declarations without checking them (they
 // come from `kush core`, so the Rust kernel has checked them) and answers in
@@ -19,6 +24,7 @@ use std.fs;
 use std.io;
 use std.result.Result;
 use std.text;
+use kernel.check;
 use kernel.engine;
 use kernel.error;
 use kernel.normal;
@@ -34,7 +40,7 @@ fn say(message: &Bytes) -> Unit ! {io} {
 }
 
 fn usage() -> i64 ! {io, alloc, panic} {
-    say(&Bytes.from("usage: kernel print|normalize FILE.kcore\n"));
+    say(&Bytes.from("usage: kernel check|print|normalize FILE.kcore\n"));
     2
 }
 
@@ -43,6 +49,58 @@ fn word(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
     let mut i = 0;
     while i < value.len() {
         out = out.push(value[i]);
+        i = i + 1;
+    }
+    out
+}
+
+/// `ok NAME`, `reject NAME` or `budget NAME` for a declaration.
+fn verdict(k: &engine.Kernel, out: Bytes, result: Result<Unit, i64>, name: i64) -> Bytes ! {alloc, panic} {
+    let label = match result {
+        Result.Ok(_) => Bytes.from("ok "),
+        Result.Err(code) => if error.inconclusive(code) { Bytes.from("budget ") } else { Bytes.from("reject ") },
+    };
+    term.name_into(&k.store, word(out, &label), name).push(10)
+}
+
+/// `budget` or `reject` for a failed query.
+fn failure(out: Bytes, code: i64) -> Bytes ! {alloc, panic} {
+    word(out, &(if error.inconclusive(code) { Bytes.from("budget\n") } else { Bytes.from("reject\n") }))
+}
+
+/// Check and answer every item.
+fn check_items(items: &Vec<reader.Item>, k: &mut engine.Kernel) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(4096);
+    let mut i = 0;
+    while i < items.len() {
+        match items[i] {
+            reader.Item.Def(name, levels, ty, value) => {
+                let result = check.define(k, name, levels, ty, value);
+                out = verdict(k, out, result, name);
+            },
+            reader.Item.Data(name, _, _, _, _) => {
+                // Data families are checked with KIK-DATA.
+                out = term.name_into(&k.store, word(out, &Bytes.from("unsupported ")), name).push(10);
+            },
+            reader.Item.Check(t, ty) => {
+                out = match check.check_closed(k, t, ty) {
+                    Result.Ok(_) => word(out, &Bytes.from("ok\n")),
+                    Result.Err(code) => failure(out, code),
+                };
+            },
+            reader.Item.Infer(t) => {
+                out = match check.infer_closed(k, t) {
+                    Result.Ok(ty) => printer.term_into(&k.store, word(out, &Bytes.from(": ")), ty).push(10),
+                    Result.Err(code) => failure(out, code),
+                };
+            },
+            reader.Item.Normalize(t) => {
+                out = match check.normalize_closed(k, t) {
+                    Result.Ok(n) => printer.term_into(&k.store, word(out, &Bytes.from("= ")), n).push(10),
+                    Result.Err(code) => failure(out, code),
+                };
+            },
+        }
         i = i + 1;
     }
     out
@@ -100,7 +158,8 @@ fn read_file(path: &Bytes) -> Result<Bytes, i64> ! {io, alloc, panic} {
     }
 }
 
-fn run_file(path: &Bytes, normalize: Bool) -> i64 ! {io, alloc, panic} {
+/// What to do with a file: 0 print, 1 normalize, 2 check.
+fn run_file(path: &Bytes, mode: i64) -> i64 ! {io, alloc, panic} {
     let source = match read_file(path) {
         Result.Ok(bytes) => bytes,
         Result.Err(code) => {
@@ -116,8 +175,12 @@ fn run_file(path: &Bytes, normalize: Bool) -> i64 ! {io, alloc, panic} {
             return 1;
         },
     };
-    if normalize {
+    if mode == 1 {
         say(&normalize_items(&items, &mut k));
+        return 0;
+    }
+    if mode == 2 {
+        say(&check_items(&items, &mut k));
         return 0;
     }
     let mut out = Bytes.with_capacity(source.len());
@@ -145,10 +208,13 @@ fn main() -> i64 ! {io, alloc, panic} {
         Result.Err(_) => return usage(),
     };
     if text.eq(&command, &Bytes.from("print")) {
-        return run_file(&path, false);
+        return run_file(&path, 0);
     }
     if text.eq(&command, &Bytes.from("normalize")) {
-        return run_file(&path, true);
+        return run_file(&path, 1);
+    }
+    if text.eq(&command, &Bytes.from("check")) {
+        return run_file(&path, 2);
     }
     usage()
 }

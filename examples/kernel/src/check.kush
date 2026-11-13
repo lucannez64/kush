@@ -1,0 +1,457 @@
+module kernel.check;
+
+// Type inference, checking and definitional equality, with the typing rules
+// of the Rust kernel (docs/kernel.md, section 3) and the same conversion
+// relation, computed lazily (docs/kernel-in-kush.md, section 1):
+//
+// 1. equal ids are equal (the store is hash-consed);
+// 2. two proofs of convertible propositions are equal (proof irrelevance);
+// 3. otherwise both sides go to weak head normal form, and
+//    - a lambda against a non-lambda is compared by eta,
+//    - a numeral against `succ x` compares its predecessor with `x`,
+//    - the same head form compares its parts pairwise, under binders where
+//      the form binds.
+//
+// Errors are codes from kernel.error. Every recursive step charges the
+// operation's budget.
+
+use std.result.Result;
+use kernel.engine;
+use kernel.engine.Kernel;
+use kernel.error;
+use kernel.normal;
+use kernel.subst;
+use kernel.term;
+
+/// The sort of propositions, as returned by `sort_of`; other sorts are
+/// returned as their level's id (never negative).
+
+pub const PROP_SORT: i64 = -1;
+
+fn at(k: &Kernel, t: i64, i: i64) -> i64 ! {panic} { term.field(&k.store, t, i) }
+
+fn tag(k: &Kernel, t: i64) -> i64 ! {panic} { term.tag(&k.store, t) }
+
+/// Reject a level mentioning a universe parameter that is not in scope.
+fn level_in_scope(k: &Kernel, level: i64) -> Result<Unit, i64> ! {panic} {
+    let pairs = term.level_pairs(&k.store, level);
+    let mut i = 0;
+    while i < pairs {
+        if term.level_param(&k.store, level, i) >= k.levels {
+            return Result.Err(error.UNBOUND_LEVEL);
+        }
+        i = i + 1;
+    }
+    Result.Ok(())
+}
+
+/// The level a sort contributes: `Prop` sits at level 0.
+fn sort_level(k: &mut Kernel, sort: i64) -> i64 ! {alloc, panic} {
+    if sort == PROP_SORT { term.level_of(&mut k.store, 0) } else { sort }
+}
+
+/// The sort a reduced term denotes: `sort l` or `prop`.
+fn as_sort(k: &mut Kernel, t: i64, code: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let reduced = normal.whnf(k, t)?;
+    let reduced_tag = tag(k, reduced);
+    if reduced_tag == term.SORT { return Result.Ok(at(k, reduced, 0)); }
+    if reduced_tag == term.PROP { return Result.Ok(PROP_SORT); }
+    Result.Err(code)
+}
+
+/// The sort of a type or proposition `t`: a level id, or `PROP_SORT`.
+pub fn sort_of(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let ty = infer(k, t)?;
+    as_sort(k, ty, error.NOT_A_TYPE)
+}
+
+/// Check `t` against `ty`.
+pub fn check(k: &mut Kernel, t: i64, ty: i64) -> Result<Unit, i64> ! {alloc, panic} {
+    let actual = infer(k, t)?;
+    if defeq(k, actual, ty)? { Result.Ok(()) } else { Result.Err(error.TYPE_MISMATCH) }
+}
+
+/// The sort returned by a type family `m : domain -> Sort`.
+fn family(k: &mut Kernel, m: i64, domain: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let ty = infer(k, m)?;
+    let reduced = normal.whnf(k, ty)?;
+    if tag(k, reduced) != term.PI { return Result.Err(error.BAD_FAMILY); }
+    let actual = at(k, reduced, 0);
+    let codomain = at(k, reduced, 1);
+    if !defeq(k, actual, domain)? { return Result.Err(error.BAD_FAMILY); }
+    engine.assume(k, domain);
+    let sort = as_sort(k, codomain, error.BAD_FAMILY)?;
+    engine.forget(k);
+    Result.Ok(sort)
+}
+
+// ------------------------------------------------------------- inference
+
+/// The type of `t` in the current context.
+pub fn infer(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    engine.enter(k)?;
+    let size = engine.context_size(k);
+    let result = infer_step(k, t);
+    engine.truncate(k, size);
+    engine.leave(k);
+    result
+}
+
+fn nat(k: &mut Kernel) -> i64 ! {alloc, panic} { term.nat(&mut k.store) }
+
+fn type0(k: &mut Kernel) -> i64 ! {alloc, panic} {
+    let zero = term.level_of(&mut k.store, 0);
+    term.sort(&mut k.store, zero)
+}
+
+fn infer_step(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let t_tag = tag(k, t);
+    if t_tag == term.VAR {
+        let index = at(k, t, 0);
+        let position = engine.context_size(k) - 1 - index;
+        if position < 0 { return Result.Err(error.UNBOUND_VARIABLE); }
+        let ty = engine.hypothesis(k, position);
+        return Result.Ok(subst.shift(&mut k.store, ty, index + 1, 0));
+    }
+    if t_tag == term.GLOBAL {
+        let name = at(k, t, 0);
+        let levels = at(k, t, 1);
+        let entry = engine.lookup(k, name);
+        if entry < 0 { return Result.Err(error.UNKNOWN_GLOBAL); }
+        let count = term.list_len(&k.store, levels);
+        if count != engine.entry_levels(k, entry) { return Result.Err(error.LEVEL_ARITY); }
+        let mut i = 0;
+        while i < count {
+            level_in_scope(k, term.list_at(&k.store, levels, i))?;
+            i = i + 1;
+        }
+        let ty = engine.entry_type(k, entry);
+        return subst.instantiate_levels(&mut k.store, ty, levels);
+    }
+    if t_tag == term.SORT {
+        let level = at(k, t, 0);
+        level_in_scope(k, level)?;
+        let next = match term.level_succ(&mut k.store, level) {
+            Result.Ok(next) => next,
+            Result.Err(_) => return Result.Err(error.LEVEL_OVERFLOW),
+        };
+        return Result.Ok(term.sort(&mut k.store, next));
+    }
+    if t_tag == term.PROP || t_tag == term.NAT || t_tag == term.SCALAR {
+        return Result.Ok(type0(k));
+    }
+    if t_tag == term.PI {
+        let domain = at(k, t, 0);
+        let codomain = at(k, t, 1);
+        let left = sort_of(k, domain)?;
+        engine.assume(k, domain);
+        let right = sort_of(k, codomain)?;
+        engine.forget(k);
+        // Impredicative Prop: a function into a proposition is one.
+        if right == PROP_SORT { return Result.Ok(term.prop(&mut k.store)); }
+        let left_level = sort_level(k, left);
+        let level = term.level_max(&mut k.store, left_level, right);
+        return Result.Ok(term.sort(&mut k.store, level));
+    }
+    if t_tag == term.LAM {
+        let domain = at(k, t, 0);
+        let body = at(k, t, 1);
+        sort_of(k, domain)?;
+        engine.assume(k, domain);
+        let body_type = infer(k, body)?;
+        engine.forget(k);
+        return Result.Ok(term.pi(&mut k.store, domain, body_type));
+    }
+    if t_tag == term.APP {
+        let function = at(k, t, 0);
+        let argument = at(k, t, 1);
+        let function_type = infer(k, function)?;
+        let reduced = normal.whnf(k, function_type)?;
+        if tag(k, reduced) != term.PI { return Result.Err(error.NOT_A_FUNCTION); }
+        let domain = at(k, reduced, 0);
+        let codomain = at(k, reduced, 1);
+        check(k, argument, domain)?;
+        return Result.Ok(subst.substitute(&mut k.store, codomain, argument));
+    }
+    if t_tag == term.I64 { return Result.Ok(term.scalar(&mut k.store, term.SCALAR_I64)); }
+    if t_tag == term.BOOL { return Result.Ok(term.scalar(&mut k.store, term.SCALAR_BOOL)); }
+    if t_tag == term.UNIT { return Result.Ok(term.scalar(&mut k.store, term.SCALAR_UNIT)); }
+    if t_tag == term.LIT || t_tag == term.ZERO { return Result.Ok(nat(k)); }
+    if t_tag == term.SUCC {
+        let value = at(k, t, 0);
+        let n = nat(k);
+        check(k, value, n)?;
+        return Result.Ok(n);
+    }
+    if t_tag == term.EQ {
+        let ty = at(k, t, 0);
+        let left = at(k, t, 1);
+        let right = at(k, t, 2);
+        let sort = sort_of(k, ty)?;
+        check(k, left, ty)?;
+        check(k, right, ty)?;
+        // Equality is Type-valued, in its carrier's universe.
+        let level = sort_level(k, sort);
+        return Result.Ok(term.sort(&mut k.store, level));
+    }
+    if t_tag == term.REFL {
+        let ty = at(k, t, 0);
+        let value = at(k, t, 1);
+        sort_of(k, ty)?;
+        check(k, value, ty)?;
+        return Result.Ok(term.eq(&mut k.store, ty, value, value));
+    }
+    if t_tag == term.NATELIM { return infer_natelim(k, t); }
+    if t_tag == term.TRANSPORT { return infer_transport(k, t); }
+    if t_tag == term.EQELIM { return infer_eqelim(k, t); }
+    // IndElim is checked with data families (KIK-DATA).
+    Result.Err(error.UNSUPPORTED)
+}
+
+fn infer_natelim(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let motive = at(k, t, 0);
+    let zero_case = at(k, t, 1);
+    let step = at(k, t, 2);
+    let value = at(k, t, 3);
+    let n = nat(k);
+    family(k, motive, n)?;
+    check(k, value, n)?;
+    let zero = term.zero(&mut k.store);
+    let at_zero = term.app(&mut k.store, motive, zero);
+    check(k, zero_case, at_zero)?;
+    // step : (n : Nat) -> motive n -> motive (succ n)
+    let s = &mut k.store;
+    let motive1 = subst.shift(s, motive, 1, 0);
+    let motive2 = subst.shift(s, motive, 2, 0);
+    let v0 = term.var(s, 0);
+    let v1 = term.var(s, 1);
+    let hypothesis = term.app(s, motive1, v0);
+    let next = term.succ(s, v1);
+    let conclusion = term.app(s, motive2, next);
+    let inner = term.pi(s, hypothesis, conclusion);
+    let n2 = term.nat(s);
+    let step_type = term.pi(s, n2, inner);
+    check(k, step, step_type)?;
+    Result.Ok(term.app(&mut k.store, motive, value))
+}
+
+fn infer_transport(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let ty = at(k, t, 0);
+    let from = at(k, t, 1);
+    let to = at(k, t, 2);
+    let motive = at(k, t, 3);
+    let proof = at(k, t, 4);
+    let value = at(k, t, 5);
+    sort_of(k, ty)?;
+    check(k, from, ty)?;
+    check(k, to, ty)?;
+    family(k, motive, ty)?;
+    let equality = term.eq(&mut k.store, ty, from, to);
+    check(k, proof, equality)?;
+    let at_from = term.app(&mut k.store, motive, from);
+    check(k, value, at_from)?;
+    Result.Ok(term.app(&mut k.store, motive, to))
+}
+
+/// J: motive : (y : A) -> Eq(A, x, y) -> Sort, refl : motive x (refl A x),
+/// proof : Eq(A, x, y); the result is motive y proof.
+fn infer_eqelim(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let ty = at(k, t, 0);
+    let left = at(k, t, 1);
+    let right = at(k, t, 2);
+    let motive = at(k, t, 3);
+    let refl_case = at(k, t, 4);
+    let proof = at(k, t, 5);
+    sort_of(k, ty)?;
+    check(k, left, ty)?;
+    check(k, right, ty)?;
+    let motive_type = infer(k, motive)?;
+    let reduced = normal.whnf(k, motive_type)?;
+    if tag(k, reduced) != term.PI { return Result.Err(error.BAD_FAMILY); }
+    let value_domain = at(k, reduced, 0);
+    let rest = at(k, reduced, 1);
+    if !defeq(k, value_domain, ty)? { return Result.Err(error.BAD_FAMILY); }
+    engine.assume(k, value_domain);
+    let inner = normal.whnf(k, rest)?;
+    if tag(k, inner) != term.PI { return Result.Err(error.BAD_FAMILY); }
+    let equality_domain = at(k, inner, 0);
+    let codomain = at(k, inner, 1);
+    let s = &mut k.store;
+    let shifted_ty = subst.shift(s, ty, 1, 0);
+    let shifted_left = subst.shift(s, left, 1, 0);
+    let v0 = term.var(s, 0);
+    let expected = term.eq(s, shifted_ty, shifted_left, v0);
+    if !defeq(k, equality_domain, expected)? { return Result.Err(error.BAD_FAMILY); }
+    engine.assume(k, equality_domain);
+    as_sort(k, codomain, error.BAD_FAMILY)?;
+    engine.forget(k);
+    engine.forget(k);
+    let s = &mut k.store;
+    let reflexive = term.reflexive(s, ty, left);
+    let motive_left = term.app(s, motive, left);
+    let refl_type = term.app(s, motive_left, reflexive);
+    check(k, refl_case, refl_type)?;
+    let equality = term.eq(&mut k.store, ty, left, right);
+    check(k, proof, equality)?;
+    let motive_right = term.app(&mut k.store, motive, right);
+    Result.Ok(term.app(&mut k.store, motive_right, proof))
+}
+
+// ------------------------------------------------------------ conversion
+
+/// Whether `t` is a proof: an inhabitant of a proposition. Types, numerals,
+/// scalar values and `refl` (equality is Type-valued) never are, so they
+/// are answered without inference.
+fn is_proof(k: &mut Kernel, t: i64) -> Result<Bool, i64> ! {alloc, panic} {
+    let t_tag = tag(k, t);
+    if !(t_tag == term.VAR || t_tag == term.GLOBAL || t_tag == term.APP || t_tag == term.LAM || t_tag == term.NATELIM || t_tag == term.TRANSPORT || t_tag == term.EQELIM || t_tag == term.INDELIM) {
+        return Result.Ok(false);
+    }
+    let ty = infer(k, t)?;
+    let sort = sort_of(k, ty)?;
+    Result.Ok(sort == PROP_SORT)
+}
+
+/// Definitional equality of two terms of the same type.
+pub fn defeq(k: &mut Kernel, a: i64, b: i64) -> Result<Bool, i64> ! {alloc, panic} {
+    if a == b { return Result.Ok(true); }
+    engine.enter(k)?;
+    let size = engine.context_size(k);
+    let result = defeq_step(k, a, b);
+    engine.truncate(k, size);
+    engine.leave(k);
+    result
+}
+
+fn defeq_fields(k: &mut Kernel, a: i64, b: i64, count: i64) -> Result<Bool, i64> ! {alloc, panic} {
+    let mut i = 0;
+    while i < count {
+        let x = at(k, a, i);
+        let y = at(k, b, i);
+        if !defeq(k, x, y)? { return Result.Ok(false); }
+        i = i + 1;
+    }
+    Result.Ok(true)
+}
+
+/// `λ(d). body` against a non-lambda `other`: `body` against `other↑ 0`.
+fn eta(k: &mut Kernel, lambda: i64, other: i64) -> Result<Bool, i64> ! {alloc, panic} {
+    let domain = at(k, lambda, 0);
+    let body = at(k, lambda, 1);
+    let s = &mut k.store;
+    let shifted = subst.shift(s, other, 1, 0);
+    let v0 = term.var(s, 0);
+    let expanded = term.app(s, shifted, v0);
+    engine.assume(k, domain);
+    let result = defeq(k, body, expanded)?;
+    engine.forget(k);
+    Result.Ok(result)
+}
+
+fn defeq_step(k: &mut Kernel, a: i64, b: i64) -> Result<Bool, i64> ! {alloc, panic} {
+    if is_proof(k, a)? &&is_proof(k, b)? {
+        let left = infer(k, a)?;
+        let right = infer(k, b)?;
+        return defeq(k, left, right);
+    }
+    let x = normal.whnf(k, a)?;
+    let y = normal.whnf(k, b)?;
+    if x == y { return Result.Ok(true); }
+    let x_tag = tag(k, x);
+    let y_tag = tag(k, y);
+    if x_tag == term.LAM && y_tag != term.LAM { return eta(k, x, y); }
+    if y_tag == term.LAM && x_tag != term.LAM { return eta(k, y, x); }
+    if x_tag == term.LIT && y_tag == term.SUCC {
+        let previous = normal.predecessor(k, x)?;
+        let inner = at(k, y, 0);
+        return defeq(k, previous, inner);
+    }
+    if y_tag == term.LIT && x_tag == term.SUCC {
+        let previous = normal.predecessor(k, y)?;
+        let inner = at(k, x, 0);
+        return defeq(k, inner, previous);
+    }
+    if x_tag != y_tag { return Result.Ok(false); }
+    if x_tag == term.PI || x_tag == term.LAM {
+        let domain = at(k, x, 0);
+        let other_domain = at(k, y, 0);
+        if !defeq(k, domain, other_domain)? { return Result.Ok(false); }
+        let body = at(k, x, 1);
+        let other_body = at(k, y, 1);
+        engine.assume(k, domain);
+        let result = defeq(k, body, other_body)?;
+        engine.forget(k);
+        return Result.Ok(result);
+    }
+    if x_tag == term.APP || x_tag == term.REFL { return defeq_fields(k, x, y, 2); }
+    if x_tag == term.SUCC { return defeq_fields(k, x, y, 1); }
+    if x_tag == term.EQ { return defeq_fields(k, x, y, 3); }
+    if x_tag == term.NATELIM { return defeq_fields(k, x, y, 4); }
+    if x_tag == term.TRANSPORT || x_tag == term.EQELIM { return defeq_fields(k, x, y, 6); }
+    if x_tag == term.INDELIM {
+        if at(k, x, 0) != at(k, y, 0) { return Result.Ok(false); }
+        let branches = at(k, x, 2);
+        let other_branches = at(k, y, 2);
+        let count = term.list_len(&k.store, branches);
+        if count != term.list_len(&k.store, other_branches) { return Result.Ok(false); }
+        let motive = at(k, x, 1);
+        let other_motive = at(k, y, 1);
+        if !defeq(k, motive, other_motive)? { return Result.Ok(false); }
+        let scrutinee = at(k, x, 3);
+        let other_scrutinee = at(k, y, 3);
+        if !defeq(k, scrutinee, other_scrutinee)? { return Result.Ok(false); }
+        let mut i = 0;
+        while i < count {
+            let branch = term.list_at(&k.store, branches, i);
+            let other_branch = term.list_at(&k.store, other_branches, i);
+            if !defeq(k, branch, other_branch)? { return Result.Ok(false); }
+            i = i + 1;
+        }
+        return Result.Ok(true);
+    }
+    // Variables, globals, sorts, numerals and scalars are equal only when
+    // they are the same object, which the id comparisons above decided.
+    Result.Ok(false)
+}
+
+// ------------------------------------------------------------ public API
+
+/// Admit a definition polymorphic over `levels` universe parameters after
+/// checking that `ty` is a type and `value` has it.
+pub fn define(k: &mut Kernel, name: i64, levels: i64, ty: i64, value: i64) -> Result<Unit, i64> ! {alloc, panic} {
+    if engine.contains(k, name) { return Result.Err(error.DUPLICATE); }
+    if levels < 0 || levels > 64 { return Result.Err(error.LEVEL_ARITY); }
+    engine.begin(k);
+    k.levels = levels;
+    let result = define_checked(k, ty, value);
+    k.levels = 0;
+    result?;
+    engine.admit_def(k, name, levels, ty, value);
+    Result.Ok(())
+}
+
+fn define_checked(k: &mut Kernel, ty: i64, value: i64) -> Result<Unit, i64> ! {alloc, panic} {
+    sort_of(k, ty)?;
+    check(k, value, ty)
+}
+
+/// Check a closed term against a closed type.
+pub fn check_closed(k: &mut Kernel, t: i64, ty: i64) -> Result<Unit, i64> ! {alloc, panic} {
+    engine.begin(k);
+    sort_of(k, ty)?;
+    check(k, t, ty)
+}
+
+/// The normal form of a closed term's type.
+pub fn infer_closed(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    engine.begin(k);
+    let ty = infer(k, t)?;
+    normal.normal(k, ty)
+}
+
+/// The normal form of a closed term, after checking it.
+pub fn normalize_closed(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    engine.begin(k);
+    infer(k, t)?;
+    normal.normal(k, t)
+}

@@ -3,6 +3,7 @@ module kernel.tests.main;
 use std.result.Result;
 use std.test;
 use std.text;
+use kernel.check;
 use kernel.engine;
 use kernel.error;
 use kernel.normal;
@@ -299,4 +300,25 @@ fn reduction_budgets_fail_closed() -> Unit ! {io, alloc, panic} {
         &reduce(&mut k, &Bytes.from("(succ (succ (succ (succ (var 0)))))"), true),
         &text.format_i64_into(Bytes.from("error "), error.DEPTH),
     );
+}
+
+#[test]
+fn definitions_are_admitted_only_after_checking() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let two = term.name(&mut k.store, &Bytes.from("two"));
+    let ty = parse(&mut k.store, &Bytes.from("nat"));
+    let value = parse(&mut k.store, &Bytes.from("(succ (succ zero))"));
+    test.is_true(match check.define(&mut k, two, 0, ty, value) { Result.Ok(_) => true, Result.Err(_) => false });
+    // A duplicate, and a value of the wrong type, are rejected and not admitted.
+    test.is_true(match check.define(&mut k, two, 0, ty, value) { Result.Ok(_) => false, Result.Err(code) => code == error.DUPLICATE });
+    let bad = term.name(&mut k.store, &Bytes.from("bad"));
+    let sort = parse(&mut k.store, &Bytes.from("(sort 0)"));
+    test.is_true(match check.define(&mut k, bad, 0, ty, sort) { Result.Ok(_) => false, Result.Err(code) => code == error.TYPE_MISMATCH });
+    test.is_false(engine.contains(&k, bad));
+    // The definition computes: refl 2 : two = 2.
+    let proof = parse(&mut k.store, &Bytes.from("(refl nat (lit 2))"));
+    let claim = parse(&mut k.store, &Bytes.from("(eq nat (global two) (lit 2))"));
+    test.is_true(match check.check_closed(&mut k, proof, claim) { Result.Ok(_) => true, Result.Err(_) => false });
+    let wrong = parse(&mut k.store, &Bytes.from("(eq nat (global two) (lit 3))"));
+    test.is_true(match check.check_closed(&mut k, proof, wrong) { Result.Ok(_) => false, Result.Err(code) => code == error.TYPE_MISMATCH });
 }

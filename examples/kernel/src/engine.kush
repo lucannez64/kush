@@ -44,6 +44,10 @@ pub struct Kernel {
     pub levels: i64,
     /// Cache generation of the operation in progress (normal forms).
     pub generation: i64,
+    /// The typing context: the first `context_size` entries are hypothesis
+    /// types, outermost first, each relative to the entries before it.
+    context: Vec<i64>,
+    context_size: i64,
 }
 
 fn zeros(count: i64) -> Vec<i64> ! {alloc, panic} {
@@ -68,6 +72,8 @@ pub fn new() -> Kernel ! {alloc, panic} {
         max_depth: NESTING,
         levels: 0,
         generation: 0,
+        context: Vec.with_capacity(64),
+        context_size: 0,
     }
 }
 
@@ -75,6 +81,7 @@ pub fn new() -> Kernel ! {alloc, panic} {
 pub fn begin(k: &mut Kernel) -> Unit ! {panic} {
     k.fuel = k.max_steps;
     k.depth = 0;
+    k.context_size = 0;
     k.generation = store.fresh_generation(&mut k.store);
 }
 
@@ -212,3 +219,26 @@ pub fn entry_type(k: &Kernel, entry: i64) -> i64 ! {panic} {
     let tag = kind(k, entry);
     if tag == DEF { part(k, entry, 1) } else if tag == DATA { part(k, entry, 4) } else { part(k, entry, 2) }
 }
+
+/// Number of hypotheses in the context.
+pub fn context_size(k: &Kernel) -> i64 ! {} { k.context_size }
+
+/// Hypothesis `position` (0 is the outermost).
+pub fn hypothesis(k: &Kernel, position: i64) -> i64 ! {panic} { k.context[position] }
+
+/// Enter a binder whose domain is `ty`.
+pub fn assume(k: &mut Kernel, ty: i64) -> Unit ! {alloc, panic} {
+    let size = k.context_size;
+    if size < k.context.len() {
+        k.context[size] = ty;
+    } else {
+        k.context.push(ty);
+    }
+    k.context_size = size + 1;
+}
+
+/// Leave the innermost binder.
+pub fn forget(k: &mut Kernel) -> Unit ! {panic} { k.context_size = k.context_size - 1; }
+
+/// Cut the context back to `size` hypotheses.
+pub fn truncate(k: &mut Kernel, size: i64) -> Unit ! {} { k.context_size = size; }
