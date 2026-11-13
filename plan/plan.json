@@ -6079,10 +6079,21 @@
       "deps": [
         "LOGIC-UNIVERSE-POLY"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "S-expression core format; Rust printer; kush core subcommand dumping admitted environment and normalize queries.",
-      "commit": null,
-      "log": []
+      "commit": "c23f367",
+      "log": [
+        {
+          "time": "2026-11-13 08:34:17",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 08:39:11",
+          "who": "agent",
+          "text": "done c23f367"
+        }
+      ]
     },
     {
       "id": "KIK-STORE",
