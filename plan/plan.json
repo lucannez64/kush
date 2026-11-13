@@ -6200,10 +6200,21 @@
       "deps": [
         "KIK-CHECK"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Corpus dump, mutator, generator, scripts/kernel-diff.sh, Rust test. Milestone M1.",
-      "commit": null,
-      "log": []
+      "commit": "a4461a3",
+      "log": [
+        {
+          "time": "2026-11-13 09:28:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:30:35",
+          "who": "agent",
+          "text": "done a4461a3"
+        }
+      ]
     },
     {
       "id": "KIK-DATA",
