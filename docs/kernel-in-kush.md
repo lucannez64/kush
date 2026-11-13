@@ -1,7 +1,9 @@
 # Kernel in Kush: design
 
-Status: **design, awaiting approval** (plan node KERNEL-IN-KUSH). Nothing here
-is implemented yet.
+Status: **design approved 2026-11-13** (plan node KERNEL-IN-KUSH), with the
+changes recorded in section 1: the logic is improved in the Rust kernel first
+(eta, universe polymorphism), then ported once; the port shares the logic but
+not the algorithm.
 
 *Kush checks its own kernel.* This ports the dependent logical kernel
 ([kernel.md](kernel.md), `crates/kush/src/kernel.rs`) to Kush, in the spirit of
@@ -19,20 +21,46 @@ theorems the Rust kernel checks.
 
 ## 1. Scope and milestones
 
-The port mirrors the Rust kernel's rules exactly, including its quirks: no
-cumulativity, no eta, Type-valued `Eq`, `Prop : Universe(0)` with impredicative
-`Pi`, proof irrelevance as a conversion rule only, normalize-then-compare
-conversion, and the same step and depth budgets. Matching the reference
-exactly is what makes differential testing meaningful. Improvements (weak head
-normalization, eta, faster conversion) wait until the port agrees with the
-reference, and then go into both kernels together, or into the Kush one only
-behind a separate entry point that the comparison does not use.
+**Same logic, independent algorithm.** The two kernels accept exactly the same
+terms: the typing rules, the conversion relation, `Prop`, irrelevance and the
+data rules are identical. If a rule changes, it changes in the Rust kernel
+first, as its own plan node with tests, and the port follows; the comparison
+then confirms the change in two independent implementations. The *algorithm*
+is free: the Kush kernel compares lazily (equal handles first, weak head
+normalization, unfolding definitions only on demand) instead of normalizing
+both sides fully, which is both faster and a more independent check than a
+line-by-line copy. The consequence is that the two kernels run out of budget
+on different inputs, so a budget exhaustion on either side is reported as
+inconclusive rather than as a disagreement (section 3).
+
+**Logic changes before the port.** Two changes go into the Rust kernel before
+porting, so the port is written once against the better logic:
+
+- **Eta for functions** [LOGIC-ETA]: `f ≡ λx. f x` in conversion, as in Lean
+  and Rocq.
+- **Universe polymorphism** [LOGIC-UNIVERSE-POLY]: definitions and data
+  families abstract over universe level variables, instantiated explicitly at
+  each use. This replaces both cumulativity and the missing sort polymorphism.
+
+`Eq` in `Prop` (with subsingleton elimination) is a possible later change, a
+separate decision. Function extensionality is not planned: as an axiom it
+breaks canonicity, so the specification of section 4 states its lemmas
+pointwise.
+
+**Library and compiler work before the port.** Arbitrary-precision naturals
+[STD-BIGNAT] are a `std` module, so the port handles compact literals from the
+start. Lambda expressions in the logical fragment [LOGIC-LAMBDA] and a
+per-definition kernel budget [KERNEL-BUDGET-ATTR] are needed by the
+specification and come before KIK-SPEC.
 
 **M1, the core** (the first milestone):
 
 - terms with de Bruijn indices, the same constructors as the Rust `Term`;
 - `Universe(u)`, `Prop`, `Pi`, `Lam`, `App`, globals with delta unfolding;
-- `Nat`, `Zero`, `Succ`, `Literal` (64-bit in M1), `NatElim`;
+- universe levels with variables (the polymorphic levels of LOGIC-UNIVERSE-POLY);
+- eta for functions;
+- `Nat`, `Zero`, `Succ`, `Literal` (arbitrary precision, from STD-BIGNAT),
+  `NatElim`;
 - `Eq`, `Refl`, `Transport`, `EqElim` (J);
 - `Scalar` and `ScalarLiteral` (they are trivial and can appear in dumps from
   mixed executable files);
@@ -46,9 +74,8 @@ the first-order positivity check, universe computation, `prop` families),
 irrelevance. Passing on `examples/logical-data.kush` and
 `examples/finite-proofs.kush`.
 
-**M3, the rest:** arbitrary-precision literals (`examples/large-naturals.kush`),
-the logical specification of section 4, and the API extras that
-TACTICS-HANDLERS needs (section 5).
+**M3, the rest:** the logical specification of section 4, and the API extras
+that TACTICS-HANDLERS needs (section 5).
 
 Out of scope: elaboration from Kush source. The Kush kernel reads core terms
 produced by the Rust frontend; it does not parse `.kush` files. Self-hosting the
@@ -69,7 +96,7 @@ append-only arena:
 pub struct Tm { id: i64 }
 
 enum Node {
-    Var(i64), Global(i64), Universe(i64), Prop,
+    Var(i64), Global(i64, i64), Universe(i64), Prop,  // Global: name, level list
     Pi(Tm, Tm), Lam(Tm, Tm), App(Tm, Tm),
     Nat, Zero, Succ(Tm), Literal(i64),
     NatElim(Tm, Tm, Tm, Tm),
@@ -87,6 +114,10 @@ pub struct Store {
     table: Vec<i64>,     // open-addressing hash-cons table over nodes
 }
 ```
+
+Universe levels (LOGIC-UNIVERSE-POLY) are hash-consed in the same store as a
+small second node kind (`zero`, `succ`, `max`, level variable), so
+`Universe` and the level arguments of a `Global` hold level handles.
 
 Every node is **hash-consed**: building a node that already exists returns the
 existing handle. Then syntactic equality is handle equality, which turns the
@@ -106,10 +137,9 @@ the escape hatch if memory becomes a problem.
 
 The Rust kernel uses zero-based de Bruijn indices throughout, and the port keeps
 them. Locally nameless would read better in places (going under a binder with
-a fresh free name instead of tracking shifts), but it would change where
-shifting happens, and with it the normal forms the two kernels print and the
-order in which fuel is charged. With identical indices, normal forms can be
-compared as text. TACTICS-HANDLERS can add named goals on top: its proof states
+a fresh free name instead of tracking shifts), but with identical indices the
+normal forms both kernels print can be compared as text, with no
+alpha-renaming step in the harness. TACTICS-HANDLERS can add named goals on top: its proof states
 are its own data and submit closed core terms to the kernel.
 
 ### Contexts and environments
@@ -130,10 +160,10 @@ an enum, not a string: `TypeMismatch(expected, actual)`, `NotAFunction(tm)`,
 tactic can inspect a failure. The verdict printer maps each to the same
 category the Rust kernel reports.
 
-Fuel and depth follow the Rust `Engine` exactly: the same `step` and `charge`
-points, defaults of 100,000 steps and depth 128. A budget exhaustion is
-reported as its own outcome, so the harness can tell "both gave up" from "they
-disagree".
+The Kush kernel has its own step and depth budgets with the same defaults
+(100,000 steps, depth 128) but its own charging points. A budget exhaustion is
+reported as its own outcome, so the harness can tell "gave up" from
+"disagrees".
 
 ## 3. Comparison against the Rust kernel
 
@@ -152,7 +182,8 @@ by Rust and read by Kush:
 ```
 
 Both sides print normal forms with the same canonical printer, so the
-comparison is a text diff.
+comparison is a text diff. The Kush kernel still has a `normalize` entry point
+for these queries; only conversion is lazy.
 
 Rust side, behind a new subcommand `kush core <file.kush>`: check the file as
 `kush check` does, then print the admitted environment in admission order, one
@@ -188,11 +219,12 @@ item: `ok`, `reject <category>`, `budget`, or a normal form.
    kernel faces the same boundary cases (positivity, large elimination from
    `Prop`, universe escape, `Prop : Prop`).
 
-Agreement means the same verdict category on every item and the same normal
-form on every accepted `normalize` query. Fuel used is printed by both sides
-and compared too, but only reported, not required: it is a good canary for an
-unfaithful port, but making it a hard requirement would freeze both kernels'
-internal traversal order.
+Agreement means the same verdict on every item where both kernels finish, and
+the same normal form on every accepted `normalize` query. Error categories are
+compared coarsely (accept versus reject), since a different algorithm may find
+a different first error. A budget exhaustion on either side makes that item
+inconclusive; the harness counts inconclusive items and fails if they exceed a
+small fraction, so a slow port cannot hide behind them.
 
 ### Harness
 
@@ -285,17 +317,14 @@ actually blocks the port; until then the workaround stands.
 - **Recursion depth.** The kernel is recursive. The depth budget of 128 bounds
   it as in Rust, so native stack use stays small; the reader of the exchange
   format must be iterative or depth-limited too.
-- **Arbitrary-precision naturals.** There is no big integer type. M1 stores
-  literals as `i64` and reports larger ones as an unsupported item (its own
-  harness category, not a disagreement). M3 adds a limb-vector natural with
-  only the operations the kernel uses: parse, print, compare, successor,
-  predecessor and the work measure.
-- **The logical fragment, for section 4.** No lambda expressions (motives and
-  renamings are named `total fn`s and aliases), no implicit arguments, no
-  sort polymorphism, no eta and no function extensionality (hence pointwise
-  lemma statements), and the default budget of 100,000 steps and depth 128.
-  Long equational proofs about `Tm` may exceed the budget; the likely fix is a
-  per-file or per-definition budget annotation, which would be a compiler node.
+- **Arbitrary-precision naturals.** There is no big integer type. STD-BIGNAT
+  adds a limb-vector natural to `std` before the port, with the operations the
+  kernel uses: parse, print, compare, successor, predecessor and the work
+  measure.
+- **The logical fragment, for section 4.** No lambda expressions and a fixed
+  budget of 100,000 steps and depth 128; LOGIC-LAMBDA and KERNEL-BUDGET-ATTR
+  fix both before KIK-SPEC. No implicit arguments, and no function
+  extensionality (hence pointwise lemma statements).
 - **No link between the logical and executable worlds.** Executable code cannot
   call or mention a logical definition, so the specification and the
   implementation are connected only by testing (section 4). Closing that gap is
@@ -310,15 +339,19 @@ Sub-nodes of KERNEL-IN-KUSH, one small commit each:
 
 | Node | Content | Depends on |
 | --- | --- | --- |
-| KIK-EXCHANGE | Exchange format; Rust printer; `kush core` subcommand; tests | |
-| KIK-STORE | Package skeleton; `Store`, hash-consing, interning; reader and printer; round-trip tests | KIK-EXCHANGE |
-| KIK-SUBST | `shift`, `substitute`, `rewrite_outer`, spine; unit tests | KIK-STORE |
-| KIK-NORMAL | Normalization: beta, delta, `NatElim`, numerals, `Transport`, J; budgets | KIK-SUBST |
-| KIK-CHECK | `infer`, `check`, `sort`, `convert`, `define`; scalars | KIK-NORMAL |
+| LOGIC-ETA | Eta for functions in the Rust kernel's conversion; tests; docs | |
+| LOGIC-UNIVERSE-POLY | Universe level variables in the Rust kernel and elaborator; tests; docs | LOGIC-ETA |
+| STD-BIGNAT | Arbitrary-precision naturals in `std` | |
+| KIK-EXCHANGE | Exchange format; Rust printer; `kush core` subcommand; tests | LOGIC-UNIVERSE-POLY |
+| KIK-STORE | Package skeleton; `Store`, hash-consing, interning; reader and printer; round-trip tests | KIK-EXCHANGE, STD-BIGNAT |
+| KIK-SUBST | `shift`, `substitute`, `rewrite_outer`, level substitution; unit tests | KIK-STORE |
+| KIK-NORMAL | Weak head and full normalization: beta, delta, `NatElim`, numerals, `Transport`, J; budgets | KIK-SUBST |
+| KIK-CHECK | `infer`, `check`, `sort`, lazy conversion with eta, `define`; scalars | KIK-NORMAL |
 | KIK-DIFF | Corpus dump, mutator, generator, `scripts/kernel-diff.sh`, Rust test; M1 done | KIK-CHECK |
 | KIK-DATA | Indexed families, positivity, `IndElim`, `prop`, proof irrelevance; M2 done | KIK-DIFF |
-| KIK-BIGNAT | Arbitrary-precision literals | KIK-DIFF |
-| KIK-SPEC | Well-scoped syntax specification and lemmas (section 4) | KIK-DATA |
+| LOGIC-LAMBDA | Lambda expressions in the logical fragment | |
+| KERNEL-BUDGET-ATTR | Per-definition kernel budget annotation | |
+| KIK-SPEC | Well-scoped syntax specification and lemmas (section 4) | KIK-DATA, LOGIC-LAMBDA, KERNEL-BUDGET-ATTR |
 | KIK-SPEC-DIFF | Specification-versus-implementation substitution tests | KIK-SPEC |
 | KIK-API | `whnf`, `abstract`, structured errors documented for TACTICS-HANDLERS | KIK-DATA |
 
