@@ -114,7 +114,12 @@ static KushFuzzSite kush_fuzz_sites[KUSH_FUZZ_SITES > 0 ? KUSH_FUZZ_SITES : 1];
 static int64_t kush_fuzz_current = -1;
 static int kush_fuzz_written = 0;
 static const char *kush_fuzz_path = NULL;
+#include <sys/resource.h>
 static void kush_fuzz_init(void) {
+    /* A fuzz run that panics aborts; a core dump of every such run (with a
+       large main stack, hundreds of milliseconds each) is never wanted. */
+    struct rlimit no_core = { 0, 0 };
+    (void)setrlimit(RLIMIT_CORE, &no_core);
     for (int64_t i = 0; i < KUSH_FUZZ_SITES; ++i) kush_fuzz_sites[i].margin = INT64_MAX;
     kush_fuzz_path = getenv("KUSH_FUZZ_OUT");
 }
@@ -203,6 +208,11 @@ _Noreturn void kush_panic(void) {
 #endif
     static const char message[] = "panic: checked arithmetic, memory, or I/O failure\n";
     kush_best_effort_write(2, message, sizeof(message) - 1);
+#ifdef KUSH_FUZZ
+    /* No abort(): a system core handler would run for every panicking
+       input. The status is the one abort() gives a shell. */
+    _exit(134);
+#endif
     abort();
 }
 /* Stack exhaustion is a panic, not a bare SIGSEGV. Every stack (the process
@@ -238,6 +248,9 @@ static void kush_fault(int number, siginfo_t *info, void *raw) {
 #endif
         static const char message[] = "panic: stack exhausted\n";
         kush_best_effort_write(2, message, sizeof(message) - 1);
+#ifdef KUSH_FUZZ
+        _exit(134);
+#endif
         abort();
     }
     /* Not ours: give the signal its default action. A fault repeats when

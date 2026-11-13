@@ -357,6 +357,7 @@ pub enum Container {
     Vec,
     Slice,
     Array,
+    Bytes,
 }
 /// PROOF-FUZZ: one run-time check the prover left in the program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17127,6 +17128,9 @@ impl Checker<'_, '_> {
             _ => ALLOC | PANIC,
         };
         self.require(effects, span)?;
+        if op == BytesOp::Get {
+            self.record_bounds(Container::Bytes, None, span);
+        }
         let mut values = vec![first];
         if matches!(op, BytesOp::Get | BytesOp::Push | BytesOp::PushReserved) {
             let value = self.expr_expected(&rest[0], Some(Type::I64))?;

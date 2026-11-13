@@ -139,6 +139,11 @@ pub fn plan(program: &Program, executable: &Executable) -> Vec<Target> {
     let mut targets = Vec::new();
     for unit in &program.units {
         let module = unit_module(program, unit);
+        // The standard library is not the program under attack, and its
+        // modules cannot take generated harnesses.
+        if module.first().is_some_and(|first| first == "std") {
+            continue;
+        }
         for item in &program.module.items[unit.items.clone()] {
             let ItemKind::Function(function) = &item.item.kind else {
                 continue;
@@ -521,11 +526,25 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
     root.push_str(&branches);
     root.push_str(&dispatch);
     root.push_str("    1\n}\n");
+    // `#[stack_size(N)]` belongs to the program's `main`: it moves from the
+    // entry's `main` (blanked to spaces, so offsets stay put) to the root's.
+    let mut stack_size = String::new();
     let entry = program.units.first().and_then(|unit| {
         let path = unit_module(program, unit).join(".");
         let file = program.sources.files.get(unit.file)?;
-        (!path.is_empty()).then(|| (path, file.name.clone(), file.text.clone()))
+        let mut text = file.text.clone();
+        for item in &program.module.items[unit.items.clone()] {
+            for attribute in item.attributes.iter().filter(|a| a.kind == "stack_size") {
+                let (start, end) = (attribute.span.start - file.base, attribute.span.end - file.base);
+                if let Some(original) = file.text.get(start..end) {
+                    stack_size = format!("{original}\n");
+                    text.replace_range(start..end, &" ".repeat(end - start));
+                }
+            }
+        }
+        (!path.is_empty()).then(|| (path, file.name.clone(), text))
     });
+    let root = root.replace("\nfn main() -> i64", &format!("\n{stack_size}fn main() -> i64"));
     Sources {
         root_name: format!("<{root_module}>"),
         root,

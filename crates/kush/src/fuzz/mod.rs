@@ -6,6 +6,7 @@ use crate::executable::Executable;
 use crate::native::{self, CodegenOptions, LinkSpec, Optimization};
 use crate::Diagnostic;
 
+pub mod engine;
 pub mod harness;
 use std::path::Path;
 
@@ -93,4 +94,44 @@ impl RunRecord {
             .collect::<Option<Vec<_>>>()?;
         Some(Self { outcome, sites })
     }
+}
+
+/// `kush fuzz` on a project: check it, build the harness program under
+/// `target/kush/fuzz`, attack every selected function (or only list them),
+/// and print the report. Returns the number of counterexamples found.
+pub fn fuzz_project(
+    project: &crate::project::Project,
+    options: &engine::Options,
+    list: bool,
+    out: &mut dyn std::io::Write,
+) -> Result<usize, crate::project::Failure> {
+    use crate::project::Failure;
+    let entry = project.package.entry_path();
+    let program = project.load_program(&entry)?;
+    let links = project.native_links()?;
+    let directory = project.root.join("target").join("kush").join("fuzz");
+    let mut session = engine::Session::new(&program, &project.modules, &links, &directory, Some(&project.root))
+        .map_err(Failure::new)?;
+    let write = |out: &mut dyn std::io::Write, text: &str| {
+        out.write_all(text.as_bytes())
+            .map_err(|e| Failure::new(format!("cannot write the report: {e}")))
+    };
+    if list {
+        write(out, &session.render_list(options))?;
+        return Ok(0);
+    }
+    let selected = (0..session.targets.len())
+        .filter(|&t| session.selected(t, options))
+        .count();
+    let checks = session.shown(options).len();
+    write(
+        out,
+        &format!(
+            "attacking {checks} unproved checks in {selected} functions of {} (seed {})\n",
+            project.package.name, options.seed
+        ),
+    )?;
+    session.fuzz(options);
+    write(out, &session.render(options))?;
+    Ok(session.found())
 }

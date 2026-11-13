@@ -31,6 +31,7 @@ Projects (Kush.toml):\n\
   kush build [--manifest-path <Kush.toml>] [-o <executable>] [--stats] [--locked] [--lib]\n\
   kush run [--manifest-path <Kush.toml>] [--stats] [--locked] [-- <program args>...]\n\
   kush test [--manifest-path <Kush.toml>] [FILTER] [--exact] [--list] [--nocapture] [--locked]\n\
+  kush fuzz [--manifest-path <Kush.toml>] [FILTER] [--runs N] [--time SECONDS] [--seed N] [--list] [--locked]\n\
   kush fmt [--check] [--manifest-path <Kush.toml>] [FILE...]\n\n\
 Native adapters (Bridge.toml):\n\
   kush bindgen <Bridge.toml> [--check]\n\n\
@@ -80,6 +81,7 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
         "fmt" => format_command(rest, out),
         "lint" => lint_command(rest, out),
         "test" => test_command(rest, out),
+        "fuzz" => fuzz_command(rest, out),
         "core" | "kernel" => exchange_command(name.as_ref(), rest, out),
         "build" if rest.len() >= 3 && rest[1] == "--lib" => library_command(rest, out),
         "check" | "build" | "run" if is_project_invocation(rest) => {
@@ -393,6 +395,48 @@ fn test_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, Stri
     )
     .map_err(project_error)?;
     Ok(u8::from(summary.failed != 0))
+}
+
+/// `kush fuzz`: attack the run-time checks the prover could not discharge
+/// (docs/proof-fuzz.md). Exits 1 when a counterexample was found.
+fn fuzz_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {
+    let mut manifest = None;
+    let mut options = kush::fuzz::engine::Options::default();
+    let mut list = false;
+    let mut locked = false;
+    let mut index = 0;
+    let number = |text: &OsString, what: &str| -> Result<u64, (u8, String)> {
+        text.to_str()
+            .and_then(|text| text.parse::<u64>().ok())
+            .ok_or_else(|| (2, format!("fuzz: {what} must be a non-negative integer")))
+    };
+    while index < args.len() {
+        match argument(args, index, "fuzz")? {
+            "--manifest-path" => {
+                manifest = Some(PathBuf::from(value(args, &mut index, "fuzz")?));
+            }
+            "--runs" => options.runs = number(value(args, &mut index, "fuzz")?, "--runs")? as usize,
+            "--time" => {
+                let seconds = number(value(args, &mut index, "fuzz")?, "--time")?;
+                options.time = Some(std::time::Duration::from_secs(seconds));
+            }
+            "--seed" => options.seed = number(value(args, &mut index, "fuzz")?, "--seed")?,
+            "--list" => list = true,
+            "--locked" => locked = true,
+            other if other.starts_with('-') => return Err(usage_error("fuzz", other)),
+            other => {
+                if options.filter.is_some() {
+                    return Err((2, "fuzz accepts at most one filter argument".into()));
+                }
+                options.filter = Some(other.to_owned());
+            }
+        }
+        index += 1;
+    }
+    let project = open_project(manifest)?;
+    project::lock::verify_or_write(&project, locked).map_err(project_error)?;
+    let found = kush::fuzz::fuzz_project(&project, &options, list, out).map_err(project_error)?;
+    Ok(u8::from(found != 0))
 }
 
 fn format_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {

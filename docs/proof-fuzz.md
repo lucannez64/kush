@@ -89,10 +89,16 @@ Flags:
 - `--list` prints the obligations with their kind, function, location, goal and
   generator status, without running anything (the "what would be attacked"
   view, and what `KUSH_PROOF_REPORT=verbose` becomes).
-- `--report` prints the proved-or-attacked table of section 4 after the run.
-- `--save` writes each minimized reproduction into the project (section 3).
+- `--report` (PF-COVERAGE) prints the proved-or-attacked table of section 4
+  after the run.
+- `--save` (PF-SHRINK) writes each minimized reproduction into the project
+  (section 3).
   Without it `kush fuzz` writes nothing outside `target/kush/fuzz/`.
-- `--json` prints one JSON object per obligation, for editors and CI.
+- `--json` (PF-COVERAGE) prints one JSON object per obligation, for editors
+  and CI.
+
+Implemented so far (PF-ENGINE): `FILTER`, `--manifest-path`, `--runs`,
+`--time`, `--seed`, `--list`, `--locked`.
 
 Exit status: 0 when nothing was found, 1 when at least one counterexample was
 found, 2 for usage or compile errors. This matches `kush test`.
@@ -200,7 +206,10 @@ does have, and the obligation is a lemma candidate (section 3).
     then never fires for an obligation, so the failure is always attributed;
   - any other panic (allocation, I/O, a check that is not an obligation)
     still goes through `kush_panic`, which in a fuzz build writes the table
-    with "unattributed panic" before aborting;
+    with "unattributed panic";
+  - a fuzz build ends a panic with `_exit(134)` instead of `abort()` and
+    sets `RLIMIT_CORE` to 0: with a system core handler, every panicking
+    input cost about 40 ms (0.8 s with the kernel example's 1 GiB stack);
   - at normal exit the table is written too. It goes to the file named by
     `KUSH_FUZZ_OUT`, as a fixed binary layout the driver reads back.
   Ordinary builds are unchanged: without the flag none of this is emitted.
@@ -209,8 +218,15 @@ does have, and the obligation is a lemma candidate (section 3).
   dispatches on `argv[1]`, the harness number. The driver runs the binary once
   per input with the tape on standard input and a wall-clock timeout
   (a timeout counts as "survived, too slow", not a find). Process start-up is
-  about a millisecond, so a few thousand runs per function take seconds. A
-  fork server can come later if start-up dominates.
+  about a millisecond, so a few thousand runs per function take seconds
+  (the whole kernel example: 6 s to build, 5 s for 300 runs of each of its
+  12 harnesses). A fork server can come later if start-up dominates.
+  The generated sources are written to `target/kush/fuzz/harnesses.kush`
+  for reading when a harness behaves unexpectedly.
+- Seeds (all zeros, then each scalar set to each dictionary value) always
+  join the corpus; a mutant joins it when it reaches a site for the first
+  time or lowers a site's smallest margin. Sites in generated code are
+  never counted.
 - The reference evaluator stays the oracle for the tests of this feature: a
   test may replay a found input under `kush eval` and check that it panics at
   the same span.
