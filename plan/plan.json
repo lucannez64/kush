@@ -6246,10 +6246,21 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "Elaborate lambda syntax in total fns to kernel lambdas, for motives and renamings.",
-      "commit": null,
-      "log": []
+      "commit": "5b8bb79",
+      "log": [
+        {
+          "time": "2026-11-13 09:43:27",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:49:05",
+          "who": "agent",
+          "text": "done 5b8bb79"
+        }
+      ]
     },
     {
       "id": "KERNEL-BUDGET-ATTR",
