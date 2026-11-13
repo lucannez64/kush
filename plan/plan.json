@@ -6802,14 +6802,19 @@
       "deps": [
         "PF-ENGINE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Tape shrinking, bug vs local, suggestions (erased precondition/ensures/invariant/refinement), kush test repro, --save, regression replay.",
-      "commit": null,
+      "commit": "3cc7de8",
       "log": [
         {
           "time": "2026-11-13 18:09:28",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 18:19:01",
+          "who": "agent",
+          "text": "done 3cc7de8"
         }
       ]
     },
@@ -6821,10 +6826,16 @@
       "deps": [
         "PF-ENGINE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "User-declared fuzz entries in the test target for deep state.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 18:19:01",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "PF-COVERAGE",
