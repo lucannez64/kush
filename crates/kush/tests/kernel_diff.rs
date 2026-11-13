@@ -506,6 +506,7 @@ fn corpus_mutants_agree() {
         "logical-data",
         "finite-proofs",
         "universes",
+        "logical-lambdas",
     ] {
         let text = mutated(name, 12, &mut rng);
         compare(

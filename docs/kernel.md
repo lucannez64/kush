@@ -436,6 +436,8 @@ Supported source features are:
   Empty parameter lists and nonempty effect rows remain unsupported here.
 - Function calls, explicit specialization, and nested blocks.
 - Immutable, explicitly typed, single-name lets followed by a tail expression.
+- Lambda expressions, `fn(x: A, y: B) -> R { body }`, elaborated to kernel
+  lambdas; see [below](#lambda-expressions).
 - Generic aliases that return types, including aliases indexed by term values.
 - `total enum` positive indexed data with checked constructors, named tuple
   fields, constructor-local binders, and `Data.elim::<D>(...)`; see
@@ -564,8 +566,8 @@ wrong value arity are rejected. Recognition uses resolved binding IDs, so local
 shadowing cannot accidentally invoke an intrinsic. Current-module qualification
 continues to work.
 
-Named total functions and partially specialized aliases provide motives and step
-functions; lambda expression syntax is not required. For example:
+Named total functions, partially specialized aliases or lambda expressions
+provide motives and step functions. For example:
 
 ```rust
 type ConstantNat<n: Nat> = Nat;
@@ -595,6 +597,39 @@ and `prop` fragments described in [logical data](logical-data.md) and
 and safe proof-irrelevance rules. Ordinary owning enums remain runtime data and
 never become logical evidence.
 
+
+### Lambda expressions
+
+A lambda in a logical definition elaborates to nested kernel lambdas and may
+refer to every binder in scope (logical definitions are erased, so nothing is
+captured at run time):
+
+```rust
+total fn add(n: Nat, m: Nat) -> Nat ! {} {
+    Nat.induct(fn(k) { Nat }, m, fn(k, acc) { Nat.succ(acc) }, n)
+}
+total fn adder(n: Nat) -> fn(m: Nat) -> Nat ! {} ! {} { fn(m) { add(n, m) } }
+total fn symmetry<T: Type>(x: T, y: T, p: Eq<T, x, y>) -> Eq<T, y, x> ! {} {
+    Eq.transport::<T>(x, y, fn(z) { Eq::<T, z, x> }, p, refl::<T>(x))
+}
+```
+
+- A parameter without a type takes the domain of the **expected function
+  type**: a function parameter's type at a call, a function's declared result
+  type (also through `let`s), a typed `let`, an annotated lambda result, and
+  the eliminator positions: `Nat.induct`'s motive (`Nat -> Sort`) and step
+  (`(n : Nat) -> motive n -> motive (succ n)`), the motives of
+  `Eq.transport` (`T -> Sort`), `Eq.elim` (`(y : T) -> Eq<T, x, y> -> Sort`)
+  and `Data.elim` (the family's indices, then the family, for a monomorphic
+  family). Otherwise the parameter needs an annotation. `Data.elim` branches
+  are not inferred: annotate their parameters.
+- A written result type is checked against the body.
+- The effect row must be empty or omitted, and parameters cannot be `erased`.
+- Types inside a lambda body use the expression form of a type application,
+  `Eq::<T, z, x>`.
+
+The complete example is [logical-lambdas.kush](../examples/logical-lambdas.kush);
+it is also part of the corpus the [Kush kernel](kernel-in-kush.md) checks.
 
 ### Checked interoperability with executable functions
 

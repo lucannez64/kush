@@ -1,0 +1,53 @@
+module examples.logical_lambdas;
+
+// Lambda expressions in logical definitions. A motive, a step or a function
+// argument can be written in place, instead of as a named total fn; a
+// parameter's type comes from the expected function type when there is one.
+
+total fn add(n: Nat, m: Nat) -> Nat ! {} {
+    Nat.induct(fn(k) { Nat }, m, fn(k, acc) { Nat.succ(acc) }, n)
+}
+
+total fn twice(f: fn(n: Nat) -> Nat ! {}, n: Nat) -> Nat ! {} { f(f(n)) }
+
+total fn four() -> Nat ! {} { twice(fn(x) { Nat.succ(x) }, 2) }
+
+// A lambda that captures the enclosing parameter.
+total fn adder(n: Nat) -> fn(m: Nat) -> Nat ! {} ! {} { fn(m) { add(n, m) } }
+
+total fn seven() -> Eq<Nat, adder<3, 4>, 7> ! {} { refl::<Nat>(7) }
+
+// Dependent motives: equality is symmetric, by transport and by J.
+total fn symmetry<T: Type>(x: T, y: T, p: Eq<T, x, y>) -> Eq<T, y, x> ! {} {
+    Eq.transport::<T>(x, y, fn(z) { Eq::<T, z, x> }, p, refl::<T>(x))
+}
+
+total fn symmetry_j<T: Type>(x: T, y: T, p: Eq<T, x, y>) -> Eq<T, y, x> ! {} {
+    Eq.elim::<T>(x, y, fn(z, q) { Eq::<T, z, x> }, refl::<T>(x), p)
+}
+
+total fn congruence(a: Nat, b: Nat, p: Eq<Nat, a, b>) -> Eq<Nat, Nat.succ<a>, Nat.succ<b>> ! {} {
+    Eq.transport::<Nat>(a, b, fn(z) { Eq::<Nat, Nat.succ<a>, Nat.succ<z>> }, p, refl::<Nat>(Nat.succ(a)))
+}
+
+// add(n, 0) = n for every n, by induction with a dependent lambda motive.
+total fn add_zero(n: Nat) -> Eq<Nat, add<n, 0>, n> ! {} {
+    Nat.induct(
+        fn(k) { Eq::<Nat, add<k, 0>, k> },
+        refl::<Nat>(0),
+        fn(k, ih) { congruence(add(k, 0), k, ih) },
+        n,
+    )
+}
+
+// Data elimination: the motive's parameter type comes from the family;
+// branches are annotated.
+total enum Even { EvenZero: Even, EvenSucc(Even): Even }
+
+total fn height(e: Even) -> Nat ! {} {
+    Data.elim::<Even>(fn(v) { Nat }, 0, fn(v: Even, ih: Nat) { Nat.succ(ih) }, e)
+}
+
+total fn height_two() -> Eq<Nat, height<EvenSucc<EvenSucc<EvenZero>>>, 2> ! {} {
+    refl::<Nat>(2)
+}

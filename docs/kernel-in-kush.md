@@ -339,10 +339,11 @@ actually blocks the port; until then the workaround stands.
   adds a limb-vector natural to `std` before the port, with the operations the
   kernel uses: parse, print, compare, successor, predecessor and the work
   measure.
-- **The logical fragment, for section 4.** No lambda expressions and a fixed
-  budget of 100,000 steps and depth 128; LOGIC-LAMBDA and KERNEL-BUDGET-ATTR
-  fix both before KIK-SPEC. No implicit arguments, and no function
-  extensionality (hence pointwise lemma statements).
+- **The logical fragment, for section 4.** Lambda expressions are available
+  (LOGIC-LAMBDA, [kernel.md](kernel.md#lambda-expressions)); the budget of
+  100,000 steps and depth 128 is still fixed until KERNEL-BUDGET-ATTR. No
+  implicit arguments, and no function extensionality (hence pointwise lemma
+  statements).
 - **No link between the logical and executable worlds.** Executable code cannot
   call or mention a logical definition, so the specification and the
   implementation are connected only by testing (section 4). Closing that gap is

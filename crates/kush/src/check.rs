@@ -1366,7 +1366,7 @@ impl Elaborator<'_> {
             self.bind_ty(parameter.span, domain)?;
         }
         let mut ty = self.ty(&f.result)?;
-        let mut value = self.block(f.body.as_ref().expect("validated body"))?;
+        let mut value = self.block_expected(f.body.as_ref().expect("validated body"), Some(&ty))?;
         for domain in domains.into_iter().rev() {
             ty = Term::pi(domain.clone(), ty);
             value = Term::lam(domain, value);
@@ -1683,7 +1683,127 @@ impl Elaborator<'_> {
             _ => Err(Diagnostic::new(ty.span, "this type form is not supported by logical checking yet (borrows, grades, unions, tuples, and slices are deferred)")),
         })
     }
+    fn shift(&self, term: &Term, amount: usize) -> Result<Term> {
+        self.kernel
+            .shift_open(term, amount)
+            .map_err(|e| Diagnostic::new(Span::default(), e.to_string()))
+    }
+    /// `(i1 : I1) -> ... -> D i1 .. ik -> Sort` for an admitted family (its
+    /// universe parameters at level 0): the expected type of a `Data.elim`
+    /// motive, used only to supply lambda parameter types.
+    fn data_motive_type(&self, name: &str) -> Option<Term> {
+        let info = self.kernel.data(name)?;
+        if info.levels > 0 {
+            return None;
+        }
+        let k = info.params.len();
+        let mut family = Term::global(name);
+        for index in (0..k).rev() {
+            family = Term::app(family, Term::Var(index));
+        }
+        let mut ty = Term::pi(family, Term::universe(0));
+        for param in info.params.iter().rev() {
+            ty = Term::pi(param.clone(), ty);
+        }
+        Some(ty)
+    }
+    /// A logical lambda `fn(x: A, y: B) -> R { body }` elaborates to nested
+    /// kernel lambdas. A parameter without a type takes the domain of the
+    /// expected function type (a typed parameter, an argument position, a
+    /// motive or step of an eliminator); otherwise it needs an annotation. A
+    /// written result type is checked against the body. The effect row must
+    /// be empty or omitted: a logical lambda is a total function.
+    fn lambda(&mut self, lambda: &Lambda, expected: Option<&Term>, span: Span) -> Result<Term> {
+        if lambda
+            .effects
+            .iter()
+            .any(|effect| !matches!(effect.kind, TypeKind::Infer))
+        {
+            return Err(Diagnostic::new(
+                span,
+                "logical lambdas require an empty effect row",
+            ));
+        }
+        if lambda.parameters.is_empty() {
+            return Err(Diagnostic::new(
+                span,
+                "a logical lambda needs at least one parameter",
+            ));
+        }
+        // The expected type, reduced, so its binders can supply domains.
+        let mut expected = match expected {
+            Some(ty) => self.kernel.normalize_open(ty, &self.local_types).ok(),
+            None => None,
+        };
+        let old_len = self.locals.len();
+        let mut domains = Vec::new();
+        let result = (|| {
+            for parameter in &lambda.parameters {
+                if parameter.erased {
+                    return Err(Diagnostic::new(
+                        parameter.span,
+                        "logical lambda parameters cannot be erased; every logical binder is already erased",
+                    ));
+                }
+                let from_expected = match expected.take() {
+                    Some(Term::Pi { domain, codomain }) => {
+                        expected = Some(*codomain);
+                        Some(*domain)
+                    }
+                    _ => None,
+                };
+                let domain = match (&parameter.ty.kind, from_expected) {
+                    (TypeKind::Infer, Some(domain)) => domain,
+                    (TypeKind::Infer, None) => {
+                        return Err(Diagnostic::new(
+                            parameter.span,
+                            format!(
+                                "annotate the type of lambda parameter '{}': no expected function type supplies it",
+                                parameter.name
+                            ),
+                        ));
+                    }
+                    _ => self.ty(&parameter.ty)?,
+                };
+                domains.push(domain.clone());
+                self.bind_ty(parameter.span, domain)?;
+            }
+            let declared = if matches!(lambda.result.kind, TypeKind::Infer) {
+                None
+            } else {
+                Some(self.ty(&lambda.result)?)
+            };
+            let body =
+                self.block_expected(&lambda.body, declared.as_ref().or(expected.as_ref()))?;
+            if let Some(declared) = declared {
+                self.kernel
+                    .check_open(&body, &declared, &self.local_types)
+                    .map_err(|error| {
+                        Diagnostic::new(
+                            lambda.result.span,
+                            format!(
+                                "the lambda body does not have its declared result type: {error}"
+                            ),
+                        )
+                    })?;
+            }
+            Ok(body)
+        })();
+        self.locals.truncate(old_len);
+        self.local_types.truncate(old_len);
+        let mut term = result?;
+        for domain in domains.into_iter().rev() {
+            term = Term::lam(domain, term);
+        }
+        Ok(term)
+    }
     fn block(&mut self, block: &Block) -> Result<Term> {
+        self.block_expected(block, None)
+    }
+    /// A block whose value is expected to have type `expected` (relative to
+    /// the context before the block), when known: the tail sees it shifted
+    /// under the block's let bindings.
+    fn block_expected(&mut self, block: &Block, expected: Option<&Term>) -> Result<Term> {
         self.nested(block.span, |e| {
             let old_len = e.locals.len();
             let mut bindings = Vec::new();
@@ -1695,12 +1815,17 @@ impl Elaborator<'_> {
                     return Err(Diagnostic::new(pattern.span, "logical let bindings require a single name"));
                 }
                 let domain = e.ty(ty)?;
-                let value = e.expr(value)?;
+                let value = e.expr_expected(value, Some(&domain))?;
                 e.bind_ty(pattern.span, domain.clone())?;
                 bindings.push((domain, value));
             }
             let tail = block.tail.as_ref().ok_or_else(|| Diagnostic::new(block.span, "logical blocks require a tail expression"))?;
-            let mut term = e.expr(tail)?;
+            let expected = match expected {
+                Some(ty) if !bindings.is_empty() => e.shift(ty, bindings.len()).ok(),
+                Some(ty) => Some(ty.clone()),
+                None => None,
+            };
+            let mut term = e.expr_expected(tail, expected.as_ref())?;
             for (domain, value) in bindings.into_iter().rev() { term = Term::app(Term::lam(domain, term), value); }
             e.locals.truncate(old_len);
             e.local_types.truncate(old_len);
@@ -1757,10 +1882,21 @@ impl Elaborator<'_> {
                         "Nat.induct expects no generic arguments and exactly four values: motive, zero, step, value",
                     ));
                 }
+                // Expected types let lambda arguments omit parameter types;
+                // the codomain sorts are placeholders the kernel never sees.
+                let motive_type = Term::pi(Term::Nat, Term::universe(0));
+                let motive = self.expr_expected(&arguments[0], Some(&motive_type))?;
+                let step_type = Term::pi(
+                    Term::Nat,
+                    Term::pi(
+                        Term::app(self.shift(&motive, 1)?, Term::Var(0)),
+                        Term::app(self.shift(&motive, 2)?, Term::succ(Term::Var(1))),
+                    ),
+                );
                 Ok(Some(Term::NatElim {
-                    motive: Box::new(self.expr(&arguments[0])?),
+                    motive: Box::new(motive),
                     zero: Box::new(self.expr(&arguments[1])?),
-                    step: Box::new(self.expr(&arguments[2])?),
+                    step: Box::new(self.expr_expected(&arguments[2], Some(&step_type))?),
                     value: Box::new(self.expr(&arguments[3])?),
                 }))
             }
@@ -1772,11 +1908,12 @@ impl Elaborator<'_> {
                     ));
                 }
                 let carrier = self.ty(&types[0])?;
+                let motive_type = Term::pi(carrier.clone(), Term::universe(0));
                 Ok(Some(Term::Transport {
                     ty: Box::new(carrier.clone()),
                     from: Box::new(self.expr_expected(&arguments[0], Some(&carrier))?),
                     to: Box::new(self.expr_expected(&arguments[1], Some(&carrier))?),
-                    motive: Box::new(self.expr(&arguments[2])?),
+                    motive: Box::new(self.expr_expected(&arguments[2], Some(&motive_type))?),
                     proof: Box::new(self.expr(&arguments[3])?),
                     value: Box::new(self.expr(&arguments[4])?),
                 }))
@@ -1789,11 +1926,24 @@ impl Elaborator<'_> {
                     ));
                 }
                 let carrier = self.ty(&types[0])?;
+                let left = self.expr_expected(&arguments[0], Some(&carrier))?;
+                // motive : (y : T) -> Eq<T, left, y> -> Sort
+                let motive_type = Term::pi(
+                    carrier.clone(),
+                    Term::pi(
+                        Term::eq(
+                            self.shift(&carrier, 1)?,
+                            self.shift(&left, 1)?,
+                            Term::Var(0),
+                        ),
+                        Term::universe(0),
+                    ),
+                );
                 Ok(Some(Term::eq_elim(
                     carrier.clone(),
-                    self.expr_expected(&arguments[0], Some(&carrier))?,
+                    left,
                     self.expr_expected(&arguments[1], Some(&carrier))?,
-                    self.expr(&arguments[2])?,
+                    self.expr_expected(&arguments[2], Some(&motive_type))?,
                     self.expr(&arguments[3])?,
                     self.expr(&arguments[4])?,
                 )))
@@ -1839,7 +1989,8 @@ impl Elaborator<'_> {
                         ),
                     ));
                 }
-                let motive = self.expr(&arguments[0])?;
+                let motive_type = self.data_motive_type(&name);
+                let motive = self.expr_expected(&arguments[0], motive_type.as_ref())?;
                 let branches = arguments[1..1 + count]
                     .iter()
                     .map(|branch| self.expr(branch))
@@ -1911,7 +2062,8 @@ impl Elaborator<'_> {
                 Ok(term)
             }
             ExprKind::Block(block) => e.block(block),
-            _ => Err(Diagnostic::new(expr.span, "this expression is not supported by logical checking yet; use names, natural literals, calls, specialization, or typed immutable lets")),
+            ExprKind::Lambda(lambda) => e.lambda(lambda, expected, expr.span),
+            _ => Err(Diagnostic::new(expr.span, "this expression is not supported by logical checking yet; use names, natural literals, calls, specialization, lambdas, or typed immutable lets")),
         })
     }
 }

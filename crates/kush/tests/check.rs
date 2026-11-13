@@ -158,7 +158,10 @@ fn unimplemented_forms_are_rejected_instead_of_erasing_their_meaning() {
     check("total fn f() -> Nat ! {} { 33 }").unwrap();
     // Machine carriers and literals are admitted as checked logical values.
     check("total fn f() -> Bool ! {} { true }").unwrap();
-    rejects("total fn f() -> Bool ! {} { 1 }", "type mismatch");
+    rejects(
+        "total fn f() -> Bool ! {} { 1 }",
+        "cannot have a Bool or Unit carrier",
+    );
 }
 #[test]
 fn namespace_resolution_and_dependency_order_are_deterministic() {
