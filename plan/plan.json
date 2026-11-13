@@ -6232,10 +6232,21 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "In std.natural.successor, 'let r = Natural { limbs: out }; if digits(&r) > max { drop(r); return Err }' was rejected with 'cannot move or drop an owner or view while a slice view derived from it is live', though the &r borrow ends with the call. Minimize, confirm whether it is a false positive, fix with tests. Worked around in std.natural by not dropping explicitly.",
-      "commit": null,
-      "log": []
+      "commit": "f596260",
+      "log": [
+        {
+          "time": "2026-11-13 08:31:36",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 08:33:34",
+          "who": "agent",
+          "text": "done f596260"
+        }
+      ]
     }
   ]
 }
