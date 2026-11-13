@@ -644,7 +644,7 @@ fn eta(k: &mut Kernel, lambda: i64, other: i64) -> Result<Bool, i64> ! {alloc, p
 /// irrelevance, which infers both types, is only tried when it fails.
 fn defeq_step(k: &mut Kernel, a: i64, b: i64) -> Result<Bool, i64> ! {alloc, panic} {
     if structurally_equal(k, a, b)? { return Result.Ok(true); }
-    if is_proof(k, a)? &&is_proof(k, b)? {
+    if is_proof(k, a)? && is_proof(k, b)? {
         let left = infer(k, a)?;
         let right = infer(k, b)?;
         return defeq(k, left, right);
