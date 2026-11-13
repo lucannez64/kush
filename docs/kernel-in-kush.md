@@ -1,9 +1,10 @@
 # Kernel in Kush: design
 
-Status: **M1 and M2 implemented** in [examples/kernel](../examples/kernel/README.md):
-the Kush kernel checks the whole example corpus, data families included, and
-agrees with the Rust kernel item by item (section 3). M3 (the specification
-and the tactic API) remains. Design approved 2026-11-13 (plan node
+Status: **implemented** in [examples/kernel](../examples/kernel/README.md)
+(milestones M1 to M3): the Kush kernel checks the whole example corpus, data
+families included, and agrees with the Rust kernel item by item (section 3);
+a specification of its syntax is checked by both kernels and tested against
+its substitution (section 4); its API for a tactic engine is section 5. Design approved 2026-11-13 (plan node
 KERNEL-IN-KUSH), with the
 changes recorded in section 1: the logic is improved in the Rust kernel first
 (eta, universe polymorphism), then ported once; the port shares the logic but
@@ -323,27 +324,50 @@ context depth, a handle is below the arena length) are stated with `ensures`
 and erased arithmetic preconditions where the prover can discharge them, and
 left as runtime checks where it cannot.
 
-## 5. API for TACTICS-HANDLERS
+## 5. API for TACTICS-HANDLERS (implemented, KIK-API)
 
-The kernel is a library module of the package (`kernel.core`), with the
-checker as a thin `main` on top. Public functions:
+`examples/kernel/src/api.kush` is the interface a client such as a tactic
+engine uses. Terms are store ids (`Tm` handles); a **context** is a list of
+hypothesis types, outermost first, each relative to the ones before it.
 
 ```text
-store / build    Store.new, mk_pi, mk_lam, mk_app, ..., view(store, tm) -> Node
-admit            define(env, name, ty, value), define_data(env, spec)
-check            infer(env, ctx, tm), check(env, ctx, tm, ty), sort(env, ctx, tm)
-compute          normalize(env, ctx, tm), whnf(env, ctx, tm), defeq(env, ctx, a, b)
-binders          shift(tm, k), instantiate(body, arg), abstract(tm, var)
+infer(k, context, t)          -> type of t (not normalized)
+check_term(k, context, t, ty) -> t : ty
+sort(k, context, ty)          -> level id, or check.PROP_SORT
+whnf(k, context, t)           -> weak head normal form (a goal's head)
+normalize(k, context, t)      -> full normal form
+defeq(k, context, a, b)       -> definitional equality (false across types)
+abstract(k, t, u)             -> t with u replaced by a new innermost variable
+instantiate(k, body, value)   -> body with index 0 replaced by value
+last_failure(k, code)         -> Failure { code, term, expected, actual, depth }
+describe(code)                -> a short description
 ```
 
-`whnf` and `abstract` are not in the Rust kernel. A tactic engine needs them
-(inspect the head of a goal; turn a hypothesis into a binder), and they are not
-used by the differential path. A tactic's proof state holds only `Tm` handles,
-so it is copyable, which is what a multishot `Choose` handler requires
-([effect handlers](effect-handlers.md); multishot resumption across calls is
-EFF-CAP-RESUME-MULTISHOT, already a dependency of TACTICS-HANDLERS). The store
-itself is owned by the outermost handler or driver and reached through `&mut`,
-never captured by a resumable continuation.
+Declarations are admitted with `check.define` and `check.define_data`; terms
+are built with `kernel.term` and read with `reader.read_term`.
+
+- **Everything is checked.** Each operation validates every hypothesis as a
+  type or proposition and checks its terms before computing with them, so
+  `whnf` and `normalize` refuse an ill-typed term instead of reducing it.
+- **`abstract`** is the operation behind `generalize` and `rewrite`: `λy.
+  abstract(t, u)` is the motive that replaces `u` in `t`, and
+  `instantiate(abstract(t, u), u)` is `t` again (the same id). Occurrences of
+  `u` are found shifted under `t`'s binders, and with hash-consing each test
+  is one id comparison.
+- **Failures are inspectable.** A failing operation returns an error code;
+  `last_failure` gives the innermost failing term, the expected and actual
+  types where there are such, and the context size they are relative to (the
+  operation's context plus the binders it had entered). For a type mismatch
+  that is the term, the expected type and the inferred one; for an
+  application of a non-function, the function and its type.
+- **Proof states are copyable.** A tactic's state holds only `Tm` handles
+  (integers), and the store only grows, so a handle stays valid and means the
+  same term forever. A multishot `Choose` handler can resume a continuation
+  twice and both branches keep allocating into the same store
+  ([effect handlers](effect-handlers.md); multishot resumption across calls
+  is EFF-CAP-RESUME-MULTISHOT, already a dependency of TACTICS-HANDLERS). The
+  store itself is owned by the outermost handler or driver and reached
+  through `&mut`, never captured by a resumable continuation.
 
 ## 6. Expected language limits
 

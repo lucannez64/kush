@@ -4,11 +4,13 @@
 (`crates/kush/src/kernel.rs`) to Kush, in the spirit of Lean4Lean. Design:
 [docs/kernel-in-kush.md](../../docs/kernel-in-kush.md).
 
-Status: milestones M1 and M2 of the design are done. The kernel checks every
+Status: done (plan node KERNEL-IN-KUSH). The kernel checks every
 declaration of the example corpus, including indexed data families, `prop`
 families and dependent elimination, and gives the same answer as the Rust
-kernel on every item of the corpus, of its mutants, of hand-written typing
-and data cases, and of seeded generated terms (`scripts/kernel-diff.sh`).
+kernel on every item of the corpus, of its mutants, of hand-written typing and
+data cases, and of seeded generated terms (`scripts/kernel-diff.sh`). It also
+checks a specification of its own syntax (`spec/scoped.kush`), and its
+substitution is tested against that specification.
 
 ```sh
 kush core ../induction.kush > induction.kcore        # Rust: dump a checked module
@@ -41,6 +43,9 @@ kush test --manifest-path Kush.toml
 - `src/data.kush`: telescope construction for data families (positivity
   occurrences, level instantiation, branch and constructor types).
 - `src/error.kush`: kernel error codes.
+- `src/api.kush`: the interface for clients such as a tactic engine:
+  checking, reduction and conversion in a context, `abstract` and
+  `instantiate`, and inspectable failures.
 - `src/main.kush`: the command line.
 - `spec/scoped.kush`: a specification of the kernel's syntax in the logical
   fragment: well-scoped terms `Tm<n>`, renaming, weakening and substitution

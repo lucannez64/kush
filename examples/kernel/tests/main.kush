@@ -3,6 +3,7 @@ module kernel.tests.main;
 use std.result.Result;
 use std.test;
 use std.text;
+use kernel.api;
 use kernel.check;
 use kernel.engine;
 use kernel.error;
@@ -356,4 +357,85 @@ fn data_families_are_admitted_and_eliminated() -> Unit ! {io, alloc, panic} {
         Result.Err(code) => text.format_i64_into(Bytes.from("error "), code),
     };
     same(&value, &Bytes.from("(lit 2)"));
+}
+
+fn show(k: &engine.Kernel, id: i64) -> Bytes ! {alloc, panic} {
+    printer.term_into(&k.store, Bytes.with_capacity(0), id)
+}
+
+#[test]
+fn the_api_works_in_a_context() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let nat = parse(&mut k.store, &Bytes.from("nat"));
+    let mut context: Vec<i64> = Vec.new();
+    context = context.push(nat);
+    // n : Nat |- n : Nat, succ n : Nat, and (λx. x) n reduces to n.
+    let n = parse(&mut k.store, &Bytes.from("(var 0)"));
+    let inferred = api.infer(&mut k, &context, n);
+    test.is_true(match inferred { Result.Ok(ty) => ty == nat, Result.Err(_) => false });
+    let next = parse(&mut k.store, &Bytes.from("(succ (var 0))"));
+    let checked = api.check_term(&mut k, &context, next, nat);
+    test.is_true(match checked { Result.Ok(_) => true, Result.Err(_) => false });
+    let redex = parse(&mut k.store, &Bytes.from("(app (lam nat (var 0)) (var 0))"));
+    let head = api.whnf(&mut k, &context, redex);
+    test.is_true(match head { Result.Ok(t) => t == n, Result.Err(_) => false });
+    let same = api.defeq(&mut k, &context, redex, n);
+    test.is_true(match same { Result.Ok(b) => b, Result.Err(_) => false });
+    // A context entry that is not a type is rejected.
+    let zero = parse(&mut k.store, &Bytes.from("zero"));
+    let mut bad: Vec<i64> = Vec.new();
+    bad = bad.push(zero);
+    let rejected = api.infer(&mut k, &bad, zero);
+    test.is_true(match rejected { Result.Ok(_) => false, Result.Err(code) => code == error.NOT_A_TYPE });
+    // An unchecked term is not reduced: (succ (sort 0)) is ill-typed.
+    let ill = parse(&mut k.store, &Bytes.from("(succ (sort 0))"));
+    let refused = api.normalize(&mut k, &context, ill);
+    test.is_true(match refused { Result.Ok(_) => false, Result.Err(code) => code == error.TYPE_MISMATCH });
+}
+
+#[test]
+fn failures_say_which_term_failed_and_why() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let nat = parse(&mut k.store, &Bytes.from("nat"));
+    let sort = parse(&mut k.store, &Bytes.from("(sort 0)"));
+    let empty: Vec<i64> = Vec.new();
+    // (sort 0) is not a Nat: the failure names the term and both types.
+    let result = api.check_term(&mut k, &empty, sort, nat);
+    let code = match result { Result.Ok(_) => 0, Result.Err(code) => code };
+    test.equal_i64(code, error.TYPE_MISMATCH);
+    let failure = api.last_failure(&k, code);
+    test.equal_i64(failure.term, sort);
+    test.equal_i64(failure.expected, nat);
+    same(&show(&k, failure.actual), &Bytes.from("(sort 1)"));
+    test.equal_i64(failure.depth, 0);
+    same(&api.describe(code), &Bytes.from("a term does not have the expected type"));
+    // Applying a non-function names the function and its type, under the
+    // binder it was found in.
+    let applied = parse(&mut k.store, &Bytes.from("(lam nat (app (var 0) zero))"));
+    let result = api.infer(&mut k, &empty, applied);
+    let code = match result { Result.Ok(_) => 0, Result.Err(code) => code };
+    test.equal_i64(code, error.NOT_A_FUNCTION);
+    let failure = api.last_failure(&k, code);
+    same(&show(&k, failure.term), &Bytes.from("(var 0)"));
+    same(&show(&k, failure.actual), &Bytes.from("nat"));
+    test.equal_i64(failure.depth, 1);
+}
+
+#[test]
+fn abstraction_builds_rewrite_motives() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    // Every occurrence of `succ zero` becomes the new variable.
+    let t = parse(&mut k.store, &Bytes.from("(app (app (global f) (succ zero)) (succ zero))"));
+    let u = parse(&mut k.store, &Bytes.from("(succ zero)"));
+    let abstracted = api.abstract(&mut k, t, u);
+    same(&show(&k, abstracted), &Bytes.from("(app (app (global f) (var 0)) (var 0))"));
+    // Under a binder the occurrence is found shifted, and free variables of
+    // the term move one binder out.
+    let t2 = parse(&mut k.store, &Bytes.from("(lam nat (app (app (var 0) (var 2)) (var 1)))"));
+    let u2 = parse(&mut k.store, &Bytes.from("(var 0)"));
+    let abstracted2 = api.abstract(&mut k, t2, u2);
+    same(&show(&k, abstracted2), &Bytes.from("(lam nat (app (app (var 0) (var 3)) (var 1)))"));
+    // Instantiating the abstraction with the term gives the original back.
+    test.equal_i64(api.instantiate(&mut k, abstracted, u), t);
+    test.equal_i64(api.instantiate(&mut k, abstracted2, u2), t2);
 }

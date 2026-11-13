@@ -56,6 +56,14 @@ pub struct Kernel {
     /// types, outermost first, each relative to the entries before it.
     context: Vec<i64>,
     context_size: i64,
+    /// The innermost failure of the last operation, for callers that inspect
+    /// errors (kernel.api.last_failure): the offending term, the expected
+    /// and the actual type where there are such (-1 otherwise), and the
+    /// context size they are relative to.
+    pub failure_term: i64,
+    pub failure_expected: i64,
+    pub failure_actual: i64,
+    pub failure_depth: i64,
 }
 
 fn zeros(count: i64) -> Vec<i64> ! {alloc, panic} {
@@ -82,6 +90,10 @@ pub fn new() -> Kernel ! {alloc, panic} {
         generation: 0,
         context: Vec.with_capacity(64),
         context_size: 0,
+        failure_term: -1,
+        failure_expected: -1,
+        failure_actual: -1,
+        failure_depth: 0,
     }
 }
 
@@ -90,6 +102,10 @@ pub fn begin(k: &mut Kernel) -> Unit ! {panic} {
     k.fuel = k.max_steps;
     k.depth = 0;
     k.context_size = 0;
+    k.failure_term = -1;
+    k.failure_expected = -1;
+    k.failure_actual = -1;
+    k.failure_depth = 0;
     k.generation = store.fresh_generation(&mut k.store);
 }
 
@@ -271,4 +287,13 @@ pub fn remove(k: &mut Kernel, name: i64) -> Unit ! {panic} {
         k.keys[slot] = -1;
         k.values[slot] = 0;
     }
+}
+
+/// Record a failure (see `failure_term`); returns `code` for `Result.Err`.
+pub fn fail(k: &mut Kernel, code: i64, term: i64, expected: i64, actual: i64) -> i64 ! {} {
+    k.failure_term = term;
+    k.failure_expected = expected;
+    k.failure_actual = actual;
+    k.failure_depth = k.context_size;
+    code
 }

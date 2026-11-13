@@ -297,8 +297,7 @@ total fn subst_ext<N: Nat>(
                     subst::<Nat.succ<n>, Nat.succ<k>>(b, under::<Fin<n>, k>(f)),
                     subst::<Nat.succ<n>, Nat.succ<k>>(b, under::<Fin<n>, k>(g)),
                     ihd(k, f, g, e),
-                    ihb(Nat.succ(k), under::<Fin<n>, k>(f), under::<Fin<n>, k>(g),
-                        fn(x) { under_ext::<Fin<n>, k>(f, g, e, x) }),
+                    ihb(Nat.succ(k), under::<Fin<n>, k>(f), under::<Fin<n>, k>(g), fn(x) { under_ext::<Fin<n>, k>(f, g, e, x) }),
                 )
             }
         },
@@ -310,8 +309,7 @@ total fn subst_ext<N: Nat>(
                     subst::<Nat.succ<n>, Nat.succ<k>>(b, under::<Fin<n>, k>(f)),
                     subst::<Nat.succ<n>, Nat.succ<k>>(b, under::<Fin<n>, k>(g)),
                     ihd(k, f, g, e),
-                    ihb(Nat.succ(k), under::<Fin<n>, k>(f), under::<Fin<n>, k>(g),
-                        fn(x) { under_ext::<Fin<n>, k>(f, g, e, x) }),
+                    ihb(Nat.succ(k), under::<Fin<n>, k>(f), under::<Fin<n>, k>(g), fn(x) { under_ext::<Fin<n>, k>(f, g, e, x) }),
                 )
             }
         },
@@ -322,11 +320,7 @@ total fn subst_ext<N: Nat>(
 type UnderComposeMotive<k: Nat, m: Nat, A: Type, x: Maybe<A>> = fn(
     r: fn(a: A) -> Fin<k> ! {},
     s: Substitution<k, m>,
-) -> Eq<
-    Tm<Nat.succ<m>>,
-    under<Fin<k>, m, s, map_maybe<A, Fin<k>, r, x>>,
-    under<A, m, compose<A, k, m, s, r>, x>,
-> ! {};
+) -> Eq<Tm<Nat.succ<m>>, under<Fin<k>, m, s, map_maybe<A, Fin<k>, r, x>>, under<A, m, compose<A, k, m, s, r>, x>,> ! {};
 
 /// Lifting a renaming, then a substitution, is lifting their composition.
 total fn under_compose<k: Nat, m: Nat, A: Type>(r: fn(a: A) -> Fin<k> ! {}, s: Substitution<k, m>, x: Maybe<A>)
@@ -349,22 +343,11 @@ total fn binder_rename<n: Nat, j: Nat, l: Nat>(
     f: Renaming<n, j>,
     g: Substitution<j, l>,
     ihd: Eq<Tm<l>, subst<j, l, rename<n, j, d, f>, g>, subst<n, l, d, compose<Fin<n>, j, l, g, f>>>,
-    ihb: Eq<
-        Tm<Nat.succ<l>>,
-        subst<Nat.succ<j>, Nat.succ<l>, rename<Nat.succ<n>, Nat.succ<j>, b, lift<n, j, f>>, under<Fin<j>, l, g>>,
-        subst<Nat.succ<n>, Nat.succ<l>, b, compose<Fin<Nat.succ<n>>, Nat.succ<j>, Nat.succ<l>, under<Fin<j>, l, g>, lift<n, j, f>>>,
+    ihb: Eq<Tm<Nat.succ<l>>,
+    subst<Nat.succ<j>, Nat.succ<l>, rename<Nat.succ<n>, Nat.succ<j>, b, lift<n, j, f>>, under<Fin<j>, l, g>>,
+    subst<Nat.succ<n>, Nat.succ<l>, b, compose<Fin<Nat.succ<n>>, Nat.succ<j>, Nat.succ<l>, under<Fin<j>, l, g>, lift<n, j, f>>>,
     >,
-) -> Eq<
-    Tm<l>,
-    c<
-        subst<j, l, rename<n, j, d, f>, g>,
-        subst<Nat.succ<j>, Nat.succ<l>, rename<Nat.succ<n>, Nat.succ<j>, b, lift<n, j, f>>, under<Fin<j>, l, g>>,
-    >,
-    c<
-        subst<n, l, d, compose<Fin<n>, j, l, g, f>>,
-        subst<Nat.succ<n>, Nat.succ<l>, b, under<Fin<n>, l, compose<Fin<n>, j, l, g, f>>>,
-    >,
-> ! {} {
+) -> Eq<Tm<l>, c<subst<j, l, rename<n, j, d, f>, g>, subst<Nat.succ<j>, Nat.succ<l>, rename<Nat.succ<n>, Nat.succ<j>, b, lift<n, j, f>>, under<Fin<j>, l, g>>,>, c<subst<n, l, d, compose<Fin<n>, j, l, g, f>>, subst<Nat.succ<n>, Nat.succ<l>, b, under<Fin<n>, l, compose<Fin<n>, j, l, g, f>>>,>,> ! {} {
     ap2::<Tm<l>, Tm<Nat.succ<l>>, Tm<l>>(
         c,
         subst::<j, l>(rename::<n, j>(d, f), g),
@@ -547,11 +530,7 @@ total fn substituted() -> Eq<Tm<0>, subst0<0, Tm.Var<1, zero_var<0>>, Tm.Sort<0,
     refl::<Tm<0>>(Tm.Sort::<0>(3))
 }
 
-total fn moved_out() -> Eq<
-    Tm<1>,
-    subst0<1, Tm.Var<2, Maybe.Some<Fin<1>, zero_var<0>>>, Tm.Sort<1, 7>>,
-    Tm.Var<1, zero_var<0>>,
-> ! {} {
+total fn moved_out() -> Eq<Tm<1>, subst0<1, Tm.Var<2, Maybe.Some<Fin<1>, zero_var<0>>>, Tm.Sort<1, 7>>, Tm.Var<1, zero_var<0>>,> ! {} {
     refl::<Tm<1>>(Tm.Var::<1>(zero_var::<0>))
 }
 
@@ -565,10 +544,6 @@ total fn two_var<n: Nat>() -> Fin<Nat.succ<Nat.succ<Nat.succ<n>>>> ! {} {
     Maybe.Some::<Fin<Nat.succ<Nat.succ<n>>>>(one_var::<n>)
 }
 
-total fn shifted() -> Eq<
-    Tm<2>,
-    shift<1, Tm.Lam<1, Tm.Sort<1, 0>, Tm.App<2, Tm.Var<2, zero_var<1>>, Tm.Var<2, one_var<0>>>>>,
-    Tm.Lam<2, Tm.Sort<2, 0>, Tm.App<3, Tm.Var<3, zero_var<2>>, Tm.Var<3, two_var<0>>>>,
-> ! {} {
+total fn shifted() -> Eq<Tm<2>, shift<1, Tm.Lam<1, Tm.Sort<1, 0>, Tm.App<2, Tm.Var<2, zero_var<1>>, Tm.Var<2, one_var<0>>>>>, Tm.Lam<2, Tm.Sort<2, 0>, Tm.App<3, Tm.Var<3, zero_var<2>>, Tm.Var<3, two_var<0>>>>,> ! {} {
     refl::<Tm<2>>(Tm.Lam::<2>(Tm.Sort::<2>(0), Tm.App::<3>(Tm.Var::<3>(zero_var::<2>), Tm.Var::<3>(two_var::<0>))))
 }

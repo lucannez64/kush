@@ -24,6 +24,7 @@ const SHIFT: i64 = 0;
 const SUBST: i64 = 1;
 const REWRITE: i64 = 2;
 const LEVELS: i64 = 3;
+const ABSTRACT: i64 = 4;
 
 /// An operation: its kind and its operand (a shift amount, the substituted
 /// term, the list of replacement terms, or the list of universe levels).
@@ -60,6 +61,8 @@ fn variable(s: &mut Store, op: Op, t: i64, depth: i64) -> Result<i64, i64> ! {al
     let index = term.field(s, t, 0);
     if index < depth || op.kind == LEVELS { return Result.Ok(t); }
     if op.kind == SHIFT { return Result.Ok(term.var(s, index + op.operand)); }
+    // ABSTRACT: the new binder sits innermost of the context, above `depth`.
+    if op.kind == ABSTRACT { return Result.Ok(term.var(s, index + 1)); }
     if op.kind == SUBST {
         if index == depth { return Result.Ok(shift(s, op.operand, depth, 0)); }
         return Result.Ok(term.var(s, index - 1));
@@ -72,7 +75,12 @@ fn variable(s: &mut Store, op: Op, t: i64, depth: i64) -> Result<i64, i64> ! {al
 }
 
 fn walk(s: &mut Store, op: Op, t: i64, depth: i64, generation: i64) -> Result<i64, i64> ! {alloc, panic} {
-    if op.kind != LEVELS && term.range(s, t) <= depth { return Result.Ok(t); }
+    // Abstraction may replace closed subterms, so it visits everything.
+    if op.kind != LEVELS && op.kind != ABSTRACT && term.range(s, t) <= depth { return Result.Ok(t); }
+    if op.kind == ABSTRACT {
+        let target = shift(s, op.operand, depth, 0);
+        if t == target { return Result.Ok(term.var(s, depth)); }
+    }
     let hit = store.cached(s, generation, t, depth);
     if hit >= 0 { return Result.Ok(hit); }
     let tag = term.tag(s, t);
@@ -176,6 +184,19 @@ pub fn rewrite_outer(s: &mut Store, t: i64, arguments: i64) -> Result<i64, i64> 
 pub fn instantiate_levels(s: &mut Store, t: i64, levels: i64) -> Result<i64, i64> ! {alloc, panic} {
     if term.list_len(s, levels) == 0 { return Result.Ok(t); }
     run(s, Op { kind: LEVELS, operand: levels }, t, 0)
+}
+
+/// Abstract every occurrence of `u` in `t`: the result lives under one new
+/// innermost binder `y` and is `t` with each occurrence of `u` (shifted
+/// under `t`'s own binders) replaced by `y`, and every other free variable
+/// moved one binder out. So `λy. abstract(t, u)` applied to `u` is `t`
+/// again: the motive of a rewrite, or the body of a generalization. Because
+/// the store is hash-consed, each occurrence test is one id comparison.
+pub fn abstract(s: &mut Store, t: i64, u: i64) -> i64 ! {alloc, panic} {
+    match run(s, Op { kind: ABSTRACT, operand: u }, t, 0) {
+        Result.Ok(result) => result,
+        Result.Err(_) => panic(),
+    }
 }
 
 /// The head of an application spine.
