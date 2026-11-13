@@ -1,6 +1,8 @@
 # A prover whose tactics are effect handlers (design)
 
-Status: **design, awaiting approval** (plan node TACTICS-HANDLERS). Builds on
+Status: **implemented** in [examples/tactics](../examples/tactics/README.md)
+(plan node TACTICS-HANDLERS; design approved 2026-11-13). Section 7 records
+where the implementation departs from the design. Builds on
 [Kernel in Kush](kernel-in-kush.md) (section 5, the tactic API) and
 [multishot capabilities](multishot-capabilities.md).
 
@@ -127,3 +129,22 @@ name; the scripts in the example are such functions.
    store ids only.
 3. Propositional logic with `->`, `&`, `|` as the demo's scope, and the Rust
    kernel as a second checker in the tests.
+
+## 7. As built
+
+- The demo's output is in the package README; proofs of all the formulas in
+  `crates/kush/tests/tactics.rs` are found in milliseconds natively, and the
+  Rust kernel accepts each of them (`--kcore`).
+- Module names: `tactics.state` (effects, queries, handler logic),
+  `tactics.search` (tactics), `tactics.prover` (handlers, deepening),
+  `tactics.formula`, `tactics.show`. `tactics.printer` would clash with the
+  kernel's `printer` module (imports cannot be renamed yet).
+- `Goal` queries are an enum of integer payloads; the eliminators are built
+  by the engine as `ElimAnd(h, G)`, `ElimOr(h, G)`, `ElimFalse(h, G)`.
+  `And` and `Or` are eliminated through a motive whose value is the
+  continuation type (`(P -> Q -> G) -> G`), because a `prop` family's
+  branches bind its parameters afresh.
+- Statistics are counted on the tactic side (`choose` reports each choice
+  through `Goal`), since the search handler captures nothing.
+- `kush eval` is not supported for the demo: the evaluator's nesting budget
+  is too small for the search; tests and the demo run natively.

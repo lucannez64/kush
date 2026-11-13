@@ -1,0 +1,359 @@
+module tactics.state;
+
+// The prover's state and its two effects (docs/tactics-handlers.md).
+//
+// `Goal` is every question a tactic asks about a goal and every term it
+// builds. Its handler owns the kernel (it captures `&mut State`) and answers
+// in place, so a tactic never holds the kernel: everything a tactic keeps
+// is a store id, an integer, which a multishot continuation can copy.
+//
+// `Choose` is the search: `perform op(n)` returns one of 0..n, and the
+// handler resumes the rest of the search once per alternative until one
+// gives a proof. A choice among zero alternatives is a failure.
+
+use std.result.Result;
+use kernel.api;
+use kernel.check;
+use kernel.engine;
+use kernel.engine.Kernel;
+use kernel.reader;
+use kernel.store.Store;
+use kernel.subst;
+use kernel.term;
+
+/// The answer of a search that found nothing (proofs are store ids >= 0).
+pub const FAIL: i64 = -1;
+
+/// Shapes of a goal in weak head normal form.
+pub const OTHER: i64 = 0;
+pub const PI: i64 = 1;
+pub const AND: i64 = 2;
+pub const OR: i64 = 3;
+pub const FALSE: i64 = 4;
+
+/// Pick one of `0..n`; the handler resumes once per alternative.
+pub effect Choose: i64 -> i64;
+
+/// Ask the engine. Contexts are interned lists of hypothesis types, outermost
+/// first, each relative to the ones before it; terms are store ids.
+pub effect Goal: Query -> i64 ! {alloc, panic};
+
+pub enum Query {
+    /// The empty context.
+    Empty,
+    /// The number of hypotheses of a context.
+    Length(i64),
+    /// The type of hypothesis `i` (`Var(i)`), in the whole context.
+    Hypothesis(i64, i64),
+    /// The context with one more hypothesis.
+    Extend(i64, i64),
+    /// Weak head normal form in a context, or `FAIL`.
+    Whnf(i64, i64),
+    /// 1 when two terms are definitionally equal in a context, else 0.
+    Defeq(i64, i64, i64),
+    /// The shape of a term in weak head normal form (`PI`, `AND`, ...).
+    Shape(i64),
+    /// A Pi's domain (0) or codomain (1); a connective's left (0) or right (1).
+    Part(i64, i64),
+    Var(i64),
+    Pi(i64, i64),
+    Lam(i64, i64),
+    App(i64, i64),
+    /// A term moved under `n` more binders.
+    Shift(i64, i64),
+    /// A binder's body with its variable replaced by a value.
+    Instantiate(i64, i64),
+    /// `And.intro P Q a b`, `Or.left P Q a`, `Or.right P Q b`.
+    AndIntro(i64, i64, i64, i64),
+    OrLeft(i64, i64, i64),
+    OrRight(i64, i64, i64),
+    /// Eliminators of a hypothesis `h` into the goal `G`:
+    /// `(P -> Q -> G) -> G` for `h : P & Q`,
+    /// `(P -> G) -> (Q -> G) -> G` for `h : P | Q`, and `G` for `h : False`.
+    ElimAnd(i64, i64),
+    ElimOr(i64, i64),
+    ElimFalse(i64, i64),
+    /// The search chose alternative `i` (statistics).
+    Chosen(i64),
+}
+
+pub struct State {
+    pub kernel: Kernel,
+    /// Interned names of the connectives.
+    pub and_name: i64,
+    pub or_name: i64,
+    pub false_name: i64,
+    /// Their terms: the families and the constructors.
+    pub and_type: i64,
+    pub or_type: i64,
+    pub false_type: i64,
+    pub and_intro: i64,
+    pub or_left: i64,
+    pub or_right: i64,
+    /// Alternatives tried, and how many of them were not the first.
+    pub choices: i64,
+    pub backtracks: i64,
+    /// The goal's atoms in quantifier order (their letters), for printing.
+    pub atoms: Vec<i64>,
+}
+
+/// The connectives, as `kush core` prints `prop And<P, Q> { Intro(P, Q) }`,
+/// `prop Or<P, Q> { Left(P), Right(Q) }` and `prop False {}`. They are
+/// admitted by the kernel's ordinary data rules.
+pub fn prelude() -> Bytes ! {alloc, panic} {
+    Bytes.from("(data And 0 prop (prop prop) (ctor And::Intro () ((var 1) (var 1)) ((var 3) (var 2))))\n(data Or 0 prop (prop prop) (ctor Or::Left () ((var 1)) ((var 2) (var 1))) (ctor Or::Right () ((var 0)) ((var 2) (var 1))))\n(data False 0 prop ())\n")
+}
+
+fn global(s: &mut Store, text: &Bytes) -> i64 ! {alloc, panic} {
+    let name = term.name(s, text);
+    let none: Vec<i64> = Vec.new();
+    let levels = term.list(s, &none);
+    term.global(s, name, levels)
+}
+
+pub fn new() -> State ! {alloc, panic} {
+    let mut k = engine.new();
+    let source = prelude();
+    let items = match reader.read(&mut k.store, &source) {
+        Result.Ok(items) => items,
+        Result.Err(_) => panic(),
+    };
+    let mut i = 0;
+    while i < items.len() {
+        match items[i] {
+            reader.Item.Data(name, levels, prop, params, constructors, _) => {
+                match check.define_data(&mut k, name, levels, prop, params, constructors) {
+                    Result.Ok(_) => {},
+                    Result.Err(_) => panic(),
+                }
+            },
+            _ => {},
+        }
+        i = i + 1;
+    }
+    let and_name = term.name(&mut k.store, &Bytes.from("And"));
+    let or_name = term.name(&mut k.store, &Bytes.from("Or"));
+    let false_name = term.name(&mut k.store, &Bytes.from("False"));
+    let and_type = global(&mut k.store, &Bytes.from("And"));
+    let or_type = global(&mut k.store, &Bytes.from("Or"));
+    let false_type = global(&mut k.store, &Bytes.from("False"));
+    let and_intro = global(&mut k.store, &Bytes.from("And::Intro"));
+    let or_left = global(&mut k.store, &Bytes.from("Or::Left"));
+    let or_right = global(&mut k.store, &Bytes.from("Or::Right"));
+    State {
+        kernel: k,
+        and_name: and_name,
+        or_name: or_name,
+        false_name: false_name,
+        and_type: and_type,
+        or_type: or_type,
+        false_type: false_type,
+        and_intro: and_intro,
+        or_left: or_left,
+        or_right: or_right,
+        choices: 0,
+        backtracks: 0,
+        atoms: Vec.new(),
+    }
+}
+
+/// The hypotheses of an interned context, outermost first.
+pub fn hypotheses(s: &Store, context: i64) -> Vec<i64> ! {alloc, panic} {
+    let n = term.list_len(s, context);
+    let mut out: Vec<i64> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        out = out.push(term.list_at(s, context, i));
+        i = i + 1;
+    }
+    out
+}
+
+/// `a b` applied twice: `f a b`.
+fn app2(s: &mut Store, f: i64, a: i64, b: i64) -> i64 ! {alloc, panic} {
+    let fa = term.app(s, f, a);
+    term.app(s, fa, b)
+}
+
+/// The connective applied to two propositions.
+pub fn connective(s: &mut Store, family: i64, p: i64, q: i64) -> i64 ! {alloc, panic} {
+    app2(s, family, p, q)
+}
+
+/// The shape of a term in weak head normal form.
+fn shape(st: &State, t: i64) -> i64 ! {panic} {
+    let s = &st.kernel.store;
+    if term.tag(s, t) == term.PI { return PI; }
+    if t == st.false_type { return FALSE; }
+    if term.tag(s, t) == term.APP && subst.argument_count(s, t) == 2 {
+        let head = subst.head(s, t);
+        if head == st.and_type { return AND; }
+        if head == st.or_type { return OR; }
+    }
+    OTHER
+}
+
+/// A Pi's domain or codomain; a connective's left or right argument.
+fn part(st: &State, t: i64, i: i64) -> i64 ! {panic} {
+    let s = &st.kernel.store;
+    if term.tag(s, t) == term.PI { return term.field(s, t, i); }
+    if i == 1 { return term.field(s, t, 1); }
+    let inner = term.field(s, t, 0);
+    term.field(s, inner, 1)
+}
+
+/// `h : P & Q` eliminated into `G`: a proof of `(P -> Q -> G) -> G`.
+/// Motive `fun P Q (x : And P Q) => (P -> Q -> G) -> G`; the branch for
+/// `Intro` is `fun P Q l r (k : P -> Q -> G) => k l r`. `G` is relative to
+/// the current context, so it is shifted under the binders above it.
+fn elim_and(st: &mut State, h: i64, g: i64) -> i64 ! {alloc, panic} {
+    let family = st.and_type;
+    let name = st.and_name;
+    let s = &mut st.kernel.store;
+    let prop = term.prop(s);
+    let v0 = term.var(s, 0);
+    let v1 = term.var(s, 1);
+    let v2 = term.var(s, 2);
+    let v3 = term.var(s, 3);
+    let g4 = subst.shift(s, g, 4, 0);
+    let g5 = subst.shift(s, g, 5, 0);
+    let g6 = subst.shift(s, g, 6, 0);
+    let both = term.pi(s, v2, g5);
+    let continuation = term.pi(s, v2, both);
+    let result = term.pi(s, continuation, g4);
+    let x = app2(s, family, v1, v0);
+    let m2 = term.lam(s, x, result);
+    let m1 = term.lam(s, prop, m2);
+    let motive = term.lam(s, prop, m1);
+    let k_inner = term.pi(s, v3, g6);
+    let k_type = term.pi(s, v3, k_inner);
+    let body = app2(s, v0, v2, v1);
+    let b5 = term.lam(s, k_type, body);
+    let b4 = term.lam(s, v1, b5);
+    let b3 = term.lam(s, v1, b4);
+    let b2 = term.lam(s, prop, b3);
+    let branch = term.lam(s, prop, b2);
+    let mut items: Vec<i64> = Vec.new();
+    items = items.push(branch);
+    let branches = term.list(s, &items);
+    term.indelim(s, name, motive, branches, h)
+}
+
+/// `h : P | Q` eliminated into `G`: a proof of `(P -> G) -> (Q -> G) -> G`.
+fn elim_or(st: &mut State, h: i64, g: i64) -> i64 ! {alloc, panic} {
+    let family = st.or_type;
+    let name = st.or_name;
+    let s = &mut st.kernel.store;
+    let prop = term.prop(s);
+    let v0 = term.var(s, 0);
+    let v1 = term.var(s, 1);
+    let v2 = term.var(s, 2);
+    let g4 = subst.shift(s, g, 4, 0);
+    let g5 = subst.shift(s, g, 5, 0);
+    // Motive: fun P Q (x : Or P Q) => (P -> G) -> (Q -> G) -> G.
+    let from_left = term.pi(s, v2, g4);
+    let from_right = term.pi(s, v2, g5);
+    let tail = term.pi(s, from_right, g5);
+    let result = term.pi(s, from_left, tail);
+    let x = app2(s, family, v1, v0);
+    let m2 = term.lam(s, x, result);
+    let m1 = term.lam(s, prop, m2);
+    let motive = term.lam(s, prop, m1);
+    // Left: fun P Q (a : P) (f : P -> G) (g : Q -> G) => f a.
+    let left_body = term.app(s, v1, v2);
+    let l5 = term.lam(s, from_right, left_body);
+    let l4 = term.lam(s, from_left, l5);
+    let l3 = term.lam(s, v1, l4);
+    let l2 = term.lam(s, prop, l3);
+    let left = term.lam(s, prop, l2);
+    // Right: fun P Q (b : Q) (f : P -> G) (g : Q -> G) => g b.
+    let right_body = term.app(s, v0, v2);
+    let r5 = term.lam(s, from_right, right_body);
+    let r4 = term.lam(s, from_left, r5);
+    let r3 = term.lam(s, v0, r4);
+    let r2 = term.lam(s, prop, r3);
+    let right = term.lam(s, prop, r2);
+    let mut items: Vec<i64> = Vec.new();
+    items = items.push(left);
+    items = items.push(right);
+    let branches = term.list(s, &items);
+    term.indelim(s, name, motive, branches, h)
+}
+
+/// `h : False` eliminated into `G`: motive `fun (x : False) => G`, no branch.
+fn elim_false(st: &mut State, h: i64, g: i64) -> i64 ! {alloc, panic} {
+    let family = st.false_type;
+    let name = st.false_name;
+    let s = &mut st.kernel.store;
+    let g1 = subst.shift(s, g, 1, 0);
+    let motive = term.lam(s, family, g1);
+    let none: Vec<i64> = Vec.new();
+    let branches = term.list(s, &none);
+    term.indelim(s, name, motive, branches, h)
+}
+
+/// Answer one `Goal` query.
+pub fn answer(st: &mut State, q: Query) -> i64 ! {alloc, panic} {
+    match q {
+        Query.Empty => { let none: Vec<i64> = Vec.new(); term.list(&mut st.kernel.store, &none) },
+        Query.Length(context) => term.list_len(&st.kernel.store, context),
+        Query.Hypothesis(context, i) => {
+            let n = term.list_len(&st.kernel.store, context);
+            let ty = term.list_at(&st.kernel.store, context, n - 1 - i);
+            subst.shift(&mut st.kernel.store, ty, i + 1, 0)
+        },
+        Query.Extend(context, ty) => {
+            let mut items = hypotheses(&st.kernel.store, context);
+            items = items.push(ty);
+            term.list(&mut st.kernel.store, &items)
+        },
+        Query.Whnf(context, t) => {
+            let items = hypotheses(&st.kernel.store, context);
+            match api.whnf(&mut st.kernel, &items, t) {
+                Result.Ok(n) => n,
+                Result.Err(_) => FAIL,
+            }
+        },
+        Query.Defeq(context, a, b) => {
+            let items = hypotheses(&st.kernel.store, context);
+            match api.defeq(&mut st.kernel, &items, a, b) {
+                Result.Ok(true) => 1,
+                _ => 0,
+            }
+        },
+        Query.Shape(t) => shape(st, t),
+        Query.Part(t, i) => part(st, t, i),
+        Query.Var(i) => term.var(&mut st.kernel.store, i),
+        Query.Pi(a, b) => term.pi(&mut st.kernel.store, a, b),
+        Query.Lam(a, b) => term.lam(&mut st.kernel.store, a, b),
+        Query.App(f, a) => term.app(&mut st.kernel.store, f, a),
+        Query.Shift(t, n) => subst.shift(&mut st.kernel.store, t, n, 0),
+        Query.Instantiate(body, value) => subst.substitute(&mut st.kernel.store, body, value),
+        Query.AndIntro(p, q2, a, b) => {
+            let c = st.and_intro;
+            let s = &mut st.kernel.store;
+            let head = app2(s, c, p, q2);
+            app2(s, head, a, b)
+        },
+        Query.OrLeft(p, q2, a) => {
+            let c = st.or_left;
+            let s = &mut st.kernel.store;
+            let head = app2(s, c, p, q2);
+            term.app(s, head, a)
+        },
+        Query.OrRight(p, q2, b) => {
+            let c = st.or_right;
+            let s = &mut st.kernel.store;
+            let head = app2(s, c, p, q2);
+            term.app(s, head, b)
+        },
+        Query.ElimAnd(h, g) => elim_and(st, h, g),
+        Query.ElimOr(h, g) => elim_or(st, h, g),
+        Query.ElimFalse(h, g) => elim_false(st, h, g),
+        Query.Chosen(i) => {
+            st.choices = st.choices + 1;
+            if i > 0 { st.backtracks = st.backtracks + 1; }
+            0
+        },
+    }
+}

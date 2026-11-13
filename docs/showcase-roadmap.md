@@ -58,7 +58,8 @@ logical kernel (universes, `J`, indexed data, `Prop`) to Kush, as Lean4Lean
 does for Lean, with its invariants (substitution preserves well-scopedness)
 checked by the Rust kernel.
 
-**A prover built on effect handlers** [TACTICS-HANDLERS]. Tactics are effects
+**A prover built on effect handlers** [TACTICS-HANDLERS, done:
+[examples/tactics](../examples/tactics/README.md)]. Tactics are effects
 (`perform Goal`, `perform Choose`, `perform Fail`); backtracking search is a
 multishot handler; proof scripts are ordinary Kush programs whose terms the
 Kush kernel checks.

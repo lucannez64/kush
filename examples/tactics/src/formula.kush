@@ -1,0 +1,174 @@
+module tactics.formula;
+
+// Formulas of propositional logic, read into closed kernel goals.
+//
+//     formula ::= either ('->' formula)?        implication, to the right
+//     either  ::= both ('|' both)*
+//     both    ::= unary ('&' unary)*
+//     unary   ::= '~' unary | 'False' | ATOM | '(' formula ')'
+//
+// An atom is one capital letter. `~A` is `A -> False`. The goal quantifies
+// over the atoms that occur, in alphabetical order:
+// `(A -> B) -> A -> B` is `(A B : Prop) -> (A -> B) -> A -> B`.
+
+use std.result.Result;
+use kernel.term;
+use tactics.state;
+use tactics.state.State;
+
+struct Reader {
+    at: i64,
+    /// Bit `k` set when the atom `A + k` occurs.
+    atoms: i64,
+    /// The number of atoms, and binders between the goal's quantifiers and
+    /// the position being read.
+    count: i64,
+}
+
+fn space(src: &Bytes, r: &mut Reader) -> Unit ! {panic} {
+    while r.at < src.len() && (src[r.at] == 32 || src[r.at] == 9 || src[r.at] == 10) {
+        r.at = r.at + 1;
+    }
+}
+
+/// Whether the next bytes (after spaces) are `text`; consume them if so.
+fn token(src: &Bytes, r: &mut Reader, text: &Bytes) -> Bool ! {panic} {
+    space(src, r);
+    if r.at + text.len() > src.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < text.len() {
+        if src[r.at + i] != text[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    r.at = r.at + text.len();
+    true
+}
+
+fn is_atom(byte: i64) -> Bool ! {} {
+    byte >= 65 && byte <= 90
+}
+
+/// The atoms that occur, as bits; malformed input is found by `read`.
+fn scan(src: &Bytes) -> i64 ! {panic} {
+    let mut atoms = 0;
+    let mut i = 0;
+    while i < src.len() {
+        let byte = src[i];
+        // `False` is a keyword, not the atom `F`.
+        if byte == 70 && i + 5 <= src.len() && src[i + 1] == 97 {
+            i = i + 5;
+        } else {
+            if is_atom(byte) {
+                atoms = atoms | (1 << (byte - 65));
+            }
+            i = i + 1;
+        }
+    }
+    atoms
+}
+
+/// The variable of atom `k` under `depth` binders inside the goal's body.
+fn atom(st: &mut State, r: &Reader, k: i64, depth: i64) -> i64 ! {alloc, panic} {
+    let mut position = 0;
+    let mut j = 0;
+    while j < k {
+        if r.atoms & (1 << j) != 0 {
+            position = position + 1;
+        }
+        j = j + 1;
+    }
+    term.var(&mut st.kernel.store, r.count - 1 - position + depth)
+}
+
+fn unary(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc, panic} {
+    if token(src, r, &Bytes.from("~")) {
+        let inner = unary(st, src, r, depth)?;
+        let bottom = st.false_type;
+        return Result.Ok(term.pi(&mut st.kernel.store, inner, bottom));
+    }
+    if token(src, r, &Bytes.from("False")) {
+        return Result.Ok(st.false_type);
+    }
+    if token(src, r, &Bytes.from("(")) {
+        let inner = formula(st, src, r, depth)?;
+        if !token(src, r, &Bytes.from(")")) {
+            return Result.Err(r.at);
+        }
+        return Result.Ok(inner);
+    }
+    space(src, r);
+    if r.at < src.len() && is_atom(src[r.at]) {
+        let k = src[r.at] - 65;
+        r.at = r.at + 1;
+        return Result.Ok(atom(st, r, k, depth));
+    }
+    Result.Err(r.at)
+}
+
+fn both(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let mut left = unary(st, src, r, depth)?;
+    while token(src, r, &Bytes.from("&")) {
+        let right = unary(st, src, r, depth)?;
+        let family = st.and_type;
+        left = state.connective(&mut st.kernel.store, family, left, right);
+    }
+    Result.Ok(left)
+}
+
+fn either(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let mut left = both(st, src, r, depth)?;
+    while token(src, r, &Bytes.from("|")) {
+        let right = both(st, src, r, depth)?;
+        let family = st.or_type;
+        left = state.connective(&mut st.kernel.store, family, left, right);
+    }
+    Result.Ok(left)
+}
+
+fn formula(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let left = either(st, src, r, depth)?;
+    if token(src, r, &Bytes.from("->")) {
+        // The right side is under the implication's (unused) binder.
+        let right = formula(st, src, r, depth + 1)?;
+        return Result.Ok(term.pi(&mut st.kernel.store, left, right));
+    }
+    Result.Ok(left)
+}
+
+/// The closed goal of a formula, or the byte offset where reading failed.
+pub fn read(st: &mut State, src: &Bytes) -> Result<i64, i64> ! {alloc, panic} {
+    let atoms = scan(src);
+    let mut count = 0;
+    let mut k = 0;
+    while k < 26 {
+        if atoms & (1 << k) != 0 {
+            count = count + 1;
+        }
+        k = k + 1;
+    }
+    let mut r = Reader { at: 0, atoms: atoms, count: count };
+    let mut goal = formula(st, src, &mut r, 0)?;
+    space(src, &mut r);
+    if r.at != src.len() {
+        return Result.Err(r.at);
+    }
+    st.atoms.clear();
+    let mut letter = 0;
+    while letter < 26 {
+        if atoms & (1 << letter) != 0 {
+            st.atoms.push(65 + letter);
+        }
+        letter = letter + 1;
+    }
+    let mut i = 0;
+    while i < count {
+        let prop = term.prop(&mut st.kernel.store);
+        goal = term.pi(&mut st.kernel.store, prop, goal);
+        i = i + 1;
+    }
+    Result.Ok(goal)
+}
