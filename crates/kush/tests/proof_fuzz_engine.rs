@@ -49,6 +49,7 @@ fn session(scratch: &Scratch) -> Session {
         &LinkSpec::default(),
         &scratch.path().join("fuzz"),
         None,
+        Vec::new(),
     )
     .unwrap_or_else(|e| panic!("{e}"))
 }

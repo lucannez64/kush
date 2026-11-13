@@ -5732,7 +5732,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             let valid = if function {
                 matches!(
                     attribute.kind.as_str(),
-                    "noalloc" | "nosuspend" | "test" | "gpu"
+                    "noalloc" | "nosuspend" | "test" | "fuzz" | "gpu"
                 ) && attribute.argument.is_none()
             } else if data {
                 (attribute.kind == "linear" && attribute.argument.is_none())
@@ -5744,7 +5744,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 return Err(Diagnostic::new(
                     attribute.span,
                     if function {
-                        "functions support the #[noalloc], #[nosuspend], #[test], and #[gpu] attributes"
+                        "functions support the #[noalloc], #[nosuspend], #[test], #[fuzz], and #[gpu] attributes"
                     } else if data {
                         "data declarations support #[linear] or #[foreign(\"release_symbol\")]"
                     } else {

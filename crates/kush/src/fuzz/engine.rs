@@ -25,6 +25,9 @@ pub struct Options {
     pub seed: u64,
     /// Wall-clock limit of one run; a run that exceeds it is not a find.
     pub timeout: Duration,
+    /// Seed inputs of `#[fuzz]` entries: `<corpus>/<entry name>/*`, each
+    /// file the raw bytes of one input.
+    pub corpus: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -35,6 +38,7 @@ impl Default for Options {
             time: None,
             seed: 0,
             timeout: Duration::from_secs(2),
+            corpus: None,
         }
     }
 }
@@ -155,15 +159,20 @@ impl Session {
         links: &LinkSpec,
         directory: &Path,
         root: Option<&Path>,
+        entries: Vec<Target>,
     ) -> Result<Self, String> {
         let checked = crate::executable::check_program(original)
             .map_err(|error| original.sources.render(&error))?;
         let mut targets = harness::plan(original, &checked);
+        targets.extend(entries);
         let assembled = harness::assemble(original, &mut targets, modules)?;
         std::fs::create_dir_all(directory)
             .map_err(|e| format!("cannot create {}: {e}", directory.display()))?;
         // The generated sources, for reading when a harness behaves oddly.
         let mut generated_text = assembled.sources.root.clone();
+        for (_, text) in assembled.sources.relays.values() {
+            generated_text.push_str(&format!("\n// ---- relay ----\n{text}"));
+        }
         for (module, extra) in &assembled.sources.appended {
             generated_text.push_str(&format!("\n// ---- appended to {module} ----\n{extra}"));
         }
@@ -173,16 +182,7 @@ impl Session {
             .map_err(|error| assembled.program.sources.render(&error))?;
         let ranges: Vec<(String, usize, usize)> = targets
             .iter()
-            .map(|target| {
-                let file = original.sources.file(target.span);
-                file.map_or((String::new(), 0, 0), |file| {
-                    (
-                        file.name.clone(),
-                        target.span.start - file.base,
-                        target.span.end - file.base,
-                    )
-                })
-            })
+            .map(|target| (target.file.clone(), target.range.0, target.range.1))
             .collect();
         let generated: BTreeMap<&str, usize> = assembled
             .sources
@@ -204,6 +204,7 @@ impl Session {
             };
             let offset = site.span.start - file.base;
             let is_generated = file.name == assembled.sources.root_name
+                || assembled.sources.relays.values().any(|(name, _)| *name == file.name)
                 || generated
                     .get(file.name.as_str())
                     .is_some_and(|&start| offset >= start);
@@ -279,6 +280,12 @@ impl Session {
             let dictionary = dictionary(&self.targets[target].constants);
             let mut corpus: Vec<Vec<u8>> = Vec::new();
             let mut queue = seeds(&layout, &dictionary);
+            if self.targets[target].fuzz_entry
+                && let Some(corpus) = &options.corpus
+            {
+                // Corpus files run first (the queue is popped from the end).
+                queue.extend(entry_seeds(&corpus.join(&self.targets[target].name)));
+            }
             let mut run = 0;
             while run < options.runs {
                 if options.time.is_some_and(|limit| start.elapsed() >= limit) {
@@ -424,7 +431,9 @@ impl Session {
                     continue;
                 }
                 let module = target.module.join(".");
-                if !text.lines().any(|line| line.trim() == format!("use {module};")) {
+                if !target.fuzz_entry
+                    && !text.lines().any(|line| line.trim() == format!("use {module};"))
+                {
                     text = insert_use(&text, &module);
                 }
                 if !text.contains(SAVED_MARKER) {
@@ -446,6 +455,10 @@ impl Session {
     /// Run harness `number` on one tape. `None` when the run left no record
     /// (it timed out or was killed).
     pub fn execute(&self, number: usize, tape: &[u8], timeout: Duration) -> Option<RunRecord> {
+        // The harness reads at most its layout's longest tape.
+        let target = self.assembled.sources.harnesses[number];
+        let longest = self.targets[target].harness.as_ref().map_or(tape.len(), Layout::max_tape);
+        let tape = &tape[..tape.len().min(longest)];
         let _ = std::fs::remove_file(&self.record);
         let mut child = Command::new(&self.binary)
             .arg(number.to_string())
@@ -524,11 +537,15 @@ impl Session {
 impl Session {
     /// Reports of the sites in selected targets, plus every finding.
     pub fn shown(&self, options: &Options) -> Vec<&SiteReport> {
+        // An entry attacks the whole program: every site it reaches counts.
+        let entry = (0..self.targets.len())
+            .any(|t| self.targets[t].fuzz_entry && self.targets[t].harness.is_ok() && self.selected(t, options));
         self.reports
             .iter()
             .filter(|report| {
                 report.finding.is_some()
                     || report.target.is_some_and(|target| self.selected(target, options))
+                    || (entry && report.hits > 0)
             })
             .collect()
     }
@@ -744,6 +761,26 @@ fn seeds(layout: &Layout, dictionary: &[i128]) -> Vec<Vec<u8>> {
     seeds
 }
 
+/// The corpus files of an entry as tapes: a two-byte length, then the bytes.
+fn entry_seeds(directory: &Path) -> Vec<Vec<u8>> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    paths.reverse();
+    paths
+        .iter()
+        .filter_map(|path| std::fs::read(path).ok())
+        .map(|bytes| {
+            let bytes = &bytes[..bytes.len().min(harness::ENTRY_LENGTH)];
+            let mut tape = (bytes.len() as u16).to_le_bytes().to_vec();
+            tape.extend_from_slice(bytes);
+            tape
+        })
+        .collect()
+}
+
 /// Byte ranges of each collection's elements on this tape, by slot index.
 pub(super) fn element_ranges(layout: &Layout, tape: &[u8]) -> Vec<(usize, usize, usize)> {
     let mut at = layout.fixed;
@@ -753,10 +790,11 @@ pub(super) fn element_ranges(layout: &Layout, tape: &[u8]) -> Vec<(usize, usize,
             offset,
             collection,
             minimum,
+            maximum,
             ..
         } = slot
         {
-            let length = minimum + (get(tape, *offset, 2) as usize) % (harness::MAX_EXTRA_LENGTH + 1);
+            let length = minimum + (get(tape, *offset, 2) as usize) % (maximum + 1);
             let width = element_width(*collection);
             ranges.push((index, at, length));
             at += length * width;
@@ -785,7 +823,40 @@ fn mutate(
         tape.resize(layout.fixed, 0);
     }
     for _ in 0..=random.below(3) {
-        match random.below(8) {
+        match random.below(10) {
+            // A run of elements is deleted, or repeated (the length follows).
+            8 | 9 => {
+                let ranges = element_ranges(layout, &tape);
+                if let Some(&(slot, start, length)) = ranges.get(random.below(ranges.len().max(1)))
+                    && length > 0
+                    && let Slot::Collection {
+                        offset,
+                        collection,
+                        minimum,
+                        maximum,
+                        ..
+                    } = &layout.slots[slot]
+                {
+                    let width = element_width(*collection);
+                    let from = random.below(length);
+                    let count = 1 + random.below((length - from).min(16));
+                    let (a, b) = (start + from * width, start + (from + count) * width);
+                    if tape.len() < start + length * width {
+                        tape.resize(start + length * width, 0);
+                    }
+                    let new_length = if random.below(2) == 0 && length - count >= *minimum {
+                        tape.drain(a..b);
+                        length - count
+                    } else if length + count <= minimum + maximum {
+                        let run: Vec<u8> = tape[a..b].to_vec();
+                        tape.splice(b..b, run);
+                        length + count
+                    } else {
+                        length
+                    };
+                    put(&mut tape, *offset, 2, (new_length - minimum) as i128);
+                }
+            }
             // A scalar gets a dictionary value.
             0 | 1 => {
                 if let Some(Slot::Scalar { offset, scalar, .. }) = pick_slot(layout, random, true) {
@@ -805,11 +876,11 @@ fn mutate(
             }
             // A collection gets a new length.
             3 => {
-                if let Some(Slot::Collection { offset, .. }) = pick_slot(layout, random, false) {
+                if let Some(Slot::Collection { offset, maximum, .. }) = pick_slot(layout, random, false) {
                     let length = if random.below(2) == 0 {
                         random.below(9)
                     } else {
-                        random.below(harness::MAX_EXTRA_LENGTH + 1)
+                        random.below(maximum + 1)
                     };
                     put(&mut tape, *offset, 2, length as i128);
                 }

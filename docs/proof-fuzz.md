@@ -98,7 +98,8 @@ Flags:
   and CI.
 
 Implemented so far: `FILTER`, `--manifest-path`, `--runs`, `--time`,
-`--seed`, `--list`, `--locked` (PF-ENGINE), `--save` (PF-SHRINK).
+`--seed`, `--list`, `--locked` (PF-ENGINE), `--save` (PF-SHRINK); seed
+inputs for entries come from `fuzz/corpus/<entry>/` (PF-ENTRIES).
 
 Exit status: 0 when nothing was found, 1 when at least one counterexample was
 found, 2 for usage or compile errors. This matches `kush test`.
@@ -275,9 +276,24 @@ does have, and the obligation is a lemma candidate (section 3).
   }
   ```
 
-  They are compiled into the same binary and use the same corpus. Every obligation they
-  reach counts toward coverage, and their findings are *entry-level* (real)
-  counterexamples by construction.
+  Implemented (PF-ENTRIES): an entry is any `#[fuzz] fn name(input:
+  &Bytes) -> Unit` in the test target (the checker accepts the attribute
+  like `#[test]`; other shapes are listed as `no generator`). Its input is
+  up to 4096 bytes, and two more mutations suit text: deleting or repeating
+  a run of bytes. Every site an entry reaches is shown, wherever it is; its
+  findings are bugs, and their reproductions are tests in the test target
+  that call the entry. Files in `fuzz/corpus/<entry>/` are seed inputs, run
+  first: random bytes rarely get through a parser (the kernel's reader
+  accepts nothing a mutation of nothing produces; seeded with four `kush
+  core` dumps of the repository's examples, it reaches 77 checks).
+- The root imports every target module through a generated *relay* module
+  (`<package>.kush_fuzz_relay_N`) that only forwards calls: Kush has no
+  import aliases, two modules may share their last name, and the test
+  target's module is called `main`, like the root's `main` function.
+- The root's input buffer is sized for the longest tape of any harness,
+  and the driver trims tapes to their layout's length: `read_all` fails on
+  input longer than its buffer, which silently dropped every input above
+  256 bytes in the first version.
 - Option C is a later sub-node: return the fallback's feasible point and add
   its parameter values to that function's initial corpus.
 

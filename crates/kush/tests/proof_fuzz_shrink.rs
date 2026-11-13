@@ -34,6 +34,7 @@ fn shrinking_shortens_collections_and_moves_numbers_to_the_boundary() {
                 offset: 8,
                 collection: Collection::Vec(I64),
                 minimum: 0,
+                maximum: 64,
                 passing: Passing::Shared,
             },
         ],
@@ -75,7 +76,7 @@ fn fuzzed() -> (Session, Scratch) {
     let modules = Memory(vec![("app.lib".into(), LIB.into())]);
     let original = program::load("main.kush", "module app;\nuse app.lib;\nfn main() -> i64 ! {} { 0 }", &modules)
         .unwrap_or_else(|(_, e)| panic!("{e:?}"));
-    let mut session = Session::new(&original, &modules, &LinkSpec::default(), &scratch.path().join("f"), None)
+    let mut session = Session::new(&original, &modules, &LinkSpec::default(), &scratch.path().join("f"), None, Vec::new())
         .unwrap_or_else(|e| panic!("{e}"));
     session.fuzz(&Options {
         runs: 400,

@@ -112,8 +112,25 @@ pub fn fuzz_project(
     let program = project.load_program(&entry)?;
     let links = project.native_links()?;
     let directory = project.root.join("target").join("kush").join("fuzz");
-    let mut session = engine::Session::new(&program, &project.modules, &links, &directory, Some(&project.root))
-        .map_err(Failure::new)?;
+    // `#[fuzz]` entries of the test target; it is only loaded when it has
+    // some.
+    let entries = match &project.test_target {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| Failure::new(format!("cannot read {}: {e}", path.display())))?;
+            harness::plan_entries(&text, &path.display().to_string()).map_err(Failure::new)?
+        }
+        None => Vec::new(),
+    };
+    let mut session = engine::Session::new(
+        &program,
+        &project.modules,
+        &links,
+        &directory,
+        Some(&project.root),
+        entries,
+    )
+    .map_err(Failure::new)?;
     let write = |out: &mut dyn std::io::Write, text: &str| {
         out.write_all(text.as_bytes())
             .map_err(|e| Failure::new(format!("cannot write the report: {e}")))
@@ -134,6 +151,9 @@ pub fn fuzz_project(
         ),
     )?;
     let regressions = project.root.join("fuzz").join("regressions");
+    let mut options = options.clone();
+    options.corpus = Some(project.root.join("fuzz").join("corpus"));
+    let options = &options;
     session.replay(&regressions, options);
     session.fuzz(options);
     write(out, &session.render(options))?;

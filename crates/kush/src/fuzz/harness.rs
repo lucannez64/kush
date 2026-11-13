@@ -17,6 +17,8 @@ use std::collections::BTreeMap;
 
 /// Longest generated collection beyond its required minimum length.
 pub const MAX_EXTRA_LENGTH: usize = 64;
+/// Longest input of a `#[fuzz]` entry.
+pub const ENTRY_LENGTH: usize = 4096;
 
 /// A scalar the tape can encode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,12 +102,15 @@ pub enum Slot {
         scalar: Scalar,
         passing: Passing,
     },
-    /// The length is `minimum + (u16 at offset) % (MAX_EXTRA_LENGTH + 1)`.
+    /// The length is `minimum + (u16 at offset) % (maximum + 1)`.
     Collection {
         name: String,
         offset: usize,
         collection: Collection,
         minimum: usize,
+        /// Most elements beyond `minimum`: [`MAX_EXTRA_LENGTH`] for a
+        /// function's argument, [`ENTRY_LENGTH`] for a `#[fuzz]` entry's input.
+        maximum: usize,
         passing: Passing,
     },
 }
@@ -116,6 +121,32 @@ pub struct Layout {
     pub slots: Vec<Slot>,
     /// Bytes of the fixed part; collection elements follow it.
     pub fixed: usize,
+}
+
+impl Layout {
+    /// The longest tape this layout reads; bytes beyond it are ignored.
+    pub fn max_tape(&self) -> usize {
+        self.fixed
+            + self
+                .slots
+                .iter()
+                .map(|slot| match slot {
+                    Slot::Collection {
+                        collection,
+                        minimum,
+                        maximum,
+                        ..
+                    } => {
+                        let width = match collection {
+                            Collection::Bytes => 1,
+                            Collection::Vec(element) => element.width(),
+                        };
+                        (minimum + maximum) * width
+                    }
+                    Slot::Scalar { .. } => 0,
+                })
+                .sum::<usize>()
+    }
 }
 
 /// A function that contains obligation sites.
@@ -137,6 +168,13 @@ pub struct Target {
     pub entry: bool,
     /// Every parameter's name and whether it is erased, in order.
     pub parameters: Vec<(String, bool)>,
+    /// The proposition of each erased parameter, in order, without braces.
+    pub preconditions: Vec<String>,
+    /// A `#[fuzz]` entry of the test target rather than a function.
+    pub fuzz_entry: bool,
+    /// The file the function is in and its byte range there.
+    pub file: String,
+    pub range: (usize, usize),
     /// The declared effect row's text, as in `io, alloc, panic`.
     pub effects: String,
 }
@@ -189,6 +227,24 @@ pub fn plan(program: &Program, executable: &Executable) -> Vec<Target> {
                     .iter()
                     .map(|p| (p.name.clone(), p.erased))
                     .collect(),
+                preconditions: function
+                    .parameters
+                    .iter()
+                    .filter(|p| p.erased)
+                    .map(|p| {
+                        let text = slice(text, p.ty.span).trim();
+                        text.strip_prefix('{')
+                            .and_then(|t| t.strip_suffix('}'))
+                            .unwrap_or(text)
+                            .to_owned()
+                    })
+                    .collect(),
+                fuzz_entry: false,
+                file: program
+                    .sources
+                    .file(item.item.span)
+                    .map_or_else(String::new, |file| file.name.clone()),
+                range: (item.item.span.start - text.1, item.item.span.end - text.1),
                 effects: function
                     .effects
                     .iter()
@@ -315,6 +371,7 @@ fn layout(function: &ast::Function, text: (&str, usize)) -> Result<Layout, Strin
                     offset,
                     collection,
                     minimum,
+                    maximum: MAX_EXTRA_LENGTH,
                     passing,
                 });
                 offset += 2;
@@ -332,6 +389,7 @@ fn layout(function: &ast::Function, text: (&str, usize)) -> Result<Layout, Strin
                     offset,
                     collection: Collection::Vec(scalar),
                     minimum,
+                    maximum: MAX_EXTRA_LENGTH,
                     passing: Passing::Slice,
                 });
                 offset += 2;
@@ -390,6 +448,11 @@ pub struct Sources {
     /// The original root file as an ordinary module (dotted path, file name,
     /// text): the synthetic root replaces it, and may import it.
     pub entry: Option<(String, String, String)>,
+    /// Generated relay modules by dotted path (file name, text). Kush has no
+    /// import aliases, so the root reaches each target module through a
+    /// relay with a unique name: two target modules may share their last
+    /// name, and a module called `main` would clash with the root's `main`.
+    pub relays: BTreeMap<String, (String, String)>,
 }
 
 /// The module path of the synthetic root.
@@ -399,39 +462,41 @@ pub const ROOT_MODULE: &str = "kush_fuzz_entry";
 /// the targets were planned from (for the source text of propositions).
 pub fn sources(program: &Program, targets: &[Target]) -> Sources {
     let mut appended: BTreeMap<String, String> = BTreeMap::new();
-    let mut root_uses = std::collections::BTreeSet::new();
+    let mut relays: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut relay_of: BTreeMap<String, String> = BTreeMap::new();
     let mut harnesses = Vec::new();
     let mut dispatch = String::new();
     let root_module = targets
         .first()
         .and_then(|t| t.module.first().cloned())
         .map_or_else(|| ROOT_MODULE.to_owned(), |package| format!("{package}.{ROOT_MODULE}"));
+    let package_prefix = root_module
+        .strip_suffix(ROOT_MODULE)
+        .unwrap_or("")
+        .to_owned();
     for (index, target) in targets.iter().enumerate() {
         let Ok(layout) = &target.harness else {
             continue;
         };
-        let Some(function) = function_at(program, target.span) else {
-            continue;
-        };
-        let text = program
-            .sources
-            .file(target.span)
-            .map(|file| (file.text.as_str(), file.base))
-            .unwrap_or(("", 0));
         let number = harnesses.len();
         harnesses.push(index);
         let module = target.module.join(".");
         let short = target.module.last().cloned().unwrap_or_default();
-        root_uses.insert(module.clone());
+        let next_relay = relay_of.len();
+        let relay = relay_of
+            .entry(module.clone())
+            .or_insert_with(|| format!("{package_prefix}kush_fuzz_relay_{next_relay}"))
+            .clone();
+        let relay_short = relay.rsplit('.').next().unwrap_or(&relay).to_owned();
         // The harness in the target's module.
         let mut parameters = Vec::new();
         let mut body = String::new();
         let mut arguments = Vec::new();
         let mut slots = layout.slots.iter();
-        for parameter in &function.parameters {
-            if parameter.erased {
-                let proposition = slice(text, parameter.ty.span).trim();
-                let inner = &proposition[1..proposition.len() - 1];
+        let mut preconditions = target.preconditions.iter();
+        for (_, erased) in &target.parameters {
+            if *erased {
+                let inner = preconditions.next().map_or("true", String::as_str);
                 body.push_str(&format!("    if !({inner}) {{ return; }}\n"));
                 arguments.push("_".to_owned());
                 continue;
@@ -476,14 +541,30 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
                 Passing::Slice => format!("&{name}[..]"),
             });
         }
-        let effects = harness_effects(function, text);
+        let effects = harness_effects(&target.effects);
         let harness = format!(
             "\npub fn __kush_fuzz_{number}({}) -> Unit ! {{{effects}}} {{\n{body}    let _ = {}({});\n}}\n",
             parameters.join(", "),
-            function.name,
+            target.function,
             arguments.join(", "),
         );
-        appended.entry(module).or_default().push_str(&harness);
+        appended.entry(module.clone()).or_default().push_str(&harness);
+        let names: Vec<&str> = layout
+            .slots
+            .iter()
+            .map(|slot| match slot {
+                Slot::Scalar { name, .. } | Slot::Collection { name, .. } => name.as_str(),
+            })
+            .collect();
+        relays
+            .entry(relay.clone())
+            .or_insert_with(|| (format!("<{relay}>"), format!("module {relay};\n\nuse {module};\n")))
+            .1
+            .push_str(&format!(
+                "\npub fn call_{number}({}) -> Unit ! {{{effects}}} {{\n    {short}.__kush_fuzz_{number}({});\n}}\n",
+                parameters.join(", "),
+                names.join(", "),
+            ));
         // Its branch of the root's dispatch.
         dispatch.push_str(&format!("    if which == {number} {{\n"));
         let mut call = Vec::new();
@@ -506,9 +587,10 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
                     offset,
                     collection,
                     minimum,
+                    maximum,
                     ..
                 } => {
-                    let extra = MAX_EXTRA_LENGTH + 1;
+                    let extra = maximum + 1;
                     dispatch.push_str(&format!(
                         "        let {name}_n = {minimum} + __fz_word(&tape, {offset}, 2) % {extra};\n"
                     ));
@@ -528,16 +610,25 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
             }
         }
         dispatch.push_str(&format!(
-            "        {short}.__kush_fuzz_{number}({});\n        return 0;\n    }}\n",
+            "        {relay_short}.call_{number}({});\n        return 0;\n    }}\n",
             call.join(", ")
         ));
     }
     let mut root = format!("module {root_module};\n\nuse std.env;\nuse std.io;\nuse std.result.Result;\n");
-    for module in &root_uses {
-        root.push_str(&format!("use {module};\n"));
+    for relay in relays.keys() {
+        root.push_str(&format!("use {relay};\n"));
     }
     root.push_str(ROOT_HELPERS);
-    root.push_str("\nfn main() -> i64 ! {io, alloc, panic} {\n    let which = __fz_which();\n    let tape = match io.read_all(io.stdin(), Bytes.with_capacity(256)) {\n        Result.Ok(bytes) => bytes,\n        Result.Err(_) => return 2,\n    };\n");
+    // `read_all` fails on input longer than its buffer: size it for the
+    // longest tape of any harness (the driver never sends more).
+    let capacity = harnesses
+        .iter()
+        .filter_map(|&index| targets[index].harness.as_ref().ok())
+        .map(Layout::max_tape)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    root.push_str(&format!("\nfn main() -> i64 ! {{io, alloc, panic}} {{\n    let which = __fz_which();\n    let tape = match io.read_all(io.stdin(), Bytes.with_capacity({capacity})) {{\n        Result.Ok(bytes) => bytes,\n        Result.Err(_) => return 2,\n    }};\n"));
     // `at` walks the collection elements after the fixed part; each branch
     // starts it at its own layout's end.
     let mut branches = String::new();
@@ -574,6 +665,7 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
         appended,
         harnesses,
         entry,
+        relays,
     }
 }
 
@@ -608,11 +700,11 @@ fn __fz_which() -> i64 ! {io, alloc, panic} {
 ";
 
 /// The harness's effect row: the target's effects plus `panic` (the guards).
-fn harness_effects(function: &ast::Function, text: (&str, usize)) -> String {
-    let mut effects: Vec<String> = function
-        .effects
-        .iter()
-        .map(|effect| slice(text, effect.span).trim().to_owned())
+fn harness_effects(row: &str) -> String {
+    let mut effects: Vec<String> = row
+        .split(',')
+        .map(|effect| effect.trim().to_owned())
+        .filter(|effect| !effect.is_empty())
         .collect();
     if !effects.iter().any(|e| e == "panic") {
         effects.push("panic".into());
@@ -620,12 +712,6 @@ fn harness_effects(function: &ast::Function, text: (&str, usize)) -> String {
     effects.join(", ")
 }
 
-fn function_at(program: &Program, span: Span) -> Option<&ast::Function> {
-    program.module.items.iter().find_map(|item| match &item.item.kind {
-        ItemKind::Function(function) if item.item.span == span => Some(function),
-        _ => None,
-    })
-}
 
 /// A module source that appends generated harness text to some modules.
 pub struct Overlay<'a> {
@@ -636,6 +722,9 @@ pub struct Overlay<'a> {
 impl ModuleSource for Overlay<'_> {
     fn find(&self, path: &[String]) -> Option<(String, String)> {
         let dotted = path.join(".");
+        if let Some((name, text)) = self.sources.relays.get(&dotted) {
+            return Some((name.clone(), text.clone()));
+        }
         let (name, mut text) = match &self.sources.entry {
             Some((entry, name, text)) if *entry == dotted => (name.clone(), text.clone()),
             _ => self.base.find(path)?,
@@ -709,6 +798,8 @@ fn harness_of(map: &crate::program::SourceMap, sources: &Sources, span: Span) ->
     let marker = if file.name == sources.root_name {
         // A dispatch branch of the root (the helpers above them are fixed).
         "if which == "
+    } else if sources.relays.values().any(|(name, _)| *name == file.name) {
+        "pub fn call_"
     } else {
         let generated = sources.appended.values().any(|extra| {
             file.text.ends_with(extra.as_str()) && offset >= file.text.len() - extra.len()
@@ -721,4 +812,87 @@ fn harness_of(map: &crate::program::SourceMap, sources: &Sources, span: Span) ->
     let at = before.rfind(marker)? + marker.len();
     let digits: String = file.text[at..].chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
+}
+
+/// The `#[fuzz]` entries of a test target: `fn name(input: &Bytes) -> Unit`
+/// functions the driver calls with arbitrary bytes. `module` is the test
+/// target's module path and `file` the name it is loaded under.
+pub fn plan_entries(text: &str, file: &str) -> Result<Vec<Target>, String> {
+    let module = crate::parser::parse(text).map_err(|diagnostic| diagnostic.render(file, text))?;
+    let path = module
+        .items
+        .iter()
+        .find_map(|item| match &item.item.kind {
+            ItemKind::Module(path) => Some(path.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let mut targets = Vec::new();
+    for item in &module.items {
+        let ItemKind::Function(function) = &item.item.kind else {
+            continue;
+        };
+        if !item.attributes.iter().any(|a| a.kind == "fuzz") {
+            continue;
+        }
+        let span = item.item.span;
+        let source = (text, 0);
+        let shape = match function.parameters.as_slice() {
+            [parameter]
+                if !parameter.erased
+                    && function.generics.is_empty()
+                    && slice(source, parameter.ty.span).replace(' ', "") == "&Bytes"
+                    && slice(source, function.result.span).trim() == "Unit" =>
+            {
+                Ok(Layout {
+                    slots: vec![Slot::Collection {
+                        name: parameter.name.clone(),
+                        offset: 0,
+                        collection: Collection::Bytes,
+                        minimum: 0,
+                        maximum: ENTRY_LENGTH,
+                        passing: Passing::Shared,
+                    }],
+                    fixed: 2,
+                })
+            }
+            _ => Err("a #[fuzz] entry takes one `&Bytes` and returns Unit".to_owned()),
+        };
+        let effects: Vec<String> = function
+            .effects
+            .iter()
+            .map(|effect| slice(source, effect.span).trim().to_owned())
+            .collect();
+        let shape = match effects.iter().find(|e| !ALLOWED_EFFECTS.contains(&e.as_str())) {
+            Some(effect) => Err(format!("effect `{effect}`")),
+            None => shape,
+        };
+        let mut constants = Vec::new();
+        if let Some(body) = &function.body {
+            collect_constants_block(body, &mut constants);
+        }
+        constants.sort_unstable();
+        constants.dedup();
+        targets.push(Target {
+            name: qualified(&path, &function.name),
+            module: path.clone(),
+            span,
+            harness: shape,
+            constants,
+            function: function.name.clone(),
+            public: true,
+            entry: false,
+            parameters: function
+                .parameters
+                .iter()
+                .map(|p| (p.name.clone(), p.erased))
+                .collect(),
+            preconditions: Vec::new(),
+            fuzz_entry: true,
+            file: file.to_owned(),
+            range: (span.start, span.end),
+            effects: effects.join(", "),
+        });
+    }
+    Ok(targets)
 }

@@ -2,7 +2,7 @@
 //! would let the prover remove the check, and write the input as a
 //! `kush test` case. See docs/proof-fuzz.md, section 3.
 use super::engine::{element_ranges, element_width, get, put, signed};
-use super::harness::{Collection, Layout, Passing, Scalar, Slot, Target, MAX_EXTRA_LENGTH};
+use super::harness::{Collection, Layout, Passing, Scalar, Slot, Target};
 use crate::executable::{Container, ObligationKind};
 
 /// A decoded argument: a scalar, or a collection's elements.
@@ -61,11 +61,12 @@ pub fn encode(layout: &Layout, values: &[Value]) -> Vec<u8> {
                     offset,
                     collection,
                     minimum,
+                    maximum,
                     ..
                 },
                 Value::List(items),
             ) => {
-                let extra = items.len().saturating_sub(*minimum).min(MAX_EXTRA_LENGTH);
+                let extra = items.len().saturating_sub(*minimum).min(*maximum);
                 put(&mut tape, *offset, 2, extra as i128);
                 let width = element_width(*collection);
                 for item in items.iter().take(minimum + extra) {
@@ -484,11 +485,15 @@ pub fn reproduction(
             _ => return None,
         }
     }
-    let module = target.module.last()?;
+    // An entry lives in the test target itself.
+    let callee = if target.fuzz_entry {
+        target.function.clone()
+    } else {
+        format!("{}.{}", target.module.last()?, target.function)
+    };
     Some(format!(
-        "#[test]\nfn {}() -> Unit ! {{io, alloc, panic}} {{\n    // kush fuzz: {what}\n{body}    let _ = {module}.{}({});\n}}\n",
+        "#[test]\nfn {}() -> Unit ! {{io, alloc, panic}} {{\n    // kush fuzz: {what}\n{body}    let _ = {callee}({});\n}}\n",
         test_name(target, line),
-        target.function,
         arguments.join(", ")
     ))
 }
