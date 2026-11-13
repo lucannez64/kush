@@ -6265,14 +6265,19 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Fuel per limb and the source size limit already bound numeral work; drop MAX_DIGITS in natural.rs and std.natural.",
-      "commit": null,
+      "commit": "8aa27ea",
       "log": [
         {
           "time": "2026-11-13 08:58:41",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:00:06",
+          "who": "agent",
+          "text": "done 8aa27ea"
         }
       ]
     }
