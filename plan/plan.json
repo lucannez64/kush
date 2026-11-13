@@ -6152,10 +6152,21 @@
       "deps": [
         "KIK-SUBST"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "whnf and full normalization: beta, delta, NatElim, numerals, Transport, J; budgets.",
-      "commit": null,
-      "log": []
+      "commit": "3cdfc9a",
+      "log": [
+        {
+          "time": "2026-11-13 09:16:59",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:23:13",
+          "who": "agent",
+          "text": "done 3cdfc9a"
+        }
+      ]
     },
     {
       "id": "KIK-CHECK",
