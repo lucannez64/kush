@@ -3,7 +3,9 @@ module kernel.tests.main;
 use std.result.Result;
 use std.test;
 use std.text;
+use kernel.engine;
 use kernel.error;
+use kernel.normal;
 use kernel.printer;
 use kernel.reader;
 use kernel.store;
@@ -250,4 +252,51 @@ fn spines_split_and_rebuild_applications() -> Unit ! {io, alloc, panic} {
     shows(&s, args[0], &Bytes.from("zero"));
     shows(&s, args[2], &Bytes.from("(var 0)"));
     test.equal_i64(subst.apply(&mut s, head, &args), t);
+}
+
+fn reduce(k: &mut engine.Kernel, source: &Bytes, full: Bool) -> Bytes ! {alloc, panic} {
+    let t = parse(&mut k.store, source);
+    engine.begin(k);
+    let result = if full { normal.normal(k, t) } else { normal.whnf(k, t) };
+    match result {
+        Result.Ok(r) => printer.term_into(&k.store, Bytes.with_capacity(0), r),
+        Result.Err(code) => text.format_i64_into(Bytes.from("error "), code),
+    }
+}
+
+#[test]
+fn weak_head_reduction_stops_at_the_head() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let name = term.name(&mut k.store, &Bytes.from("two"));
+    let ty = term.nat(&mut k.store);
+    let value = parse(&mut k.store, &Bytes.from("(succ (succ zero))"));
+    engine.admit_def(&mut k, name, 0, ty, value);
+    // Beta and delta at the head; the body under the binder is left alone.
+    let source = Bytes.from("(app (lam nat (lam nat (app (lam nat (var 0)) (var 1)))) (global two))");
+    same(
+        &reduce(&mut k, &source, false),
+        &Bytes.from("(lam nat (app (lam nat (var 0)) (global two)))"),
+    );
+    same(&reduce(&mut k, &source, true), &Bytes.from("(lam nat (lit 2))"));
+    same(&reduce(&mut k, &Bytes.from("(global two)"), false), &Bytes.from("(succ (succ zero))"));
+    // A stuck elimination is its own weak head normal form.
+    same(
+        &reduce(&mut k, &Bytes.from("(natelim (lam nat nat) zero (lam nat (lam nat (var 0))) (var 3))"), false),
+        &Bytes.from("(natelim (lam nat nat) zero (lam nat (lam nat (var 0))) (var 3))"),
+    );
+}
+
+#[test]
+fn reduction_budgets_fail_closed() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let deep = Bytes.from("(natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 20))");
+    same(&reduce(&mut k, &deep, true), &Bytes.from("(lit 20)"));
+    k.max_steps = 50;
+    same(&reduce(&mut k, &deep, true), &text.format_i64_into(Bytes.from("error "), error.BUDGET));
+    k.max_steps = engine.STEPS;
+    k.max_depth = 3;
+    same(
+        &reduce(&mut k, &Bytes.from("(succ (succ (succ (succ (var 0)))))"), true),
+        &text.format_i64_into(Bytes.from("error "), error.DEPTH),
+    );
 }

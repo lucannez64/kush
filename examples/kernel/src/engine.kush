@@ -1,0 +1,214 @@
+module kernel.engine;
+
+// The kernel state: the store, the global environment, and the budgets of
+// the operation in progress.
+//
+// Global entries are interned objects too:
+//
+//     [DEF, levels, type, value]
+//     [DATA, levels, prop, parameter list, constructor list, family type]
+//     [CONSTRUCTOR, data name, index, type]
+//
+// `define`/`define_data` (kernel.check) are the only way entries are added
+// for checking; `admit_*` below inserts an entry without checking it and is
+// used by those functions after checking, and by the `normalize` command,
+// which replays declarations the Rust kernel has already checked.
+
+use std.result.Result;
+use kernel.error;
+use kernel.store;
+use kernel.store.Store;
+use kernel.term;
+
+pub const DEF: i64 = 40;
+pub const DATA: i64 = 41;
+pub const CONSTRUCTOR: i64 = 42;
+
+/// Default budgets, the Rust kernel's defaults.
+pub const STEPS: i64 = 100000;
+pub const NESTING: i64 = 128;
+
+pub struct Kernel {
+    pub store: Store,
+    /// Open addressing from a name id to its entry id: `keys` holds name
+    /// id + 1 (0 for empty).
+    keys: Vec<i64>,
+    values: Vec<i64>,
+    entries: i64,
+    /// Remaining steps and current nesting of the operation in progress.
+    fuel: i64,
+    depth: i64,
+    pub max_steps: i64,
+    pub max_depth: i64,
+    /// Universe parameters in scope (`u_0 .. u_{levels-1}`).
+    pub levels: i64,
+    /// Cache generation of the operation in progress (normal forms).
+    pub generation: i64,
+}
+
+fn zeros(count: i64) -> Vec<i64> ! {alloc, panic} {
+    let mut out: Vec<i64> = Vec.with_capacity(count);
+    let mut i = 0;
+    while i < count {
+        out = out.push(0);
+        i = i + 1;
+    }
+    out
+}
+
+pub fn new() -> Kernel ! {alloc, panic} {
+    Kernel {
+        store: store.new(),
+        keys: zeros(1024),
+        values: zeros(1024),
+        entries: 0,
+        fuel: STEPS,
+        depth: 0,
+        max_steps: STEPS,
+        max_depth: NESTING,
+        levels: 0,
+        generation: 0,
+    }
+}
+
+/// Start a public operation: a full budget and a fresh normal-form cache.
+pub fn begin(k: &mut Kernel) -> Unit ! {panic} {
+    k.fuel = k.max_steps;
+    k.depth = 0;
+    k.generation = store.fresh_generation(&mut k.store);
+}
+
+/// Charge `units` steps.
+pub fn charge(k: &mut Kernel, units: i64) -> Result<Unit, i64> ! {panic} {
+    if k.fuel < units { return Result.Err(error.BUDGET); }
+    k.fuel = k.fuel - units;
+    Result.Ok(())
+}
+
+/// Enter one level of recursion: one step and one level of nesting.
+pub fn enter(k: &mut Kernel) -> Result<Unit, i64> ! {panic} {
+    if k.depth >= k.max_depth { return Result.Err(error.DEPTH); }
+    charge(k, 1)?;
+    k.depth = k.depth + 1;
+    Result.Ok(())
+}
+
+pub fn leave(k: &mut Kernel) -> Unit ! {panic} { k.depth = k.depth - 1; }
+
+fn slot_of(k: &Kernel, name: i64) -> i64 ! {panic} {
+    let mask = k.keys.len() - 1;
+    let mut slot = Int.wrapping_mul(name + 1, 2654435761) & mask;
+    while k.keys[slot] != 0 && k.keys[slot] != name + 1 {
+        slot = (slot + 1) & mask;
+    }
+    slot
+}
+
+/// The entry of a global, or -1.
+pub fn lookup(k: &Kernel, name: i64) -> i64 ! {panic} {
+    let slot = slot_of(k, name);
+    if k.keys[slot] == 0 { -1 } else { k.values[slot] }
+}
+
+pub fn contains(k: &Kernel, name: i64) -> Bool ! {panic} { lookup(k, name) >= 0 }
+
+fn grow(k: &mut Kernel) -> Unit ! {alloc, panic} {
+    let size = 2 * k.keys.len();
+    let mask = size - 1;
+    let mut keys = zeros(size);
+    let mut values = zeros(size);
+    let mut i = 0;
+    while i < k.keys.len() {
+        let key = k.keys[i];
+        if key != 0 {
+            let mut slot = Int.wrapping_mul(key, 2654435761) & mask;
+            while keys[slot] != 0 {
+                slot = (slot + 1) & mask;
+            }
+            keys[slot] = key;
+            values[slot] = k.values[i];
+        }
+        i = i + 1;
+    }
+    let old_keys = k.keys.replace(keys);
+    let old_values = k.values.replace(values);
+    drop(old_keys);
+    drop(old_values);
+}
+
+fn insert(k: &mut Kernel, name: i64, entry: i64) -> Unit ! {alloc, panic} {
+    let slot = slot_of(k, name);
+    k.keys[slot] = name + 1;
+    k.values[slot] = entry;
+    k.entries = k.entries + 1;
+    if 2 * k.entries > k.keys.len() { grow(k); }
+}
+
+fn entry(k: &mut Kernel, tag: i64, a: i64, b: i64, c: i64, d: i64, e: i64, count: i64) -> i64 ! {alloc, panic} {
+    store.begin(&mut k.store, tag);
+    store.add(&mut k.store, a);
+    store.add(&mut k.store, b);
+    store.add(&mut k.store, c);
+    if count > 3 { store.add(&mut k.store, d); }
+    if count > 4 { store.add(&mut k.store, e); }
+    store.finish(&mut k.store, 0)
+}
+
+/// Insert a definition without checking it (see the module comment).
+pub fn admit_def(k: &mut Kernel, name: i64, levels: i64, ty: i64, value: i64) -> Unit ! {alloc, panic} {
+    let id = entry(k, DEF, levels, ty, value, 0, 0, 3);
+    insert(k, name, id);
+}
+
+/// Insert a data family and its constructors without checking them.
+/// `family_type` is `(params) -> Sort`; constructor types are given in
+/// constructor order as a list.
+pub fn admit_data(
+    k: &mut Kernel,
+    name: i64,
+    levels: i64,
+    prop: Bool,
+    params: i64,
+    constructors: i64,
+    family_type: i64,
+    constructor_types: i64,
+) -> Unit ! {alloc, panic} {
+    store.begin(&mut k.store, DATA);
+    store.add(&mut k.store, levels);
+    store.add(&mut k.store, if prop { 1 } else { 0 });
+    store.add(&mut k.store, params);
+    store.add(&mut k.store, constructors);
+    store.add(&mut k.store, family_type);
+    let id = store.finish(&mut k.store, 0);
+    insert(k, name, id);
+    let count = term.list_len(&k.store, constructors);
+    let mut i = 0;
+    while i < count {
+        let constructor = term.list_at(&k.store, constructors, i);
+        let ty = term.list_at(&k.store, constructor_types, i);
+        let entry_id = entry(k, CONSTRUCTOR, name, i, ty, 0, 0, 3);
+        insert(k, term.field(&k.store, constructor, 0), entry_id);
+        i = i + 1;
+    }
+}
+
+pub fn kind(k: &Kernel, entry: i64) -> i64 ! {panic} { term.tag(&k.store, entry) }
+
+/// Field `i` of an entry (see the layouts in the module comment).
+pub fn part(k: &Kernel, entry: i64, i: i64) -> i64 ! {panic} { term.field(&k.store, entry, i) }
+
+/// The number of universe parameters of a global's entry.
+pub fn entry_levels(k: &Kernel, entry: i64) -> i64 ! {panic} {
+    let tag = kind(k, entry);
+    if tag == CONSTRUCTOR {
+        let data = lookup(k, part(k, entry, 0));
+        return part(k, data, 0);
+    }
+    part(k, entry, 0)
+}
+
+/// The declared type of a global's entry (before level instantiation).
+pub fn entry_type(k: &Kernel, entry: i64) -> i64 ! {panic} {
+    let tag = kind(k, entry);
+    if tag == DEF { part(k, entry, 1) } else if tag == DATA { part(k, entry, 4) } else { part(k, entry, 2) }
+}

@@ -187,6 +187,17 @@ pub fn head(s: &Store, t: i64) -> i64 ! {panic} {
     current
 }
 
+/// The number of arguments of an application spine.
+pub fn argument_count(s: &Store, t: i64) -> i64 ! {panic} {
+    let mut count = 0;
+    let mut current = t;
+    while term.tag(s, current) == term.APP {
+        current = term.field(s, current, 0);
+        count = count + 1;
+    }
+    count
+}
+
 /// The arguments of an application spine, in source order.
 pub fn arguments(s: &Store, t: i64) -> Vec<i64> ! {alloc, panic} {
     let mut reversed: Vec<i64> = Vec.new();

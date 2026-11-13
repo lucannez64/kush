@@ -348,6 +348,12 @@ actually blocks the port; until then the workaround stands.
 - **`std.env.arg` and `std.fs.read` append into the buffer's existing
   capacity** and fail with `EFBIG` when it is full, so a zero-capacity buffer
   always fails; `main.kush` reads files with a doubling retry.
+- **No two-phase borrows for calls**: `normal(k, term.field(&k.store, t, 3))`
+  is rejected because `k` is lent exclusively while a later argument still
+  reads it. Reads of the store are hoisted into `let`s first. Two disjoint
+  field borrows (`&mut k.store` beside other fields) work.
+- **Module imports cannot be renamed**: `kernel.env` clashed with `std.env`,
+  so the kernel state module is `kernel.engine`.
 - **`refl` is a reserved name** even for a module function; the constructor is
   `term.reflexive`.
 - An explicit `drop` after a condition's borrow was rejected; fixed in the

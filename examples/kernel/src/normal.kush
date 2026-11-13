@@ -1,0 +1,349 @@
+module kernel.normal;
+
+// Reduction: weak head normal forms (for conversion and type inference) and
+// full normal forms (for `normalize` answers), with the Rust kernel's
+// reduction rules (docs/kernel.md, section 4):
+//
+//     beta       (λx:A. b) a                      -> b[a/x]
+//     delta      a definition                     -> its value, at the
+//                                                    reference's levels
+//     numerals   succ (lit n)                     -> lit (n + 1)
+//     NatElim    on zero, succ n, lit (n + 1)     -> the zero case / a step
+//     Transport  with a refl proof                -> the transported value
+//     J          with a refl proof                -> the refl case
+//     IndElim    on a constructor application     -> its branch applied to the
+//                                                    indices, locals, fields
+//                                                    and induction hypotheses
+//
+// The step is lazy, as in Rust: NatElim on succ n becomes
+// `step n (NatElim ... n)`, so a step that ignores its hypothesis never
+// computes the earlier cases.
+//
+// Every visit charges one step and one level of nesting (`engine.enter`), and
+// numeral work is charged per limb. Full normal forms are cached per
+// operation, so a shared subterm is normalized once.
+
+use std.natural;
+use std.option.Option;
+use std.result.Result;
+use kernel.engine;
+use kernel.engine.Kernel;
+use kernel.error;
+use kernel.store;
+use kernel.subst;
+use kernel.term;
+
+/// Charge the limb count of a numeral.
+
+fn charge_numeral(k: &mut Kernel, lit: i64) -> Result<Unit, i64> ! {panic} {
+    let limbs = store.size(&k.store, term.field(&k.store, lit, 0)) - 1;
+    engine.charge(k, if limbs < 1 { 1 } else { limbs })
+}
+
+/// `lit (n + 1)` for a numeral `lit n`.
+fn successor(k: &mut Kernel, lit: i64) -> Result<i64, i64> ! {alloc, panic} {
+    charge_numeral(k, lit)?;
+    let value = term.to_natural(&k.store, term.field(&k.store, lit, 0));
+    let next = natural.successor(&value);
+    let id = term.natural_id(&mut k.store, &next);
+    Result.Ok(term.lit(&mut k.store, id))
+}
+
+/// `n - 1` for a numeral `lit n` (never zero), as a numeral or `zero`.
+fn predecessor(k: &mut Kernel, lit: i64) -> Result<i64, i64> ! {alloc, panic} {
+    charge_numeral(k, lit)?;
+    let value = term.to_natural(&k.store, term.field(&k.store, lit, 0));
+    let previous = match natural.predecessor(&value) {
+        Option.Some(n) => n,
+        Option.None => return Result.Ok(term.zero(&mut k.store)),
+    };
+    let id = term.natural_id(&mut k.store, &previous);
+    Result.Ok(term.lit(&mut k.store, id))
+}
+
+/// The value of a definition at the reference's levels, or -1 when the
+/// global does not unfold (a data family or constructor).
+fn unfold(k: &mut Kernel, global: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let name = term.field(&k.store, global, 0);
+    let entry = engine.lookup(k, name);
+    if entry < 0 { return Result.Err(error.UNKNOWN_GLOBAL); }
+    if engine.kind(k, entry) != engine.DEF { return Result.Ok(-1); }
+    let value = engine.part(k, entry, 2);
+    let levels = term.field(&k.store, global, 1);
+    subst.instantiate_levels(&mut k.store, value, levels)
+}
+
+/// `step n (NatElim motive zero step n)`.
+fn induction_step(k: &mut Kernel, elim: i64, n: i64) -> i64 ! {alloc, panic} {
+    let motive = term.field(&k.store, elim, 0);
+    let zero_case = term.field(&k.store, elim, 1);
+    let step = term.field(&k.store, elim, 2);
+    let previous = term.natelim(&mut k.store, motive, zero_case, step, n);
+    let applied = term.app(&mut k.store, step, n);
+    term.app(&mut k.store, applied, previous)
+}
+
+/// One constructor step of `IndElim data motive branches scrutinee`, where
+/// `scrutinee` is already reduced; -1 when it is not a constructor of `data`
+/// applied to all its arguments (the elimination stays neutral).
+fn elim_step(k: &mut Kernel, elim: i64, scrutinee: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let data = term.field(&k.store, elim, 0);
+    let motive = term.field(&k.store, elim, 1);
+    let branches = term.field(&k.store, elim, 2);
+    let head = subst.head(&k.store, scrutinee);
+    if term.tag(&k.store, head) != term.GLOBAL { return Result.Ok(-1); }
+    let head_name = term.field(&k.store, head, 0);
+    let entry = engine.lookup(k, head_name);
+    if entry < 0 || engine.kind(k, entry) != engine.CONSTRUCTOR || engine.part(k, entry, 0) != data {
+        return Result.Ok(-1);
+    }
+    let index = engine.part(k, entry, 1);
+    let family = engine.lookup(k, data);
+    let params_list = engine.part(k, family, 2);
+    let params = term.list_len(&k.store, params_list);
+    let constructor_list = engine.part(k, family, 3);
+    let constructor = term.list_at(&k.store, constructor_list, index);
+    let locals = term.list_len(&k.store, term.field(&k.store, constructor, 1));
+    let fields = term.field(&k.store, constructor, 2);
+    let field_count = term.list_len(&k.store, fields);
+    let arguments = subst.arguments(&k.store, scrutinee);
+    let arity = params + locals;
+    if arguments.len() != arity + field_count { return Result.Ok(-1); }
+    if index >= term.list_len(&k.store, branches) { return Result.Err(error.MISSING_BRANCH); }
+    engine.charge(k, 1)?;
+    let mut result = term.list_at(&k.store, branches, index);
+    let mut i = 0;
+    while i < arity {
+        result = term.app(&mut k.store, result, arguments[i]);
+        i = i + 1;
+    }
+    let mut f = 0;
+    while f < field_count {
+        let value = arguments[arity + f];
+        result = term.app(&mut k.store, result, value);
+        // A direct recursive field gets its induction hypothesis.
+        let field_type = term.list_at(&k.store, fields, f);
+        let field_head = subst.head(&k.store, field_type);
+        if term.tag(&k.store, field_head) == term.GLOBAL
+            && term.field(&k.store, field_head, 0) == data
+            && subst.argument_count(&k.store, field_type) == params {
+            let hypothesis = term.indelim(&mut k.store, data, motive, branches, value);
+            result = term.app(&mut k.store, result, hypothesis);
+        }
+        f = f + 1;
+    }
+    Result.Ok(result)
+}
+
+// ------------------------------------------------------- weak head normal
+
+/// The weak head normal form of `t`: reduce until the head is a binder, a
+/// sort, a constructor form, a variable or a stuck elimination.
+pub fn whnf(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    engine.enter(k)?;
+    let result = whnf_step(k, t);
+    engine.leave(k);
+    result
+}
+
+fn whnf_step(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let tag = term.tag(&k.store, t);
+    if tag == term.GLOBAL {
+        let value = unfold(k, t)?;
+        if value < 0 { return Result.Ok(t); }
+        return whnf(k, value);
+    }
+    if tag == term.APP {
+        let head = subst.head(&k.store, t);
+        let arguments = subst.arguments(&k.store, t);
+        let reduced = whnf(k, head)?;
+        if term.tag(&k.store, reduced) == term.LAM {
+            let body = term.field(&k.store, reduced, 1);
+            let mut next = subst.substitute(&mut k.store, body, arguments[0]);
+            let mut i = 1;
+            while i < arguments.len() {
+                next = term.app(&mut k.store, next, arguments[i]);
+                i = i + 1;
+            }
+            return whnf(k, next);
+        }
+        if reduced == head { return Result.Ok(t); }
+        return Result.Ok(subst.apply(&mut k.store, reduced, &arguments));
+    }
+    if tag == term.NATELIM {
+        let fourth = term.field(&k.store, t, 3);
+        let value = whnf(k, fourth)?;
+        let value_tag = term.tag(&k.store, value);
+        let second = term.field(&k.store, t, 1);
+        if value_tag == term.ZERO { return whnf(k, second); }
+        if value_tag == term.SUCC {
+            let predecessor_term = term.field(&k.store, value, 0);
+            let next = induction_step(k, t, predecessor_term);
+            return whnf(k, next);
+        }
+        if value_tag == term.LIT {
+            let previous = predecessor(k, value)?;
+            let next = induction_step(k, t, previous);
+            return whnf(k, next);
+        }
+        return Result.Ok(t);
+    }
+    if tag == term.TRANSPORT || tag == term.EQELIM {
+        let proof_term = term.field(&k.store, t, if tag == term.TRANSPORT { 4 } else { 5 });
+        let proof = whnf(k, proof_term)?;
+        if term.tag(&k.store, proof) != term.REFL { return Result.Ok(t); }
+        let target = term.field(&k.store, t, if tag == term.TRANSPORT { 5 } else { 4 });
+        return whnf(k, target);
+    }
+    if tag == term.INDELIM {
+        let fourth = term.field(&k.store, t, 3);
+        let scrutinee = whnf(k, fourth)?;
+        let next = elim_step(k, t, scrutinee)?;
+        if next < 0 { return Result.Ok(t); }
+        return whnf(k, next);
+    }
+    Result.Ok(t)
+}
+
+// ------------------------------------------------------------ normal form
+
+/// The full normal form of `t`, also under binders.
+pub fn normal(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let hit = store.cached(&k.store, k.generation, t, -1);
+    if hit >= 0 { return Result.Ok(hit); }
+    engine.enter(k)?;
+    let result = normal_step(k, t);
+    engine.leave(k);
+    let value = result?;
+    store.remember(&mut k.store, k.generation, t, -1, value);
+    Result.Ok(value)
+}
+
+fn normal_list(k: &mut Kernel, list: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let n = term.list_len(&k.store, list);
+    let mut items: Vec<i64> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let element = term.list_at(&k.store, list, i);
+        let item = normal(k, element)?;
+        items = items.push(item);
+        i = i + 1;
+    }
+    Result.Ok(term.list(&mut k.store, &items))
+}
+
+/// Normalize fields `0..count` of `t` and rebuild it with the same tag.
+fn normal_fields(k: &mut Kernel, t: i64, count: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let tag = term.tag(&k.store, t);
+    let mut parts: Vec<i64> = Vec.with_capacity(count);
+    let mut i = 0;
+    while i < count {
+        let child = term.field(&k.store, t, i);
+        let part = normal(k, child)?;
+        parts = parts.push(part);
+        i = i + 1;
+    }
+    Result.Ok(rebuild(k, tag, &parts))
+}
+
+fn rebuild(k: &mut Kernel, tag: i64, p: &Vec<i64>) -> i64 ! {alloc, panic} {
+    let s = &mut k.store;
+    if tag == term.PI { return term.pi(s, p[0], p[1]); }
+    if tag == term.LAM { return term.lam(s, p[0], p[1]); }
+    if tag == term.APP { return term.app(s, p[0], p[1]); }
+    if tag == term.REFL { return term.reflexive(s, p[0], p[1]); }
+    if tag == term.EQ { return term.eq(s, p[0], p[1], p[2]); }
+    if tag == term.NATELIM { return term.natelim(s, p[0], p[1], p[2], p[3]); }
+    if tag == term.TRANSPORT { return term.transport(s, p[0], p[1], p[2], p[3], p[4], p[5]); }
+    term.eqelim(s, p[0], p[1], p[2], p[3], p[4], p[5])
+}
+
+fn normal_step(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let tag = term.tag(&k.store, t);
+    if tag == term.LIT {
+        charge_numeral(k, t)?;
+        return Result.Ok(t);
+    }
+    if tag == term.SUCC {
+        let first = term.field(&k.store, t, 0);
+        let value = normal(k, first)?;
+        let value_tag = term.tag(&k.store, value);
+        if value_tag == term.ZERO {
+            let one = natural.successor(&natural.zero());
+            let id = term.natural_id(&mut k.store, &one);
+            return Result.Ok(term.lit(&mut k.store, id));
+        }
+        if value_tag == term.LIT { return successor(k, value); }
+        return Result.Ok(term.succ(&mut k.store, value));
+    }
+    if tag == term.GLOBAL {
+        let value = unfold(k, t)?;
+        if value < 0 { return Result.Ok(t); }
+        return normal(k, value);
+    }
+    if tag == term.APP {
+        let first = term.field(&k.store, t, 0);
+        let function = normal(k, first)?;
+        if term.tag(&k.store, function) == term.LAM {
+            let body = term.field(&k.store, function, 1);
+            let second = term.field(&k.store, t, 1);
+            let replaced = subst.substitute(&mut k.store, body, second);
+            return normal(k, replaced);
+        }
+        let second = term.field(&k.store, t, 1);
+        let argument = normal(k, second)?;
+        return Result.Ok(term.app(&mut k.store, function, argument));
+    }
+    if tag == term.NATELIM {
+        let fourth = term.field(&k.store, t, 3);
+        let value = normal(k, fourth)?;
+        let value_tag = term.tag(&k.store, value);
+        let second = term.field(&k.store, t, 1);
+        if value_tag == term.ZERO { return normal(k, second); }
+        if value_tag == term.SUCC {
+            let predecessor_term = term.field(&k.store, value, 0);
+            let next = induction_step(k, t, predecessor_term);
+            return normal(k, next);
+        }
+        if value_tag == term.LIT {
+            let previous = predecessor(k, value)?;
+            let next = induction_step(k, t, previous);
+            return normal(k, next);
+        }
+        let first = term.field(&k.store, t, 0);
+        let motive = normal(k, first)?;
+        let second = term.field(&k.store, t, 1);
+        let zero_case = normal(k, second)?;
+        let third = term.field(&k.store, t, 2);
+        let step = normal(k, third)?;
+        return Result.Ok(term.natelim(&mut k.store, motive, zero_case, step, value));
+    }
+    if tag == term.TRANSPORT || tag == term.EQELIM {
+        let proof_field = if tag == term.TRANSPORT { 4 } else { 5 };
+        let proof_term = term.field(&k.store, t, proof_field);
+        let proof = normal(k, proof_term)?;
+        if term.tag(&k.store, proof) == term.REFL {
+            let target = term.field(&k.store, t, if tag == term.TRANSPORT { 5 } else { 4 });
+            return normal(k, target);
+        }
+        return normal_fields(k, t, 6);
+    }
+    if tag == term.INDELIM {
+        let fourth = term.field(&k.store, t, 3);
+        let scrutinee = normal(k, fourth)?;
+        let next = elim_step(k, t, scrutinee)?;
+        if next >= 0 { return normal(k, next); }
+        let second = term.field(&k.store, t, 1);
+        let motive = normal(k, second)?;
+        let third = term.field(&k.store, t, 2);
+        let branches = normal_list(k, third)?;
+        let first = term.field(&k.store, t, 0);
+        return Result.Ok(term.indelim(&mut k.store, first, motive, branches, scrutinee));
+    }
+    if tag == term.PI || tag == term.LAM || tag == term.REFL {
+        return normal_fields(k, t, 2);
+    }
+    if tag == term.EQ { return normal_fields(k, t, 3); }
+    // Variables, sorts, prop, nat, zero and scalars are normal.
+    Result.Ok(t)
+}

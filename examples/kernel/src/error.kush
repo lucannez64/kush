@@ -19,3 +19,7 @@ pub const OUT_OF_RANGE: i64 = 5;
 
 /// Whether a code means "ran out of budget" rather than "rejected".
 pub fn inconclusive(code: i64) -> Bool ! {} { code == BUDGET || code == DEPTH }
+/// A global that is not in the environment.
+pub const UNKNOWN_GLOBAL: i64 = 6;
+/// An eliminator without a branch for the scrutinee's constructor.
+pub const MISSING_BRANCH: i64 = 7;
