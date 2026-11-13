@@ -165,10 +165,10 @@ arbitrary code for two frames, and `random_cartridge` treats its input as a
 cartridge, seeded with four minimal headers in `fuzz/corpus/`.
 
 ```sh
-kush fuzz --runs 1000 --report     # about 5 minutes
+kush fuzz --runs 1000 --report     # about 80 seconds
 ```
 
-Of 535 checks, 262 are proved and 176 attacked: 82% proved or attacked
+Of 535 checks, 262 are proved and 181 attacked: 83% proved or attacked
 (60% without the entries). It found one real bug: a file too short to hold
 a header crashed in `cartridge.title`, which `main` calls before
 `cartridge.kind` rejects the file. Both header readers now check the length

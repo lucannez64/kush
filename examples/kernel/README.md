@@ -65,7 +65,7 @@ seeds in `fuzz/corpus/` are `kush core` dumps of two examples; random bytes
 alone never get through the reader.
 
 ```sh
-kush fuzz --runs 1000 --report     # about 30 seconds
+kush fuzz --runs 1000 --report     # about 10 seconds
 ```
 
 Of 369 checks, 78 are proved and 156 attacked: 63% proved or attacked (29%

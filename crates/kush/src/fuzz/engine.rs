@@ -1,7 +1,7 @@
 //! PROOF-FUZZ driver: build the harness program once, instrumented, then run
 //! it on generated tapes, one process per input, keeping the inputs that
-//! reach a new obligation site or come closer to failing one. Everything is
-//! deterministic for a given seed. See docs/proof-fuzz.md, sections 1 and 2.
+//! reach a new obligation site or come closer to failing one. Harnesses run
+//! in parallel; everything is deterministic for a given seed. See docs/proof-fuzz.md, sections 1 and 2.
 use super::harness::{self, Assembled, Collection, Layout, Scalar, Slot, Target};
 use super::{Outcome, RunRecord};
 use crate::executable::{Executable, ObligationKind};
@@ -24,7 +24,11 @@ pub struct Options {
     pub time: Option<Duration>,
     pub seed: u64,
     /// Wall-clock limit of one run; a run that exceeds it is not a find.
+    /// Once a harness has finished a run, its limit tightens to ten times
+    /// its slowest finished run (at least 100 ms).
     pub timeout: Duration,
+    /// Harnesses fuzzed (and findings minimized) at once.
+    pub jobs: usize,
     /// Seed inputs of `#[fuzz]` entries: `<corpus>/<entry name>/*`, each
     /// file the raw bytes of one input.
     pub corpus: Option<PathBuf>,
@@ -38,9 +42,16 @@ impl Default for Options {
             time: None,
             seed: 0,
             timeout: Duration::from_secs(2),
+            jobs: default_jobs(),
             corpus: None,
         }
     }
+}
+
+/// Half the machine's cores: fuzzing is one short process per input, so
+/// this keeps the machine responsive while running several at once.
+pub fn default_jobs() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
 }
 
 /// Where an obligation site is, in source terms.
@@ -147,7 +158,8 @@ pub struct Session {
     sites: Vec<Option<usize>>,
     pub reports: Vec<SiteReport>,
     binary: PathBuf,
-    record: PathBuf,
+    /// Where the harness program and its run records live.
+    directory: PathBuf,
     /// Element accesses the prover proved in bounds in the original program.
     pub bounds_proved: usize,
     /// Checks the prover discharged in the original program, one per
@@ -319,7 +331,7 @@ impl Session {
             targets,
             sites,
             reports,
-            record: directory.join("record"),
+            directory: directory.to_path_buf(),
             binary,
             assembled,
             bounds_proved: checked.bounds_report().0,
@@ -339,10 +351,13 @@ impl Session {
             .is_none_or(|filter| self.targets[target].name.contains(filter.as_str()))
     }
 
-    /// Run every selected harness for its budget.
+    /// Run every selected harness for its budget. Each harness explores on
+    /// its own (its own random stream and coverage), running its inputs in
+    /// fixed batches spread over `options.jobs` processes and folded in
+    /// order, so a session does not depend on how many run at once.
     pub fn fuzz(&mut self, options: &Options) {
         let start = Instant::now();
-        let mut random = Random::new(options.seed);
+        let mut jobs = Vec::new();
         for number in 0..self.assembled.sources.harnesses.len() {
             let target = self.assembled.sources.harnesses[number];
             if !self.selected(target, options) {
@@ -353,7 +368,6 @@ impl Session {
                 .clone()
                 .expect("a harness has a layout");
             let dictionary = dictionary(&self.targets[target].constants);
-            let mut corpus: Vec<Vec<u8>> = Vec::new();
             let mut queue = seeds(&layout, &dictionary);
             if self.targets[target].fuzz_entry
                 && let Some(corpus) = &options.corpus
@@ -361,78 +375,124 @@ impl Session {
                 // Corpus files run first (the queue is popped from the end).
                 queue.extend(entry_seeds(&corpus.join(&self.targets[target].name)));
             }
-            let mut run = 0;
-            while run < options.runs {
-                if options.time.is_some_and(|limit| start.elapsed() >= limit) {
-                    return;
-                }
-                // Seeds always join the corpus; mutants only when they
-                // reach a new site or come closer to failing one.
-                let (tape, seed) = match queue.pop() {
-                    Some(tape) => (tape, true),
-                    None if corpus.is_empty() => (vec![0; layout.fixed], true),
-                    None => (
-                        {
-                        let parent = &corpus[random.below(corpus.len())];
-                        let other = &corpus[random.below(corpus.len())];
-                        mutate(parent, other, &layout, &dictionary, &mut random)
-                        },
-                        false,
-                    ),
-                };
-                run += 1;
-                self.stats[target].runs += 1;
-                let Some(record) = self.execute(number, &tape, options.timeout) else {
-                    self.stats[target].lost += 1;
-                    continue;
-                };
-                match record.outcome {
-                    Outcome::Exited => self.stats[target].exited += 1,
-                    Outcome::Failed(_) => self.stats[target].failed += 1,
-                    Outcome::Unattributed | Outcome::StackExhausted => self.stats[target].other += 1,
-                }
-                if self.absorb(target, &layout, &tape, run, &record) || seed {
-                    corpus.push(tape);
-                }
+            jobs.push(Job {
+                number,
+                layout,
+                dictionary,
+                queue,
+            });
+        }
+        let worker = Worker {
+            binary: &self.binary,
+            sites: &self.sites,
+            timeout: options.timeout,
+        };
+        let deadline = options.time.map(|limit| start + limit);
+        let runs: Vec<HarnessRun> = jobs
+            .iter()
+            .map(|job| worker.fuzz(job, options, deadline, &self.directory))
+            .collect();
+        for run in runs {
+            self.fold(run);
+        }
+        self.finish_findings(options);
+    }
+
+    /// Fold one harness's runs into the reports.
+    fn fold(&mut self, run: HarnessRun) {
+        let target = self.assembled.sources.harnesses[run.number];
+        let stats = &mut self.stats[target];
+        stats.runs += run.stats.runs;
+        stats.lost += run.stats.lost;
+        stats.exited += run.stats.exited;
+        stats.failed += run.stats.failed;
+        stats.other += run.stats.other;
+        for (site, (hits, margin)) in run.hits.iter().zip(&run.margins).enumerate() {
+            let Some(Some(report)) = self.sites.get(site).copied() else {
+                continue;
+            };
+            self.reports[report].hits += hits;
+            self.reports[report].margin = self.reports[report].margin.min(*margin);
+        }
+        let layout = self.targets[target].harness.clone().expect("a harness has a layout");
+        for (site, number, tape) in run.failures {
+            let Some(Some(report)) = self.sites.get(site).copied() else {
+                continue;
+            };
+            if self.reports[report].finding.is_none() {
+                self.reports[report].finding = Some(self.finding(target, &layout, &tape, number));
             }
-            self.finish_findings(number, options);
         }
     }
 
-    /// Minimize the new findings of harness `number`, then attach their
-    /// suggestion and reproduction.
-    fn finish_findings(&mut self, number: usize, options: &Options) {
-        let target = self.assembled.sources.harnesses[number];
-        let Ok(layout) = self.targets[target].harness.clone() else {
-            return;
-        };
-        for report in 0..self.reports.len() {
-            let Some(finding) = &self.reports[report].finding else {
+    fn finding(&self, target: usize, layout: &Layout, tape: &[u8], run: usize) -> Finding {
+        Finding {
+            target,
+            tape: tape.to_vec(),
+            inputs: decode(layout, tape),
+            run,
+            shrink_runs: 0,
+            public: self.targets[target].public,
+            suggestion: String::new(),
+            reproduction: None,
+        }
+    }
+
+    /// Minimize the new findings, `options.jobs` at a time, then attach
+    /// their suggestion and reproduction.
+    fn finish_findings(&mut self, options: &Options) {
+        let mut jobs = Vec::new();
+        for (report, site) in self.reports.iter().enumerate() {
+            let Some(finding) = &site.finding else {
                 continue;
             };
-            if finding.target != target || !finding.suggestion.is_empty() {
+            if !finding.suggestion.is_empty() {
                 continue;
             }
-            let (tape, shrink_runs) = super::shrink::shrink(&layout, &finding.tape, SHRINK_BUDGET, |tape| {
+            let Some(number) = self
+                .assembled
+                .sources
+                .harnesses
+                .iter()
+                .position(|&t| t == finding.target)
+            else {
+                continue;
+            };
+            let Ok(layout) = self.targets[finding.target].harness.clone() else {
+                continue;
+            };
+            jobs.push((report, number, layout, finding.tape.clone()));
+        }
+        let worker = Worker {
+            binary: &self.binary,
+            sites: &self.sites,
+            timeout: options.timeout,
+        };
+        let shrunk = parallel(&jobs, options.jobs, &self.directory, |(report, number, layout, tape), record| {
+            super::shrink::shrink(layout, tape, SHRINK_BUDGET, |tape| {
                 matches!(
-                    self.execute(number, tape, options.timeout).map(|r| r.outcome),
-                    Some(Outcome::Failed(site)) if self.sites.get(site).copied().flatten() == Some(report)
+                    worker.run(*number, layout, tape, record).map(|r| r.outcome),
+                    Some(Outcome::Failed(site)) if worker.sites.get(site).copied().flatten() == Some(*report)
                 )
-            });
+            })
+        });
+        for ((report, _, layout, _), (tape, shrink_runs)) in jobs.iter().zip(shrunk) {
+            let report = *report;
             let site = &self.reports[report];
+            let target = site.finding.as_ref().expect("a finding").target;
             let owner = &self.targets[site.target.unwrap_or(target)];
             let suggestion = super::shrink::suggestion(site.kind, &site.text, &site.goal, owner);
             let what = format!("{} check at {}", site.kind.label(), site.location);
-            let values = super::shrink::values(&layout, &tape);
+            let values = super::shrink::values(layout, &tape);
             let reproduction = super::shrink::reproduction(
                 &self.targets[target],
-                &layout,
+                layout,
                 &values,
                 &what,
                 site.location.line,
             );
             let finding = self.reports[report].finding.as_mut().expect("checked above");
-            finding.inputs = decode(&layout, &tape);
+            finding.inputs = decode(layout, &tape);
             finding.tape = tape;
             finding.shrink_runs = shrink_runs;
             finding.suggestion = suggestion;
@@ -462,11 +522,11 @@ impl Session {
                 };
                 self.stats[target].runs += 1;
                 if let Some(record) = self.execute(number, &tape, options.timeout) {
-                    self.absorb(target, &layout, &tape, 0, &record);
+                    self.absorb(target, &layout, &tape, &record);
                 }
             }
-            self.finish_findings(number, options);
         }
+        self.finish_findings(options);
     }
 
     /// `--save`: write each finding's reproduction into the test target
@@ -530,14 +590,84 @@ impl Session {
     /// Run harness `number` on one tape. `None` when the run left no record
     /// (it timed out or was killed).
     pub fn execute(&self, number: usize, tape: &[u8], timeout: Duration) -> Option<RunRecord> {
-        // The harness reads at most its layout's longest tape.
         let target = self.assembled.sources.harnesses[number];
-        let longest = self.targets[target].harness.as_ref().map_or(tape.len(), Layout::max_tape);
-        let tape = &tape[..tape.len().min(longest)];
-        let _ = std::fs::remove_file(&self.record);
-        let mut child = Command::new(&self.binary)
+        let layout = self.targets[target].harness.as_ref().ok()?;
+        let worker = Worker {
+            binary: &self.binary,
+            sites: &self.sites,
+            timeout,
+        };
+        worker.run(number, layout, tape, &self.directory.join("record"))
+    }
+
+    /// Fold one replayed saved input into the reports.
+    fn absorb(&mut self, target: usize, layout: &Layout, tape: &[u8], record: &RunRecord) {
+        for (site, counters) in record.sites.iter().enumerate() {
+            let Some(Some(report)) = self.sites.get(site).copied() else {
+                continue;
+            };
+            let report = &mut self.reports[report];
+            report.hits += counters.hits;
+            report.margin = report.margin.min(counters.margin);
+        }
+        if let Outcome::Failed(site) = record.outcome
+            && let Some(Some(report)) = self.sites.get(site).copied()
+            && self.reports[report].finding.is_none()
+        {
+            self.reports[report].finding = Some(self.finding(target, layout, tape, 0));
+        }
+    }
+}
+
+/// One harness to fuzz: its layout and starting inputs.
+struct Job {
+    number: usize,
+    layout: Layout,
+    dictionary: Vec<i128>,
+    queue: Vec<Vec<u8>>,
+}
+
+/// What fuzzing one harness produced, kept apart from the session until
+/// every harness is done.
+struct HarnessRun {
+    number: usize,
+    stats: RunStats,
+    /// Per fuzz-program site: hits, and the smallest margin seen.
+    hits: Vec<u64>,
+    margins: Vec<i64>,
+    /// The first failing input of each site, in run order: `(site, run, tape)`.
+    failures: Vec<(usize, usize, Vec<u8>)>,
+}
+
+/// What running a harness needs, shared by the worker threads.
+#[derive(Clone, Copy)]
+struct Worker<'a> {
+    binary: &'a Path,
+    sites: &'a [Option<usize>],
+    timeout: Duration,
+}
+
+impl Worker<'_> {
+    /// Run harness `number` on one tape, writing its record to `record`.
+    /// `None` when the run left no record (it timed out or was killed).
+    fn run(&self, number: usize, layout: &Layout, tape: &[u8], record: &Path) -> Option<RunRecord> {
+        self.run_within(number, layout, tape, record, self.timeout)
+    }
+
+    fn run_within(
+        &self,
+        number: usize,
+        layout: &Layout,
+        tape: &[u8],
+        record: &Path,
+        timeout: Duration,
+    ) -> Option<RunRecord> {
+        // The harness reads at most its layout's longest tape.
+        let tape = &tape[..tape.len().min(layout.max_tape())];
+        let _ = std::fs::remove_file(record);
+        let mut child = Command::new(self.binary)
             .arg(number.to_string())
-            .env(super::OUT_VARIABLE, &self.record)
+            .env(super::OUT_VARIABLE, record)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -562,51 +692,137 @@ impl Session {
                 }
             }
         }
-        RunRecord::parse(&std::fs::read(&self.record).ok()?)
+        RunRecord::parse(&std::fs::read(record).ok()?)
     }
 
-    /// Fold one run into the reports; whether the input is worth keeping
-    /// (it reached a site for the first time or came closer to failing one).
-    fn absorb(
-        &mut self,
-        target: usize,
-        layout: &Layout,
-        tape: &[u8],
-        run: usize,
-        record: &RunRecord,
-    ) -> bool {
-        let mut interesting = false;
-        for (site, counters) in record.sites.iter().enumerate() {
-            let Some(Some(report)) = self.sites.get(site).copied() else {
-                continue;
+    /// Fuzz one harness for its budget, in batches of `BATCH` inputs run
+    /// `options.jobs` at a time and folded in order. Seeds always join the
+    /// corpus; mutants only when they reach a site this harness had not
+    /// reached or come closer to failing one.
+    fn fuzz(&self, job: &Job, options: &Options, deadline: Option<Instant>, directory: &Path) -> HarnessRun {
+        let mut random = Random::new(options.seed ^ (job.number as u64 + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
+        let mut out = HarnessRun {
+            number: job.number,
+            stats: RunStats::default(),
+            hits: vec![0; self.sites.len()],
+            margins: vec![i64::MAX; self.sites.len()],
+            failures: Vec::new(),
+        };
+        let mut failed = vec![false; self.sites.len()];
+        let mut queue = job.queue.clone();
+        let mut corpus: Vec<Vec<u8>> = Vec::new();
+        // The slowest run that finished: until one has, a run gets the whole
+        // timeout; then ten times that (at least `QUICK_TIMEOUT`), so an
+        // input that makes a quick harness loop costs little.
+        let mut slowest: Option<Duration> = None;
+        let mut run = 0;
+        while run < options.runs {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                break;
+            }
+            // A batch is drawn from the corpus as it stood before it, so it
+            // does not depend on how many of its runs go at once.
+            let count = BATCH.min(options.runs - run);
+            let batch: Vec<(Vec<u8>, bool)> = if !queue.is_empty() {
+                let at = queue.len().saturating_sub(count);
+                queue.drain(at..).rev().map(|tape| (tape, true)).collect()
+            } else if corpus.is_empty() {
+                vec![(vec![0; job.layout.fixed], true)]
+            } else {
+                (0..count)
+                    .map(|_| {
+                        let parent = &corpus[random.below(corpus.len())];
+                        let other = &corpus[random.below(corpus.len())];
+                        (mutate(parent, other, &job.layout, &job.dictionary, &mut random), false)
+                    })
+                    .collect()
             };
-            let report = &mut self.reports[report];
-            if counters.hits > 0 && report.hits == 0 {
-                interesting = true;
-            }
-            report.hits += counters.hits;
-            if counters.margin < report.margin {
-                interesting = true;
-                report.margin = counters.margin;
-            }
-        }
-        if let Outcome::Failed(site) = record.outcome
-            && let Some(Some(report)) = self.sites.get(site).copied()
-            && self.reports[report].finding.is_none()
-        {
-            self.reports[report].finding = Some(Finding {
-                target,
-                tape: tape.to_vec(),
-                inputs: decode(layout, tape),
-                run,
-                shrink_runs: 0,
-                public: self.targets[target].public,
-                suggestion: String::new(),
-                reproduction: None,
+            let timeout = slowest.map_or(self.timeout, |slowest| {
+                (slowest * 10).clamp(QUICK_TIMEOUT, self.timeout.max(QUICK_TIMEOUT))
             });
+            let records = parallel(&batch, options.jobs, directory, |(tape, _), record| {
+                let began = Instant::now();
+                let result = self.run_within(job.number, &job.layout, tape, record, timeout);
+                (result, began.elapsed())
+            });
+            for ((tape, seed), (record, took)) in batch.into_iter().zip(records) {
+                run += 1;
+                out.stats.runs += 1;
+                let Some(record) = record else {
+                    out.stats.lost += 1;
+                    continue;
+                };
+                slowest = Some(slowest.map_or(took, |slowest| slowest.max(took)));
+                match record.outcome {
+                    Outcome::Exited => out.stats.exited += 1,
+                    Outcome::Failed(_) => out.stats.failed += 1,
+                    Outcome::Unattributed | Outcome::StackExhausted => out.stats.other += 1,
+                }
+                let mut interesting = false;
+                for (site, counters) in record.sites.iter().enumerate().take(self.sites.len()) {
+                    if self.sites[site].is_none() {
+                        continue;
+                    }
+                    if counters.hits > 0 && out.hits[site] == 0 {
+                        interesting = true;
+                    }
+                    out.hits[site] += counters.hits;
+                    if counters.margin < out.margins[site] {
+                        interesting = true;
+                        out.margins[site] = counters.margin;
+                    }
+                }
+                if let Outcome::Failed(site) = record.outcome
+                    && self.sites.get(site).copied().flatten().is_some()
+                    && !failed[site]
+                {
+                    failed[site] = true;
+                    out.failures.push((site, run, tape.clone()));
+                }
+                if interesting || seed {
+                    corpus.push(tape);
+                }
+            }
         }
-        interesting
+        out
     }
+}
+
+/// Apply `work` to every item on up to `jobs` threads; the results come
+/// back in item order. Each thread has its own record file in `directory`.
+fn parallel<J: Sync, R: Send>(
+    items: &[J],
+    jobs: usize,
+    directory: &Path,
+    work: impl Fn(&J, &Path) -> R + Sync,
+) -> Vec<R> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = jobs.clamp(1, items.len().max(1));
+    let mut results: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|thread| {
+                let (next, work) = (&next, &work);
+                let record = directory.join(format!("record-{thread}"));
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            break;
+                        };
+                        done.push((index, work(item, &record)));
+                    }
+                    done
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("a fuzz worker panicked"))
+            .collect()
+    });
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 impl Session {
@@ -864,6 +1080,14 @@ impl Session {
         out
     }
 }
+
+/// Inputs of one harness run at once (at most `Options::jobs` of them in
+/// parallel). Fixed, so the inputs drawn do not depend on the job count.
+const BATCH: usize = 16;
+
+/// The shortest run time limit once a harness has finished a run (see
+/// `Worker::fuzz`).
+const QUICK_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Runs spent minimizing one counterexample.
 const SHRINK_BUDGET: usize = 300;

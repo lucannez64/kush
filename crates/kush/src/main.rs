@@ -31,7 +31,7 @@ Projects (Kush.toml):\n\
   kush build [--manifest-path <Kush.toml>] [-o <executable>] [--stats] [--locked] [--lib]\n\
   kush run [--manifest-path <Kush.toml>] [--stats] [--locked] [-- <program args>...]\n\
   kush test [--manifest-path <Kush.toml>] [FILTER] [--exact] [--list] [--nocapture] [--locked]\n\
-  kush fuzz [--manifest-path <Kush.toml>] [FILTER] [--runs N] [--time SECONDS] [--seed N] [--list] [--save] [--report] [--json] [--locked]\n\
+  kush fuzz [--manifest-path <Kush.toml>] [FILTER] [--runs N] [--time SECONDS] [--seed N] [--jobs N] [--list] [--save] [--report] [--json] [--locked]\n\
   kush fmt [--check] [--manifest-path <Kush.toml>] [FILE...]\n\n\
 Native adapters (Bridge.toml):\n\
   kush bindgen <Bridge.toml> [--check]\n\n\
@@ -424,6 +424,9 @@ fn fuzz_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, Stri
                 options.time = Some(std::time::Duration::from_secs(seconds));
             }
             "--seed" => options.seed = number(value(args, &mut index, "fuzz")?, "--seed")?,
+            "--jobs" | "-j" => {
+                options.jobs = number(value(args, &mut index, "fuzz")?, "--jobs")?.max(1) as usize;
+            }
             "--list" => list = true,
             "--save" => save = true,
             "--report" => report = true,

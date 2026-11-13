@@ -2,7 +2,7 @@
 //! failing check and the decoded input; a true but unproved check survives;
 //! a check behind an impossible branch stays unreached; a function whose
 //! parameters cannot be generated is reported as such; a session is
-//! deterministic for a seed. See docs/proof-fuzz.md.
+//! deterministic for a seed, however many harnesses run at once. See docs/proof-fuzz.md.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use kush::fuzz::engine::{Options, Session, State};
 use kush::native::{LinkSpec, Scratch};
@@ -148,6 +148,19 @@ fn a_session_is_deterministic_for_a_seed() {
     second.fuzz(&options(None));
     assert_eq!(first.render(&options(None)), second.render(&options(None)));
     assert_eq!(first.reports, second.reports);
+}
+
+#[test]
+fn parallel_harnesses_give_the_same_session() {
+    // Harnesses explore on their own and are folded in order, so how many
+    // run at once changes only the wall-clock time.
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    let mut alone = session(&scratch);
+    alone.fuzz(&Options { jobs: 1, ..options(None) });
+    let mut together = session(&scratch);
+    together.fuzz(&Options { jobs: 4, ..options(None) });
+    assert_eq!(alone.reports, together.reports);
+    assert_eq!(alone.stats, together.stats);
 }
 
 #[test]

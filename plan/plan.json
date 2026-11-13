@@ -6949,6 +6949,23 @@
           "text": "done 11d2329"
         }
       ]
+    },
+    {
+      "id": "PF-SPEED",
+      "title": "",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "kush fuzz: parallel batches per harness (--jobs), an adaptive run timeout, and a branch-local tape offset in the generated root (the prover case-split on it). Game Boy 5.5 min -> 80 s, kernel 30 s -> 11 s.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-13 23:59:23",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     }
   ]
 }

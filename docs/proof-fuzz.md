@@ -55,7 +55,7 @@ What exists today, and what this design has to add:
 
 ```sh
 kush fuzz [FILTER] [--manifest-path <Kush.toml>] [--locked]
-          [--runs N] [--time SECONDS] [--seed N]
+          [--runs N] [--time SECONDS] [--seed N] [--jobs N]
           [--list] [--report] [--save] [--json]
 ```
 
@@ -86,6 +86,8 @@ Flags:
 - `--seed N` (default 0) makes a session fully deterministic: same tree, same
   seed, same report. A fuzzer whose CI output changes run to run is not
   useful in a test suite.
+- `--jobs N` (`-j N`, default half the cores) fuzzes that many functions at
+  once. It changes only the time a session takes, not its report.
 - `--list` prints the obligations with their kind, function, location, goal and
   generator status, without running anything (the "what would be attacked"
   view, and what `KUSH_PROOF_REPORT=verbose` becomes).
@@ -216,10 +218,18 @@ does have, and the obligation is a lemma candidate (section 3).
   the in-memory sources (as `kush test` does) and the generated `main`
   dispatches on `argv[1]`, the harness number. The driver runs the binary once
   per input with the tape on standard input and a wall-clock timeout
-  (a timeout counts as "survived, too slow", not a find). Process start-up is
-  about a millisecond, so a few thousand runs per function take seconds
+  (a timeout counts as "survived, too slow", not a find). The timeout is 2 s
+  until a harness finishes a run, then ten times its slowest finished run
+  (at least 100 ms): an input that makes a quick function loop, such as a
+  huge size, costs little. Process start-up is about a millisecond, so a few
+  thousand runs per function take seconds
   (the whole kernel example: 6 s to build, 5 s for 300 runs of each of its
   12 harnesses). A fork server can come later if start-up dominates.
+- **Harnesses run in parallel** (`--jobs N`, default half the cores), as do
+  the minimizations of their findings. Each harness has its own random
+  stream (derived from the seed and its number) and its own coverage, and
+  the results are folded in harness order, so a session is the same for any
+  number of jobs.
   The generated sources are written to `target/kush/fuzz/harnesses.kush`
   for reading when a harness behaves unexpectedly.
 - Seeds (all zeros, then each scalar set to each dictionary value) always
@@ -416,7 +426,7 @@ existed (PF-DEMO, 2026-11-13, `--runs 1000 --report`, seed 0):
 | | checks | proved | found | survived | unreached | no generator | proved or attacked |
 |---|---|---|---|---|---|---|---|
 | Game Boy, functions only | 481 | 262 | 6 | 22 | 12 | 179 | 60% |
-| Game Boy, with entries | 535 | 262 | 4 | 172 | 40 | 57 | 82% |
+| Game Boy, with entries | 535 | 262 | 4 | 177 | 39 | 53 | 83% |
 | kernel, functions only | 310 | 78 | 4 | 9 | 8 | 211 | 29% |
 | kernel, with entries | 369 | 78 | 4 | 152 | 36 | 99 | 63% |
 
@@ -432,7 +442,7 @@ helpers they reach are counted.)
    short and read with `Vec.at(rom, i, _)`, so the prover discharges those
    accesses instead of the program checking them; a regression test pins
    it. Two entries (`random_program`, `random_cartridge`, seeded with four
-   minimal headers) reach the CPU, video, sound and bank controllers; 172
+   minimal headers) reach the CPU, video, sound and bank controllers; 177
    checks survived their attack.
 2. **Game Boy: four local counterexamples**, in private helpers given
    values no caller passes (`ppu.shade` with a palette index above 3,
@@ -445,8 +455,13 @@ helpers they reach are counted.)
    file; random bytes never pass the reader, so their seeds are `kush core`
    dumps of two examples. 152 checks survived.
 
-Run time on this machine: about 5 minutes for the Game Boy (68 harnesses),
-30 seconds for the kernel.
+Run time on this machine (12 cores, so 6 jobs, with a development build of
+`kush`): 80 seconds for the Game Boy (68 harnesses), 11 seconds for the
+kernel. One harness at a time with a 2 s timeout, it was about 5 minutes and
+30 seconds; most of the difference is `cartridge.mbc5`, whose every run
+mirrors the image to 8 MiB (100 ms), now spread over the jobs, and
+`cartridge.mirrored`, whose huge sizes now time out at ten times its
+slowest finished run instead of after 2 s.
 
 ## 6. Tests
 

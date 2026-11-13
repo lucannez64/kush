@@ -567,6 +567,13 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
             ));
         // Its branch of the root's dispatch.
         dispatch.push_str(&format!("    if which == {number} {{\n"));
+        // `at` walks the collection elements after the fixed part. It is
+        // local to the branch: one `at` set by a chain of branches would
+        // give the prover a case split over every harness at each check
+        // of `main`.
+        if layout.slots.iter().any(|slot| matches!(slot, Slot::Collection { .. })) {
+            dispatch.push_str(&format!("        let mut at = {};\n", layout.fixed));
+        }
         let mut call = Vec::new();
         for (position, slot) in layout.slots.iter().enumerate() {
             let name = &format!("fz_p{position}");
@@ -629,15 +636,6 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
         .unwrap_or(0)
         + 1;
     root.push_str(&format!("\nfn main() -> i64 ! {{io, alloc, panic}} {{\n    let which = __fz_which();\n    let tape = match io.read_all(io.stdin(), Bytes.with_capacity({capacity})) {{\n        Result.Ok(bytes) => bytes,\n        Result.Err(_) => return 2,\n    }};\n"));
-    // `at` walks the collection elements after the fixed part; each branch
-    // starts it at its own layout's end.
-    let mut branches = String::new();
-    for (number, &index) in harnesses.iter().enumerate() {
-        let fixed = targets[index].harness.as_ref().map_or(0, |l| l.fixed);
-        branches.push_str(&format!("    if which == {number} {{ at = {fixed}; }}\n"));
-    }
-    root.push_str("    let mut at = 0;\n");
-    root.push_str(&branches);
     root.push_str(&dispatch);
     root.push_str("    1\n}\n");
     // `#[stack_size(N)]` belongs to the program's `main`: it moves from the
