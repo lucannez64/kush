@@ -6055,14 +6055,19 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Limb-vector naturals in std (parse, print, compare, succ, pred) for the Kush kernel's literals.",
-      "commit": null,
+      "commit": "9d33586",
       "log": [
         {
           "time": "2026-11-13 08:13:05",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 08:13:05",
+          "who": "agent",
+          "text": "done 9d33586"
         }
       ]
     },
