@@ -1,8 +1,8 @@
 //! Canonical arbitrary-precision nonnegative integers used by the logical kernel.
-//! No machine-word value bound; a digit budget bounds compiler storage/work.
+//! No machine-word or digit bound: kernel fuel, charged per limb touched, and
+//! the source size limit bound the work and storage of numerals.
 use std::{fmt, str::FromStr};
 
-pub const MAX_DIGITS: usize = 4096;
 const BASE: u32 = 1_000_000_000;
 
 /// Little-endian base-10^9 limbs. Zero has no limbs; positive values have a
@@ -15,16 +15,11 @@ pub struct Natural {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     InvalidDecimal,
-    DigitLimit,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidDecimal => f.write_str("expected a nonempty ASCII decimal natural number"),
-            Self::DigitLimit => write!(
-                f,
-                "natural number exceeds the {MAX_DIGITS}-significant-digit budget"
-            ),
         }
     }
 }
@@ -44,7 +39,7 @@ impl Natural {
     pub(crate) fn work(&self) -> usize {
         self.limbs.len().max(1)
     }
-    pub fn successor(&self) -> Result<Self, Error> {
+    pub fn successor(&self) -> Self {
         let mut result = self.clone();
         let mut carry = true;
         for limb in &mut result.limbs {
@@ -59,10 +54,7 @@ impl Natural {
         if carry {
             result.limbs.push(1);
         }
-        if result.decimal_digits() > MAX_DIGITS {
-            return Err(Error::DigitLimit);
-        }
-        Ok(result)
+        result
     }
     /// None at zero; there is no saturating subtraction in the proof kernel.
     pub fn predecessor(&self) -> Option<Self> {
@@ -102,9 +94,6 @@ impl FromStr for Natural {
             return Err(Error::InvalidDecimal);
         }
         let digits = text.trim_start_matches('0');
-        if digits.len() > MAX_DIGITS {
-            return Err(Error::DigitLimit);
-        }
         let limbs = digits
             .as_bytes()
             .rchunks(9)

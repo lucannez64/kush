@@ -6,15 +6,15 @@ module std.natural;
 //
 // Little-endian base 10^9 limbs. Zero has no limbs and a positive value has a
 // nonzero last limb; the field is private, so every value is canonical and
-// `equal` is limb equality. A value has at most `max_digits()` significant
-// decimal digits, the same budget as the Rust kernel.
+// `equal` is limb equality. There is no digit limit: values are bounded by
+// memory only, and the kernel bounds its work with fuel charged per limb.
 //
 //     let n = match natural.parse(&Bytes.from("18446744073709551616")) { .. };
-//     let m = natural.successor(&n)?;
+//     let m = natural.successor(&n);
 //     io.write(io.stdout(), &natural.format(&m));
 //
 // Errors use the `std.text` codes: 22 (EINVAL) for malformed text, 34
-// (ERANGE) for a value over the digit budget or outside `i64`.
+// (ERANGE) for a negative `from_i64` argument.
 
 use std.option.Option;
 use std.result.Result;
@@ -22,9 +22,6 @@ use std.result.Result;
 pub struct Natural {
     limbs: Vec<i64>,
 }
-
-/// The significant-digit budget shared with the Rust kernel.
-pub fn max_digits() -> i64 ! {} { 4096 }
 
 fn base() -> i64 ! {} { 1000000000 }
 
@@ -82,8 +79,8 @@ fn limb_digits(limbs: &Vec<i64>) -> i64 ! {panic} {
     (count - 1) * 9 + width
 }
 
-/// `n + 1`, or `ERANGE` past the digit budget.
-pub fn successor(n: &Natural) -> Result<Natural, i64> ! {alloc, panic} {
+/// `n + 1`.
+pub fn successor(n: &Natural) -> Natural ! {alloc, panic} {
     let limbs = &n.limbs;
     let count = Vec.len(limbs);
     let mut out: Vec<i64> = Vec.with_capacity(count + 1);
@@ -102,10 +99,7 @@ pub fn successor(n: &Natural) -> Result<Natural, i64> ! {alloc, panic} {
         i = i + 1;
     }
     if carry { out = Vec.push(out, 1); }
-    if limb_digits(&out) > max_digits() {
-        return Result.Err(34);
-    }
-    Result.Ok(Natural { limbs: out })
+    Natural { limbs: out }
 }
 
 /// `n - 1`, or `None` at zero: there is no saturating subtraction.
@@ -192,7 +186,6 @@ pub fn parse(text: &Bytes) -> Result<Natural, i64> ! {alloc, panic} {
     while start < n && Bytes.get(text, start) == 48 {
         start = start + 1;
     }
-    if n - start > max_digits() { return Result.Err(34); }
     // Chunks of nine digits from the right; the leftmost may be shorter.
     let mut limbs: Vec<i64> = Vec.with_capacity((n - start) / 9 + 1);
     let mut end = n;

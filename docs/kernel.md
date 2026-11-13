@@ -421,7 +421,7 @@ Supported source features are:
   `Data.elim::<D>` names the bare family and takes its levels from the
   scrutinee's type. `Level` and `Level.succ`/`Level.max` are reserved names.
 - `Nat`, `Nat.zero`, `Nat.succ(n)`, and compact arbitrary-precision decimal
-  logical literals, subject to the significant-digit budget in section 8.
+  logical literals of any size (section 8).
 - `Eq<T, x, y>` and `refl::<T>(x)`. These elaborate directly to kernel equality
   and reflexive-proof terms, so the carrier may be a Type at any supported level
   or a proposition. A generic definition binds `T : Type` at level 0 unless it
@@ -662,7 +662,7 @@ elaboration each have a 128-frame nesting budget. Checked source modules are
 limited to 256 definitions. Each public kernel operation starts a fresh budget
 of 100000 weighted computation units and 128 nested frames. Traversals consume
 units; numeric operations additionally charge by the number of base-10^9 limbs
-touched. The significant-digit limit in section 8 bounds numeral storage.
+touched, so fuel also bounds numeral size (section 8).
 Budget exhaustion is an error, not a logical conclusion. Callers can configure
 kernel budgets, but changing budgets cannot admit unchecked globals or terms.
 
@@ -676,7 +676,7 @@ positivity/universe/result-index rejection, atomic global and data admission,
 cyclic source definitions, dependency ordering, lexical scopes, constructor
 ambiguity, unsupported features, source-level induction, transport, and data
 elimination, named/anonymous function-type binder scopes, higher-universe
-motives, compact-number conversion, carry/borrow behavior, digit/fuel budgets,
+motives, compact-number conversion, carry/borrow behavior, numeric fuel budgets,
 erasure at reference/native boundaries, and CLI diagnostics.
 
 Next work should extend the elaboration/type-checking boundary deliberately:
@@ -717,11 +717,15 @@ There is no longer a `0..32` literal restriction. A source literal larger than
 values, dependent indices, and equality proofs. See the
 [large-natural example](../examples/large-naturals.kush).
 
-The current compiler uses a **4096 significant decimal digit** budget per
-natural number. Leading zeroes and source separators do not consume that budget;
-the frontend's file/token limits still apply. Parsing over-budget literals or
-normalizing a successor beyond that budget reports an error. This is an explicit
-compiler resource limit, not wrapping arithmetic or a fixed-width machine type.
+There is **no digit limit**. An earlier 4096-significant-digit budget was
+removed: it bounded nothing that fuel does not. Every numeric operation
+(inference of a literal, normalizing or copying it, successor, predecessor) is
+charged per base-10^9 limb it touches, so a numeral of about 900,000 digits
+already exhausts the default 100,000-unit budget, and source literals are
+bounded by the frontend's file size limit anyway. Parsing into limbs is linear,
+so there is no quadratic conversion to guard against (the reason Python limits
+`int`/`str` conversion). Lean, Rocq and Agda likewise bound numerals only by
+memory. An exhausted budget is an error, never wrapping or truncation.
 Checking a definition does not promise that every future application can be
 normalized within resource budgets. Mathematical `Nat` remains distinct from
 future runtime machine integers and allocator-backed runtime big integers.

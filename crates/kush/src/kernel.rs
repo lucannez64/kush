@@ -1266,10 +1266,7 @@ impl Engine<'_> {
                 Term::Zero => Ok(Term::natural(Natural::from(1))),
                 Term::Literal(value) => {
                     e.charge(value.work())?;
-                    let next = value
-                        .successor()
-                        .map_err(|error| Error(error.to_string()))?;
-                    Ok(Term::natural(next))
+                    Ok(Term::natural(value.successor()))
                 }
                 neutral => Ok(Term::succ(neutral)),
             },

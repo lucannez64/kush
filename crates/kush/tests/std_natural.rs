@@ -2,7 +2,7 @@
 //! parsing, printing, successor, predecessor, comparison and `i64`
 //! conversion, on both backends, and frees every allocation.
 use kush::executable::check;
-use kush::natural::{MAX_DIGITS, Natural};
+use kush::natural::Natural;
 use std::cmp::Ordering;
 
 fn reference(source: &str) -> String {
@@ -63,10 +63,7 @@ fn report(text: &Bytes, next: &Bytes) -> Unit ! {io, alloc, panic} {
         Result.Ok(n) => {
             show(&n);
             print_i64(natural.digits(&n));
-            match natural.successor(&n) {
-                Result.Ok(m) => { show(&m); },
-                Result.Err(code) => { print_i64(code); },
-            }
+            show(&natural.successor(&n));
             match natural.predecessor(&n) {
                 Option.Some(m) => { show(&m); },
                 Option.None => { line(&Bytes.from("none")); },
@@ -90,13 +87,9 @@ fn expected(text: &str, next: &str) -> String {
     let n = match text.parse::<Natural>() {
         Ok(n) => n,
         Err(kush::natural::Error::InvalidDecimal) => return "22\n".into(),
-        Err(kush::natural::Error::DigitLimit) => return "34\n".into(),
     };
     out += &format!("{n}\n{}\n", n.decimal_digits());
-    match n.successor() {
-        Ok(m) => out += &format!("{m}\n"),
-        Err(_) => out += "34\n",
-    }
+    out += &format!("{}\n", n.successor());
     match n.predecessor() {
         Some(m) => out += &format!("{m}\n"),
         None => out += "none\n",
@@ -122,7 +115,8 @@ fn expected(text: &str, next: &str) -> String {
 
 #[test]
 fn std_natural_agrees_with_the_kernel_naturals() {
-    let budget = "9".repeat(MAX_DIGITS);
+    // Values well past the old 4096-digit budget, which no longer exists.
+    let nines = "9".repeat(5000);
     let inputs: Vec<String> = [
         "0",
         "000",
@@ -147,7 +141,7 @@ fn std_natural_agrees_with_the_kernel_naturals() {
     ]
     .iter()
     .map(|s| s.to_string())
-    .chain([budget.clone(), format!("1{}", "0".repeat(MAX_DIGITS))])
+    .chain([nines.clone(), format!("1{}", "0".repeat(5000))])
     .collect();
     let mut body = String::new();
     let mut want = String::new();
@@ -159,9 +153,7 @@ fn std_natural_agrees_with_the_kernel_naturals() {
         } else {
             "1000000000"
         };
-        body += &format!(
-            "    report(&Bytes.from(\"{text}\"), &Bytes.from(\"{next}\"));\n"
-        );
+        body += &format!("    report(&Bytes.from(\"{text}\"), &Bytes.from(\"{next}\"));\n");
         want += &expected(text, next);
     }
     // Copy, equality and from_i64 round out the API.
@@ -187,8 +179,7 @@ fn std_natural_agrees_with_the_kernel_naturals() {
     print_i64(natural.work(&z));
 "#;
     want += "1\n4000000000\n2\n34\n1\n1\n";
-    let source = format!(
-        "{PRELUDE}\nfn main() -> i64 ! {{io, alloc, panic}} {{\n{body}    0\n}}\n"
-    );
+    let source =
+        format!("{PRELUDE}\nfn main() -> i64 ! {{io, alloc, panic}} {{\n{body}    0\n}}\n");
     assert_eq!(agrees(&source), want);
 }

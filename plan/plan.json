@@ -6258,6 +6258,23 @@
           "text": "done f596260"
         }
       ]
+    },
+    {
+      "id": "NAT-NO-DIGIT-LIMIT",
+      "title": "Remove the 4096-digit natural budget",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "Fuel per limb and the source size limit already bound numeral work; drop MAX_DIGITS in natural.rs and std.natural.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-13 08:58:41",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     }
   ]
 }
