@@ -6956,14 +6956,19 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "kush fuzz: parallel batches per harness (--jobs), an adaptive run timeout, and a branch-local tape offset in the generated root (the prover case-split on it). Game Boy 5.5 min -> 80 s, kernel 30 s -> 11 s.",
-      "commit": null,
+      "commit": "108c354",
       "log": [
         {
           "time": "2026-11-13 23:59:23",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 23:59:23",
+          "who": "agent",
+          "text": "done 108c354"
         }
       ]
     }
