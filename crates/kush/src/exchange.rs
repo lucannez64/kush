@@ -638,6 +638,11 @@ fn raise(kernel: &mut Kernel, steps: Option<usize>) -> crate::kernel::Limits {
 /// infer queries. A rejected declaration is not admitted, exactly as in the
 /// kernel, so later items that use it are rejected too.
 pub fn answer(text: &str) -> Result<String> {
+    // One large stack for the whole replay (see `kernel::on_kernel_stack`).
+    crate::kernel::on_kernel_stack(|| answer_on_kernel_stack(text))
+}
+
+fn answer_on_kernel_stack(text: &str) -> Result<String> {
     let mut kernel = Kernel::default();
     let mut out = String::new();
     for item in parse(text)? {
