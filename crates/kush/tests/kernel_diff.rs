@@ -164,7 +164,7 @@ fn rebuild(t: &T, f: &mut impl FnMut(&T) -> T) -> T {
         } => T::IndElim {
             data: data.clone(),
             motive: b(motive, f),
-            branches: branches.iter().map(|x| f(x)).collect(),
+            branches: branches.iter().map(&mut *f).collect(),
             scrutinee: b(scrutinee, f),
         },
         other => other.clone(),
@@ -235,8 +235,8 @@ fn mutants(t: &T) -> Vec<T> {
         children.push(child.clone());
         child.clone()
     });
-    for child_index in 0..children.len() {
-        for edited in mutants(&children[child_index]) {
+    for (child_index, child) in children.iter().enumerate() {
+        for edited in mutants(child) {
             let mut seen = 0usize;
             out.push(rebuild(t, &mut |child| {
                 let result = if seen == child_index {
