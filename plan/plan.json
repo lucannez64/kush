@@ -6548,14 +6548,19 @@
       "deps": [
         "EFF-CAP-RESUME-CALLS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "docs/multishot-capabilities.md section 9 step 1",
-      "commit": null,
+      "commit": "d87f4cd",
       "log": [
         {
           "time": "2026-11-13 14:05:18",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 14:15:45",
+          "who": "agent",
+          "text": "done d87f4cd"
         }
       ]
     },
@@ -6567,10 +6572,16 @@
       "deps": [
         "MS-TYPE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "docs/multishot-capabilities.md section 9 step 2",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 14:15:45",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "MS-TOKEN",
