@@ -6176,10 +6176,21 @@
       "deps": [
         "KIK-NORMAL"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "infer/check/sort, lazy conversion with eta, define; scalars.",
-      "commit": null,
-      "log": []
+      "commit": "20f86c8",
+      "log": [
+        {
+          "time": "2026-11-13 09:24:07",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:28:09",
+          "who": "agent",
+          "text": "done 20f86c8"
+        }
+      ]
     },
     {
       "id": "KIK-DIFF",
