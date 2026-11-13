@@ -4215,9 +4215,9 @@
         "EFF-CAP-RESUME-CALLS",
         "MS-STRESS-DOCS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Multishot capabilities across calls: needs new cap syntax for a copyable token (confirm spelling with the user, e.g. cap multi Op) and continuation-chain copying across calls, which does not exist for declared operations either.",
-      "commit": null,
+      "commit": "9506122",
       "log": [
         {
           "time": "2026-11-06 18:15:36",
@@ -4243,6 +4243,11 @@
           "time": "2026-11-13 14:05:01",
           "who": "agent",
           "text": "Design approved by the user (section 10, decisions 1-5): continuation stack, copyable second-class multi fn tokens, copyable ungraded live values, cap/cap multi distinct, epochs + poisoning."
+        },
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "done 9506122"
         }
       ]
     },
@@ -6572,14 +6577,19 @@
       "deps": [
         "MS-TYPE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "docs/multishot-capabilities.md section 9 step 2",
-      "commit": null,
+      "commit": "2c36d04",
       "log": [
         {
           "time": "2026-11-13 14:15:45",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "done 2c36d04"
         }
       ]
     },
@@ -6591,10 +6601,16 @@
       "deps": [
         "MS-KSTACK"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/multishot-capabilities.md section 9 step 3",
-      "commit": null,
-      "log": []
+      "commit": "2c36d04",
+      "log": [
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "done 2c36d04"
+        }
+      ]
     },
     {
       "id": "MS-CAP",
@@ -6604,10 +6620,16 @@
       "deps": [
         "MS-TOKEN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/multishot-capabilities.md section 9 step 4",
-      "commit": null,
-      "log": []
+      "commit": "2c36d04",
+      "log": [
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "done 2c36d04"
+        }
+      ]
     },
     {
       "id": "MS-STRESS-DOCS",
@@ -6617,10 +6639,26 @@
       "deps": [
         "MS-CAP"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/multishot-capabilities.md section 9 step 5",
-      "commit": null,
-      "log": []
+      "commit": "9506122",
+      "log": [
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "Stress test (peak stack proportional to depth), example, LLVM parity and as-built docs in 9506122. Review done by the implementer (no subagent): escape paths checked against multishot.rs and the lowering. Not done: benchmarks/effects row, capturing multishot handlers across calls, tokens naming abortive operations."
+        },
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "done 9506122"
+        }
+      ]
     }
   ]
 }
