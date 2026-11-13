@@ -6104,14 +6104,19 @@
         "KIK-EXCHANGE",
         "STD-BIGNAT"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "examples/kernel package; hash-consed arena Store, interning, exchange reader/printer, round-trip tests.",
-      "commit": null,
+      "commit": "a7c6f14",
       "log": [
         {
           "time": "2026-11-13 09:00:12",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:08:02",
+          "who": "agent",
+          "text": "done a7c6f14"
         }
       ]
     },
