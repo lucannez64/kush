@@ -5,4 +5,5 @@ module media;
 // system's SDL2. See README.md.
 
 /// The package version, for programs that report it.
+
 pub const VERSION: i64 = 1;

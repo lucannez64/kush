@@ -10,6 +10,7 @@ use gameboy.machine.Machine;
 // written once.
 
 /// An 8-bit operand; `Hl` is the byte at address HL.
+
 pub enum Reg8 { B, C, D, E, H, L, Hl, A }
 /// A 16-bit operand for loads and arithmetic.
 pub enum Pair { Bc, De, Hl, Sp }
@@ -61,6 +62,7 @@ fn mask(n: u8) -> u8 ! {panic} { let one: u8 = 1; one << n }
 fn join(high: u8, low: u8) -> u16 ! {panic} {
     (Int.convert::<u16>(high) << 8) | Int.convert::<u16>(low)
 }
+
 fn high(value: u16) -> u8 ! {panic} { Int.truncate(value >> 8) }
 fn low(value: u16) -> u8 ! {} { Int.truncate(value) }
 

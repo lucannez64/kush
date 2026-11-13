@@ -27,6 +27,7 @@ foreign "media_window_set_fullscreen" fn fullscreen_window(window: &Handle, on: 
 
 /// Open a window for a `width` x `height` image, shown `scale` times as
 /// large. Fails with ENODEV (19) when there is no display.
+
 pub fn open(title: &Bytes, width: i64, height: i64, scale: i64) -> Result<Window, i64> ! {io} {
     match open_window(title, width, height, scale) {
         Result.Ok(raw) => Result.Ok(Window { raw: raw }),

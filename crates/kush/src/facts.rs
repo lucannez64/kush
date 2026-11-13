@@ -3063,4 +3063,3 @@ mod tests {
         assert!(prove_with(&hypotheses, &inequality(&[], 3)).is_some());
     }
 }
-

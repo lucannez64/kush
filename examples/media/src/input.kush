@@ -8,6 +8,7 @@ use std.option.Option;
 // into these types, so programs never see the packing.
 
 /// A keyboard key, by meaning rather than position.
+
 pub enum Key {
     Up, Down, Left, Right,
     Enter, Escape, Space, Backspace, Tab,

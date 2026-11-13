@@ -38,6 +38,7 @@ const AUDIO_TARGET: i64 = 4 * 800 * 4;
 const FRAME_NS: i64 = 16742706;
 
 /// What the player is holding, from every input source.
+
 struct Controls {
     keys: i64,
     pad: i64,
@@ -57,8 +58,8 @@ fn key_bit(key: Key) -> i64 ! {} {
         Key.Enter => START, Key.Space => SELECT, Key.Backspace => SELECT,
         Key.Char(c) => match c {
             119 => UP, 97 => LEFT, 115 => DOWN, 100 => RIGHT, // w a s d
-            120 => A, 107 => A,                                // x k
-            122 => B, 106 => B,                                // z j
+            120 => A, 107 => A, // x k
+            122 => B, 106 => B, // z j
             _ => 0,
         },
         _ => 0,

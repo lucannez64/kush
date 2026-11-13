@@ -21,6 +21,7 @@ foreign "media_audio_queued" fn queued_bytes(audio: &Device) -> i64 ! {io};
 
 /// Open the default output at `rate` samples per second with 1 or 2
 /// channels. Fails with ENODEV (19) when there is no audio device.
+
 pub fn open(rate: i64, channels: i64) -> Result<Audio, i64> ! {io} {
     match open_device(rate, channels) {
         Result.Ok(device) => Result.Ok(Audio { device: device }),

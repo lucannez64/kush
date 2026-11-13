@@ -11,6 +11,7 @@ use gameboy.machine.Machine;
 use gameboy.ppu;
 
 /// Clock cycles in one frame at 59.7 frames per second.
+
 pub const CYCLES_PER_FRAME: i64 = 70224;
 
 /// Run until the display finishes a frame (or a frame's worth of cycles has

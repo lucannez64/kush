@@ -10,6 +10,7 @@ module gameboy.apu;
 // see them, through the masks below); this module keeps the running state.
 
 /// Output samples per second.
+
 pub const SAMPLE_RATE: i64 = 48000;
 /// The CPU clock, in cycles per second.
 const CLOCK: i64 = 4194304;

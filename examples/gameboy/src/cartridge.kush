@@ -7,6 +7,7 @@ module gameboy.cartridge;
 // with no dispatch on the hot path.
 
 /// The byte the bus reads where nothing drives it.
+
 pub const OPEN_BUS: u8 = 0xFF;
 
 pub trait Mapper {

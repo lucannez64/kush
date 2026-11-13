@@ -26,6 +26,7 @@ use gameboy.terminal;
 // is also how the emulator is checked. Headless runs never write saves.
 
 /// What the command line asked for.
+
 struct Options {
     /// 0 plays in a window (falling back to the terminal), -1 plays in the
     /// terminal, more runs headless.

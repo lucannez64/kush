@@ -420,4 +420,74 @@ mod tests {
         assert!(formatted.contains("    // body note\n"));
         assert_eq!(format_source("<test>", &formatted).unwrap(), formatted);
     }
+
+    fn formats_to(source: &str, expected: &str) {
+        let formatted = format_source("<test>", source).unwrap();
+        assert_eq!(formatted, expected);
+        assert_eq!(format_source("<test>", &formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn shifts_are_operators_not_generic_brackets() {
+        formats_to(
+            "fn f(v: i64) -> i64 ! {} { ((v<<1)|(v>>7)) & (v >>(2)) }\n",
+            "fn f(v: i64) -> i64 ! {} { ((v << 1) | (v >> 7)) & (v >> (2)) }\n",
+        );
+    }
+
+    #[test]
+    fn refinements_invariants_and_clauses_keep_their_layout() {
+        formats_to(
+            "struct M { io: Vec<u8>   where len>=0x80 }\n\
+             fn f(io:&mut Vec<u8> where len>=8)->i64!{panic}\n\
+             ensures{0<=result}\n\
+             {\n\
+             let mut c=0;\n\
+             while c<10 invariant{c<=10}{\n\
+             c=c+1;\n\
+             }\n\
+             c\n\
+             }\n",
+            "struct M { io: Vec<u8> where len >= 0x80 }\n\
+             fn f(io: &mut Vec<u8> where len >= 8) -> i64 ! {panic}\n\
+             \x20   ensures { 0 <= result }\n\
+             {\n\
+             \x20   let mut c = 0;\n\
+             \x20   while c < 10 invariant { c <= 10 } {\n\
+             \x20       c = c + 1;\n\
+             \x20   }\n\
+             \x20   c\n\
+             }\n",
+        );
+    }
+
+    #[test]
+    fn a_handled_body_follows_its_handler_on_the_same_line() {
+        formats_to(
+            "fn f() -> i64 ! {panic} {\n\
+             let handle = 1;\n\
+             handle Op: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {\n\
+             k(x)\n\
+             } {\n\
+             go(handle)\n\
+             }\n\
+             }\n",
+            "fn f() -> i64 ! {panic} {\n\
+             \x20   let handle = 1;\n\
+             \x20   handle Op: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {\n\
+             \x20       k(x)\n\
+             \x20   } {\n\
+             \x20       go(handle)\n\
+             \x20   }\n\
+             }\n",
+        );
+    }
+
+    #[test]
+    fn a_comment_alone_in_a_block_stays_inside_it() {
+        formats_to(
+            "fn f(c: i64) -> Unit ! {} {\n    if c > 3 {\n        // nothing yet\n    }\n}\n",
+            "fn f(c: i64) -> Unit ! {} {\n    if c > 3 {\n        // nothing yet\n    }\n}\n",
+        );
+    }
 }
