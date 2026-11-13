@@ -39,3 +39,11 @@ pub const DUPLICATE: i64 = 13;
 pub const BAD_FAMILY: i64 = 14;
 /// A construct this kernel does not check yet.
 pub const UNSUPPORTED: i64 = 15;
+/// A data family occurring negatively, nested, or at other universe levels.
+pub const POSITIVITY: i64 = 16;
+/// A constructor field or result outside the family's universe.
+pub const UNIVERSE_ESCAPE: i64 = 17;
+/// A malformed data declaration (arity, duplicate constructor, limits).
+pub const BAD_DATA: i64 = 18;
+/// A Type-valued motive for a family in Prop.
+pub const LARGE_ELIMINATION: i64 = 19;

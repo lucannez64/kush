@@ -1,6 +1,10 @@
 # Kernel in Kush: design
 
-Status: **design approved 2026-11-13** (plan node KERNEL-IN-KUSH), with the
+Status: **M1 and M2 implemented** in [examples/kernel](../examples/kernel/README.md):
+the Kush kernel checks the whole example corpus, data families included, and
+agrees with the Rust kernel item by item (section 3). M3 (the specification
+and the tactic API) remains. Design approved 2026-11-13 (plan node
+KERNEL-IN-KUSH), with the
 changes recorded in section 1: the logic is improved in the Rust kernel first
 (eta, universe polymorphism), then ported once; the port shares the logic but
 not the algorithm.

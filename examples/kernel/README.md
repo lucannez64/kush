@@ -4,11 +4,11 @@
 (`crates/kush/src/kernel.rs`) to Kush, in the spirit of Lean4Lean. Design:
 [docs/kernel-in-kush.md](../../docs/kernel-in-kush.md).
 
-Status: the term store, reader and printer (KIK-STORE), binder operations
-(KIK-SUBST), reduction (KIK-NORMAL) and type checking (KIK-CHECK). It checks
-every declaration of the corpus files without data families and gives the
-same answers as the Rust kernel on them and on a file of typing cases, most
-of them rejections; data families come next (KIK-DATA).
+Status: milestones M1 and M2 of the design are done. The kernel checks every
+declaration of the example corpus, including indexed data families, `prop`
+families and dependent elimination, and gives the same answer as the Rust
+kernel on every item of the corpus, of its mutants, of hand-written typing
+and data cases, and of seeded generated terms (`scripts/kernel-diff.sh`).
 
 ```sh
 kush core ../induction.kush > induction.kcore        # Rust: dump a checked module
@@ -36,7 +36,10 @@ kush test --manifest-path Kush.toml
   reference's universe levels, numerals, lazy `NatElim`, `Transport` and `J`
   on `refl`, and constructor reduction of `IndElim`.
 - `src/check.kush`: inference, checking and the lazy conversion check
-  (proof irrelevance, eta, numerals against `succ`), and `define`.
+  (proof irrelevance, eta, numerals against `succ`), `define`, and
+  `define_data` with `IndElim` typing.
+- `src/data.kush`: telescope construction for data families (positivity
+  occurrences, level instantiation, branch and constructor types).
 - `src/error.kush`: kernel error codes.
 - `src/main.kush`: the command line.
 

@@ -31,7 +31,8 @@ pub const NESTING: i64 = 128;
 pub struct Kernel {
     pub store: Store,
     /// Open addressing from a name id to its entry id: `keys` holds name
-    /// id + 1 (0 for empty).
+    /// id + 1, 0 for empty, or -1 for a removed entry (probing continues
+    /// past it).
     keys: Vec<i64>,
     values: Vec<i64>,
     entries: i64,
@@ -127,7 +128,7 @@ fn grow(k: &mut Kernel) -> Unit ! {alloc, panic} {
     let mut i = 0;
     while i < k.keys.len() {
         let key = k.keys[i];
-        if key != 0 {
+        if key > 0 {
             let mut slot = Int.wrapping_mul(key, 2654435761) & mask;
             while keys[slot] != 0 {
                 slot = (slot + 1) & mask;
@@ -167,9 +168,29 @@ pub fn admit_def(k: &mut Kernel, name: i64, levels: i64, ty: i64, value: i64) ->
     insert(k, name, id);
 }
 
-/// Insert a data family and its constructors without checking them.
-/// `family_type` is `(params) -> Sort`; constructor types are given in
-/// constructor order as a list.
+/// Insert a data family's entry alone, without checking it. `family_type`
+/// is `(params) -> Sort`.
+pub fn admit_family(
+    k: &mut Kernel,
+    name: i64,
+    levels: i64,
+    prop: Bool,
+    params: i64,
+    constructors: i64,
+    family_type: i64,
+) -> Unit ! {alloc, panic} {
+    store.begin(&mut k.store, DATA);
+    store.add(&mut k.store, levels);
+    store.add(&mut k.store, if prop { 1 } else { 0 });
+    store.add(&mut k.store, params);
+    store.add(&mut k.store, constructors);
+    store.add(&mut k.store, family_type);
+    let id = store.finish(&mut k.store, 0);
+    insert(k, name, id);
+}
+
+/// Insert a data family and its constructors without checking them;
+/// constructor types are given in constructor order as a list.
 pub fn admit_data(
     k: &mut Kernel,
     name: i64,
@@ -180,14 +201,7 @@ pub fn admit_data(
     family_type: i64,
     constructor_types: i64,
 ) -> Unit ! {alloc, panic} {
-    store.begin(&mut k.store, DATA);
-    store.add(&mut k.store, levels);
-    store.add(&mut k.store, if prop { 1 } else { 0 });
-    store.add(&mut k.store, params);
-    store.add(&mut k.store, constructors);
-    store.add(&mut k.store, family_type);
-    let id = store.finish(&mut k.store, 0);
-    insert(k, name, id);
+    admit_family(k, name, levels, prop, params, constructors, family_type);
     let count = term.list_len(&k.store, constructors);
     let mut i = 0;
     while i < count {
@@ -242,3 +256,12 @@ pub fn forget(k: &mut Kernel) -> Unit ! {panic} { k.context_size = k.context_siz
 
 /// Cut the context back to `size` hypotheses.
 pub fn truncate(k: &mut Kernel, size: i64) -> Unit ! {} { k.context_size = size; }
+
+/// Remove a global (used to undo a provisional admission).
+pub fn remove(k: &mut Kernel, name: i64) -> Unit ! {panic} {
+    let slot = slot_of(k, name);
+    if k.keys[slot] == name + 1 {
+        k.keys[slot] = -1;
+        k.values[slot] = 0;
+    }
+}

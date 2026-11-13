@@ -78,9 +78,9 @@ fn check_items(items: &Vec<reader.Item>, k: &mut engine.Kernel) -> Bytes ! {allo
                 let result = check.define(k, name, levels, ty, value);
                 out = verdict(k, out, result, name);
             },
-            reader.Item.Data(name, _, _, _, _) => {
-                // Data families are checked with KIK-DATA.
-                out = term.name_into(&k.store, word(out, &Bytes.from("unsupported ")), name).push(10);
+            reader.Item.Data(name, levels, prop, params, constructors) => {
+                let result = check.define_data(k, name, levels, prop, params, constructors);
+                out = verdict(k, out, result, name);
             },
             reader.Item.Check(t, ty) => {
                 out = match check.check_closed(k, t, ty) {

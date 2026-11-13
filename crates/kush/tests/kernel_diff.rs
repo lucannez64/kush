@@ -499,8 +499,14 @@ fn corpus_mutants_agree() {
     let binary = build(&dir);
     let mut rng = Rng(0x5EED);
     let mut tally = Tally::default();
-    // Files with data families are compared once KIK-DATA checks them.
-    for name in ["proofs", "induction", "large-naturals"] {
+    for name in [
+        "proofs",
+        "induction",
+        "large-naturals",
+        "logical-data",
+        "finite-proofs",
+        "universes",
+    ] {
         let text = mutated(name, 12, &mut rng);
         compare(
             &binary,
@@ -510,7 +516,7 @@ fn corpus_mutants_agree() {
         );
     }
     eprintln!("corpus mutants: {tally:?}");
-    assert!(tally.rejected >= 100, "{tally:?}");
+    assert!(tally.rejected >= 300, "{tally:?}");
     assert!(
         tally.inconclusive * 20 <= tally.accepted + tally.rejected,
         "{tally:?}"

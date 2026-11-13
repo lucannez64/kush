@@ -227,12 +227,62 @@ const TYPING: &str = "
     (infer (global missing))
 ";
 
+/// Data family cases: admission (positivity, universes, Prop) and
+/// elimination (motives, branches, large elimination, proof irrelevance).
+const DATA: &str = "
+    (data Even 0 type () (ctor E0 () () ()) (ctor ES () ((global Even)) ()))
+    (data Negative 0 type () (ctor B () ((pi (global Negative) nat)) ()))
+    (data Nested 0 type () (ctor N () ((app (lam (sort 0) (var 0)) (global Nested))) ()))
+    (data Big 0 type () (ctor Wrap () ((sort 0)) ()))
+    (infer (global Big))
+    (infer (global Wrap))
+    (data Two 0 prop () (ctor First () () ()) (ctor Second () () ()))
+    (check (refl (global Two) (global First)) (eq (global Two) (global First) (global Second)))
+    (check (refl (global Even) (global E0)) (eq (global Even) (global E0) (app (global ES) (global E0))))
+    (infer (indelim Two (lam (global Two) nat) (zero (lit 1)) (global First)))
+    (infer (indelim Two (lam (global Two) (global Two)) ((global First) (global First)) (global Second)))
+    (data Boxed 0 prop () (ctor Box () ((sort 0)) ()))
+    (data Fin 0 type (nat)
+      (ctor FZ (nat) () ((succ (var 0))))
+      (ctor FS (nat) ((app (global Fin) (var 0))) ((succ (var 1)))))
+    (infer (app (app (app (global FS) (lit 2)) (lit 1)) (app (app (global FZ) (lit 1)) zero)))
+    (infer (indelim Fin (lam nat (lam (app (global Fin) (var 0)) nat))
+      ((lam nat (lam nat zero)) (lam nat (lam nat (lam (app (global Fin) (var 0)) (lam nat (succ (var 0)))))))
+      (app (app (app (global FS) (lit 2)) (lit 1)) (app (app (global FZ) (lit 1)) zero))))
+    (normalize (indelim Fin (lam nat (lam (app (global Fin) (var 0)) nat))
+      ((lam nat (lam nat zero)) (lam nat (lam nat (lam (app (global Fin) (var 0)) (lam nat (succ (var 0)))))))
+      (app (app (app (global FS) (lit 2)) (lit 1)) (app (app (global FZ) (lit 1)) zero))))
+    (infer (indelim Fin (lam nat (lam (app (global Fin) (var 0)) nat))
+      ((lam nat (lam nat zero)))
+      (app (app (global FZ) (lit 1)) zero)))
+    (infer (indelim Fin (lam nat (lam (app (global Fin) (var 0)) nat))
+      ((lam nat (lam nat zero)) (lam nat (lam nat (lam (app (global Fin) (var 0)) (lam nat (var 1))))))
+      (app (app (global FZ) (lit 1)) zero)))
+    (infer (indelim Fin (lam (app (global Fin) zero) nat)
+      ((lam nat (lam nat zero)) (lam nat (lam nat (lam (app (global Fin) (var 0)) (lam nat (succ (var 0)))))))
+      (app (app (global FZ) (lit 1)) zero)))
+    (infer (indelim Even (lam (global Even) nat) (zero (lam (global Even) (lam nat (succ (var 0))))) (lit 3)))
+    (data Dup 0 type () (ctor D () () ()) (ctor D () () ()))
+    (data Clash 0 type () (ctor E0 () () ()))
+    (data Arity 0 type (nat) (ctor A () () ()))
+    (data List 1 type ((sort (u 0)))
+      (ctor nil () () ((var 0)))
+      (ctor cons () ((var 0) (app (global List (u 0)) (var 1))) ((var 2))))
+    (infer (app (global List 1) (sort 0)))
+    (infer (app (app (app (global cons 1) (sort 0)) nat) (app (global nil 1) (sort 0))))
+    (data Uneven 1 type ((sort (u 0)))
+      (ctor nil2 () () ((var 0)))
+      (ctor cons2 () ((var 0) (app (global Uneven 0) (var 1))) ((var 2))))
+    (data Even 0 type () (ctor Other () () ()))
+    (infer (global Negative))
+";
+
 #[test]
 fn the_checker_agrees_with_the_rust_kernel() {
     let dir = scratch("check");
     let binary = build(&dir);
-    // The corpus files without data families, every item compared.
-    for name in ["proofs", "induction", "large-naturals"] {
+    // The whole corpus, every item compared.
+    for name in CORPUS {
         let file = dir.join(format!("{name}.kcore"));
         let text = dump(name);
         assert_eq!(
@@ -244,6 +294,16 @@ fn the_checker_agrees_with_the_rust_kernel() {
     let file = dir.join("typing.kcore");
     let compared = agree_on_answers(&binary, &file, TYPING);
     assert!(compared >= 45, "{compared}");
+    let file = dir.join("data.kcore");
+    let compared = agree_on_answers(&binary, &file, DATA);
+    assert_eq!(compared, 29, "{compared}");
+    assert!(
+        kush::exchange::answer(DATA)
+            .unwrap()
+            .matches("reject")
+            .count()
+            >= 12
+    );
     // The cases really include rejections.
     assert!(
         kush::exchange::answer(TYPING)
