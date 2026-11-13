@@ -74,12 +74,16 @@ fn check_items(items: &Vec<reader.Item>, k: &mut engine.Kernel) -> Bytes ! {allo
     let mut i = 0;
     while i < items.len() {
         match items[i] {
-            reader.Item.Def(name, levels, ty, value) => {
+            reader.Item.Def(name, levels, ty, value, steps) => {
+                if steps > 0 { k.max_steps = steps; }
                 let result = check.define(k, name, levels, ty, value);
+                k.max_steps = engine.STEPS;
                 out = verdict(k, out, result, name);
             },
-            reader.Item.Data(name, levels, prop, params, constructors) => {
+            reader.Item.Data(name, levels, prop, params, constructors, steps) => {
+                if steps > 0 { k.max_steps = steps; }
                 let result = check.define_data(k, name, levels, prop, params, constructors);
+                k.max_steps = engine.STEPS;
                 out = verdict(k, out, result, name);
             },
             reader.Item.Check(t, ty) => {
@@ -112,11 +116,11 @@ fn normalize_items(items: &Vec<reader.Item>, k: &mut engine.Kernel) -> Bytes ! {
     let mut i = 0;
     while i < items.len() {
         match items[i] {
-            reader.Item.Def(name, levels, ty, value) => {
+            reader.Item.Def(name, levels, ty, value, _) => {
                 engine.admit_def(k, name, levels, ty, value);
                 out = term.name_into(&k.store, word(out, &Bytes.from("ok ")), name).push(10);
             },
-            reader.Item.Data(name, levels, prop, params, constructors) => {
+            reader.Item.Data(name, levels, prop, params, constructors, _) => {
                 // Types are not needed to reduce; KIK-CHECK computes them.
                 let placeholder = term.prop(&mut k.store);
                 let mut types: Vec<i64> = Vec.new();

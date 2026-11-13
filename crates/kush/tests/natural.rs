@@ -224,10 +224,17 @@ fn induction_retains_its_constructor_equations_for_literals() {
 
 #[test]
 fn numeric_budget_exhaustion_cannot_produce_a_false_proof_or_admit_a_global() {
-    let mut k = Kernel::default();
     // Numeric work is charged per base-10^9 limb: a million-digit numeral
-    // (about 111,000 limbs) exhausts the default 100,000-unit budget.
+    // (about 111,000 limbs) exhausts a 100,000-unit budget.
+    let mut k = Kernel::new(Limits {
+        steps: 100_000,
+        depth: 128,
+    });
     let too_large = T::succ(term(&"9".repeat(1_000_000)));
+    assert!(
+        Kernel::default().normalize_closed(&too_large).is_ok(),
+        "the default budget covers it"
+    );
     assert!(
         k.normalize_closed(&too_large)
             .unwrap_err()

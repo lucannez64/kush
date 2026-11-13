@@ -40,13 +40,15 @@ term  ::= (var I) | (global NAME level...) | (sort level) | prop
         | (indelim DATA motive (branch...) scrutinee)
         | (scalar i64|Bool|Unit) | (i64 N) | (bool true|false) | unit
 
-item  ::= (def NAME LEVELS TYPE VALUE)
-        | (data NAME LEVELS type|prop (PARAM...)
+item  ::= (def NAME LEVELS TYPE VALUE [(steps N)])
+        | (data NAME LEVELS type|prop (PARAM...) [(steps N)]
               (ctor NAME (LOCAL...) (FIELD...) (RESULT...)) ...)
         | (check TERM TYPE) | (infer TERM) | (normalize TERM)
 ```
 
-`(var I)` is a zero-based de Bruijn index, as in the kernel. `LEVELS` is the
+`(steps N)` is the declaration's own step budget, from `#[kernel_steps(N)]`
+(see [kernel.md](kernel.md), section 7); both kernels admit the declaration
+with it. `(var I)` is a zero-based de Bruijn index, as in the kernel. `LEVELS` is the
 number of universe parameters, referred to as `(u 0)`, `(u 1)`, .... A `data`
 item is the `IndexedDataSpec` that admits the family; the family's universe is
 recomputed by the kernel, not read. `(lit N)` is an arbitrary-precision

@@ -46,8 +46,9 @@ fn print(item: &Item) -> String {
             levels,
             ty,
             value,
-        } => exchange::def_sexp(name, *levels, ty, value).to_string(),
-        Item::Data(spec) => exchange::data_sexp(spec).to_string(),
+            steps,
+        } => exchange::def_sexp(name, *levels, ty, value, *steps).to_string(),
+        Item::Data { spec, steps } => exchange::data_sexp(spec, *steps).to_string(),
         Item::Check { term, ty } => format!(
             "(check {} {})",
             exchange::term_sexp(term),
@@ -75,7 +76,7 @@ fn the_corpus_round_trips_and_replays() {
         for (item, line) in items.iter().zip(&lines) {
             match item {
                 Item::Def { name: def, .. } => assert_eq!(*line, format!("ok {def}")),
-                Item::Data(spec) => assert_eq!(*line, format!("ok {}", spec.name)),
+                Item::Data { spec, .. } => assert_eq!(*line, format!("ok {}", spec.name)),
                 Item::Normalize(term) => {
                     let normal = checked.kernel.normalize_closed(term).unwrap();
                     assert_eq!(*line, format!("= {}", exchange::term_sexp(&normal)));

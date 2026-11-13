@@ -5571,7 +5571,28 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     let mut monomorphic = Vec::new();
     for declaration in &module.items {
         let span = declaration.item.span;
-        if !declaration.attributes.is_empty()
+        // `#[kernel_steps(N)]` raises the kernel budget of a logical
+        // declaration; the logical checker has already validated and used it.
+        let logical_declaration = match &declaration.item.kind {
+            ast::ItemKind::Function(f) => f.total,
+            ast::ItemKind::Enum { total, .. } => *total,
+            ast::ItemKind::Prop { .. } | ast::ItemKind::Alias { .. } => true,
+            _ => false,
+        };
+        if let Some(attribute) = declaration
+            .attributes
+            .iter()
+            .find(|attribute| attribute.kind == "kernel_steps" && !logical_declaration)
+        {
+            return Err(Diagnostic::new(
+                attribute.span,
+                "#[kernel_steps(N)] applies to logical declarations only: total fn, total enum, prop and type aliases",
+            ));
+        }
+        if declaration
+            .attributes
+            .iter()
+            .any(|attribute| attribute.kind != "kernel_steps")
             && !matches!(
                 declaration.item.kind,
                 ast::ItemKind::Function(_)
@@ -5590,6 +5611,9 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             ast::ItemKind::Struct { .. } | ast::ItemKind::Enum { .. }
         );
         for attribute in &declaration.attributes {
+            if attribute.kind == "kernel_steps" {
+                continue;
+            }
             let valid = if function {
                 matches!(
                     attribute.kind.as_str(),

@@ -317,6 +317,37 @@ fn the_checker_agrees_with_the_rust_kernel() {
 }
 
 #[test]
+fn declaration_budgets_are_read_printed_and_honoured() {
+    let dir = scratch("budgets");
+    let binary = build(&dir);
+    let text = "(def two 0 nat (succ (succ zero)) (steps 3))\n\
+                (def three 0 nat (succ (succ (succ zero))) (steps 1000))\n\
+                (data Unit1 0 type () (steps 1000) (ctor mk () () ()))\n\
+                (check (global mk) (global Unit1))\n";
+    let file = dir.join("budgets.kcore");
+    std::fs::write(&file, text).unwrap();
+    // Printed back unchanged, budgets included.
+    let printed = Command::new(&binary)
+        .arg("print")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(printed.stdout).unwrap(), text);
+    // Three steps are too few in both kernels; a thousand are enough.
+    let output = Command::new(&binary)
+        .arg("check")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "budget two\nok three\nok Unit1\nok\n"
+    );
+    assert_eq!(agree_on_answers(&binary, &file, text), 3);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn the_kush_kernel_prints_the_corpus_back_unchanged() {
     let dir = scratch("print");
     let binary = build(&dir);

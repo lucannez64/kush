@@ -14,11 +14,13 @@ use kernel.term;
 /// One item of an exchange file. Every field is a store id (or a count).
 
 pub enum Item {
-    /// name, number of universe parameters, type, value
-    Def(i64, i64, i64, i64),
+    /// name, number of universe parameters, type, value, step budget (-1
+    /// for the default)
+    Def(i64, i64, i64, i64, i64),
     /// name, number of universe parameters, lives in Prop, parameter list,
-    /// constructor list (of `term.CTOR` objects)
-    Data(i64, i64, Bool, i64, i64),
+    /// constructor list (of `term.CTOR` objects), step budget (-1 for the
+    /// default)
+    Data(i64, i64, Bool, i64, i64, i64),
     /// term, type
     Check(i64, i64),
     Infer(i64),
@@ -67,6 +69,7 @@ const W_BOOL_TYPE: i64 = 7402444;
 const W_UNIT_TYPE: i64 = 12378708;
 const W_TRUE: i64 = 5317957;
 const W_FALSE: i64 = 100975813;
+const W_STEPS: i64 = 324031507;
 
 fn is_space(byte: i64) -> Bool ! {} { byte == 32 || byte == 9 || byte == 10 || byte == 13 }
 
@@ -410,6 +413,20 @@ fn constructor(s: &mut Store, src: &Bytes, at: i64) -> Result<Parsed, i64> ! {al
     Result.Ok(Parsed { value: value, next: close(src, at)? })
 }
 
+/// An optional `(steps N)` element: N, or -1 when absent.
+fn optional_steps(src: &Bytes, at: i64) -> Result<Parsed, i64> ! {alloc, panic} {
+    let start = skip(src, at);
+    if start >= src.len() || src[start] != 40 {
+        return Result.Ok(Parsed { value: -1, next: start });
+    }
+    let after = open(src, start)?;
+    let Parsed { value: form, next: next } = keyword(src, after)?;
+    if form != W_STEPS { return Result.Ok(Parsed { value: -1, next: start }); }
+    let Parsed { value: steps, next: next } = count(src, next)?;
+    if steps == 0 { return Result.Err(start); }
+    Result.Ok(Parsed { value: steps, next: close(src, next)? })
+}
+
 /// A parsed item and the offset after it.
 struct ParsedItem { item: Item, next: i64 }
 
@@ -421,8 +438,9 @@ fn item(s: &mut Store, src: &Bytes, at: i64) -> Result<ParsedItem, i64> ! {alloc
         let Parsed { value: levels, next: at } = count(src, at)?;
         let Parsed { value: ty, next: at } = term_at(s, src, at, 1)?;
         let Parsed { value: value, next: at } = term_at(s, src, at, 1)?;
+        let Parsed { value: steps, next: at } = optional_steps(src, at)?;
         let next = close(src, at)?;
-        return Result.Ok(ParsedItem { item: Item.Def(def_name, levels, ty, value), next: next });
+        return Result.Ok(ParsedItem { item: Item.Def(def_name, levels, ty, value, steps), next: next });
     }
     if form == W_DATA {
         let Parsed { value: data_name, next: at } = name(s, src, at)?;
@@ -436,6 +454,7 @@ fn item(s: &mut Store, src: &Bytes, at: i64) -> Result<ParsedItem, i64> ! {alloc
             return Result.Err(at);
         };
         let Parsed { value: params, next: at } = terms(s, src, at, 1)?;
+        let Parsed { value: steps, next: at } = optional_steps(src, at)?;
         let mut at = at;
         let mut constructors: Vec<i64> = Vec.new();
         while !at_close(src, at) {
@@ -446,7 +465,7 @@ fn item(s: &mut Store, src: &Bytes, at: i64) -> Result<ParsedItem, i64> ! {alloc
         let list = term.list(s, &constructors);
         let next = close(src, at)?;
         return Result.Ok(ParsedItem {
-            item: Item.Data(data_name, levels, prop, params, list),
+            item: Item.Data(data_name, levels, prop, params, list, steps),
             next: next,
         });
     }

@@ -292,7 +292,11 @@ fn mutated(name: &str, per_def: usize, rng: &mut Rng) -> String {
     let mut counter = 0;
     for item in exchange::parse(&text).unwrap() {
         let Item::Def {
-            levels, ty, value, ..
+            levels,
+            ty,
+            value,
+            steps,
+            ..
         } = item
         else {
             continue;
@@ -304,8 +308,8 @@ fn mutated(name: &str, per_def: usize, rng: &mut Rng) -> String {
         candidates.extend(mutants(&ty).into_iter().map(|t| (t, value.clone())));
         for (ty, value) in sample(&candidates, per_def, rng) {
             counter += 1;
-            out +=
-                &exchange::def_sexp(&format!("mutant{counter}"), levels, &ty, &value).to_string();
+            out += &exchange::def_sexp(&format!("mutant{counter}"), levels, &ty, &value, steps)
+                .to_string();
             out.push('\n');
         }
     }

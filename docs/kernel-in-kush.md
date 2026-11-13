@@ -164,8 +164,12 @@ an enum, not a string: `TypeMismatch(expected, actual)`, `NotAFunction(tm)`,
 tactic can inspect a failure. The verdict printer maps each to the same
 category the Rust kernel reports.
 
-The Kush kernel has its own step and depth budgets with the same defaults
-(100,000 steps, depth 128) but its own charging points. A budget exhaustion is
+The Kush kernel has its own step budget with the Rust kernel's default
+(100,000,000 steps, raised per declaration by `(steps N)` in the exchange
+file) but its own charging points. Its nesting cap is 8,000: unlike the Rust
+kernel, which moves to a fresh large stack as it recurses (KERNEL-BUDGET-ATTR),
+it cannot choose its stack, and its 8 MB main stack overflows near 20,000
+levels (LANG-STACK-SIZE). A budget exhaustion is
 reported as its own outcome, so the harness can tell "gave up" from
 "disagrees".
 
@@ -340,8 +344,8 @@ actually blocks the port; until then the workaround stands.
   kernel uses: parse, print, compare, successor, predecessor and the work
   measure.
 - **The logical fragment, for section 4.** Lambda expressions are available
-  (LOGIC-LAMBDA, [kernel.md](kernel.md#lambda-expressions)); the budget of
-  100,000 steps and depth 128 is still fixed until KERNEL-BUDGET-ATTR. No
+  (LOGIC-LAMBDA, [kernel.md](kernel.md#lambda-expressions)), and a long proof
+  can raise its step budget with `#[kernel_steps(N)]` (KERNEL-BUDGET-ATTR). No
   implicit arguments, and no function extensionality (hence pointwise lemma
   statements).
 - **No link between the logical and executable worlds.** Executable code cannot

@@ -1286,3 +1286,72 @@ fn eta_does_not_identify_different_functions() {
         );
     }
 }
+
+#[test]
+fn deep_terms_grow_the_stack_instead_of_overflowing_it() {
+    // A test thread has a 2 MiB stack; these recurse tens of thousands of
+    // levels deep, so the kernel must continue on stacks of its own.
+    let k = Kernel::default();
+    let unary = (0..60_000).fold(T::Zero, |n, _| T::succ(n));
+    assert_eq!(k.normalize_closed(&unary).unwrap(), nat(60_000));
+    let count = T::NatElim {
+        motive: Box::new(T::lam(T::Nat, T::Nat)),
+        zero: Box::new(T::Zero),
+        step: Box::new(T::lam(T::Nat, T::lam(T::Nat, T::succ(T::Var(0))))),
+        value: Box::new(nat(20_000)),
+    };
+    assert_eq!(k.normalize_closed(&count).unwrap(), nat(20_000));
+    // The nesting cap still turns a pathological depth into an error.
+    let shallow = Kernel::new(Limits {
+        steps: 100_000_000,
+        depth: 1_000,
+    });
+    assert!(
+        shallow
+            .normalize_closed(&unary)
+            .unwrap_err()
+            .0
+            .contains("nesting")
+    );
+}
+
+#[test]
+#[ignore = "measurement: cargo test --release -- --ignored kernel_throughput --nocapture"]
+fn kernel_throughput() {
+    let k = Kernel::new(Limits {
+        steps: usize::MAX,
+        depth: 1_000_000,
+    });
+    let count = T::NatElim {
+        motive: Box::new(T::lam(T::Nat, T::Nat)),
+        zero: Box::new(T::Zero),
+        step: Box::new(T::lam(T::Nat, T::lam(T::Nat, T::succ(T::Var(0))))),
+        value: Box::new(nat(100_000)),
+    };
+    let start = std::time::Instant::now();
+    k.normalize_closed(&count).unwrap();
+    let elapsed = start.elapsed();
+    let mut budget = Kernel::new(Limits {
+        steps: 1,
+        depth: 1_000_000,
+    });
+    // Find the steps it used by bisection on the budget.
+    let (mut low, mut high) = (1usize, 1usize << 40);
+    while low < high {
+        let mid = (low + high) / 2;
+        budget = Kernel::new(Limits {
+            steps: mid,
+            depth: 1_000_000,
+        });
+        if budget.normalize_closed(&count).is_ok() {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    let _ = budget;
+    eprintln!(
+        "{low} steps in {elapsed:?}: {:.1} M steps/s",
+        low as f64 / elapsed.as_secs_f64() / 1e6
+    );
+}

@@ -694,10 +694,35 @@ remains supported; kernel checking does not silently erase them.
 
 The frontend's existing input/token/nesting limits still apply. Resolution and
 elaboration each have a 128-frame nesting budget. Checked source modules are
-limited to 256 definitions. Each public kernel operation starts a fresh budget
-of 100000 weighted computation units and 128 nested frames. Traversals consume
-units; numeric operations additionally charge by the number of base-10^9 limbs
-touched, so fuel also bounds numeral size (section 8).
+limited to 256 definitions.
+
+**Kernel budgets.** Each public kernel operation starts a fresh **step
+budget** of 100,000,000 weighted units (`kernel::DEFAULT_STEPS`; about a minute
+of work in a debug build, a few seconds in a release build). Traversals
+consume units; numeric operations additionally charge by the number of
+base-10^9 limbs touched, so fuel also bounds numeral size (section 8). The
+budget is deterministic: it is exhausted at the same point on every machine,
+so a build never passes or fails depending on load, and a dependency cannot
+make a build hang. A logical declaration may set its own budget:
+
+```rust
+#[kernel_steps(500_000_000)]
+total fn long_proof() -> ... ! {} { ... }
+```
+
+`#[kernel_steps(N)]` (a positive integer) applies to that declaration's
+elaboration and admission only, on `total fn`, `total enum`, `prop` and type
+aliases, also in programs with executable code; it is exported with the
+declaration (`kush core`, [kernel-exchange.md](kernel-exchange.md)). Lean's
+`set_option maxHeartbeats` is the same idea.
+
+**Nesting** is not a budget but a safety net. The kernel is recursive; when the
+stack segment it runs on is nearly full (512 KiB on the caller's thread, then
+240 MiB of each 256 MiB segment it creates), it continues the traversal on a
+fresh thread with a large stack, so deep but ordinary terms never overflow the
+native stack. The cap (`kernel::DEFAULT_DEPTH`, 100,000 levels) only turns a
+pathological depth into an error instead of exhausting memory.
+
 Budget exhaustion is an error, not a logical conclusion. Callers can configure
 kernel budgets, but changing budgets cannot admit unchecked globals or terms.
 
@@ -755,8 +780,8 @@ values, dependent indices, and equality proofs. See the
 There is **no digit limit**. An earlier 4096-significant-digit budget was
 removed: it bounded nothing that fuel does not. Every numeric operation
 (inference of a literal, normalizing or copying it, successor, predecessor) is
-charged per base-10^9 limb it touches, so a numeral of about 900,000 digits
-already exhausts the default 100,000-unit budget, and source literals are
+charged per base-10^9 limb it touches, so fuel bounds a numeral's size along
+with everything else, and source literals are
 bounded by the frontend's file size limit anyway. Parsing into limbs is linear,
 so there is no quadratic conversion to guard against (the reason Python limits
 `int`/`str` conversion). Lean, Rocq and Agda likewise bound numerals only by

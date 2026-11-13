@@ -168,10 +168,15 @@ impl Parser {
                             self.bump();
                             value
                         }
+                        // A numeric argument, as in `#[kernel_steps(500000000)]`.
+                        Kind::Integer(value) => {
+                            self.bump();
+                            value
+                        }
                         _ => {
-                            return Err(
-                                self.error("attribute arguments must be one string literal")
-                            );
+                            return Err(self.error(
+                                "attribute arguments must be one string or integer literal",
+                            ));
                         }
                     };
                     self.expect(&Kind::RParen, "')' after an attribute argument")?;

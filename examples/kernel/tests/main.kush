@@ -335,7 +335,7 @@ fn data_families_are_admitted_and_eliminated() -> Unit ! {io, alloc, panic} {
     let mut i = 0;
     while i < items.len() {
         match items[i] {
-            reader.Item.Data(name, levels, prop, params, constructors) => {
+            reader.Item.Data(name, levels, prop, params, constructors, _) => {
                 let code = match check.define_data(&mut k, name, levels, prop, params, constructors) {
                     Result.Ok(_) => 0,
                     Result.Err(code) => code,

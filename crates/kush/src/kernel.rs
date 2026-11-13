@@ -500,11 +500,18 @@ pub struct Limits {
     pub steps: usize,
     pub depth: usize,
 }
+/// The default step budget: deterministic, the same on every machine, and
+/// large enough for ordinary proofs (seconds of work). A definition may raise
+/// it with `#[kernel_steps(N)]`.
+pub const DEFAULT_STEPS: usize = 100_000_000;
+/// The nesting cap: a safety net, not a budget. The kernel grows its stack as
+/// it recurses (`Engine::step`), so only pathological terms reach it.
+pub const DEFAULT_DEPTH: usize = 100_000;
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            steps: 100_000,
-            depth: 128,
+            steps: DEFAULT_STEPS,
+            depth: DEFAULT_DEPTH,
         }
     }
 }
@@ -646,6 +653,9 @@ pub struct Kernel {
     /// universe-polymorphic declaration sets this to the declaration's
     /// parameter count. Admission (`define_*`) uses its own explicit count.
     level_scope: u32,
+    /// Step budgets of declarations admitted with a non-default budget
+    /// (`#[kernel_steps(N)]`), so they can be exported with them.
+    budgets: BTreeMap<String, usize>,
 }
 impl Kernel {
     pub fn new(limits: Limits) -> Self {
@@ -653,6 +663,25 @@ impl Kernel {
             definitions: BTreeMap::new(),
             limits,
             level_scope: 0,
+            budgets: BTreeMap::new(),
+        }
+    }
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+    /// Change the budgets of every later operation; returns the previous
+    /// ones. A frontend raises them around one declaration's admission.
+    pub fn set_limits(&mut self, limits: Limits) -> Limits {
+        std::mem::replace(&mut self.limits, limits)
+    }
+    /// The step budget a declaration was admitted with, when it was not the
+    /// default.
+    pub fn admitted_steps(&self, name: &str) -> Option<usize> {
+        self.budgets.get(name).copied()
+    }
+    fn record_budget(&mut self, name: &str) {
+        if self.limits.steps != DEFAULT_STEPS {
+            self.budgets.insert(name.to_owned(), self.limits.steps);
         }
     }
     fn engine(&self) -> Engine<'_> {
@@ -728,6 +757,7 @@ impl Kernel {
             e.sort(&ty, &mut Vec::new())?;
             e.check(&value, &ty, &mut Vec::new())?;
         }
+        self.record_budget(&name);
         self.definitions
             .insert(name, Global::Definition(Definition { levels, ty, value }));
         Ok(())
@@ -948,6 +978,7 @@ impl Kernel {
                 constructor_types.push(ty);
             }
         }
+        self.record_budget(&spec.name);
         self.definitions.insert(
             spec.name.clone(),
             Global::Data {
@@ -1071,6 +1102,24 @@ struct Engine<'a> {
     max_depth: usize,
     /// Universe parameters in scope: levels may mention `param(0..levels)`.
     levels: u32,
+    /// Approximate address of the bottom of the stack segment in use, and
+    /// how much of it the kernel may use before continuing on a fresh,
+    /// larger stack (see `step`).
+    stack_base: usize,
+    stack_allowance: usize,
+}
+
+/// Stack the kernel uses on the caller's thread before moving to its own
+/// stack: small enough for a 2 MiB test thread that has already recursed.
+const CALLER_STACK_ALLOWANCE: usize = 512 * 1024;
+/// Size of each stack segment the kernel creates, and how much of it it uses
+/// before creating the next one.
+const SEGMENT_STACK_SIZE: usize = 256 * 1024 * 1024;
+const SEGMENT_STACK_ALLOWANCE: usize = 240 * 1024 * 1024;
+
+fn stack_address() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(&marker) as *const u8 as usize
 }
 impl Engine<'_> {
     fn new(definitions: &BTreeMap<String, Global>, limits: Limits) -> Engine<'_> {
@@ -1080,6 +1129,8 @@ impl Engine<'_> {
             depth: 0,
             max_depth: limits.depth,
             levels: 0,
+            stack_base: stack_address(),
+            stack_allowance: CALLER_STACK_ALLOWANCE,
         }
     }
     /// Reject a level that mentions a parameter not in scope.
@@ -1151,15 +1202,48 @@ impl Engine<'_> {
         }
         Ok(info)
     }
-    fn step<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+    /// One step of a recursive kernel traversal: charge the step budget and
+    /// one level of nesting. Recursion depth is bounded by the nesting cap,
+    /// a safety net rather than a budget: when the stack segment in use is
+    /// nearly full, the rest of the traversal continues on a fresh thread
+    /// with a large stack, so deep but legitimate terms do not overflow the
+    /// native stack.
+    fn step<T: Send>(&mut self, f: impl FnOnce(&mut Self) -> Result<T> + Send) -> Result<T> {
         if self.depth >= self.max_depth {
             return fail("kernel nesting budget exhausted");
         }
         self.charge(1)?;
         self.depth += 1;
-        let result = f(self);
+        let result = if stack_address().abs_diff(self.stack_base) > self.stack_allowance {
+            self.on_fresh_stack(f)
+        } else {
+            f(self)
+        };
         self.depth -= 1;
         result
+    }
+    fn on_fresh_stack<T: Send>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T> + Send,
+    ) -> Result<T> {
+        let saved = (self.stack_base, self.stack_allowance);
+        let outcome = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .name("kush-kernel".into())
+                .stack_size(SEGMENT_STACK_SIZE)
+                .spawn_scoped(scope, || {
+                    self.stack_base = stack_address();
+                    self.stack_allowance = SEGMENT_STACK_ALLOWANCE;
+                    f(self)
+                })
+                .map(|handle| handle.join())
+        });
+        (self.stack_base, self.stack_allowance) = saved;
+        match outcome {
+            Ok(Ok(result)) => result,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(_) => fail("the kernel could not create a thread to extend its stack"),
+        }
     }
     fn charge(&mut self, units: usize) -> Result<()> {
         self.fuel = self

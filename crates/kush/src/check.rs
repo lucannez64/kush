@@ -669,13 +669,48 @@ fn logical_data_ids(module: &Module, resolution: &Resolution) -> BTreeSet<Bindin
 }
 
 /// Reject declarations that are not part of the trusted logical fragment.
+/// The step budget a logical declaration asks for with
+/// `#[kernel_steps(N)]`, if any. Rejects a malformed or repeated attribute.
+pub(crate) fn kernel_steps(declaration: &Declaration) -> Result<Option<usize>> {
+    let mut steps = None;
+    for attribute in &declaration.attributes {
+        if attribute.kind != "kernel_steps" {
+            continue;
+        }
+        if steps.is_some() {
+            return Err(Diagnostic::new(
+                attribute.span,
+                "#[kernel_steps(N)] may appear once per declaration",
+            ));
+        }
+        let value = attribute
+            .argument
+            .as_deref()
+            .and_then(|text| text.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    attribute.span,
+                    "#[kernel_steps(N)] takes a positive integer step budget",
+                )
+            })?;
+        steps = Some(value);
+    }
+    Ok(steps)
+}
+
 fn validate(declaration: &Declaration) -> Result<()> {
-    if !declaration.attributes.is_empty() {
+    if let Some(attribute) = declaration
+        .attributes
+        .iter()
+        .find(|attribute| attribute.kind != "kernel_steps")
+    {
         return Err(Diagnostic::new(
-            declaration.attributes[0].span,
-            "attributes/resource contracts are not supported by logical checking yet",
+            attribute.span,
+            "logical declarations support only #[kernel_steps(N)]; other attributes and resource contracts are not supported by logical checking",
         ));
     }
+    kernel_steps(declaration)?;
     match &declaration.item.kind {
         ItemKind::Module(_) => Ok(()),
         ItemKind::Function(f) if !f.total => Err(Diagnostic::new(
@@ -853,6 +888,13 @@ fn check_selected(
         let declaration = declarations[&id];
         let own_levels = levels.get(&id).copied().unwrap_or(0);
         kernel.set_level_scope(own_levels);
+        // A raised step budget applies to this declaration only, including
+        // the kernel queries its elaboration makes.
+        let steps = kernel_steps(declaration)?;
+        kernel.set_limits(crate::kernel::Limits {
+            steps: steps.unwrap_or(crate::kernel::DEFAULT_STEPS),
+            depth: crate::kernel::DEFAULT_DEPTH,
+        });
         let mut elaborator = Elaborator {
             resolution,
             kernel: &kernel,
@@ -941,6 +983,7 @@ fn check_selected(
             .map_err(|e| Diagnostic::new(declaration.item.span, format!("in '{name}': {e}")))?;
         definitions.push(name);
     }
+    kernel.set_limits(crate::kernel::Limits::default());
     Ok(LogicalEnvironment {
         kernel,
         names,

@@ -224,13 +224,19 @@ fn terms(items: &[Term]) -> Sexp {
     list(items.iter().map(term_sexp))
 }
 
-pub fn data_sexp(spec: &IndexedDataSpec) -> Sexp {
+fn steps_sexp(steps: usize) -> Sexp {
+    tagged("steps", [atom(steps.to_string())])
+}
+
+/// `(data NAME LEVELS type|prop (PARAMS) [(steps N)] (ctor ...) ...)`.
+pub fn data_sexp(spec: &IndexedDataSpec, steps: Option<usize>) -> Sexp {
     let mut items = vec![
         atom(spec.name.clone()),
         atom(spec.levels.to_string()),
         atom(if spec.prop { "prop" } else { "type" }),
         terms(&spec.params),
     ];
+    items.extend(steps.map(steps_sexp));
     for constructor in &spec.constructors {
         items.push(tagged(
             "ctor",
@@ -245,7 +251,8 @@ pub fn data_sexp(spec: &IndexedDataSpec) -> Sexp {
     tagged("data", items)
 }
 
-pub fn def_sexp(name: &str, levels: u32, ty: &Term, value: &Term) -> Sexp {
+/// `(def NAME LEVELS TYPE VALUE [(steps N)])`.
+pub fn def_sexp(name: &str, levels: u32, ty: &Term, value: &Term, steps: Option<usize>) -> Sexp {
     tagged(
         "def",
         [
@@ -253,7 +260,9 @@ pub fn def_sexp(name: &str, levels: u32, ty: &Term, value: &Term) -> Sexp {
             atom(levels.to_string()),
             term_sexp(ty),
             term_sexp(value),
-        ],
+        ]
+        .into_iter()
+        .chain(steps.map(steps_sexp)),
     )
 }
 
@@ -286,8 +295,9 @@ pub fn dump(module: &CheckedModule) -> String {
     let mut out = String::new();
     let mut queries = Vec::new();
     for name in &module.definitions {
+        let steps = kernel.admitted_steps(name);
         if let Some(spec) = data_spec(kernel, name) {
-            let _ = writeln!(out, "{}", data_sexp(&spec));
+            let _ = writeln!(out, "{}", data_sexp(&spec, steps));
             continue;
         }
         let (Some(ty), Some(value)) = (kernel.definition_type(name), kernel.definition_value(name))
@@ -295,7 +305,7 @@ pub fn dump(module: &CheckedModule) -> String {
             continue;
         };
         let levels = kernel.global_levels(name).unwrap_or(0);
-        let _ = writeln!(out, "{}", def_sexp(name, levels, ty, value));
+        let _ = writeln!(out, "{}", def_sexp(name, levels, ty, value, steps));
         let global = Term::Global(name.clone(), vec![Level::zero(); levels as usize]);
         queries.push(tagged("normalize", [term_sexp(&global)]));
     }
@@ -486,18 +496,20 @@ fn parse_terms(sexp: &Sexp, what: &str) -> Result<Vec<Term>> {
 /// One item of an exchange file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
+    /// `steps` is a raised step budget for this declaration.
     Def {
         name: String,
         levels: u32,
         ty: Term,
         value: Term,
+        steps: Option<usize>,
     },
-    Data(IndexedDataSpec),
+    Data {
+        spec: IndexedDataSpec,
+        steps: Option<usize>,
+    },
     /// Check a closed term against a closed type.
-    Check {
-        term: Term,
-        ty: Term,
-    },
+    Check { term: Term, ty: Term },
     /// Infer and print the normal form of a closed term's type.
     Infer(Term),
     /// Check, then print the normal form of a closed term.
@@ -511,12 +523,17 @@ pub fn parse_item(sexp: &Sexp) -> Result<Item> {
     }
     Ok(match expect_atom(&items[0], "an item tag")? {
         "def" => {
-            let a = form(items, 4)?;
+            let (a, steps) = if items.len() == 6 {
+                (form(items, 5)?, Some(parse_steps(&items[5])?))
+            } else {
+                (form(items, 4)?, None)
+            };
             Item::Def {
                 name: expect_atom(&a[0], "a definition name")?.to_owned(),
                 levels: number(&a[1], "a level parameter count")?,
                 ty: parse_term(&a[2])?,
                 value: parse_term(&a[3])?,
+                steps,
             }
         }
         "data" => {
@@ -528,7 +545,13 @@ pub fn parse_item(sexp: &Sexp) -> Result<Item> {
                 "prop" => true,
                 other => return fail(format!("expected type or prop, found '{other}'")),
             };
-            let constructors = items[5..]
+            let (steps, first_constructor) = match items.get(5) {
+                Some(Sexp::List(parts)) if parts.first() == Some(&Sexp::Atom("steps".into())) => {
+                    (Some(parse_steps(&items[5])?), 6)
+                }
+                _ => (None, 5),
+            };
+            let constructors = items[first_constructor..]
                 .iter()
                 .map(|sexp| {
                     let parts = expect_list(sexp, "a constructor")?;
@@ -544,13 +567,16 @@ pub fn parse_item(sexp: &Sexp) -> Result<Item> {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Item::Data(IndexedDataSpec {
-                name: expect_atom(&items[1], "a data family name")?.to_owned(),
-                levels: number(&items[2], "a level parameter count")?,
-                prop,
-                params: parse_terms(&items[4], "a parameter list")?,
-                constructors,
-            })
+            Item::Data {
+                spec: IndexedDataSpec {
+                    name: expect_atom(&items[1], "a data family name")?.to_owned(),
+                    levels: number(&items[2], "a level parameter count")?,
+                    prop,
+                    params: parse_terms(&items[4], "a parameter list")?,
+                    constructors,
+                },
+                steps,
+            }
         }
         "check" => {
             let a = form(items, 2)?;
@@ -563,6 +589,19 @@ pub fn parse_item(sexp: &Sexp) -> Result<Item> {
         "normalize" => Item::Normalize(parse_term(&form(items, 1)?[0])?),
         other => return fail(format!("unknown item '{other}'")),
     })
+}
+
+/// `(steps N)` with a positive N.
+fn parse_steps(sexp: &Sexp) -> Result<usize> {
+    let parts = expect_list(sexp, "(steps N)")?;
+    if parts.is_empty() || expect_atom(&parts[0], "steps")? != "steps" {
+        return fail("expected (steps N)");
+    }
+    let steps: usize = number(&form(parts, 1)?[0], "a step budget")?;
+    if steps == 0 {
+        return fail("a step budget must be positive");
+    }
+    Ok(steps)
 }
 
 pub fn parse(text: &str) -> Result<Vec<Item>> {
@@ -580,6 +619,19 @@ fn verdict(error: &crate::kernel::Error) -> &'static str {
     }
 }
 
+/// Use a declaration's own step budget, if it has one; returns the limits to
+/// restore.
+fn raise(kernel: &mut Kernel, steps: Option<usize>) -> crate::kernel::Limits {
+    let previous = kernel.limits();
+    if let Some(steps) = steps {
+        kernel.set_limits(crate::kernel::Limits {
+            steps,
+            depth: previous.depth,
+        });
+    }
+    previous
+}
+
 /// Replay an exchange file with the Rust kernel. One line per item:
 /// `ok NAME` / `reject NAME` / `budget NAME` for declarations, `ok` /
 /// `reject` / `budget` for checks, and `= TERM` or `: TYPE` for normalize and
@@ -595,13 +647,22 @@ pub fn answer(text: &str) -> Result<String> {
                 levels,
                 ty,
                 value,
-            } => match kernel.define_polymorphic(name.clone(), levels, ty, value) {
-                Ok(()) => format!("ok {name}"),
-                Err(error) => format!("{} {name}", verdict(&error)),
-            },
-            Item::Data(spec) => {
+                steps,
+            } => {
+                let previous = raise(&mut kernel, steps);
+                let result = kernel.define_polymorphic(name.clone(), levels, ty, value);
+                kernel.set_limits(previous);
+                match result {
+                    Ok(()) => format!("ok {name}"),
+                    Err(error) => format!("{} {name}", verdict(&error)),
+                }
+            }
+            Item::Data { spec, steps } => {
                 let name = spec.name.clone();
-                match kernel.define_indexed_data(spec) {
+                let previous = raise(&mut kernel, steps);
+                let result = kernel.define_indexed_data(spec);
+                kernel.set_limits(previous);
+                match result {
                     Ok(()) => format!("ok {name}"),
                     Err(error) => format!("{} {name}", verdict(&error)),
                 }

@@ -165,20 +165,28 @@ fn ctor_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
     close(out)
 }
 
+/// ` (steps N)` when a declaration has its own step budget.
+fn steps_into(out: Bytes, steps: i64) -> Bytes ! {alloc, panic} {
+    if steps < 0 { return out; }
+    close(number(space(open(space(out), &Bytes.from("steps"))), steps))
+}
+
 /// One item on one line, as the Rust printer writes it.
 pub fn item_into(s: &Store, out: Bytes, item: Item) -> Bytes ! {alloc, panic} {
     let out = match item {
-        Item.Def(name, levels, ty, value) => {
+        Item.Def(name, levels, ty, value, steps) => {
             let mut out = term.name_into(s, space(open(out, &Bytes.from("def"))), name);
             out = number(space(out), levels);
             out = term_into(s, space(out), ty);
-            close(term_into(s, space(out), value))
+            out = term_into(s, space(out), value);
+            close(steps_into(out, steps))
         },
-        Item.Data(name, levels, prop, params, constructors) => {
+        Item.Data(name, levels, prop, params, constructors, steps) => {
             let mut out = term.name_into(s, space(open(out, &Bytes.from("data"))), name);
             out = number(space(out), levels);
             out = word(space(out), &(if prop { Bytes.from("prop") } else { Bytes.from("type") }));
             out = terms_into(s, space(out), params);
+            out = steps_into(out, steps);
             let n = term.list_len(s, constructors);
             let mut i = 0;
             while i < n {

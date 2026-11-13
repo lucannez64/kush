@@ -6264,14 +6264,20 @@
     },
     {
       "id": "KERNEL-BUDGET-ATTR",
-      "title": "Per-definition kernel budget",
-      "size": "S",
+      "title": "Kernel budgets: growing stack, large deterministic default, per-declaration override",
+      "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
-      "desc": "An attribute raising the kernel step/depth budget for one logical definition.",
+      "status": "in_progress",
+      "desc": "Depth becomes a safety cap (100,000) with the kernel moving to fresh 256 MiB stacks as it recurses; the deterministic step budget defaults to 10^8; #[kernel_steps(N)] raises it per logical declaration and travels in the exchange format.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 09:56:15",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "KIK-SPEC",
@@ -6388,6 +6394,17 @@
       "deps": [],
       "status": "todo",
       "desc": "Two modules with the same last segment cannot both be imported (kernel.env clashed with std.env, so the kernel's state module is kernel.engine). Add 'use path as name' for modules and items: resolver, formatter, language server, editor grammars, docs. Found in examples/kernel; see docs/kernel-in-kush.md section 6.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LANG-STACK-SIZE",
+      "title": "Choose a thread's stack size, or grow it",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Kush programs run recursion on a fixed native stack (8 MB main thread) and abort with 'stack exhausted' past it; there is no way to request a larger stack. The Kush kernel therefore caps nesting at 8,000 where the Rust kernel (which moves to fresh 256 MiB stacks as it recurses) caps at 100,000. Add a stack size to Thread.spawn (and possibly the entry point), or segmented stack growth. See docs/kernel-in-kush.md.",
       "commit": null,
       "log": []
     }
