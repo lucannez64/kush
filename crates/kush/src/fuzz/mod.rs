@@ -5,6 +5,8 @@
 use crate::executable::Executable;
 use crate::native::{self, CodegenOptions, LinkSpec, Optimization};
 use crate::Diagnostic;
+
+pub mod harness;
 use std::path::Path;
 
 /// The environment variable naming the file an instrumented program writes

@@ -214,22 +214,33 @@ does have, and the obligation is a lemma candidate (section 3).
 - The reference evaluator stays the oracle for the tests of this feature: a
   test may replay a found input under `kush eval` and check that it panics at
   the same span.
-- Harness per targeted function `f`, placed in `f`'s own module so private
-  functions are reachable:
+- Harness per targeted function `f` (`fuzz/harness.rs`), appended in
+  memory to `f`'s own module so private functions are reachable. It takes
+  the decoded values, applies `f`'s preconditions as guards and calls it:
 
   ```text
-  fn __fuzz_f() -> Unit ! {io, alloc, panic} {
-      let mut tape = fuzz.Tape.stdin();
-      let src = tape.bytes(64);
-      let at = tape.i64();
-      if !(0 <= at && at <= src.len()) { return; }   // f's erased precondition
-      let _ = f(&src, at, _);
+  pub fn __kush_fuzz_3(src: Bytes, at: i64) -> Unit ! {panic} {
+      if !(0 <= at && at <= Bytes.len(&src)) { return; }   // f's erased precondition
+      let _ = skip(&src, at, _);
   }
   ```
 
-  The tape decoder is a small `std.fuzz` module written in Kush. An exhausted
-  tape yields zeros, so every byte string is a valid input and mutation never
-  produces a rejected one.
+  A synthetic root module (`<package>.kush_fuzz_entry`) replaces the entry
+  file, which it can still import as an ordinary module. Its `main` reads
+  the tape from standard input and decodes the arguments of harness
+  `argv[1]`. The layout is fixed per harness: each scalar has its own
+  little-endian bytes at a fixed offset, each collection a two-byte length
+  there (`minimum + n % 65`, where `minimum` comes from a `where len >= N`
+  refinement); the elements of the collections follow. Bytes past the end
+  of the tape read as zero, so every byte string is a valid input, and the
+  driver can place a dictionary value at a known offset.
+  Supported parameters: integers of every width and `Bool` by value,
+  `Bytes` and `Vec<scalar>` by value, `&` or `&mut`, and `&[scalar]`.
+  Anything else (records, enums, generics, effects other than `io`,
+  `alloc` and `panic`) is reported as `no generator` with the parameter
+  that blocks it. A harness that does not check, for example because the
+  result is linear and cannot be discarded, is dropped with the checker's
+  message as its reason, and the rest are rebuilt.
 - Mutations: byte flips, insert or overwrite with a dictionary value, integer
   ±1, copy a chunk, splice two corpus inputs. The corpus keeps an input when it
   reaches a new obligation or improves an obligation's smallest margin
