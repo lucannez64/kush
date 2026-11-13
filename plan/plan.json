@@ -6753,14 +6753,19 @@
       "deps": [
         "PF-OBLIGATIONS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Tape decoder in Kush; generated harnesses per function from parameter types, dictionary, precondition guards; argv dispatch.",
-      "commit": null,
+      "commit": "9efdb46",
       "log": [
         {
           "time": "2026-11-13 17:25:00",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 17:31:27",
+          "who": "agent",
+          "text": "done 9efdb46"
         }
       ]
     },
@@ -6773,10 +6778,16 @@
         "PF-INSTRUMENT",
         "PF-HARNESS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Driver: seeds, mutators, margin-guided corpus, budgets, timeouts, --list, exit codes.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 17:31:27",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "PF-SHRINK",
