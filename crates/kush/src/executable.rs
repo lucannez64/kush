@@ -39400,6 +39400,16 @@ impl Executable {
     pub fn obligations(&self) -> &[Obligation] {
         &self.obligations
     }
+    /// PROOF-FUZZ: obligation sites, one per source location and kind (the
+    /// instances of a generic function share a site), in source order. A
+    /// site's position in this list is its id in fuzz builds.
+    pub fn obligation_sites(&self) -> Vec<&Obligation> {
+        let mut seen = BTreeSet::new();
+        self.obligations
+            .iter()
+            .filter(|o| seen.insert((o.span.start, o.span.end, o.kind.label())))
+            .collect()
+    }
     pub fn function_count(&self) -> usize {
         self.functions.len()
     }
@@ -40908,45 +40918,6 @@ impl Executable {
     }
 }
 
-#[cfg(test)]
-mod recursive_summary_mapping_tests {
-    use super::*;
-
-    fn origin(parameter: usize, path: &[&str]) -> recursive_lifetimes::Origin {
-        recursive_lifetimes::Origin {
-            parameter,
-            path: path.iter().map(|part| (*part).to_owned()).collect(),
-        }
-    }
-
-    #[test]
-    fn a_direct_parameter_origin_maps_even_when_a_field_path_is_present() {
-        let lifetime = summary_origin_lifetime(
-            &origin(0, &["view"]),
-            &[Some("'a".to_owned())],
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        assert_eq!(lifetime, "'a");
-    }
-
-    #[test]
-    fn a_missing_field_path_is_rejected_instead_of_dropped() {
-        let error =
-            summary_origin_lifetime(&origin(0, &["missing"]), &[None], &[], &BTreeMap::new())
-                .unwrap_err();
-        assert!(error.contains("no source binder"), "{error}");
-    }
-
-    #[test]
-    fn an_unborrowed_empty_path_origin_is_rejected() {
-        let error =
-            summary_origin_lifetime(&origin(0, &[]), &[None], &[], &BTreeMap::new()).unwrap_err();
-        assert!(error.contains("no inferred borrow lifetime"), "{error}");
-    }
-}
-
 /// PROOF-FUZZ: obligations in source order (then by function instance).
 fn sorted_obligations(
     obligations: &BTreeMap<(usize, usize, usize, ObligationKind), Obligation>,
@@ -41004,3 +40975,43 @@ pub(crate) fn obligation_report<'o>(
     }
     lines
 }
+
+#[cfg(test)]
+mod recursive_summary_mapping_tests {
+    use super::*;
+
+    fn origin(parameter: usize, path: &[&str]) -> recursive_lifetimes::Origin {
+        recursive_lifetimes::Origin {
+            parameter,
+            path: path.iter().map(|part| (*part).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_direct_parameter_origin_maps_even_when_a_field_path_is_present() {
+        let lifetime = summary_origin_lifetime(
+            &origin(0, &["view"]),
+            &[Some("'a".to_owned())],
+            &[],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(lifetime, "'a");
+    }
+
+    #[test]
+    fn a_missing_field_path_is_rejected_instead_of_dropped() {
+        let error =
+            summary_origin_lifetime(&origin(0, &["missing"]), &[None], &[], &BTreeMap::new())
+                .unwrap_err();
+        assert!(error.contains("no source binder"), "{error}");
+    }
+
+    #[test]
+    fn an_unborrowed_empty_path_origin_is_rejected() {
+        let error =
+            summary_origin_lifetime(&origin(0, &[]), &[None], &[], &BTreeMap::new()).unwrap_err();
+        assert!(error.contains("no inferred borrow lifetime"), "{error}");
+    }
+}
+
