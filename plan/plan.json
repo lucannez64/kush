@@ -6268,14 +6268,19 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Depth becomes a safety cap (100,000) with the kernel moving to fresh 256 MiB stacks as it recurses; the deterministic step budget defaults to 10^8; #[kernel_steps(N)] raises it per logical declaration and travels in the exchange format.",
-      "commit": null,
+      "commit": "3af7db6",
       "log": [
         {
           "time": "2026-11-13 09:56:15",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 10:16:16",
+          "who": "agent",
+          "text": "done 3af7db6"
         }
       ]
     },
