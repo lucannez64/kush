@@ -408,13 +408,25 @@ Supported source features are:
 
 - Explicit type/value generic parameters; an omitted generic bound defaults to
   `Type`, meaning `Universe(0)`.
-- `Type` and `Type<literal>` for universe levels 0 through 255.
+- `Type` and `Type<level>`, where a level is a literal from 0 through 255, a
+  universe level generic, `Level.succ<l>` or `Level.max<a, b>`.
+- Universe polymorphism: generics bound by `Level` (`<u: Level>`) come before
+  every other generic of a `total fn`, alias, `total enum` or `prop`, and make
+  the declaration polymorphic over those levels. Every use passes the levels
+  first, like other explicit generic arguments (`id::<0, Nat>(3)`,
+  `List<1, Type>`, a partially applied motive `LengthMotive::<u>`); a missing
+  level is an error, never inferred. A level generic may only appear in
+  `Type<...>` or as a universe argument. A data family's recursive fields and
+  constructor results must use the family at its own levels, in order.
+  `Data.elim::<D>` names the bare family and takes its levels from the
+  scrutinee's type. `Level` and `Level.succ`/`Level.max` are reserved names.
 - `Nat`, `Nat.zero`, `Nat.succ(n)`, and compact arbitrary-precision decimal
   logical literals, subject to the significant-digit budget in section 8.
 - `Eq<T, x, y>` and `refl::<T>(x)`. These elaborate directly to kernel equality
   and reflexive-proof terms, so the carrier may be a Type at any supported level
-  or a proposition. A generic *definition* still binds `T : Type` at level 0
-  unless it is written against `Prop`; there is no sort-polymorphic generic.
+  or a proposition. A generic definition binds `T : Type` at level 0 unless it
+  declares a level generic (`<u: Level, T: Type<u>>`) or is written against
+  `Prop`; there is no generic ranging over both `Type` and `Prop`.
 - Dependent result types referencing earlier parameters or generic values.
 - Pure function types, including dependent binders:
   `fn(n: Nat, hypothesis: P<n>) -> P<Nat.succ<n>> ! {}`.
@@ -485,6 +497,33 @@ total enum Indexed<p: Two> { Mk: Indexed<p> }
 total fn same_proof() -> Indexed<Second> ! {} { Indexed.Mk::<First> }
 ```
 
+### Universe-polymorphic declarations
+
+```rust
+total fn id<u: Level, T: Type<u>>(x: T) -> T ! {} { x }
+total fn three() -> Nat ! {} { id::<0, Nat>(3) }
+total fn nat_type() -> Type ! {} { id::<1, Type>(Nat) }   // one level up
+
+type Big<u: Level> = Type<Level.succ<u>>;
+
+total enum List<u: Level, A: Type<u>> {
+    Nil: List<u, A>,
+    Cons(A, List<u, A>): List<u, A>,
+}
+type LengthMotive<u: Level, A: Type<u>, l: List<u, A>> = Nat;
+total fn length<u: Level, A: Type<u>>(l: List<u, A>) -> Nat ! {} {
+    Data.elim::<List>(LengthMotive::<u>, nil_length::<u>, cons_length::<u>, l)
+}
+total fn types() -> List<1, Type> ! {} {
+    Cons::<1, Type>(Nat, Cons::<1, Type>(Bool, Nil::<1, Type>))
+}
+```
+
+`id::<0, Type>(Nat)` is rejected (`Type` lives in `Type<1>`), and so is using
+`Nat` where `Big<1>` is expected: polymorphism replaces cumulativity, it does
+not add it. The complete example is
+[universes.kush](../examples/universes.kush).
+
 ### Source-level induction and transport
 
 The source checker now exposes two fully applied operations, lowering directly to
@@ -510,8 +549,8 @@ connect `from` to `to`, and the supplied value must inhabit the family at `from`
 The result inhabits the family at `to`. The motive's result sort is inferred
 by the kernel, not hardcoded by elaboration. `Eq`/`refl` elaborate directly to
 kernel equality terms, so a direct application can use a Type at any level or a
-proposition as the carrier. Generic helpers still need an explicit `Type` or
-`Prop` binder; there is no sort-polymorphic generic.
+proposition as the carrier. Generic helpers need an explicit `Type<u>` (with a
+level generic for any level) or `Prop` binder; no generic ranges over both.
 
 `Data.elim::<D>` takes a motive, one branch per constructor in declaration order,
 and a scrutinee; `Eq.elim::<T>` takes `left`, `right`, a motive, the reflexive

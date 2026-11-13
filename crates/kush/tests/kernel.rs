@@ -217,18 +217,12 @@ fn global_admission_is_atomic_and_rejects_recursion_or_axioms() {
     let mut k = Kernel::default();
     assert!(k.define("bad".into(), T::Nat, T::Nat).is_err());
     assert!(!k.contains("bad"));
-    assert!(
-        k.define("loop".into(), T::Nat, T::global("loop"))
-            .is_err()
-    );
+    assert!(k.define("loop".into(), T::Nat, T::global("loop")).is_err());
     assert!(!k.contains("loop"));
     k.define("id".into(), identity_type(), identity()).unwrap();
     let value = T::app(T::app(T::global("id"), T::Nat), nat(2));
     k.define("two".into(), T::Nat, value).unwrap();
-    assert_eq!(
-        k.normalize_closed(&T::global("two")).unwrap(),
-        nat(2)
-    );
+    assert_eq!(k.normalize_closed(&T::global("two")).unwrap(), nat(2));
     assert!(k.define("two".into(), T::Nat, T::Zero).is_err());
     assert_eq!(k.definition_type("two"), Some(&T::Nat));
 }
@@ -360,16 +354,10 @@ fn nil() -> T {
     T::app(T::global("Vect::nil"), T::Zero)
 }
 fn cons(n: u32, head: T, tail: T) -> T {
-    T::app(
-        T::app(T::app(T::global("Vect::cons"), nat(n)), head),
-        tail,
-    )
+    T::app(T::app(T::app(T::global("Vect::cons"), nat(n)), head), tail)
 }
 fn length_motive() -> T {
-    T::lam(
-        T::Nat,
-        T::lam(T::app(T::global("Vect"), T::Var(0)), T::Nat),
-    )
+    T::lam(T::Nat, T::lam(T::app(T::global("Vect"), T::Var(0)), T::Nat))
 }
 fn length_branches() -> Vec<T> {
     vec![
@@ -399,17 +387,11 @@ fn positive_logical_data_is_admitted_with_checked_constructors() {
     // Vect : Nat -> Universe(0), constructors are checked globals.
     k.check_closed(&nil(), &T::app(T::global("Vect"), T::Zero))
         .unwrap();
-    k.check_closed(
-        &cons(0, nat(5), nil()),
-        &T::app(T::global("Vect"), nat(1)),
-    )
-    .unwrap();
+    k.check_closed(&cons(0, nat(5), nil()), &T::app(T::global("Vect"), nat(1)))
+        .unwrap();
     assert!(
-        k.check_closed(
-            &cons(0, nat(5), nil()),
-            &T::app(T::global("Vect"), nat(2))
-        )
-        .is_err()
+        k.check_closed(&cons(0, nat(5), nil()), &T::app(T::global("Vect"), nat(2)))
+            .is_err()
     );
     assert!(k.data("Vect::nil").is_none());
     assert!(k.data("missing").is_none());
@@ -529,21 +511,13 @@ fn negative_nested_and_malformed_data_are_rejected_atomically() {
         vec![T::universe(0)],
         vec![ConstructorSpec {
             name: "Indexed::mk".into(),
-            fields: vec![T::app(
-                T::global("Indexed"),
-                T::global("Indexed"),
-            )],
+            fields: vec![T::app(T::global("Indexed"), T::global("Indexed"))],
             result: vec![T::Var(0)],
         }],
     );
     assert!(error.0.contains("non-strictly-positive"), "{error}");
     // Self-reference in a parameter/kind.
-    let error = reject(
-        &mut k,
-        "SelfParam",
-        vec![T::global("SelfParam")],
-        vec![],
-    );
+    let error = reject(&mut k, "SelfParam", vec![T::global("SelfParam")], vec![]);
     assert!(error.0.contains("own parameter"), "{error}");
     // Result arity.
     let error = reject(
@@ -618,8 +592,7 @@ fn empty_data_families_are_sound_and_have_zero_branches() {
     assert!(k.data("Void").unwrap().constructors.is_empty());
     let motive = T::lam(T::global("Void"), T::Nat);
     let term = T::elim("Void", motive, vec![], T::Var(0));
-    k.check_open(&term, &T::Nat, &[T::global("Void")])
-        .unwrap();
+    k.check_open(&term, &T::Nat, &[T::global("Void")]).unwrap();
 }
 
 #[test]
@@ -690,10 +663,7 @@ fn constructor_results_may_depend_on_field_values_at_the_kernel_level() {
     let value = T::app(T::app(T::global("Dep::mk"), T::Zero), nat(3));
     k.check_closed(&value, &T::app(T::global("Dep"), nat(3)))
         .unwrap();
-    let motive = T::lam(
-        T::Nat,
-        T::lam(T::app(T::global("Dep"), T::Var(0)), T::Nat),
-    );
+    let motive = T::lam(T::Nat, T::lam(T::app(T::global("Dep"), T::Var(0)), T::Nat));
     let branch = T::lam(T::Nat, T::lam(T::Nat, T::Var(0)));
     let term = T::elim("Dep", motive, vec![branch], value);
     assert_eq!(k.normalize_closed(&term).unwrap(), nat(3));
@@ -834,10 +804,7 @@ fn constructor_local_binders_produce_finite_index_values() {
 #[test]
 fn elimination_over_constructor_local_binders_checks_and_reduces() {
     let k = fin();
-    let motive = T::lam(
-        T::Nat,
-        T::lam(T::app(T::global("Fin"), T::Var(0)), T::Nat),
-    );
+    let motive = T::lam(T::Nat, T::lam(T::app(T::global("Fin"), T::Var(0)), T::Nat));
     // (N) -> (n) -> Nat
     let zero_branch = T::lam(T::Nat, T::lam(T::Nat, T::Zero));
     // (N) -> (n) -> (pred : Fin n) -> (motive n pred) -> Nat
@@ -1144,12 +1111,8 @@ fn constructor_local_universes_raise_type_valued_families() {
     })
     .unwrap();
     assert_eq!(k.data("Code").unwrap().sort, 1.into());
-    k.check_closed(&T::global("Code"), &T::universe(1))
-        .unwrap();
-    assert!(
-        k.check_closed(&T::global("Code"), &T::universe(0))
-            .is_err()
-    );
+    k.check_closed(&T::global("Code"), &T::universe(1)).unwrap();
+    assert!(k.check_closed(&T::global("Code"), &T::universe(0)).is_err());
     // A Prop family ignores local universe levels because elimination stays
     // inside Prop.
     let mut props = Kernel::default();

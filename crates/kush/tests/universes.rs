@@ -76,18 +76,12 @@ fn universe_arguments_must_match_and_be_in_scope() {
     let mut k = kernel_with_identity();
     // Wrong number of level arguments.
     assert!(k.infer_closed(&T::global("id")).is_err());
-    assert!(
-        k.infer_closed(&at("id", vec![0.into(), 0.into()]))
-            .is_err()
-    );
+    assert!(k.infer_closed(&at("id", vec![0.into(), 0.into()])).is_err());
     // A closed term cannot mention a level parameter.
     assert!(k.infer_closed(&sort(u(0))).is_err());
     assert!(k.infer_closed(&at("id", vec![u(0)])).is_err());
     // A monomorphic definition cannot mention one either.
-    assert!(
-        k.define("bad".into(), T::universe(1), sort(u(0)))
-            .is_err()
-    );
+    assert!(k.define("bad".into(), T::universe(1), sort(u(0))).is_err());
     assert!(!k.contains("bad"));
     // Inside a polymorphic definition, only its own parameters are in scope.
     assert!(
@@ -219,7 +213,10 @@ fn a_polymorphic_family_lives_in_its_parameter_universe() {
         scrutinee: Box::new(value),
     };
     assert_eq!(k.infer_closed(&length).unwrap(), T::Nat);
-    assert_eq!(k.normalize_closed(&length).unwrap(), T::natural(1u64.into()));
+    assert_eq!(
+        k.normalize_closed(&length).unwrap(),
+        T::natural(1u64.into())
+    );
 }
 
 #[test]
@@ -233,4 +230,109 @@ fn recursive_fields_use_the_family_at_its_own_levels() {
     spec.params = vec![sort(u(1))];
     assert!(k.define_indexed_data(spec).is_err());
     assert!(!k.contains("List"));
+}
+
+const POLYMORPHIC: &str = "
+total fn id<u: Level, T: Type<u>>(x: T) -> T ! {} { x }
+total fn three() -> Nat ! {} { id::<0, Nat>(3) }
+total fn nat_type() -> Type ! {} { id::<1, Type>(Nat) }
+total fn computes() -> Eq<Nat, id<0, Nat, 3>, 3> ! {} { refl::<Nat>(3) }
+
+type Big<u: Level> = Type<Level.succ<u>>;
+total fn type_is_big() -> Big<0> ! {} { Type }
+type Both<u: Level, v: Level> = Type<Level.max<u, v>>;
+total fn nat_in_both() -> Both<0, 0> ! {} { Nat }
+
+total enum List<u: Level, A: Type<u>> {
+    Nil: List<u, A>,
+    Cons(A, List<u, A>): List<u, A>,
+}
+type LengthMotive<u: Level, A: Type<u>, l: List<u, A>> = Nat;
+total fn nil_length<u: Level, A: Type<u>>() -> Nat ! {} { 0 }
+total fn cons_length<u: Level, A: Type<u>>(x: A, xs: List<u, A>, ih: Nat) -> Nat ! {} {
+    Nat.succ(ih)
+}
+total fn length<u: Level, A: Type<u>>(l: List<u, A>) -> Nat ! {} {
+    Data.elim::<List>(LengthMotive::<u>, nil_length::<u>, cons_length::<u>, l)
+}
+total fn types() -> List<1, Type> ! {} { Cons::<1, Type>(Nat, Cons::<1, Type>(Bool, Nil::<1, Type>)) }
+total fn numbers() -> List<0, Nat> ! {} { Cons::<0, Nat>(7, Nil::<0, Nat>) }
+total fn two_types() -> Eq<Nat, length<1, Type, types>, 2> ! {} { refl::<Nat>(2) }
+total fn one_number() -> Eq<Nat, length<0, Nat, numbers>, 1> ! {} { refl::<Nat>(1) }
+";
+
+#[test]
+fn source_level_universe_polymorphism() {
+    let checked = kush::check(POLYMORPHIC).unwrap();
+    let kernel = &checked.kernel;
+    assert_eq!(kernel.global_levels("id"), Some(1));
+    assert_eq!(kernel.global_levels("Both"), Some(2));
+    assert_eq!(kernel.data("List").unwrap().sort, u(0));
+}
+
+fn rejects(source: &str, expected: &str) {
+    let error = kush::check(source).unwrap_err().message;
+    assert!(
+        error.contains(expected),
+        "expected '{expected}' in: {error}"
+    );
+}
+
+#[test]
+fn source_level_universe_errors() {
+    let id = "total fn id<u: Level, T: Type<u>>(x: T) -> T ! {} { x }\n";
+    // Level arguments are required and come first.
+    rejects(
+        &format!("{id}total fn bad() -> Nat ! {{}} {{ id(3) }}"),
+        "universe polymorphic",
+    );
+    // id at level 0 cannot take Type, which lives in Type<1>.
+    rejects(
+        &format!("{id}total fn bad() -> Type ! {{}} {{ id::<0, Type>(Nat) }}"),
+        "type mismatch",
+    );
+    // There is still no cumulativity.
+    rejects(
+        "type Big<u: Level> = Type<Level.succ<u>>;
+         total fn bad() -> Big<1> ! {} { Nat }",
+        "type mismatch",
+    );
+    rejects(
+        "total fn bad<T: Type, u: Level>(x: T) -> T ! {} { x }",
+        "must come before",
+    );
+    rejects(
+        "total fn bad<u: Level>(x: u) -> Nat ! {} { 0 }",
+        "only appear in Type",
+    );
+    rejects(
+        "total fn bad<T: Type>(x: T) -> Type<T> ! {} { Nat }",
+        "expected a universe level",
+    );
+    // A recursive field must use the family's own levels.
+    rejects(
+        "total enum List<u: Level, A: Type<u>> {
+             Nil: List<u, A>,
+             Cons(A, List<0, A>): List<u, A>,
+         }",
+        "own universe parameters",
+    );
+    rejects(
+        "total enum List<u: Level, A: Type<u>> {
+             Nil: List<0, A>,
+         }",
+        "own universe levels",
+    );
+}
+
+#[test]
+fn the_universes_example_checks() {
+    let checked = kush::check(include_str!("../../../examples/universes.kush")).unwrap();
+    assert_eq!(checked.kernel.global_levels("length"), Some(1));
+    // Replacing a true count with a false one is rejected.
+    let false_proof = include_str!("../../../examples/universes.kush").replace(
+        "length<1, Type, types>, 3> ! {} { refl::<Nat>(3) }",
+        "length<1, Type, types>, 2> ! {} { refl::<Nat>(2) }",
+    );
+    assert!(kush::check(&false_proof).is_err());
 }

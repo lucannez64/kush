@@ -1349,7 +1349,7 @@ const KEYWORD_BEFORE_NAME: &[&str] = &["is", "algebra", "dyn", "const", "for", "
 
 const PRIMITIVE_TYPE_WORDS: &[&str] = &[
     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f64", "bool", "char", "String", "Bytes",
-    "Nat", "Prop", "Unit", "Bool",
+    "Nat", "Prop", "Level", "Unit", "Bool",
 ];
 
 const KEYWORD: u64 = 0;

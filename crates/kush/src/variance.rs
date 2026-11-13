@@ -1652,6 +1652,7 @@ mod tests {
             constructors: BTreeMap::new(),
             constructor_counts: BTreeMap::new(),
             nullary: BTreeMap::new(),
+            levels: BTreeMap::new(),
             definitions: Vec::new(),
         };
         let module = ast::Module { items: Vec::new() };

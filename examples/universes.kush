@@ -1,0 +1,51 @@
+module examples.universes;
+
+// Universe polymorphism: a declaration generic over `u: Level` is checked once
+// and used at every level. Levels are explicit, passed before other generics.
+
+total fn id<u: Level, T: Type<u>>(x: T) -> T ! {} { x }
+
+total fn three() -> Nat ! {} { id::<0, Nat>(3) }
+
+// The same function one universe up: it takes a type and returns it.
+total fn nat_type() -> Type ! {} { id::<1, Type>(Nat) }
+
+total fn id_computes() -> Eq<Nat, id<0, Nat, 3>, 3> ! {} { refl::<Nat>(3) }
+
+// Level arithmetic: successor and maximum.
+type Big<u: Level> = Type<Level.succ<u>>;
+type Both<u: Level, v: Level> = Type<Level.max<u, v>>;
+
+total fn type_is_big() -> Big<0> ! {} { Type }
+total fn nat_in_both() -> Both<0, 0> ! {} { Nat }
+
+// A polymorphic family lives in its parameter's universe: List<0, Nat> is a
+// Type, List<1, Type> is a Type<1>.
+total enum List<u: Level, A: Type<u>> {
+    Nil: List<u, A>,
+    Cons(A, List<u, A>): List<u, A>,
+}
+
+type LengthMotive<u: Level, A: Type<u>, l: List<u, A>> = Nat;
+
+total fn nil_length<u: Level, A: Type<u>>() -> Nat ! {} { 0 }
+
+total fn cons_length<u: Level, A: Type<u>>(x: A, xs: List<u, A>, ih: Nat) -> Nat ! {} {
+    Nat.succ(ih)
+}
+
+// One definition of length, for lists at any level.
+total fn length<u: Level, A: Type<u>>(l: List<u, A>) -> Nat ! {} {
+    Data.elim::<List>(LengthMotive::<u>, nil_length::<u>, cons_length::<u>, l)
+}
+
+total fn numbers() -> List<0, Nat> ! {} {
+    Cons::<0, Nat>(7, Cons::<0, Nat>(8, Nil::<0, Nat>))
+}
+
+total fn types() -> List<1, Type> ! {} {
+    Cons::<1, Type>(Nat, Cons::<1, Type>(Bool, Cons::<1, Type>(Unit, Nil::<1, Type>)))
+}
+
+total fn two_numbers() -> Eq<Nat, length<0, Nat, numbers>, 2> ! {} { refl::<Nat>(2) }
+total fn three_types() -> Eq<Nat, length<1, Type, types>, 3> ! {} { refl::<Nat>(3) }

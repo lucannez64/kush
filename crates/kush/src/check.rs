@@ -3,7 +3,7 @@
 use crate::{
     Diagnostic, Span,
     ast::*,
-    kernel::{Kernel, Scalar, Term},
+    kernel::{Kernel, Level, Scalar, Term},
     lexer::Kind,
     parse,
     resolve::{self, BindingId, BindingKind, Resolution},
@@ -30,6 +30,9 @@ pub(crate) struct LogicalEnvironment {
     /// Number of constructors per admitted logical data family.
     pub constructor_counts: BTreeMap<BindingId, usize>,
     pub nullary: BTreeMap<BindingId, usize>,
+    /// Universe parameter count of each polymorphic logical declaration
+    /// (absent means monomorphic). A constructor uses its family's count.
+    pub levels: BTreeMap<BindingId, u32>,
     pub definitions: Vec<String>,
 }
 
@@ -605,7 +608,16 @@ fn logical_type(
                 BindingKind::Builtin => {
                     matches!(
                         binding.name.as_str(),
-                        "Type" | "Nat" | "Eq" | "Prop" | "i64" | "Bool" | "Unit"
+                        "Type"
+                            | "Nat"
+                            | "Eq"
+                            | "Prop"
+                            | "i64"
+                            | "Bool"
+                            | "Unit"
+                            | "Level"
+                            | "Level.succ"
+                            | "Level.max"
                     )
                 }
                 BindingKind::Generic => true,
@@ -696,6 +708,18 @@ fn validate(declaration: &Declaration) -> Result<()> {
             "logical checking supports total functions, type aliases, and total logical data declarations only",
         )),
     }
+}
+
+/// Whether a generic binds a universe level (`<u: Level>`).
+fn level_bound(resolution: &Resolution, generic: &Generic) -> bool {
+    let Some(bound) = &generic.bound else {
+        return false;
+    };
+    matches!(&bound.kind, TypeKind::Named { arguments, .. } if arguments.is_empty())
+        && resolution.reference(bound.span).is_some_and(|id| {
+            let binding = &resolution.bindings[id];
+            binding.kind == BindingKind::Builtin && binding.name == "Level"
+        })
 }
 
 fn check_selected(
@@ -806,10 +830,29 @@ fn check_selected(
         }
         constructor_counts.insert(*id, count);
     }
+    let mut levels = BTreeMap::new();
+    for id in selected {
+        let generics = match declarations.get(id).map(|d| &d.item.kind) {
+            Some(ItemKind::Function(f)) => f.generics.as_slice(),
+            Some(ItemKind::Alias { generics, .. })
+            | Some(ItemKind::Enum { generics, .. })
+            | Some(ItemKind::Prop { generics, .. }) => generics.as_slice(),
+            _ => continue,
+        };
+        let count = generics
+            .iter()
+            .take_while(|generic| level_bound(resolution, generic))
+            .count();
+        if count > 0 {
+            levels.insert(*id, count as u32);
+        }
+    }
     let mut kernel = Kernel::default();
     let mut definitions = Vec::new();
     for id in order {
         let declaration = declarations[&id];
+        let own_levels = levels.get(&id).copied().unwrap_or(0);
+        kernel.set_level_scope(own_levels);
         let mut elaborator = Elaborator {
             resolution,
             kernel: &kernel,
@@ -818,6 +861,8 @@ fn check_selected(
             constructors: &constructors,
             constructor_counts: &constructor_counts,
             nullary: &nullary,
+            levels: &levels,
+            level_params: Vec::new(),
             aliases: &EMPTY_ALIASES,
             literals: &EMPTY_LITERALS,
             locals: Vec::new(),
@@ -834,6 +879,7 @@ fn check_selected(
             } => {
                 debug_assert_eq!(name, data[&id]);
                 let spec = elaborator.data(id, &name, generics, variants, false)?;
+                kernel.set_level_scope(0);
                 kernel.define_indexed_data(spec).map_err(|e| {
                     Diagnostic::new(
                         declaration.item.span,
@@ -848,6 +894,7 @@ fn check_selected(
             } => {
                 debug_assert_eq!(name, data[&id]);
                 let spec = elaborator.data(id, &name, generics, variants, true)?;
+                kernel.set_level_scope(0);
                 kernel.define_indexed_data(spec).map_err(|e| {
                     Diagnostic::new(
                         declaration.item.span,
@@ -863,7 +910,7 @@ fn check_selected(
         let (ty, value) = match &declaration.item.kind {
             ItemKind::Function(f) => elaborator.function(f)?,
             ItemKind::Alias { generics, ty, .. } => {
-                let domains = elaborator.generics(generics)?;
+                let domains = elaborator.generics(generics, true)?;
                 let mut value = elaborator.ty(ty)?;
                 for domain in domains.iter().rev() {
                     value = Term::lam(domain.clone(), value);
@@ -888,8 +935,9 @@ fn check_selected(
             }
             _ => unreachable!(),
         };
+        kernel.set_level_scope(0);
         kernel
-            .define(name.clone(), ty, value)
+            .define_polymorphic(name.clone(), own_levels, ty, value)
             .map_err(|e| Diagnostic::new(declaration.item.span, format!("in '{name}': {e}")))?;
         definitions.push(name);
     }
@@ -900,6 +948,7 @@ fn check_selected(
         constructors,
         constructor_counts,
         nullary,
+        levels,
         definitions,
     })
 }
@@ -958,6 +1007,10 @@ struct Elaborator<'a> {
     constructors: &'a BTreeMap<BindingId, String>,
     constructor_counts: &'a BTreeMap<BindingId, usize>,
     nullary: &'a BTreeMap<BindingId, usize>,
+    /// Universe parameter counts of polymorphic declarations.
+    levels: &'a BTreeMap<BindingId, u32>,
+    /// The current declaration's level generics; position is the parameter.
+    level_params: Vec<BindingId>,
     locals: Vec<Option<BindingId>>,
     /// Symbolic scalar bindings introduced as by-value aliases of an earlier
     /// binder. The value is the absolute outer-to-inner position in `locals`,
@@ -1015,6 +1068,98 @@ impl Elaborator<'_> {
             _ => None,
         })
     }
+    /// Elaborate a universe level: a literal, a level generic of the current
+    /// declaration, `Level.succ<l>` or `Level.max<a, b>`.
+    fn level(&mut self, ty: &Type) -> Result<Level> {
+        let expected = "expected a universe level: a literal, a level generic, Level.succ<l>, or Level.max<a, b>";
+        match &ty.kind {
+            TypeKind::Integer(value) => value
+                .parse::<u32>()
+                .ok()
+                .filter(|level| *level <= 255)
+                .map(Level::constant)
+                .ok_or_else(|| {
+                    Diagnostic::new(ty.span, "surface universe levels must be in 0..255")
+                }),
+            TypeKind::Named { arguments, .. } => {
+                let id = self
+                    .resolution
+                    .reference(ty.span)
+                    .ok_or_else(|| Diagnostic::new(ty.span, expected))?;
+                if let Some(position) = self.level_params.iter().position(|param| *param == id) {
+                    if !arguments.is_empty() {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            "a universe level takes no arguments",
+                        ));
+                    }
+                    return Ok(Level::param(position as u32));
+                }
+                let binding = &self.resolution.bindings[id];
+                let level = match (binding.kind, binding.name.as_str(), arguments.as_slice()) {
+                    (BindingKind::Builtin, "Level.succ", [inner]) => self
+                        .level(inner)?
+                        .succ()
+                        .map_err(|e| Diagnostic::new(ty.span, e.to_string()))?,
+                    (BindingKind::Builtin, "Level.max", [left, right]) => {
+                        self.level(left)?.max(&self.level(right)?)
+                    }
+                    _ => return Err(Diagnostic::new(ty.span, expected)),
+                };
+                Ok(level)
+            }
+            _ => Err(Diagnostic::new(ty.span, expected)),
+        }
+    }
+    /// A reference applied to arguments. A universe-polymorphic global takes
+    /// its level arguments first; they are consumed here and the remaining
+    /// arguments are returned for ordinary application.
+    fn applied_reference<'t>(
+        &mut self,
+        span: Span,
+        arguments: &'t [Type],
+    ) -> Result<(Term, &'t [Type])> {
+        let mut term = self.reference(span)?;
+        let Some(id) = self.resolution.reference(span) else {
+            return Ok((term, arguments));
+        };
+        let binding = &self.resolution.bindings[id];
+        let owner = match binding.kind {
+            BindingKind::Constructor => binding.owner,
+            BindingKind::Function | BindingKind::Alias | BindingKind::Data => Some(id),
+            _ => None,
+        };
+        let count = owner
+            .and_then(|owner| self.levels.get(&owner))
+            .copied()
+            .unwrap_or(0) as usize;
+        if count == 0 {
+            return Ok((term, arguments));
+        }
+        if arguments.len() < count {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "'{}' is universe polymorphic: pass its {count} universe level argument(s) first",
+                    binding.name
+                ),
+            ));
+        }
+        let levels = arguments[..count]
+            .iter()
+            .map(|argument| self.level(argument))
+            .collect::<Result<Vec<_>>>()?;
+        match &mut term {
+            Term::Global(_, slot) => *slot = levels,
+            _ => {
+                return Err(Diagnostic::new(
+                    span,
+                    "internal error: polymorphic reference is not a global",
+                ));
+            }
+        }
+        Ok((term, &arguments[count..]))
+    }
     fn reference(&self, span: Span) -> Result<Term> {
         let id = self.resolution.reference(span).ok_or_else(|| {
             Diagnostic::new(
@@ -1022,6 +1167,12 @@ impl Elaborator<'_> {
                 "dependent member projection is not supported by logical checking yet",
             )
         })?;
+        if self.level_params.contains(&id) {
+            return Err(Diagnostic::new(
+                span,
+                "a universe level can only appear in Type<...> or as a universe argument",
+            ));
+        }
         if let Some(term) = self.literals.get(&id) {
             return Ok(term.clone());
         }
@@ -1164,9 +1315,28 @@ impl Elaborator<'_> {
             .map(Term::natural)
             .map_err(|e: crate::natural::Error| Diagnostic::new(span, e.to_string()))
     }
-    fn generics(&mut self, generics: &[Generic]) -> Result<Vec<Term>> {
+    fn generics(&mut self, generics: &[Generic], levels_allowed: bool) -> Result<Vec<Term>> {
         let mut domains = Vec::new();
         for generic in generics {
+            if level_bound(self.resolution, generic) {
+                if !levels_allowed {
+                    return Err(Diagnostic::new(
+                        generic.span,
+                        "universe level generics belong to the declaration, not to a constructor",
+                    ));
+                }
+                if !domains.is_empty() {
+                    return Err(Diagnostic::new(
+                        generic.span,
+                        "universe level generics must come before every other generic",
+                    ));
+                }
+                let id = self.resolution.binder(generic.span).ok_or_else(|| {
+                    Diagnostic::new(generic.span, "internal error: unresolved level binder")
+                })?;
+                self.level_params.push(id);
+                continue;
+            }
             if let Some(excludes) = &generic.excludes {
                 return Err(Diagnostic::new(
                     excludes.span,
@@ -1189,7 +1359,7 @@ impl Elaborator<'_> {
         Ok(domains)
     }
     fn function(&mut self, f: &Function) -> Result<(Term, Term)> {
-        let mut domains = self.generics(&f.generics)?;
+        let mut domains = self.generics(&f.generics, true)?;
         for parameter in &f.parameters {
             let domain = self.ty(&parameter.ty)?;
             domains.push(domain.clone());
@@ -1234,12 +1404,17 @@ impl Elaborator<'_> {
         carriers: &[Option<Term>],
         ty: &Type,
     ) -> Result<Term> {
+        let own_levels = self.level_params.len();
         if let TypeKind::Named { arguments, .. } = &ty.kind
             && self.resolution.reference(ty.span) == Some(id)
-            && arguments.len() == arity
+            && arguments.len() == own_levels + arity
         {
-            let mut term = Term::global(name.to_owned());
-            for (argument, carrier) in arguments.iter().zip(carriers) {
+            let levels = arguments[..own_levels]
+                .iter()
+                .map(|argument| self.level(argument))
+                .collect::<Result<Vec<_>>>()?;
+            let mut term = Term::Global(name.to_owned(), levels);
+            for (argument, carrier) in arguments[own_levels..].iter().zip(carriers) {
                 term = Term::app(term, self.ty_expected(argument, carrier.as_ref())?);
             }
             return Ok(term);
@@ -1259,8 +1434,9 @@ impl Elaborator<'_> {
         prop: bool,
     ) -> Result<crate::kernel::IndexedDataSpec> {
         let param_base = self.locals.len();
-        let params = self.generics(generics)?;
-        let arity = generics.len();
+        let params = self.generics(generics, true)?;
+        let own_levels = self.level_params.len();
+        let arity = params.len();
         // The declared carrier of each family index, when it is an admitted
         // machine scalar. Constructor result indices use it to interpret
         // literals such as `IsZeroI<0>` as `i64` rather than mathematical `Nat`.
@@ -1273,7 +1449,7 @@ impl Elaborator<'_> {
         let mut constructors = Vec::with_capacity(variants.len());
         for variant in variants {
             let base = self.locals.len();
-            let locals = self.generics(&variant.locals)?;
+            let locals = self.generics(&variant.locals, false)?;
             let mut fields = Vec::new();
             match &variant.payload {
                 Payload::Unit => {}
@@ -1323,16 +1499,34 @@ impl Elaborator<'_> {
                             "a constructor result must name its own declared total data family or proposition",
                         ));
                     }
-                    if arguments.len() != arity {
+                    if arguments.len() != own_levels + arity {
                         return Err(Diagnostic::new(
                             ty.span,
-                            format!(
-                                "constructor result for '{}' expects {arity} index arguments, found {}",
-                                variant.name,
-                                arguments.len()
-                            ),
+                            if own_levels == 0 {
+                                format!(
+                                    "constructor result for '{}' expects {arity} index arguments, found {}",
+                                    variant.name,
+                                    arguments.len()
+                                )
+                            } else {
+                                format!(
+                                    "constructor result for '{}' expects {} arguments ({own_levels} universe levels, then {arity} indices), found {}",
+                                    variant.name,
+                                    own_levels + arity,
+                                    arguments.len()
+                                )
+                            },
                         ));
                     }
+                    for (index, argument) in arguments[..own_levels].iter().enumerate() {
+                        if self.level(argument)? != Level::param(index as u32) {
+                            return Err(Diagnostic::new(
+                                argument.span,
+                                "a constructor result must use the family at its own universe levels, in order",
+                            ));
+                        }
+                    }
+                    let arguments = &arguments[own_levels..];
                     let mut result = Vec::with_capacity(arguments.len());
                     for (index, argument) in arguments.iter().enumerate() {
                         result.push(self.ty_expected(argument, param_carriers[index].as_ref())?);
@@ -1360,7 +1554,7 @@ impl Elaborator<'_> {
             params,
             constructors,
             prop,
-            levels: 0,
+            levels: own_levels as u32,
         })
     }
     /// The machine carrier an expected kernel type denotes, if any. A literal
@@ -1405,12 +1599,10 @@ impl Elaborator<'_> {
                 if binding.kind == BindingKind::Builtin {
                     match binding.name.as_str() {
                         "Type" if !arguments.is_empty() => {
-                            if let [Node { kind: TypeKind::Integer(level), .. }] = arguments.as_slice() {
-                                let level = level.parse::<u32>().ok().filter(|level| *level <= 255)
-                                    .ok_or_else(|| Diagnostic::new(ty.span, "surface universe levels must be in 0..255"))?;
-                                return Ok(Term::universe(level));
+                            if let [level] = arguments.as_slice() {
+                                return Ok(Term::Universe(e.level(level)?));
                             }
-                            return Err(Diagnostic::new(ty.span, "Type expects one literal universe level"));
+                            return Err(Diagnostic::new(ty.span, "Type expects one universe level"));
                         }
                         // Equality is built directly so the carrier may be a
                         // Type at any level, a proposition, or an admitted
@@ -1432,7 +1624,7 @@ impl Elaborator<'_> {
                         _ => {}
                     }
                 }
-                let mut term = e.reference(ty.span)?;
+                let (mut term, arguments) = e.applied_reference(ty.span, arguments)?;
                 // A fully applied data family's parameter carriers are known
                 // from its admitted declaration. This avoids needing the whole
                 // surrounding context to be admitted while the current family
@@ -1671,7 +1863,9 @@ impl Elaborator<'_> {
     }
     fn expr_expected(&mut self, expr: &Expr, expected: Option<&Term>) -> Result<Term> {
         self.nested(expr.span, |e| match &expr.kind {
-            ExprKind::Name(_) | ExprKind::Field { .. } => e.reference(expr.span),
+            ExprKind::Name(_) | ExprKind::Field { .. } => {
+                Ok(e.applied_reference(expr.span, &[])?.0)
+            }
             ExprKind::Integer(value) => match e.expected_scalar(expected) {
                 Some(Scalar::I64) => Self::machine_i64(value, expr.span),
                 Some(Scalar::Bool | Scalar::Unit) => Err(Diagnostic::new(
@@ -1703,7 +1897,12 @@ impl Elaborator<'_> {
                 e.apply_expression(term, arguments)
             }
             ExprKind::Specialize { callee, arguments } => {
-                let mut term = e.expr(callee)?;
+                let (mut term, arguments) = match &callee.kind {
+                    ExprKind::Name(_) | ExprKind::Field { .. } => {
+                        e.applied_reference(callee.span, arguments)?
+                    }
+                    _ => (e.expr(callee)?, arguments.as_slice()),
+                };
                 for argument in arguments {
                     let domain = e.application_domain(&term)?;
                     let value = e.ty_expected(argument, domain.as_ref())?;
@@ -1738,6 +1937,8 @@ pub(crate) fn elaborate_type(
         constructors: &environment.constructors,
         constructor_counts: &environment.constructor_counts,
         nullary: &environment.nullary,
+        levels: &environment.levels,
+        level_params: Vec::new(),
         locals: locals.iter().map(|(id, _)| Some(*id)).collect(),
         aliases: &EMPTY_ALIASES,
         literals: &EMPTY_LITERALS,
@@ -1767,6 +1968,8 @@ pub(crate) fn elaborate_value_with_aliases(
         constructors: &environment.constructors,
         constructor_counts: &environment.constructor_counts,
         nullary: &environment.nullary,
+        levels: &environment.levels,
+        level_params: Vec::new(),
         locals: locals.iter().map(|(id, _)| Some(*id)).collect(),
         aliases,
         literals,

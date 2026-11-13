@@ -54,7 +54,7 @@ impl ScalarValue {
 /// Structural equality is therefore level equality, and `a <= b` holds for
 /// every assignment exactly when `max(a, b) == b`. There is no `imax`: `Prop`
 /// is a separate sort, never `Universe(l)`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct Level {
     constant: u32,
     /// `(parameter, offset)`, sorted by parameter, each parameter once.
@@ -141,6 +141,11 @@ impl Level {
             result = result.max(&level);
         }
         Ok(result)
+    }
+}
+impl fmt::Debug for Level {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
     }
 }
 impl From<u32> for Level {
@@ -707,10 +712,8 @@ impl Kernel {
             e.sort(&ty, &mut Vec::new())?;
             e.check(&value, &ty, &mut Vec::new())?;
         }
-        self.definitions.insert(
-            name,
-            Global::Definition(Definition { levels, ty, value }),
-        );
+        self.definitions
+            .insert(name, Global::Definition(Definition { levels, ty, value }));
         Ok(())
     }
     /// Atomically validate and admit a positive indexed data family and all of
@@ -802,8 +805,16 @@ impl Kernel {
                 let mut recursive = Vec::with_capacity(constructor.fields.len());
                 for field in &constructor.fields {
                     let (head, args) = spine(field);
-                    let direct = matches!(head, Term::Global(name, levels)
-                            if name == &spec.name && levels == &own_levels)
+                    if let Term::Global(name, levels) = head
+                        && name == &spec.name
+                        && levels != &own_levels
+                    {
+                        return fail(format!(
+                            "constructor '{}' uses '{}' at other universe levels; a recursive occurrence must use the family's own universe parameters, in order",
+                            constructor.name, spec.name
+                        ));
+                    }
+                    let direct = matches!(head, Term::Global(name, _) if name == &spec.name)
                         && args.len() == k;
                     if direct {
                         for argument in &args {
@@ -1081,7 +1092,9 @@ impl Engine<'_> {
                 levels.len()
             ));
         }
-        levels.iter().try_for_each(|level| self.level_in_scope(level))
+        levels
+            .iter()
+            .try_for_each(|level| self.level_in_scope(level))
     }
     /// Replace universe parameters throughout a term. Charged like any other
     /// traversal.

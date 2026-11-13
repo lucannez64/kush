@@ -25,8 +25,7 @@ fn source_induction_defines_addition_and_proves_right_identity() {
         assert_eq!(k.normalize_closed(&proof).unwrap(), T::refl(T::Nat, nat(n)));
     }
     assert_eq!(
-        k.normalize_closed(&T::global("addition_example"))
-            .unwrap(),
+        k.normalize_closed(&T::global("addition_example")).unwrap(),
         T::refl(T::Nat, nat(5))
     );
     // The theorem itself quantifies over n. Checking it did not enumerate n.
@@ -78,10 +77,7 @@ fn pure_nondependent_function_types_shift_anonymous_binders() {
     ";
     let checked = check(source).unwrap();
     assert_eq!(
-        checked
-            .kernel
-            .normalize_closed(&T::global("test"))
-            .unwrap(),
+        checked.kernel.normalize_closed(&T::global("test")).unwrap(),
         nat(3)
     );
 }

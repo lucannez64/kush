@@ -86,7 +86,7 @@ fn universes_are_explicit_and_not_type_in_type() {
     check("total fn good() -> Type<1> ! {} { Type }").unwrap();
     rejects("total fn bad() -> Type ! {} { Type }", "type mismatch");
     rejects("type U = Type<256>;", "universe levels");
-    rejects("type U = Type<Nat>;", "literal universe level");
+    rejects("type U = Type<Nat>;", "expected a universe level");
     // No implicit cumulativity.
     rejects("total fn bad() -> Type<1> ! {} { Nat }", "type mismatch");
 }
@@ -167,10 +167,7 @@ fn namespace_resolution_and_dependency_order_are_deterministic() {
     let result = check(source).unwrap();
     assert_eq!(result.definitions, ["last", "first"]);
     assert_eq!(
-        result
-            .kernel
-            .normalize_closed(&T::global("first"))
-            .unwrap(),
+        result.kernel.normalize_closed(&T::global("first")).unwrap(),
         nat(1)
     );
     let first = check(include_str!("../../../examples/proofs.kush"))
@@ -273,10 +270,7 @@ fn indexed_vector_data_supports_dependent_motive_proofs() {
         T::refl(T::Nat, nat(2))
     );
     let two = T::global("two");
-    let length = T::app(
-        T::app(T::app(T::global("length"), T::Nat), nat(2)),
-        two,
-    );
+    let length = T::app(T::app(T::app(T::global("length"), T::Nat), nat(2)), two);
     assert_eq!(result.kernel.normalize_closed(&length).unwrap(), nat(2));
 }
 
@@ -382,10 +376,7 @@ fn multiple_recursive_fields_interleave_induction_hypotheses() {
     "#;
     let result = check(source).unwrap();
     assert_eq!(
-        result
-            .kernel
-            .normalize_closed(&T::global("value"))
-            .unwrap(),
+        result.kernel.normalize_closed(&T::global("value")).unwrap(),
         nat(2)
     );
 }
@@ -413,10 +404,7 @@ fn prop_declarations_are_checked_as_propositions() {
     assert!(result.definitions.contains(&"True".to_owned()));
     assert!(result.definitions.contains(&"And".to_owned()));
     assert_eq!(
-        result
-            .kernel
-            .normalize_closed(&T::global("both"))
-            .unwrap(),
+        result.kernel.normalize_closed(&T::global("both")).unwrap(),
         T::app(
             T::app(
                 T::app(

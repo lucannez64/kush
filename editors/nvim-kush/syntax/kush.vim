@@ -22,7 +22,7 @@ syntax match kushComment '//.*$' contains=@Spell
 syntax region kushBlockComment start='/\*' end='\*/' contains=kushBlockComment,@Spell
 
 " Primitives and well-known namespaces.
-syntax keyword kushType i8 i16 i32 i64 u8 u16 u32 u64 f64 bool char String Bytes Nat Prop
+syntax keyword kushType i8 i16 i32 i64 u8 u16 u32 u64 f64 bool char String Bytes Nat Prop Level
 syntax match kushNamespace '\<[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_]\+'ms=s+1
 syntax match kushDecorator '#\[\w\+'
 syntax match kushEffect '! *{[^}]*}\|![^ ]*' containedin=ALLBUT,kushComment,kushBlockComment
