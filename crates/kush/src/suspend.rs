@@ -2207,6 +2207,7 @@ fn build(
             local_borrowed: vec![],
             local_copyable: vec![],
             capability_parameters: vec![],
+            shared_environment: false,
         });
     }
     // Handler specializations: `resume(y)` calls the point's continuation
@@ -3486,6 +3487,7 @@ fn resumable_entry(
         local_borrowed: host.borrowed,
         local_copyable: host.copyable,
         capability_parameters: source.capability_parameters.clone(),
+        shared_environment: false,
     };
     for continuation in built.continuations {
         program.functions.push(continuation);

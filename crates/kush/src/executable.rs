@@ -92,6 +92,13 @@ pub(crate) enum Type {
     /// `function_types[id].linear` marks the linear-once mode: the callable
     /// itself must be consumed by exactly one call.
     Once(usize),
+    /// A multishot resumption token, `multi fn(R) -> R`
+    /// (docs/multishot-capabilities.md). Two words: code address and an
+    /// environment on the task's continuation stack (null when capture-free).
+    /// Copyable and second-class: calls do not consume it, it owns nothing,
+    /// and it is never stored, returned or captured, so the environment is
+    /// released when the token call or `handle` that pushed it returns.
+    Multi(usize),
     /// An opaque, affine structured-task handle. One word. Handles are created
     /// only inside a `Task.scope` and may not escape it through data or results.
     Task(usize),
@@ -387,6 +394,10 @@ pub(crate) struct Function {
     pub local_copyable: Vec<bool>,
     /// Parameter slots of type `cap Op` (EFF-CAP-RESUME-CALLS).
     pub capability_parameters: Vec<usize>,
+    /// A `multi fn` continuation: its captures are copied out of an
+    /// environment on the continuation stack, which the call leaves in place
+    /// for later resumptions (docs/multishot-capabilities.md).
+    pub shared_environment: bool,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Local {
@@ -6152,6 +6163,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             local_borrowed,
             local_copyable,
             capability_parameters,
+            shared_environment: false,
         });
     }
     // Re-check every proof certificate without the search that produced it.
@@ -6262,6 +6274,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         logical_definitions: logical.definitions.clone(),
     };
     crate::gpu::check(&executable)?;
+    crate::multishot::check(&executable)?;
     crate::suspend::mark_abort_calls(&mut executable)?;
     crate::ownership::check(&mut executable)?;
     crate::grades::check(&executable)?;
@@ -6521,8 +6534,13 @@ fn type_key(ty: &ast::Type) -> String {
         ast::TypeKind::Lifetime(name) => format!("'{name}"),
         ast::TypeKind::SelfType => "Self".to_owned(),
         ast::TypeKind::Infer => "_".to_owned(),
-        ast::TypeKind::Capability { operation, effects } => format!(
-            "cap {operation} ! {{{}}}",
+        ast::TypeKind::Capability {
+            operation,
+            effects,
+            multi,
+        } => format!(
+            "cap {}{operation} ! {{{}}}",
+            if *multi { "multi " } else { "" },
             effects.iter().map(type_key).collect::<Vec<_>>().join(", ")
         ),
         ast::TypeKind::Function {
@@ -6532,6 +6550,7 @@ fn type_key(ty: &ast::Type) -> String {
             effects,
             call_once,
             call_linear,
+            call_multi,
         } => {
             let lifetimes = lifetimes
                 .iter()
@@ -6554,6 +6573,8 @@ fn type_key(ty: &ast::Type) -> String {
                     "linear "
                 } else if *call_once {
                     "once "
+                } else if *call_multi {
+                    "multi "
                 } else {
                     ""
                 },
@@ -6660,9 +6681,14 @@ impl ContractNames {
                 }
             }
             ast::TypeKind::Infer => ast::TypeKind::Infer,
-            ast::TypeKind::Capability { operation, effects } => ast::TypeKind::Capability {
+            ast::TypeKind::Capability {
+                operation,
+                effects,
+                multi,
+            } => ast::TypeKind::Capability {
                 operation: operation.clone(),
                 effects: effects.iter().map(|effect| self.ty(effect)).collect(),
+                multi: *multi,
             },
             ast::TypeKind::SelfType => {
                 if let Some(self_ty) = &self.self_ty {
@@ -6731,6 +6757,7 @@ impl ContractNames {
                 effects,
                 call_once,
                 call_linear,
+                call_multi,
             } => ast::TypeKind::Function {
                 lifetimes: lifetimes
                     .iter()
@@ -6759,6 +6786,7 @@ impl ContractNames {
                 effects: effects.iter().map(|effect| self.ty(effect)).collect(),
                 call_once: *call_once,
                 call_linear: *call_linear,
+                call_multi: *call_multi,
             },
             ast::TypeKind::Integer(value) => ast::TypeKind::Integer(value.clone()),
             ast::TypeKind::Bool(value) => ast::TypeKind::Bool(*value),
@@ -11854,6 +11882,7 @@ impl<'a> Functions<'a> {
                 local_borrowed: vec![],
                 local_copyable: vec![],
                 capability_parameters: vec![],
+                shared_environment: false,
             }));
         } else {
             self.bodies.push(None);
@@ -12871,6 +12900,8 @@ struct SuspendableSite {
     lexical: bool,
     operation: Option<usize>,
     multishot: bool,
+    /// The handler takes a `multi fn` token (docs/multishot-capabilities.md).
+    multi: bool,
     handler_writes: Vec<usize>,
     effects: u16,
     token_effects: u16,
@@ -12888,6 +12919,9 @@ struct HandlerScope {
     /// The handler accepts the copyable multishot resumption token. Only a
     /// capture-free continuation has that representation.
     multishot: bool,
+    /// The multishot token is a `multi fn` with a continuation-stack
+    /// environment instead of a code pointer.
+    multi: bool,
     /// Performs of this operation become `Suspend` points of a suspendable
     /// body instead of identity-token handler calls.
     region: bool,
@@ -13885,7 +13919,7 @@ impl Checker<'_, '_> {
         }
         if matches!(
             ty,
-            Type::Task(_) | Type::Thread(_) | Type::Fn(_) | Type::Once(_)
+            Type::Task(_) | Type::Thread(_) | Type::Fn(_) | Type::Once(_) | Type::Multi(_)
         ) {
             return Err(Diagnostic::new(
                 span,
@@ -14191,6 +14225,7 @@ impl Checker<'_, '_> {
                 | Type::Union(_)
                 | Type::Fn(_)
                 | Type::Once(_)
+                | Type::Multi(_)
         ) {
             return Err(Diagnostic::new(
                 span,
@@ -16580,6 +16615,7 @@ impl Checker<'_, '_> {
             local_borrowed: vec![],
             local_copyable: vec![],
             capability_parameters: vec![],
+            shared_environment: false,
         };
         let signature = Signature {
             call_contract: None,
@@ -19462,6 +19498,21 @@ impl Checker<'_, '_> {
         {
             return self.coerce_function(value, expected, span);
         }
+        if let (Type::Multi(source), Type::Multi(target)) = (value.ty, expected) {
+            // Tokens are made only by the compiler: a wider token type is
+            // accepted only when no adapter is needed.
+            let source = self.types.function_types[source].clone();
+            let target = self.types.function_types[target].clone();
+            if self.arrow_rep_change(&source, &target) {
+                return Err(Diagnostic::new(
+                    span,
+                    "a multishot resumption token cannot be adapted to a token type with a different representation",
+                ));
+            }
+            let mut value = value;
+            value.ty = expected;
+            return Ok(value);
+        }
         let Type::Union(target_id) = expected else {
             return Err(Diagnostic::new(
                 span,
@@ -20267,6 +20318,7 @@ impl Checker<'_, '_> {
             local_borrowed: vec![],
             local_copyable: vec![],
             capability_parameters: vec![],
+            shared_environment: false,
         };
         let synthetic = Signature {
             call_contract: None,
@@ -22019,7 +22071,7 @@ impl Checker<'_, '_> {
                 })
             }
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
-                Type::Fn(id) | Type::Once(id) => {
+                Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
                     self.types.function_types.get(id).and_then(|signature| {
                         signature
                             .result_grade
@@ -22118,7 +22170,7 @@ impl Checker<'_, '_> {
                 .first()
                 .is_some_and(|owner| self.value_moves_linear(owner)),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
-                Type::Fn(id) | Type::Once(id) => {
+                Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
                     self.types.function_types.get(id).is_some_and(|signature| {
                         signature.result_grade.is_some_and(Grade::is_one)
                             && self.owned_type(signature.result)
@@ -25912,6 +25964,7 @@ impl Checker<'_, '_> {
             local_borrowed,
             local_copyable,
             capability_parameters: capability_captures.clone(),
+            shared_environment: false,
         };
         let index = self.functions.add_synthetic(signature, function)?;
         let ty = if once {
@@ -26418,6 +26471,7 @@ impl Checker<'_, '_> {
             match ty {
                 Type::Fn(_)
                 | Type::Once(_)
+                | Type::Multi(_)
                 | Type::DynObj(_)
                 | Type::Task(_)
                 | Type::Thread(_)
@@ -27008,7 +27062,12 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
-        let Some((id, _)) = Self::function_parts(callee.ty) else {
+        let parts = match callee.ty {
+            // A multishot token is called without being consumed.
+            Type::Multi(id) => Some((id, false)),
+            ty => Self::function_parts(ty),
+        };
+        let Some((id, _)) = parts else {
             return Err(Diagnostic::new(
                 callee.span,
                 format!(
@@ -29928,7 +29987,7 @@ impl Checker<'_, '_> {
                 })
             }
             ast::TypeKind::Function { parameters, .. } => match actual {
-                Type::Fn(id) | Type::Once(id) => {
+                Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
                     self.types.function_types[id].parameters.len() == parameters.len()
                 }
                 _ => false,
@@ -30731,7 +30790,9 @@ impl Checker<'_, '_> {
                 ..
             } => {
                 let signature = match actual {
-                    Type::Fn(id) | Type::Once(id) => self.types.function_types[id].clone(),
+                    Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
+                        self.types.function_types[id].clone()
+                    }
                     _ => return Ok(()),
                 };
                 if signature.parameters.len() != parameters.len() {
@@ -32788,6 +32849,7 @@ impl Checker<'_, '_> {
                 | Type::AllocBox(_)
                 | Type::AllocVec(_)
                 | Type::Once(_)
+                | Type::Multi(_)
                 | Type::DynObj(_) => return true,
                 Type::Box(p)
                 | Type::Vec(p)
@@ -34930,7 +34992,11 @@ impl Checker<'_, '_> {
             }
             _ => (None, false),
         };
-        let multishot = if signature.parameters[1] == one_shot
+        let multi_token = Type::Multi(self.types.multi_token(result_ty));
+        let multi = signature.parameters[1] == multi_token;
+        let multishot = if multi {
+            true
+        } else if signature.parameters[1] == one_shot
             || (token_effects.is_some() && !token_multishot)
         {
             false
@@ -34940,7 +35006,9 @@ impl Checker<'_, '_> {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "the handler's second parameter must be exactly 'linear once fn({}) -> {}' for one-shot resumption or 'fn({}) -> {}' for multishot resumption",
+                    "the handler's second parameter must be exactly 'linear once fn({}) -> {}' for one-shot resumption, or 'multi fn({}) -> {}' or 'fn({}) -> {}' for multishot resumption",
+                    self.types.name(result_ty),
+                    self.types.name(result_ty),
                     self.types.name(result_ty),
                     self.types.name(result_ty),
                     self.types.name(result_ty),
@@ -35144,6 +35212,7 @@ impl Checker<'_, '_> {
             handler_result,
             effects: signature.effects,
             multishot,
+            multi,
             region,
             points: 0,
             declared: declared.is_some(),
@@ -35181,6 +35250,7 @@ impl Checker<'_, '_> {
                 lexical,
                 operation: declared.map(|declared| declared.id),
                 multishot,
+                multi,
                 handler_function,
                 handler_writes,
                 effects: saved_effects,
@@ -35322,6 +35392,7 @@ impl Checker<'_, '_> {
             local_borrowed: vec![],
             local_copyable: vec![],
             capability_parameters: vec![],
+            shared_environment: false,
         };
         let signature = Signature {
             call_contract: None,
@@ -35457,6 +35528,7 @@ impl Checker<'_, '_> {
             handler_result: signature.result,
             effects: signature.effects,
             multishot: false,
+            multi: false,
             region: false,
             points: 0,
             declared: declared.is_some(),
@@ -36247,6 +36319,58 @@ impl Checker<'_, '_> {
     /// the ordinary callable ownership rules; no hidden continuation or stack
     /// pointer exists, so a token that is transferred and called normally is
     /// still a one-shot operation result.
+    /// The token type a handler receives: a `multi fn` token when the
+    /// handler declares one, otherwise `resume_type_with`.
+    fn token_type(&mut self, result: Type, multishot: bool, multi: bool, effects: u16) -> Type {
+        if multi {
+            Type::Multi(self.types.multi_token(result))
+        } else {
+            self.resume_type_with(result, multishot, effects)
+        }
+    }
+    /// The identity `multi fn(R) -> R` token of a perform that continues in
+    /// place. It takes (and ignores) an environment word; its environment
+    /// is null, so nothing is pushed on the continuation stack.
+    fn multi_identity(&mut self, result: Type, span: Span) -> Result<Expr> {
+        let id = self.types.multi_token(result);
+        let signature = self.types.function_types[id].clone();
+        let locals = vec![Local {
+            ty: result,
+            mutable: false,
+            linear: false,
+            pinned: false,
+            grade: None,
+            span,
+        }];
+        let body = Block {
+            statements: vec![],
+            tail: Some(Box::new(Expr {
+                kind: ExprKind::Local(0),
+                ty: result,
+                span,
+                resource: None,
+            })),
+            ty: result,
+        };
+        let function = self.register_adapter(
+            "effect resume",
+            &signature,
+            vec![],
+            true,
+            locals,
+            body,
+            span,
+        )?;
+        Ok(Expr {
+            kind: ExprKind::FnValue {
+                function,
+                captures: vec![],
+            },
+            ty: Type::Multi(id),
+            span,
+            resource: None,
+        })
+    }
     fn resume_value(&mut self, result: Type, multishot: bool, span: Span) -> Result<Expr> {
         self.resume_value_with(result, multishot, 0, span)
     }
@@ -36369,7 +36493,7 @@ impl Checker<'_, '_> {
             // scopes, trait objects, callbacks), which would otherwise run
             // with the identity token under this non-tail handler.
             let ty = block.ty;
-            let token = self.resume_type_with(result_ty, site.multishot, site.token_effects);
+            let token = self.token_type(result_ty, site.multishot, site.multi, site.token_effects);
             return Ok(Block {
                 statements: vec![],
                 tail: Some(Box::new(Expr {
@@ -36446,7 +36570,7 @@ impl Checker<'_, '_> {
             })?;
         }
         self.anf_block(&mut block)?;
-        let token = self.resume_type_with(result_ty, site.multishot, site.token_effects);
+        let token = self.token_type(result_ty, site.multishot, site.multi, site.token_effects);
         let suspendable = Expr {
             kind: ExprKind::Suspendable(Box::new(Suspendable {
                 handler_function: site.handler_function,
@@ -36852,6 +36976,7 @@ impl Checker<'_, '_> {
             scope.multishot,
         );
         let region = scope.region;
+        let multi = scope.multi;
         let token_effects = scope.token_effects;
         let handler_ty = self.locals[slot].ty;
         if let Some(label) = scope.abort {
@@ -36892,7 +37017,7 @@ impl Checker<'_, '_> {
         if region {
             self.handlers[index].points += 1;
             let point = self.handlers[index].points;
-            let token = self.resume_type_with(result, multishot, token_effects);
+            let token = self.token_type(result, multishot, multi, token_effects);
             let call = Expr {
                 kind: ExprKind::CallIndirect {
                     callee: Box::new(Expr {
@@ -36932,7 +37057,11 @@ impl Checker<'_, '_> {
                 None => Ok(suspend),
             };
         }
-        let resume = self.resume_value_with(result, multishot, token_effects, span)?;
+        let resume = if multi {
+            self.multi_identity(result, span)?
+        } else {
+            self.resume_value_with(result, multishot, token_effects, span)?
+        };
         let call = Expr {
             kind: ExprKind::CallIndirect {
                 callee: Box::new(Expr {
@@ -39358,6 +39487,7 @@ pub(crate) fn substitute_alias_type(
             effects,
             call_once,
             call_linear,
+            call_multi,
         } => K::Function {
             lifetimes: lifetimes.clone(),
             parameters: parameters
@@ -39375,6 +39505,7 @@ pub(crate) fn substitute_alias_type(
                 .collect(),
             call_once: *call_once,
             call_linear: *call_linear,
+            call_multi: *call_multi,
         },
         K::Binary { op, left, right } => K::Binary {
             op: op.clone(),
@@ -39388,9 +39519,14 @@ pub(crate) fn substitute_alias_type(
         K::Predicate(expr) => K::Predicate(expr.clone()),
         K::SelfType => K::SelfType,
         K::Infer => K::Infer,
-        K::Capability { operation, effects } => K::Capability {
+        K::Capability {
+            operation,
+            effects,
+            multi,
+        } => K::Capability {
             operation: operation.clone(),
             effects: effects.clone(),
+            multi: *multi,
         },
     };
     ast::Type::new(kind, ty.span)

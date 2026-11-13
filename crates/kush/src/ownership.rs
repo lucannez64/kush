@@ -2454,6 +2454,7 @@ impl Checker<'_> {
                 | Type::SliceMut(_)
                 | Type::Fn(_)
                 | Type::Once(_)
+                | Type::Multi(_)
                 | Type::Task(_)
                 | Type::Thread(_) => true,
                 Type::Box(p) | Type::Vec(p) => go(c, c.pointees[p], seen),
@@ -4620,18 +4621,20 @@ impl Checker<'_> {
                 .first()
                 .is_some_and(|owner| self.value_moves_linear(owner)),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
-                Type::Fn(id) | Type::Once(id) => self.functions.get(id).is_some_and(|signature| {
-                    signature.result_grade.is_some_and(Grade::is_one)
-                        && (owns(signature.result, self.owned, self.unions, self.pointees)
-                            || is_linear(
-                                signature.result,
-                                self.linear,
-                                self.unions,
-                                self.pointees,
-                                self.functions,
-                                self.dyn_linear,
-                            ))
-                }),
+                Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
+                    self.functions.get(id).is_some_and(|signature| {
+                        signature.result_grade.is_some_and(Grade::is_one)
+                            && (owns(signature.result, self.owned, self.unions, self.pointees)
+                                || is_linear(
+                                    signature.result,
+                                    self.linear,
+                                    self.unions,
+                                    self.pointees,
+                                    self.functions,
+                                    self.dyn_linear,
+                                ))
+                    })
+                }
                 _ => false,
             },
             ExprKind::Block(block) => self.block_value_moves_linear(block),
@@ -6463,7 +6466,7 @@ impl Checker<'_> {
                 }
                 // A callable type with borrowed parameters or results carries
                 // a borrow contract; apply it exactly as for a direct call.
-                if let Type::Fn(id) | Type::Once(id) = callee.ty {
+                if let Type::Fn(id) | Type::Once(id) | Type::Multi(id) = callee.ty {
                     let signature = &self.functions[id];
                     let borrows = &signature.borrows;
                     if !borrows.parameters.is_empty()

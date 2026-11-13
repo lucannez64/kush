@@ -2267,6 +2267,7 @@ impl<'a> Types<'a> {
                 .join(" | "),
             Type::Fn(id) => self.callable_name(id),
             Type::Once(id) => self.callable_name(id),
+            Type::Multi(id) => format!("multi {}", self.function_name(id)),
             Type::Task(p) => format!("Task<{}>", self.name(self.pointees[p])),
             Type::Thread(p) => format!("Thread<{}>", self.name(self.pointees[p])),
             Type::DynObj(id) => self
@@ -2495,7 +2496,12 @@ impl<'a> Types<'a> {
                 ),
             ));
         }
-        if let ast::TypeKind::Capability { operation, effects } = &ty.kind {
+        if let ast::TypeKind::Capability {
+            operation,
+            effects,
+            multi,
+        } = &ty.kind
+        {
             let Some((parameter, result)) = self.capability_operations.get(operation).copied()
             else {
                 return Err(Diagnostic::new(
@@ -2514,7 +2520,11 @@ impl<'a> Types<'a> {
                 ));
             }
             let bits = effect_bits_with(self.resolution, effects, &substitution.effects)?;
-            return Ok(Type::Fn(self.capability_arrow(parameter, result, bits)));
+            return Ok(Type::Fn(if *multi {
+                self.multi_capability_arrow(parameter, result, bits)
+            } else {
+                self.capability_arrow(parameter, result, bits)
+            }));
         }
         if matches!(ty.kind, ast::TypeKind::SelfType) {
             return substitution.self_type.ok_or_else(|| {
@@ -2752,6 +2762,7 @@ impl<'a> Types<'a> {
             effects,
             call_once,
             call_linear,
+            call_multi,
         } = &ty.kind
         {
             let mut declared = BTreeSet::new();
@@ -3114,6 +3125,8 @@ impl<'a> Types<'a> {
             );
             return Ok(if *call_once {
                 Type::Once(id)
+            } else if *call_multi {
+                Type::Multi(id)
             } else {
                 Type::Fn(id)
             });
@@ -4100,6 +4113,10 @@ impl<'a> Types<'a> {
                 span,
                 "internal error: union normalization did not flatten its members",
             )),
+            Type::Multi(_) => Err(Diagnostic::new(
+                span,
+                "a multishot resumption token cannot be a union member; it is second-class",
+            )),
             Type::Fn(id) | Type::Once(id) => {
                 let signature = &self.function_types[id];
                 if self.width(if signature.once {
@@ -4197,6 +4214,9 @@ impl<'a> Types<'a> {
                 return self.function_subtype(&self.function_types[a], &self.function_types[b]);
             }
             (Type::Once(_), Type::Fn(_)) => return false,
+            (Type::Multi(a), Type::Multi(b)) => {
+                return self.function_subtype(&self.function_types[a], &self.function_types[b]);
+            }
             (Type::Enum(a), Type::Enum(b))
                 if self.enums[a].name == "TaskExit" && self.enums[b].name == "TaskExit" =>
             {
@@ -4364,7 +4384,9 @@ impl<'a> Types<'a> {
     /// demand that neither written order required.
     fn canonical_equivalent(&self, left: Type, right: Type) -> Type {
         match (left, right) {
-            (Type::Fn(a), Type::Fn(b)) | (Type::Once(a), Type::Once(b)) => {
+            (Type::Fn(a), Type::Fn(b))
+            | (Type::Once(a), Type::Once(b))
+            | (Type::Multi(a), Type::Multi(b)) => {
                 let source = &self.function_types[a];
                 let target = &self.function_types[b];
                 let rank = |grades: &[Option<Grade>]| {
@@ -4445,6 +4467,34 @@ impl<'a> Types<'a> {
             result,
             effects,
             vec![None, None],
+            None,
+            false,
+            false,
+            BorrowSig::default(),
+        )
+    }
+    /// The handler arrow of `cap multi Op ! {e}`:
+    /// `fn(P, multi fn(R) -> R ! {}) -> R ! {e}`.
+    pub fn multi_capability_arrow(&mut self, parameter: Type, result: Type, effects: u16) -> usize {
+        let token = self.multi_token(result);
+        self.function_type_with(
+            vec![parameter, Type::Multi(token)],
+            result,
+            effects,
+            vec![None, None],
+            None,
+            false,
+            false,
+            BorrowSig::default(),
+        )
+    }
+    /// The arrow of a pure multishot token `multi fn(R) -> R ! {}`.
+    pub fn multi_token(&mut self, result: Type) -> usize {
+        self.function_type_with(
+            vec![result],
+            result,
+            0,
+            vec![None],
             None,
             false,
             false,
@@ -4991,7 +5041,7 @@ impl<'a> Types<'a> {
                 }
                 Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::StrMut => Ok(4),
                 Type::Fn(_) => Ok(1),
-                Type::Once(_) | Type::DynObj(_) => Ok(2),
+                Type::Once(_) | Type::Multi(_) | Type::DynObj(_) => Ok(2),
                 _ => Ok(1),
             }
         }
@@ -6128,7 +6178,7 @@ pub(crate) fn runtime_length_binders(types: &Types<'_>, ty: Type) -> BTreeSet<Bi
                     go(types, *member, seen, out);
                 }
             }
-            Type::Fn(id) | Type::Once(id) => {
+            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
                 if let Some(function) = types.function_types.get(id) {
                     for parameter in &function.parameters {
                         go(types, *parameter, seen, out);
@@ -6203,6 +6253,7 @@ fn has_forbidden_record_metadata(types: &Types<'_>, ty: Type) -> bool {
             | Type::Union(_)
             | Type::Fn(_)
             | Type::Once(_)
+            | Type::Multi(_)
             | Type::Task(_)
             | Type::Thread(_) => return true,
             Type::Box(p)
@@ -6500,7 +6551,7 @@ pub(crate) fn contains_task_exit_borrow(types: &Types<'_>, ty: Type) -> bool {
                 .members
                 .iter()
                 .any(|member| go(types, *member, seen)),
-            Type::Fn(id) | Type::Once(id) => types.function_types[id]
+            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => types.function_types[id]
                 .parameters
                 .iter()
                 .copied()
@@ -6893,8 +6944,13 @@ pub(crate) fn type_name_in(
             .map(|member| type_name_in(*member, pointees, enums, unions, functions))
             .collect::<Vec<_>>()
             .join(" | "),
-        Type::Fn(id) | Type::Once(id) => format!(
-            "fn({}) -> {}",
+        Type::Fn(id) | Type::Once(id) | Type::Multi(id) => format!(
+            "{}fn({}) -> {}",
+            if matches!(ty, Type::Multi(_)) {
+                "multi "
+            } else {
+                ""
+            },
             functions[id]
                 .parameters
                 .iter()
@@ -6948,6 +7004,9 @@ pub(crate) fn width(
         3
     } else if matches!(ty, Type::Once(_)) {
         // (code pointer, owned environment pointer)
+        2
+    } else if matches!(ty, Type::Multi(_)) {
+        // (code pointer, continuation-stack environment pointer)
         2
     } else if matches!(ty, Type::DynObj(_)) {
         // (member identifier, owned payload pointer)
@@ -7052,7 +7111,7 @@ pub(crate) fn reject_optional_reference_boundary(
                 .members
                 .iter()
                 .any(|member| contains(types, *member, seen)),
-            Type::Fn(id) | Type::Once(id) => {
+            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
                 let f = &types.function_types[id];
                 f.parameters
                     .iter()

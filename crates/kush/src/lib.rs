@@ -24,6 +24,7 @@ mod layout_cert;
 mod length;
 pub mod lexer;
 mod lifetimes;
+mod multishot;
 pub mod native;
 pub mod natural;
 mod ownership;

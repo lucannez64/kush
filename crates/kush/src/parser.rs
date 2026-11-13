@@ -1361,6 +1361,14 @@ impl Parser {
             self.bump(); // once
             self.bump(); // fn
             self.function_type(start, true, false)?
+        } else if self.multi_fn_ahead() {
+            self.bump(); // multi
+            self.bump(); // fn
+            let mut ty = self.function_type(start, false, false)?;
+            if let TypeKind::Function { call_multi, .. } = &mut ty.kind {
+                *call_multi = true;
+            }
+            ty
         } else if self.eat(&Kind::Fn) {
             self.function_type(start, false, false)?
         } else if let Kind::Integer(value) = self.current().kind.clone() {
@@ -1392,6 +1400,16 @@ impl Parser {
             // Contextual `cap Op ! {e}`: only when a name follows, so a type
             // or binding called `cap` keeps working.
             if path == ["cap"] && matches!(self.current().kind, Kind::Ident(_)) {
+                // `cap multi Op`: `multi` followed by a name. A lone
+                // `cap multi` names an operation called `multi`.
+                let multi = matches!(&self.current().kind, Kind::Ident(name) if name == "multi")
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|token| matches!(token.kind, Kind::Ident(_)));
+                if multi {
+                    self.bump();
+                }
                 let operation = self.ident()?;
                 let effects = if self.at(&Kind::Bang) {
                     self.effects()?
@@ -1399,7 +1417,11 @@ impl Parser {
                     Vec::new()
                 };
                 return Ok(Node::new(
-                    TypeKind::Capability { operation, effects },
+                    TypeKind::Capability {
+                        operation,
+                        effects,
+                        multi,
+                    },
                     self.since(path_start),
                 ));
             }
@@ -1474,6 +1496,15 @@ impl Parser {
                 .get(self.pos + 1)
                 .is_some_and(|token| token.kind == Kind::Fn)
     }
+    /// `multi fn(...)`: a multishot resumption token type. `multi` is not a
+    /// reserved keyword; only the two-token sequence `multi fn` is special.
+    fn multi_fn_ahead(&self) -> bool {
+        matches!(&self.current().kind, Kind::Ident(name) if name == "multi")
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| token.kind == Kind::Fn)
+    }
     /// `linear once fn(...)`: a linear-once callable type. At most one call
     /// consumes its captured linear obligations, and the callable itself is a
     /// linear value.
@@ -1541,6 +1572,7 @@ impl Parser {
                 effects,
                 call_once,
                 call_linear,
+                call_multi: false,
             },
             self.since(start),
         ))

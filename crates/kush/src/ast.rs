@@ -414,6 +414,9 @@ pub enum TypeKind {
     Capability {
         operation: String,
         effects: Vec<Type>,
+        /// `cap multi Op`: the handler takes a multishot `multi fn` token
+        /// (docs/multishot-capabilities.md).
+        multi: bool,
     },
     /// The receiver type placeholder `Self` inside a trait/impl method
     /// signature. It is replaced by the concrete impl target before runtime
@@ -445,6 +448,9 @@ pub enum TypeKind {
         /// obligations must be consumed by exactly one call. It is a linear
         /// value and may not be implicitly or explicitly dropped.
         call_linear: bool,
+        /// `multi fn(...)`: a copyable, second-class multishot resumption
+        /// token (docs/multishot-capabilities.md). Never with `call_once`.
+        call_multi: bool,
     },
     Binary {
         op: Kind,
