@@ -367,9 +367,13 @@ actually blocks the port; until then the workaround stands.
 - **No two-phase borrows for calls**: `normal(k, term.field(&k.store, t, 3))`
   is rejected because `k` is lent exclusively while a later argument still
   reads it. Reads of the store are hoisted into `let`s first. Two disjoint
-  field borrows (`&mut k.store` beside other fields) work.
+  field borrows (`&mut k.store` beside other fields) work. To fix:
+  LANG-TWO-PHASE-CALLS.
+- **A `match` scrutinee's exclusive loan lasts through its arms**, even when
+  the matched value (`Result<i64, i64>`) holds no borrow; the result is bound
+  with a `let` first. To fix: LANG-MATCH-SCRUTINEE-LOAN.
 - **Module imports cannot be renamed**: `kernel.env` clashed with `std.env`,
-  so the kernel state module is `kernel.engine`.
+  so the kernel state module is `kernel.engine`. To fix: LANG-IMPORT-ALIAS.
 - **`refl` is a reserved name** even for a module function; the constructor is
   `term.reflexive`.
 - An explicit `drop` after a condition's borrow was rejected; fixed in the

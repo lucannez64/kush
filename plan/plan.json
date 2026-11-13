@@ -6346,6 +6346,39 @@
           "text": "done 8aa27ea"
         }
       ]
+    },
+    {
+      "id": "LANG-TWO-PHASE-CALLS",
+      "title": "Two-phase borrows for call arguments",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "f(k, read(&k.store)) is rejected: an argument lent exclusively (k: &mut Kernel) stays borrowed while later arguments are evaluated, even when they only read and finish before the call. Reserve the exclusive loan and activate it at the call, as Rust's two-phase borrows do; keep rejecting real overlap (a later argument that writes, or a returned view). Found in examples/kernel (normal.kush, check.kush hoist such reads into lets); see docs/kernel-in-kush.md section 6.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LANG-MATCH-SCRUTINEE-LOAN",
+      "title": "End a match scrutinee's loan when its value holds no borrow",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "match check.normalize_closed(&mut k, t) { Ok(n) => printer.term_into(&k.store, ..) } is rejected: the &mut loan taken while evaluating the scrutinee stays live in the arms although the result (Result<i64, i64>) holds no borrow. End call-scoped loans after the scrutinee unless its type can carry one. Found in examples/kernel/tests/main.kush; see docs/kernel-in-kush.md section 6.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LANG-IMPORT-ALIAS",
+      "title": "Renamed imports (use a.b as c)",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Two modules with the same last segment cannot both be imported (kernel.env clashed with std.env, so the kernel's state module is kernel.engine). Add 'use path as name' for modules and items: resolver, formatter, language server, editor grammars, docs. Found in examples/kernel; see docs/kernel-in-kush.md section 6.",
+      "commit": null,
+      "log": []
     }
   ]
 }
