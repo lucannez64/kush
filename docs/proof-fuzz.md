@@ -1,6 +1,6 @@
 # Proof-directed fuzzing (PROOF-FUZZ)
 
-Status: design, not implemented.
+Status: design approved 2026-11-13 (native engine); implementation in progress.
 
 *Every check is either proved or attacked.* The checker removes a run-time
 bounds or overflow check when the facts in scope prove it can never fail
@@ -100,8 +100,9 @@ found, 2 for usage or compile errors. This matches `kush test`.
 **Why `kush fuzz`.** It is the word users already know (`cargo fuzz`, `go test
 -fuzz`), and it sits next to `kush check` and `kush test` as a project
 command. The alternatives were `kush attack` (matches the slogan but reads as a
-security tool) and `kush test --fuzz` (`kush test` builds and runs each test in
-a native process, which is the wrong engine for this, see section 2). The
+security tool) and `kush test --fuzz` (`kush test` builds one ordinary
+binary per test with no inputs; fuzzing needs one instrumented binary run
+thousands of times, and a report about obligations, not tests). The
 slogan's vocabulary is kept in the output: each check ends up *proved*,
 *found*, *survived* or *unreached*.
 
@@ -158,18 +159,21 @@ it a bug.
 
 **B. Coverage guidance.** Record which obligations a run reached and how
 close each came to failing, and keep inputs that reach a new obligation or get
-closer. The pitch suggested instrumenting the native build. The evaluator gets
-the same signal far more cheaply: it already evaluates every checked access
-and checked operation and knows its span, so an optional observer on the
-`Evaluator` records `(obligation id, margin)` per run. The margin is
-`min(index, length - 1 - index)` for bounds, and the distance of the exact
-result from the nearest end of the type's range for overflow. That is
-libFuzzer's "value profile" idea, but over the exact checks we care about
-rather than every comparison. Native instrumentation would need changes in both
-backends (Cranelift and LLVM), a span map in the binary, and per-run process
-startup. It would also lose attribution: native overflow, bounds and division
-panics print the same message on purpose
-([deferred-overflow.md](deferred-overflow.md)).
+closer. The **margin** is `min(index, length - 1 - index)` for bounds, and for
+overflow the number of bits between the exact result and the nearest end of
+the type's range. That is libFuzzer's "value profile" idea, but over the exact
+checks we care about rather than every comparison. Two places can measure it:
+
+- the reference evaluator already evaluates every checked access and
+  operation and knows its span, so an observer on `Evaluator` would get the
+  signal with almost no code. It is about two orders of magnitude slower than
+  native code, though, which matters for deep `#[fuzz]` entries such as a
+  Game Boy running a ROM;
+- an instrumented native build. Today native panics cannot be attributed:
+  `kush_panic` prints one fixed message, inline checks trap, and deferred
+  overflow moves the panic to the end of a chunk on purpose
+  ([deferred-overflow.md](deferred-overflow.md)). So this needs a fuzz build
+  mode (section 2.3).
 
 **C. Seed from the failed proof's model.** There is no SMT model: the search
 returns no witness. The bounded integer fallback could be extended to return
@@ -182,14 +186,34 @@ does have, and the obligation is a lemma candidate (section 3).
 
 ### 2.3 Recommendation
 
-**A + B in the reference evaluator, and C later as an optional seed.**
+**A + B in an instrumented native build, and C later as an optional seed.**
 
-- Engine: compile the project once, append generated harnesses to the
-  in-memory source (as `kush test` does), and evaluate many inputs
-  **in-process** with the reference evaluator. Each run gets a fresh heap, a
-  step budget (fuel exhaustion counts as "survived, too slow", not a find),
-  and the tape as its standard input. The panic span gives the failing
-  obligation directly.
+- **Fuzz build mode.** `kush fuzz` builds one native executable with the
+  Cranelift backend (LLVM's longer compile time buys nothing here) and a
+  `fuzz` code-generation flag:
+  - deferred overflow is off, so a check panics where it is written;
+  - every recorded obligation is compiled as an explicit test before the
+    operation: compute the margin inline and call
+    `kush_fuzz_check(id, margin)`. The runtime keeps a static table of hit
+    counts and smallest margins per obligation id. A negative margin records
+    the id as the failure, writes the table and aborts. The original check
+    then never fires for an obligation, so the failure is always attributed;
+  - any other panic (allocation, I/O, a check that is not an obligation)
+    still goes through `kush_panic`, which in a fuzz build writes the table
+    with "unattributed panic" before aborting;
+  - at normal exit the table is written too. It goes to the file named by
+    `KUSH_FUZZ_OUT`, as a fixed binary layout the driver reads back.
+  Ordinary builds are unchanged: without the flag none of this is emitted.
+- **One binary, many runs.** All harnesses for the session are appended to
+  the in-memory sources (as `kush test` does) and the generated `main`
+  dispatches on `argv[1]`, the harness number. The driver runs the binary once
+  per input with the tape on standard input and a wall-clock timeout
+  (a timeout counts as "survived, too slow", not a find). Process start-up is
+  about a millisecond, so a few thousand runs per function take seconds. A
+  fork server can come later if start-up dominates.
+- The reference evaluator stays the oracle for the tests of this feature: a
+  test may replay a found input under `kush eval` and check that it panics at
+  the same span.
 - Harness per targeted function `f`, placed in `f`'s own module so private
   functions are reachable:
 
@@ -224,16 +248,17 @@ does have, and the obligation is a lemma candidate (section 3).
   }
   ```
 
-  They run with the same observer and the same corpus. Every obligation they
+  They are compiled into the same binary and use the same corpus. Every obligation they
   reach counts toward coverage, and their findings are *entry-level* (real)
   counterexamples by construction.
 - Option C is a later sub-node: return the fallback's feasible point and add
   its parameter values to that function's initial corpus.
 
-Cost: the evaluator is slower than native code, but the targets are single
-function calls bounded by fuel, and the budgets above are thousands of runs,
-not millions. A `--native` mode for `#[fuzz]` entries can come later, once
-native panics can report which check failed.
+Cost: the instrumentation is one inline comparison and one call per
+obligation, and only in fuzz builds. The work is in the Cranelift backend
+(the checked-operation and `Vec` access lowerings) and in the C runtime
+(`kush_fuzz_check`, the table, the panic hook). The LLVM backend does not need
+the mode.
 
 ## 3. What a counterexample produces
 
@@ -338,7 +363,9 @@ before this feature existed:
    the new report will list. Add one `#[fuzz]` entry that runs a random 32 KiB
    ROM through the plain cartridge for a few thousand instructions on a
    headless machine. Report the coverage table, and either a real issue with
-   its reproduction or "every remaining check survived N attacks".
+   its reproduction or "every remaining check survived N attacks". The
+   native engine is what makes thousands of emulated instructions per run
+   affordable.
 
 The README of each example gets the before and after numbers. The demo is
 honest either way: "no counterexample in N runs, these K are unreached" is
@@ -353,8 +380,10 @@ New suites in `crates/kush/tests/`:
   obligations equal `bounds_checked`; overflow obligations disappear exactly
   where `overflow_elision.rs` expects elision.
 - `proof_fuzz.rs`:
-  - an evaluator panic maps to the obligation id; margins for bounds and
-    overflow are computed correctly;
+  - an instrumented native binary reports the failing obligation id, and
+    the same input under `kush eval` panics at that obligation's span;
+    margins for bounds and overflow are computed correctly; a build without
+    the fuzz flag emits no instrumentation;
   - generators: every supported type round-trips through the tape; length
     refinements and dictionary constants appear; a precondition guard is
     respected (no counterexample violates it); unsupported parameters report
@@ -363,8 +392,7 @@ New suites in `crates/kush/tests/`:
     off-by-one index, an `i64` overflow at `MAX`, a `u8` overflow);
   - a check that is true but unproved ends `survived`; one behind an
     impossible branch ends `unreached`;
-  - the same seed gives byte-identical output; fuel exhaustion is not a
-    find;
+  - the same seed gives byte-identical output; a timeout is not a find;
   - the printed reproduction compiles and fails under `kush test`; `--save`
     regressions are replayed;
   - CLI: exit codes 0/1/2, `--list`, `--json`, the filter.
@@ -378,9 +406,10 @@ New suites in `crates/kush/tests/`:
 1. **PF-OBLIGATIONS**: obligation table in the checker;
    `KUSH_PROOF_REPORT=verbose` lists all kinds, including overflow;
    `proof_obligations.rs`.
-2. **PF-OBSERVE**: evaluator observer (reached, margin, failing obligation);
-   an in-process entry point for evaluating with given stdin and fuel many
-   times.
+2. **PF-INSTRUMENT**: Cranelift fuzz build mode: obligation ids in the IR,
+   inline margins, `kush_fuzz_check`, the runtime table, `KUSH_FUZZ_OUT`,
+   deferred overflow off; tests that an instrumented binary reports the
+   right id and margins and that ordinary builds are unchanged.
 3. **PF-HARNESS**: `std.fuzz` tape decoder; harness synthesis for directly
    generatable parameters, with precondition guards.
 4. **PF-ENGINE**: `kush fuzz` command: seeds, mutation, corpus, budgets,
@@ -395,8 +424,7 @@ New suites in `crates/kush/tests/`:
 
 ## Non-goals
 
-- Native-speed fuzzing and native instrumentation (needs per-check panic
-  locations in native code first).
+- Fuzz instrumentation in the LLVM backend, and a fork server.
 - Fuzzing floats, function values, linear resources or effect handlers as
   parameters; they show as `no generator` and are reached through `#[fuzz]`
   entries.

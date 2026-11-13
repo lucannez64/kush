@@ -5790,11 +5790,19 @@
       "title": "Fuzz the obligations the prover leaves unproved",
       "size": "M",
       "hard": false,
-      "deps": [],
-      "status": "todo",
+      "deps": [
+        "PF-DEMO"
+      ],
+      "status": "in_progress",
       "desc": "Turn KUSH_PROOF_REPORT's unproved bounds/overflow checks into fuzz targets; counterexamples become bugs or lemmas. See docs/showcase-roadmap.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 17:06:32",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "DP-GRADES",
@@ -6690,6 +6698,130 @@
           "text": "done 9506122"
         }
       ]
+    },
+    {
+      "id": "PF-OBLIGATIONS",
+      "title": "Proof fuzz: record every unproved check; report lists all kinds",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "Obligation table (bounds incl. unrefined, overflow, division, shift) with kind/span/function/goal/terms; KUSH_PROOF_REPORT=verbose lists them. docs/proof-fuzz.md step 1.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-13 17:06:32",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
+    },
+    {
+      "id": "PF-INSTRUMENT",
+      "title": "Proof fuzz: Cranelift fuzz build mode with attributed checks",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PF-OBLIGATIONS"
+      ],
+      "status": "todo",
+      "desc": "Obligation ids in IR, inline margins, kush_fuzz_check, runtime table to KUSH_FUZZ_OUT, deferred overflow off. docs/proof-fuzz.md 2.3.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PF-HARNESS",
+      "title": "Proof fuzz: std.fuzz tape and harness synthesis",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PF-OBLIGATIONS"
+      ],
+      "status": "todo",
+      "desc": "Tape decoder in Kush; generated harnesses per function from parameter types, dictionary, precondition guards; argv dispatch.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PF-ENGINE",
+      "title": "Proof fuzz: kush fuzz command, mutation and corpus",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PF-INSTRUMENT",
+        "PF-HARNESS"
+      ],
+      "status": "todo",
+      "desc": "Driver: seeds, mutators, margin-guided corpus, budgets, timeouts, --list, exit codes.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PF-SHRINK",
+      "title": "Proof fuzz: minimize, classify, suggest, reproduce",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PF-ENGINE"
+      ],
+      "status": "todo",
+      "desc": "Tape shrinking, bug vs local, suggestions (erased precondition/ensures/invariant/refinement), kush test repro, --save, regression replay.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PF-ENTRIES",
+      "title": "Proof fuzz: #[fuzz] byte entries",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PF-ENGINE"
+      ],
+      "status": "todo",
+      "desc": "User-declared fuzz entries in the test target for deep state.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PF-COVERAGE",
+      "title": "Proof fuzz: proved-or-attacked coverage report",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PF-ENGINE"
+      ],
+      "status": "todo",
+      "desc": "Per-function/package table, --report, --json.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PF-DEMO",
+      "title": "Proof fuzz: kernel and Game Boy showcase runs",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PF-SHRINK",
+        "PF-ENTRIES",
+        "PF-COVERAGE"
+      ],
+      "status": "todo",
+      "desc": "Run on examples/kernel and examples/gameboy; README before/after numbers.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PF-SEED",
+      "title": "Proof fuzz: seed from the integer fallback's feasible point",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PF-ENGINE"
+      ],
+      "status": "todo",
+      "desc": "Optional: return a candidate point from the bounded integer search and seed the corpus.",
+      "commit": null,
+      "log": []
     }
   ]
 }
