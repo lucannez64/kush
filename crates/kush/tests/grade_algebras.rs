@@ -276,3 +276,49 @@ fn an_algebra_with_identical_zero_and_one_is_rejected() {
         "same element for zero and one",
     );
 }
+
+#[test]
+fn an_algebra_whose_nonzero_uses_add_to_zero_is_rejected() {
+    // Z/2: `x + x` on an erased `@[Parity.Even]` binding would otherwise
+    // type-check and read an erased slot (it printed 0 instead of 42).
+    rejects(
+        r#"algebra Parity {
+            elements { Even, Odd }
+            zero = Even; one = Odd;
+            add { Even + Even = Even, Even + Odd = Odd, Odd + Even = Odd, Odd + Odd = Even }
+            mul { Even * Even = Even, Even * Odd = Even, Odd * Even = Even, Odd * Odd = Odd }
+        }
+        fn main() -> i64 ! {panic} {
+            let x: i64 @[Parity.Even] = 21;
+            x + x
+        }"#,
+        "'Odd' + 'Odd' = 'Even'",
+    );
+}
+
+#[test]
+fn an_algebra_with_zero_divisors_is_rejected() {
+    // Bool x Bool with componentwise or/and: a valid semiring, zero-sum-free,
+    // but Left * Right = Zero, so a nested demand could count a physical use
+    // as erased.
+    rejects(
+        r#"algebra Pair {
+            elements { Zero, Left, Right, Both }
+            zero = Zero; one = Both;
+            add {
+                Zero + Zero = Zero, Zero + Left = Left, Zero + Right = Right, Zero + Both = Both,
+                Left + Zero = Left, Left + Left = Left, Left + Right = Both, Left + Both = Both,
+                Right + Zero = Right, Right + Left = Both, Right + Right = Right, Right + Both = Both,
+                Both + Zero = Both, Both + Left = Both, Both + Right = Both, Both + Both = Both,
+            }
+            mul {
+                Zero * Zero = Zero, Zero * Left = Zero, Zero * Right = Zero, Zero * Both = Zero,
+                Left * Zero = Zero, Left * Left = Left, Left * Right = Zero, Left * Both = Left,
+                Right * Zero = Zero, Right * Left = Zero, Right * Right = Right, Right * Both = Right,
+                Both * Zero = Zero, Both * Left = Left, Both * Right = Right, Both * Both = Both,
+            }
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "'Left' * 'Right' = 'Zero'",
+    );
+}
