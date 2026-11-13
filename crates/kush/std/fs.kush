@@ -9,7 +9,6 @@ module std.fs;
 use std.result.Result;
 use std.sys;
 
-
 /// stat(2) one field with EINTR retried.
 fn stat_field(path: &Bytes, field: i64) -> Result<i64, i64> ! {io} {
     loop {

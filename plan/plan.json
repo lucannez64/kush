@@ -5883,11 +5883,43 @@
       "title": "Port the dependent kernel to Kush",
       "size": "L",
       "hard": true,
-      "deps": [],
-      "status": "todo",
+      "deps": [
+        "KIK-DIFF",
+        "KIK-DATA",
+        "KIK-SPEC",
+        "KIK-SPEC-DIFF",
+        "KIK-API"
+      ],
+      "status": "done",
       "desc": "Lean4Lean-style: universes, J, indexed data, Prop in Kush; the Rust kernel checks its invariants. See docs/showcase-roadmap.md.",
-      "commit": null,
-      "log": []
+      "commit": "6f666e5",
+      "log": [
+        {
+          "time": "2026-11-13 03:24:31",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 03:27:43",
+          "who": "agent",
+          "text": "Design draft in docs/kernel-in-kush.md (arena + hash-consed de Bruijn terms, exchange format + kush core dump, differential corpus/mutants/generator, logical Tm<n> spec checked by the Rust kernel); awaiting approval"
+        },
+        {
+          "time": "2026-11-13 03:41:38",
+          "who": "agent",
+          "text": "Design approved: same logic, independent algorithm; eta and universe polymorphism land in the Rust kernel first; sub-nodes added"
+        },
+        {
+          "time": "2026-11-13 11:14:42",
+          "who": "agent",
+          "text": "done 6f666e5"
+        },
+        {
+          "time": "2026-11-13 11:14:42",
+          "who": "agent",
+          "text": "All sub-nodes done: Kush kernel checks the corpus, agrees with Rust on corpus, mutants, typing/data cases, generated terms; spec of its syntax checked by both kernels and tested against its substitution; API for TACTICS-HANDLERS."
+        }
+      ]
     },
     {
       "id": "TACTICS-HANDLERS",
@@ -5969,6 +6001,499 @@
       "desc": "HALT with IME=0 and a pending interrupt fails to increment PC on the next fetch. See examples/gameboy/README.md, Not yet.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "LOGIC-ETA",
+      "title": "Eta for functions in the kernel",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Eta conversion for functions in the Rust kernel (f = fun x => f x); tests; docs/kernel.md. Before the Kush port, see docs/kernel-in-kush.md.",
+      "commit": "b6ffe6c",
+      "log": [
+        {
+          "time": "2026-11-13 03:41:46",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 03:44:02",
+          "who": "agent",
+          "text": "done b6ffe6c"
+        }
+      ]
+    },
+    {
+      "id": "LOGIC-UNIVERSE-POLY",
+      "title": "Universe polymorphism in the kernel",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LOGIC-ETA"
+      ],
+      "status": "done",
+      "desc": "Universe level variables for definitions and data families, explicit instantiation; kernel + elaborator + surface syntax; replaces cumulativity and sort-polymorphism gaps. See docs/kernel-in-kush.md.",
+      "commit": "36d1e83",
+      "log": [
+        {
+          "time": "2026-11-13 03:44:53",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 08:10:36",
+          "who": "agent",
+          "text": "done 36d1e83"
+        }
+      ]
+    },
+    {
+      "id": "STD-BIGNAT",
+      "title": "Arbitrary-precision naturals in std",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Limb-vector naturals in std (parse, print, compare, succ, pred) for the Kush kernel's literals.",
+      "commit": "9d33586",
+      "log": [
+        {
+          "time": "2026-11-13 08:13:05",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 08:13:05",
+          "who": "agent",
+          "text": "done 9d33586"
+        }
+      ]
+    },
+    {
+      "id": "KIK-EXCHANGE",
+      "title": "Kernel exchange format and kush core",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "LOGIC-UNIVERSE-POLY"
+      ],
+      "status": "done",
+      "desc": "S-expression core format; Rust printer; kush core subcommand dumping admitted environment and normalize queries.",
+      "commit": "c23f367",
+      "log": [
+        {
+          "time": "2026-11-13 08:34:17",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 08:39:11",
+          "who": "agent",
+          "text": "done c23f367"
+        }
+      ]
+    },
+    {
+      "id": "KIK-STORE",
+      "title": "Kush kernel: term store and reader",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "KIK-EXCHANGE",
+        "STD-BIGNAT"
+      ],
+      "status": "done",
+      "desc": "examples/kernel package; hash-consed arena Store, interning, exchange reader/printer, round-trip tests.",
+      "commit": "a7c6f14",
+      "log": [
+        {
+          "time": "2026-11-13 09:00:12",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:08:02",
+          "who": "agent",
+          "text": "done a7c6f14"
+        }
+      ]
+    },
+    {
+      "id": "KIK-SUBST",
+      "title": "Kush kernel: shifting and substitution",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "KIK-STORE"
+      ],
+      "status": "done",
+      "desc": "shift, substitute, rewrite_outer, level substitution; unit tests.",
+      "commit": "0a3d7c2",
+      "log": [
+        {
+          "time": "2026-11-13 09:13:36",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:16:49",
+          "who": "agent",
+          "text": "done 0a3d7c2"
+        }
+      ]
+    },
+    {
+      "id": "KIK-NORMAL",
+      "title": "Kush kernel: normalization",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "KIK-SUBST"
+      ],
+      "status": "done",
+      "desc": "whnf and full normalization: beta, delta, NatElim, numerals, Transport, J; budgets.",
+      "commit": "3cdfc9a",
+      "log": [
+        {
+          "time": "2026-11-13 09:16:59",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:23:13",
+          "who": "agent",
+          "text": "done 3cdfc9a"
+        }
+      ]
+    },
+    {
+      "id": "KIK-CHECK",
+      "title": "Kush kernel: type checking",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "KIK-NORMAL"
+      ],
+      "status": "done",
+      "desc": "infer/check/sort, lazy conversion with eta, define; scalars.",
+      "commit": "20f86c8",
+      "log": [
+        {
+          "time": "2026-11-13 09:24:07",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:28:09",
+          "who": "agent",
+          "text": "done 20f86c8"
+        }
+      ]
+    },
+    {
+      "id": "KIK-DIFF",
+      "title": "Kush kernel: differential harness",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "KIK-CHECK"
+      ],
+      "status": "done",
+      "desc": "Corpus dump, mutator, generator, scripts/kernel-diff.sh, Rust test. Milestone M1.",
+      "commit": "a4461a3",
+      "log": [
+        {
+          "time": "2026-11-13 09:28:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:30:35",
+          "who": "agent",
+          "text": "done a4461a3"
+        }
+      ]
+    },
+    {
+      "id": "KIK-DATA",
+      "title": "Kush kernel: indexed families",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "KIK-DIFF"
+      ],
+      "status": "done",
+      "desc": "define_indexed_data, positivity, IndElim, prop families, proof irrelevance. Milestone M2.",
+      "commit": "cf7fdaa",
+      "log": [
+        {
+          "time": "2026-11-13 09:31:10",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:35:47",
+          "who": "agent",
+          "text": "done cf7fdaa"
+        }
+      ]
+    },
+    {
+      "id": "LOGIC-LAMBDA",
+      "title": "Lambda expressions in the logical fragment",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Elaborate lambda syntax in total fns to kernel lambdas, for motives and renamings.",
+      "commit": "5b8bb79",
+      "log": [
+        {
+          "time": "2026-11-13 09:43:27",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:49:05",
+          "who": "agent",
+          "text": "done 5b8bb79"
+        }
+      ]
+    },
+    {
+      "id": "KERNEL-BUDGET-ATTR",
+      "title": "Kernel budgets: growing stack, large deterministic default, per-declaration override",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Depth becomes a safety cap (100,000) with the kernel moving to fresh 256 MiB stacks as it recurses; the deterministic step budget defaults to 10^8; #[kernel_steps(N)] raises it per logical declaration and travels in the exchange format.",
+      "commit": "3af7db6",
+      "log": [
+        {
+          "time": "2026-11-13 09:56:15",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 10:16:16",
+          "who": "agent",
+          "text": "done 3af7db6"
+        }
+      ]
+    },
+    {
+      "id": "KIK-SPEC",
+      "title": "Well-scoped syntax spec checked by the Rust kernel",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "KIK-DATA",
+        "LOGIC-LAMBDA",
+        "KERNEL-BUDGET-ATTR"
+      ],
+      "status": "done",
+      "desc": "Tm<n> with Fin variables, rename/shift/subst with scope in their types, pointwise lemmas; also in the diff corpus.",
+      "commit": "5536ce4",
+      "log": [
+        {
+          "time": "2026-11-13 10:19:13",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 10:45:40",
+          "who": "agent",
+          "text": "done 5536ce4"
+        }
+      ]
+    },
+    {
+      "id": "KIK-SPEC-DIFF",
+      "title": "Spec-versus-implementation substitution tests",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "KIK-SPEC"
+      ],
+      "status": "done",
+      "desc": "Rust kernel normalizes spec subst on generated Tm values; compare with the Kush kernel's substitute.",
+      "commit": "216776f",
+      "log": [
+        {
+          "time": "2026-11-13 11:03:12",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 11:09:38",
+          "who": "agent",
+          "text": "done 216776f"
+        }
+      ]
+    },
+    {
+      "id": "KIK-API",
+      "title": "Kush kernel API for tactics",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "KIK-DATA"
+      ],
+      "status": "done",
+      "desc": "whnf, abstract, structured errors, documented for TACTICS-HANDLERS.",
+      "commit": "6f666e5",
+      "log": [
+        {
+          "time": "2026-11-13 11:09:56",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 11:14:42",
+          "who": "agent",
+          "text": "done 6f666e5"
+        }
+      ]
+    },
+    {
+      "id": "LANG-DROP-AFTER-BORROW",
+      "title": "Explicit drop after a call-scoped borrow",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "In std.natural.successor, 'let r = Natural { limbs: out }; if digits(&r) > max { drop(r); return Err }' was rejected with 'cannot move or drop an owner or view while a slice view derived from it is live', though the &r borrow ends with the call. Minimize, confirm whether it is a false positive, fix with tests. Worked around in std.natural by not dropping explicitly.",
+      "commit": "f596260",
+      "log": [
+        {
+          "time": "2026-11-13 08:31:36",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 08:33:34",
+          "who": "agent",
+          "text": "done f596260"
+        }
+      ]
+    },
+    {
+      "id": "NAT-NO-DIGIT-LIMIT",
+      "title": "Remove the 4096-digit natural budget",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Fuel per limb and the source size limit already bound numeral work; drop MAX_DIGITS in natural.rs and std.natural.",
+      "commit": "8aa27ea",
+      "log": [
+        {
+          "time": "2026-11-13 08:58:41",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:00:06",
+          "who": "agent",
+          "text": "done 8aa27ea"
+        }
+      ]
+    },
+    {
+      "id": "LANG-TWO-PHASE-CALLS",
+      "title": "Two-phase borrows for call arguments",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "f(k, read(&k.store)) is rejected: an argument lent exclusively (k: &mut Kernel) stays borrowed while later arguments are evaluated, even when they only read and finish before the call. Reserve the exclusive loan and activate it at the call, as Rust's two-phase borrows do; keep rejecting real overlap (a later argument that writes, or a returned view). Found in examples/kernel (normal.kush, check.kush hoist such reads into lets); see docs/kernel-in-kush.md section 6.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LANG-MATCH-SCRUTINEE-LOAN",
+      "title": "End a match scrutinee's loan when its value holds no borrow",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "match check.normalize_closed(&mut k, t) { Ok(n) => printer.term_into(&k.store, ..) } is rejected: the &mut loan taken while evaluating the scrutinee stays live in the arms although the result (Result<i64, i64>) holds no borrow. End call-scoped loans after the scrutinee unless its type can carry one. Found in examples/kernel/tests/main.kush; see docs/kernel-in-kush.md section 6.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LANG-IMPORT-ALIAS",
+      "title": "Renamed imports (use a.b as c)",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Two modules with the same last segment cannot both be imported (kernel.env clashed with std.env, so the kernel's state module is kernel.engine). Add 'use path as name' for modules and items: resolver, formatter, language server, editor grammars, docs. Found in examples/kernel; see docs/kernel-in-kush.md section 6.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LANG-STACK-SIZE",
+      "title": "Choose a thread's stack size, or grow it",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Kush programs run recursion on a fixed native stack (8 MB main thread) and abort with 'stack exhausted' past it; there is no way to request a larger stack. The Kush kernel therefore caps nesting at 8,000 where the Rust kernel (which moves to fresh 256 MiB stacks as it recurses) caps at 100,000. Add a stack size to Thread.spawn (and possibly the entry point), or segmented stack growth. See docs/kernel-in-kush.md.",
+      "commit": "8298dfd",
+      "log": [
+        {
+          "time": "2026-11-13 11:47:05",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 12:00:22",
+          "who": "agent",
+          "text": "done 8298dfd"
+        }
+      ]
+    },
+    {
+      "id": "LSP-NESTED-PROJECTS",
+      "title": "Language server: projects nested in the workspace",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "The server found Kush.toml only from the workspace root, so files of a project in a subfolder (examples/kernel opened from the repository root) were analyzed alone and their imports failed ('a module cannot import itself'). Keep several projects; load the nearest manifest above each opened file; analyze each file with the innermost owning project.",
+      "commit": "beef334",
+      "log": [
+        {
+          "time": "2026-11-13 11:40:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 11:40:32",
+          "who": "agent",
+          "text": "done beef334"
+        }
+      ]
+    },
+    {
+      "id": "KIK-RESOURCES",
+      "title": "Kush kernel: free memory, cheaper conversion, deep recursion",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "store mark/rewind (tombstones, cost proportional to what is dropped) used after each definition and query; proof irrelevance tried after the structural comparison; nesting cap 100,000 on a 1 GiB main stack.",
+      "commit": "756a893",
+      "log": [
+        {
+          "time": "2026-11-13 12:00:22",
+          "who": "agent",
+          "text": "done 756a893"
+        }
+      ]
     },
     {
       "id": "GRADE-ERASURE-ZEROSUM",

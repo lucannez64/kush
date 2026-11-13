@@ -270,7 +270,7 @@ impl Evaluator<'_> {
                 )
             })?
             .clone();
-        let mut term = Term::Global(name);
+        let mut term = Term::global(name);
         for argument in arguments {
             let natural = Natural::from(u64::try_from(argument).map_err(|_| {
                 Diagnostic::new(span, "compile-time natural does not fit a machine size")

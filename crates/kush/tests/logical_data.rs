@@ -235,10 +235,10 @@ const FIN: &str = r#"
 fn finite_index_data_uses_constructor_local_binders_from_source() {
     let checked = kush::check(FIN).unwrap();
     assert!(checked.definitions.contains(&"Fin".to_owned()));
-    let three = kush::kernel::Term::Global("three".into());
+    let three = kush::kernel::Term::global("three");
     let count = kush::kernel::Term::app(
         kush::kernel::Term::app(
-            kush::kernel::Term::Global("fin_count".into()),
+            kush::kernel::Term::global("fin_count"),
             kush::kernel::Term::natural(3u64.into()),
         ),
         three,
@@ -250,7 +250,7 @@ fn finite_index_data_uses_constructor_local_binders_from_source() {
     assert_eq!(
         checked
             .kernel
-            .normalize_closed(&kush::kernel::Term::Global("count_three".into()))
+            .normalize_closed(&kush::kernel::Term::global("count_three"))
             .unwrap(),
         kush::kernel::Term::refl(
             kush::kernel::Term::Nat,
@@ -261,7 +261,7 @@ fn finite_index_data_uses_constructor_local_binders_from_source() {
     assert_eq!(
         checked
             .kernel
-            .normalize_closed(&kush::kernel::Term::Global("total_three".into()))
+            .normalize_closed(&kush::kernel::Term::global("total_three"))
             .unwrap(),
         kush::kernel::Term::refl(
             kush::kernel::Term::Nat,
@@ -369,10 +369,10 @@ const NAMED_FIELDS: &str = r#"
 #[test]
 fn named_logical_fields_bind_in_later_fields_and_result_indices() {
     let checked = kush::check(NAMED_FIELDS).unwrap();
-    let tag3 = kush::kernel::Term::Global("tag3".into());
+    let tag3 = kush::kernel::Term::global("tag3");
     let value = kush::kernel::Term::app(
         kush::kernel::Term::app(
-            kush::kernel::Term::Global("tag_value".into()),
+            kush::kernel::Term::global("tag_value"),
             kush::kernel::Term::natural(3u64.into()),
         ),
         tag3,
@@ -381,7 +381,7 @@ fn named_logical_fields_bind_in_later_fields_and_result_indices() {
         checked.kernel.normalize_closed(&value).unwrap(),
         kush::kernel::Term::natural(4u64.into())
     );
-    let one = kush::kernel::Term::Global("one_item".into());
+    let one = kush::kernel::Term::global("one_item");
     assert!(
         checked
             .kernel
@@ -389,7 +389,7 @@ fn named_logical_fields_bind_in_later_fields_and_result_indices() {
                 &one,
                 &kush::kernel::Term::app(
                     kush::kernel::Term::app(
-                        kush::kernel::Term::Global("SizedVect".into()),
+                        kush::kernel::Term::global("SizedVect"),
                         kush::kernel::Term::Nat
                     ),
                     kush::kernel::Term::natural(1u64.into())
@@ -480,7 +480,7 @@ fn constructor_local_binders_may_depend_on_earlier_locals() {
     assert_eq!(
         checked
             .kernel
-            .normalize_closed(&kush::kernel::Term::Global("tag_value".into()))
+            .normalize_closed(&kush::kernel::Term::global("tag_value"))
             .unwrap(),
         kush::kernel::Term::refl(
             kush::kernel::Term::Nat,
@@ -518,7 +518,7 @@ fn later_named_fields_may_depend_on_earlier_field_values() {
     assert_eq!(
         checked
             .kernel
-            .normalize_closed(&kush::kernel::Term::Global("check".into()))
+            .normalize_closed(&kush::kernel::Term::global("check"))
             .unwrap(),
         kush::kernel::Term::refl(
             kush::kernel::Term::Nat,

@@ -1,0 +1,235 @@
+module kernel;
+
+// The Kush kernel's command line (docs/kernel-in-kush.md).
+//
+//     kernel check FILE.kcore      check and answer every item
+//     kernel print FILE.kcore      read an exchange file and print it back
+//     kernel normalize FILE.kcore  answer its normalize queries
+//
+// `check` is the kernel: it admits each declaration only after checking it
+// and answers every query, in the format of `kush kernel` (Rust), so the two
+// outputs can be diffed (docs/kernel-exchange.md).
+//
+// `normalize` admits the file's declarations without checking them (they
+// come from `kush core`, so the Rust kernel has checked them) and answers in
+// the format of `kush kernel`: `ok NAME` per declaration, `= TERM`, `reject`
+// or `budget` per normalize query, and `skip` for other queries. It tests
+// reduction on its own, before the checker exists.
+//
+// `print` is the round-trip check of the reader and printer: on a file the
+// Rust side wrote (`kush core`), its output is identical to its input.
+
+use std.env;
+use std.fs;
+use std.io;
+use std.result.Result;
+use std.text;
+use kernel.check;
+use kernel.engine;
+use kernel.error;
+use kernel.normal;
+use kernel.printer;
+use kernel.store;
+use kernel.term;
+use kernel.reader;
+
+fn say(message: &Bytes) -> Unit ! {io} {
+    match io.write(io.stdout(), message) {
+        Result.Ok(_) => {},
+        Result.Err(_) => {},
+    }
+}
+
+fn usage() -> i64 ! {io, alloc, panic} {
+    say(&Bytes.from("usage: kernel check|print|normalize FILE.kcore\n"));
+    2
+}
+
+fn word(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < value.len() {
+        out = out.push(value[i]);
+        i = i + 1;
+    }
+    out
+}
+
+/// `ok NAME`, `reject NAME` or `budget NAME` for a declaration.
+fn verdict(k: &engine.Kernel, out: Bytes, result: Result<Unit, i64>, name: i64) -> Bytes ! {alloc, panic} {
+    let label = match result {
+        Result.Ok(_) => Bytes.from("ok "),
+        Result.Err(code) => if error.inconclusive(code) { Bytes.from("budget ") } else { Bytes.from("reject ") },
+    };
+    term.name_into(&k.store, word(out, &label), name).push(10)
+}
+
+/// `budget` or `reject` for a failed query.
+fn failure(out: Bytes, code: i64) -> Bytes ! {alloc, panic} {
+    word(out, &(if error.inconclusive(code) { Bytes.from("budget\n") } else { Bytes.from("reject\n") }))
+}
+
+/// Check and answer every item.
+fn check_items(items: &Vec<reader.Item>, k: &mut engine.Kernel) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(4096);
+    let mut i = 0;
+    while i < items.len() {
+        match items[i] {
+            reader.Item.Def(name, levels, ty, value, steps) => {
+                if steps > 0 { k.max_steps = steps; }
+                let result = check.define(k, name, levels, ty, value);
+                k.max_steps = engine.STEPS;
+                out = verdict(k, out, result, name);
+            },
+            reader.Item.Data(name, levels, prop, params, constructors, steps) => {
+                if steps > 0 { k.max_steps = steps; }
+                let result = check.define_data(k, name, levels, prop, params, constructors);
+                k.max_steps = engine.STEPS;
+                out = verdict(k, out, result, name);
+            },
+            // A query's terms are dropped once its answer is printed.
+            reader.Item.Check(t, ty) => {
+                let start = store.mark(&k.store);
+                out = match check.check_closed(k, t, ty) {
+                    Result.Ok(_) => word(out, &Bytes.from("ok\n")),
+                    Result.Err(code) => failure(out, code),
+                };
+                store.rewind(&mut k.store, start);
+            },
+            reader.Item.Infer(t) => {
+                let start = store.mark(&k.store);
+                out = match check.infer_closed(k, t) {
+                    Result.Ok(ty) => printer.term_into(&k.store, word(out, &Bytes.from(": ")), ty).push(10),
+                    Result.Err(code) => failure(out, code),
+                };
+                store.rewind(&mut k.store, start);
+            },
+            reader.Item.Normalize(t) => {
+                let start = store.mark(&k.store);
+                out = match check.normalize_closed(k, t) {
+                    Result.Ok(n) => printer.term_into(&k.store, word(out, &Bytes.from("= ")), n).push(10),
+                    Result.Err(code) => failure(out, code),
+                };
+                store.rewind(&mut k.store, start);
+            },
+        }
+        i = i + 1;
+    }
+    out
+}
+
+/// Answer the normalize queries of `items`, admitting declarations as is.
+fn normalize_items(items: &Vec<reader.Item>, k: &mut engine.Kernel) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(4096);
+    let mut i = 0;
+    while i < items.len() {
+        match items[i] {
+            reader.Item.Def(name, levels, ty, value, _) => {
+                engine.admit_def(k, name, levels, ty, value);
+                out = term.name_into(&k.store, word(out, &Bytes.from("ok ")), name).push(10);
+            },
+            reader.Item.Data(name, levels, prop, params, constructors, _) => {
+                // Types are not needed to reduce; KIK-CHECK computes them.
+                let placeholder = term.prop(&mut k.store);
+                let mut types: Vec<i64> = Vec.new();
+                let mut c = 0;
+                while c < term.list_len(&k.store, constructors) {
+                    types = types.push(placeholder);
+                    c = c + 1;
+                }
+                let type_list = term.list(&mut k.store, &types);
+                engine.admit_data(k, name, levels, prop, params, constructors, placeholder, type_list);
+                out = term.name_into(&k.store, word(out, &Bytes.from("ok ")), name).push(10);
+            },
+            reader.Item.Normalize(t) => {
+                engine.begin(k);
+                out = match normal.normal(k, t) {
+                    Result.Ok(n) => printer.term_into(&k.store, word(out, &Bytes.from("= ")), n).push(10),
+                    Result.Err(code) => {
+                        word(out, &(if error.inconclusive(code) { Bytes.from("budget\n") } else { Bytes.from("reject\n") }))
+                    },
+                };
+            },
+            _ => { out = word(out, &Bytes.from("skip\n")); },
+        }
+        i = i + 1;
+    }
+    out
+}
+
+/// Read a whole file, doubling the buffer while it does not fit (`fs.read`
+/// fails with EFBIG, 27, when the buffer is full).
+fn read_file(path: &Bytes) -> Result<Bytes, i64> ! {io, alloc, panic} {
+    let mut capacity = 1048576;
+    loop {
+        match fs.read(path, Bytes.with_capacity(capacity)) {
+            Result.Ok(bytes) => return Result.Ok(bytes),
+            Result.Err(27) => { capacity = 2 * capacity; },
+            Result.Err(code) => return Result.Err(code),
+        }
+    }
+}
+
+/// What to do with a file: 0 print, 1 normalize, 2 check.
+fn run_file(path: &Bytes, mode: i64) -> i64 ! {io, alloc, panic} {
+    let source = match read_file(path) {
+        Result.Ok(bytes) => bytes,
+        Result.Err(code) => {
+            say(&text.format_i64_into(Bytes.from("error: cannot read the file: errno "), code).push(10));
+            return 1;
+        },
+    };
+    let mut k = engine.new();
+    let items = match reader.read(&mut k.store, &source) {
+        Result.Ok(items) => items,
+        Result.Err(at) => {
+            say(&text.format_i64_into(Bytes.from("error: malformed exchange input at byte "), at).push(10));
+            return 1;
+        },
+    };
+    if mode == 1 {
+        say(&normalize_items(&items, &mut k));
+        return 0;
+    }
+    if mode == 2 {
+        say(&check_items(&items, &mut k));
+        return 0;
+    }
+    let mut out = Bytes.with_capacity(source.len());
+    let mut i = 0;
+    while i < items.len() {
+        out = printer.item_into(&k.store, out, items[i]);
+        i = i + 1;
+    }
+    say(&out);
+    0
+}
+
+// The kernel recurses as deeply as its nesting cap allows (100,000 levels,
+// as the Rust kernel), which needs more than the default 8 MiB stack.
+#[stack_size(1024)]
+fn main() -> i64 ! {io, alloc, panic} {
+    let count = match env.arg_count() {
+        Result.Ok(count) => count,
+        Result.Err(_) => 0,
+    };
+    if count != 3 { return usage(); }
+    let command = match env.arg(1, Bytes.with_capacity(64)) {
+        Result.Ok(bytes) => bytes,
+        Result.Err(_) => return usage(),
+    };
+    let path = match env.arg(2, Bytes.with_capacity(4096)) {
+        Result.Ok(bytes) => bytes,
+        Result.Err(_) => return usage(),
+    };
+    if text.eq(&command, &Bytes.from("print")) {
+        return run_file(&path, 0);
+    }
+    if text.eq(&command, &Bytes.from("normalize")) {
+        return run_file(&path, 1);
+    }
+    if text.eq(&command, &Bytes.from("check")) {
+        return run_file(&path, 2);
+    }
+    usage()
+}

@@ -605,6 +605,10 @@
     "named": false
   },
   {
+    "type": "Level",
+    "named": false
+  },
+  {
     "type": "Nat",
     "named": false
   },

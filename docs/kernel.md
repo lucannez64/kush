@@ -76,7 +76,7 @@ Core terms are explicit and use zero-based de Bruijn indices. Index 0 denotes
 the nearest enclosing binder; binder names do not affect equality.
 
 ```text
-t, A, B ::= Var(i) | Global(name) | Universe(u) | Prop
+t, A, B ::= Var(i) | Global(name, [l...]) | Universe(l) | Prop
           | Pi(A, B) | Lam(A, t) | App(t, t)
           | Nat | Zero | Succ(t) | Literal(natural)
           | NatElim(motive, zero, step, value)
@@ -84,6 +84,8 @@ t, A, B ::= Var(i) | Global(name) | Universe(u) | Prop
           | Transport(A, x, y, motive, equality, value)
           | EqElim(A, x, y, motive, refl_case, proof)
           | IndElim(data, motive, branches, scrutinee)
+
+l       ::= c | u_i | succ(l) | max(l, l)       -- c a u32 constant
 ```
 
 Global names include admitted definitions, total logical data families, and
@@ -133,9 +135,43 @@ kernel metavariables or unchecked holes.
 Γ ⊢ App(f, a) : B[a/x]
 ```
 
-Universe levels are explicit `u32` integers with checked successor arithmetic.
-Overflow is an error. There is **no cumulativity**: `Nat : Universe(0)` does not
-also establish `Nat : Universe(1)`. `Universe(0)` never inhabits itself.
+Universe levels are `u32` constants, level parameters `u_i`, successor and
+maximum, with checked successor arithmetic; overflow is an error. There is **no
+cumulativity**: `Nat : Universe(0)` does not also establish
+`Nat : Universe(1)`. `Universe(0)` never inhabits itself. Universe
+polymorphism (below) replaces cumulativity as the way to reuse a definition at
+several levels.
+
+### Universe polymorphism
+
+A definition or data family may declare `n` universe parameters `u_0 ..
+u_{n-1}` (`Kernel::define_polymorphic`, `IndexedDataSpec::levels`). Its type,
+value, parameters and constructors may mention them. Every reference names one
+level per parameter, `Global(name, [l_0, ..., l_{n-1}])`, and sees the
+declaration instantiated at those levels, for typing and for delta unfolding:
+
+```text
+id.{u} : (A : Universe(u_0)) -> A -> A
+id.{0} Nat 3 : Nat          id.{1} Universe(0) Nat : Universe(0)
+```
+
+Levels are kept in a canonical form, `max(c, u_i + k_i, ...)` with each
+parameter once at its largest offset and the constant dropped when a parameter
+offset dominates it (parameters are never negative). Structural equality of
+canonical levels is level equality, so `Universe(max(u + 1, 1))` and
+`Universe(u + 1)` are the same term, and `a <= b` for all assignments is
+`max(a, b) = b`. There is no `imax`: `Prop` is a separate sort, never
+`Universe(l)`, so the `Pi` rule stays as below with `max` on levels.
+
+A level may only mention parameters in scope: those of the declaration being
+admitted, or for the open-term APIs those set by `Kernel::set_level_scope`
+(used by the frontend while elaborating a polymorphic declaration). A wrong
+number of level arguments, or an unbound parameter, is rejected. A data
+family's universe is computed over its own parameters (`List.{u} (A :
+Universe(u_0)) : Universe(u_0)`), field universes are compared with `<=` on
+levels, and a recursive field must use the family at exactly its own
+parameters, in order; any other instantiation is rejected as non-uniform. An
+eliminator takes the family's levels from its scrutinee's type.
 
 Throughout the rules, `Sort` means `Universe(u)` or `Prop`, and
 `level(Prop) = 0`. `Prop` is the sort of propositions. `Prop : Universe(0)`, so
@@ -291,8 +327,17 @@ Conversion compares normal forms structurally after:
   eliminated recursively and non-recursive fields are passed through.
 
 Normal forms also normalize under binders. Eliminations on neutral variables
-remain neutral. There is no eta conversion, implicit coercion, algebraic
-subtyping, arithmetic solver, or theorem search.
+remain neutral. There is no implicit coercion, algebraic subtyping, arithmetic
+solver, or theorem search.
+
+Conversion includes **eta for functions**: when exactly one side of a
+comparison is a lambda, `Lam(A, b) ≡ f` holds if `b ≡ App(f↑, Var(0))` under
+`A`, where `f↑` is `f` shifted past the new binder. So `λx. f x ≡ f` for any
+function `f`, including variables and opaque or defined globals, and nested
+abstractions compare argument by argument. Eta is a conversion rule only:
+normalization never contracts or expands lambdas, so normal forms are
+unchanged. Two lambdas still compare domain and body structurally. There is no
+eta for records or logical data.
 
 Conversion is additionally type-directed for **proof irrelevance**: if both
 terms are inhabitants of propositions and their proposition types are
@@ -363,13 +408,25 @@ Supported source features are:
 
 - Explicit type/value generic parameters; an omitted generic bound defaults to
   `Type`, meaning `Universe(0)`.
-- `Type` and `Type<literal>` for universe levels 0 through 255.
+- `Type` and `Type<level>`, where a level is a literal from 0 through 255, a
+  universe level generic, `Level.succ<l>` or `Level.max<a, b>`.
+- Universe polymorphism: generics bound by `Level` (`<u: Level>`) come before
+  every other generic of a `total fn`, alias, `total enum` or `prop`, and make
+  the declaration polymorphic over those levels. Every use passes the levels
+  first, like other explicit generic arguments (`id::<0, Nat>(3)`,
+  `List<1, Type>`, a partially applied motive `LengthMotive::<u>`); a missing
+  level is an error, never inferred. A level generic may only appear in
+  `Type<...>` or as a universe argument. A data family's recursive fields and
+  constructor results must use the family at its own levels, in order.
+  `Data.elim::<D>` names the bare family and takes its levels from the
+  scrutinee's type. `Level` and `Level.succ`/`Level.max` are reserved names.
 - `Nat`, `Nat.zero`, `Nat.succ(n)`, and compact arbitrary-precision decimal
-  logical literals, subject to the significant-digit budget in section 8.
+  logical literals of any size (section 8).
 - `Eq<T, x, y>` and `refl::<T>(x)`. These elaborate directly to kernel equality
   and reflexive-proof terms, so the carrier may be a Type at any supported level
-  or a proposition. A generic *definition* still binds `T : Type` at level 0
-  unless it is written against `Prop`; there is no sort-polymorphic generic.
+  or a proposition. A generic definition binds `T : Type` at level 0 unless it
+  declares a level generic (`<u: Level, T: Type<u>>`) or is written against
+  `Prop`; there is no generic ranging over both `Type` and `Prop`.
 - Dependent result types referencing earlier parameters or generic values.
 - Pure function types, including dependent binders:
   `fn(n: Nat, hypothesis: P<n>) -> P<Nat.succ<n>> ! {}`.
@@ -379,6 +436,8 @@ Supported source features are:
   Empty parameter lists and nonempty effect rows remain unsupported here.
 - Function calls, explicit specialization, and nested blocks.
 - Immutable, explicitly typed, single-name lets followed by a tail expression.
+- Lambda expressions, `fn(x: A, y: B) -> R { body }`, elaborated to kernel
+  lambdas; see [below](#lambda-expressions).
 - Generic aliases that return types, including aliases indexed by term values.
 - `total enum` positive indexed data with checked constructors, named tuple
   fields, constructor-local binders, and `Data.elim::<D>(...)`; see
@@ -440,6 +499,33 @@ total enum Indexed<p: Two> { Mk: Indexed<p> }
 total fn same_proof() -> Indexed<Second> ! {} { Indexed.Mk::<First> }
 ```
 
+### Universe-polymorphic declarations
+
+```rust
+total fn id<u: Level, T: Type<u>>(x: T) -> T ! {} { x }
+total fn three() -> Nat ! {} { id::<0, Nat>(3) }
+total fn nat_type() -> Type ! {} { id::<1, Type>(Nat) }   // one level up
+
+type Big<u: Level> = Type<Level.succ<u>>;
+
+total enum List<u: Level, A: Type<u>> {
+    Nil: List<u, A>,
+    Cons(A, List<u, A>): List<u, A>,
+}
+type LengthMotive<u: Level, A: Type<u>, l: List<u, A>> = Nat;
+total fn length<u: Level, A: Type<u>>(l: List<u, A>) -> Nat ! {} {
+    Data.elim::<List>(LengthMotive::<u>, nil_length::<u>, cons_length::<u>, l)
+}
+total fn types() -> List<1, Type> ! {} {
+    Cons::<1, Type>(Nat, Cons::<1, Type>(Bool, Nil::<1, Type>))
+}
+```
+
+`id::<0, Type>(Nat)` is rejected (`Type` lives in `Type<1>`), and so is using
+`Nat` where `Big<1>` is expected: polymorphism replaces cumulativity, it does
+not add it. The complete example is
+[universes.kush](../examples/universes.kush).
+
 ### Source-level induction and transport
 
 The source checker now exposes two fully applied operations, lowering directly to
@@ -465,8 +551,8 @@ connect `from` to `to`, and the supplied value must inhabit the family at `from`
 The result inhabits the family at `to`. The motive's result sort is inferred
 by the kernel, not hardcoded by elaboration. `Eq`/`refl` elaborate directly to
 kernel equality terms, so a direct application can use a Type at any level or a
-proposition as the carrier. Generic helpers still need an explicit `Type` or
-`Prop` binder; there is no sort-polymorphic generic.
+proposition as the carrier. Generic helpers need an explicit `Type<u>` (with a
+level generic for any level) or `Prop` binder; no generic ranges over both.
 
 `Data.elim::<D>` takes a motive, one branch per constructor in declaration order,
 and a scrutinee; `Eq.elim::<T>` takes `left`, `right`, a motive, the reflexive
@@ -480,8 +566,8 @@ wrong value arity are rejected. Recognition uses resolved binding IDs, so local
 shadowing cannot accidentally invoke an intrinsic. Current-module qualification
 continues to work.
 
-Named total functions and partially specialized aliases provide motives and step
-functions; lambda expression syntax is not required. For example:
+Named total functions, partially specialized aliases or lambda expressions
+provide motives and step functions. For example:
 
 ```rust
 type ConstantNat<n: Nat> = Nat;
@@ -511,6 +597,39 @@ and `prop` fragments described in [logical data](logical-data.md) and
 and safe proof-irrelevance rules. Ordinary owning enums remain runtime data and
 never become logical evidence.
 
+
+### Lambda expressions
+
+A lambda in a logical definition elaborates to nested kernel lambdas and may
+refer to every binder in scope (logical definitions are erased, so nothing is
+captured at run time):
+
+```rust
+total fn add(n: Nat, m: Nat) -> Nat ! {} {
+    Nat.induct(fn(k) { Nat }, m, fn(k, acc) { Nat.succ(acc) }, n)
+}
+total fn adder(n: Nat) -> fn(m: Nat) -> Nat ! {} ! {} { fn(m) { add(n, m) } }
+total fn symmetry<T: Type>(x: T, y: T, p: Eq<T, x, y>) -> Eq<T, y, x> ! {} {
+    Eq.transport::<T>(x, y, fn(z) { Eq::<T, z, x> }, p, refl::<T>(x))
+}
+```
+
+- A parameter without a type takes the domain of the **expected function
+  type**: a function parameter's type at a call, a function's declared result
+  type (also through `let`s), a typed `let`, an annotated lambda result, and
+  the eliminator positions: `Nat.induct`'s motive (`Nat -> Sort`) and step
+  (`(n : Nat) -> motive n -> motive (succ n)`), the motives of
+  `Eq.transport` (`T -> Sort`), `Eq.elim` (`(y : T) -> Eq<T, x, y> -> Sort`)
+  and `Data.elim` (the family's indices, then the family) and its branches
+  (each constructor's branch type for the given motive), for a monomorphic
+  family. Otherwise the parameter needs an annotation.
+- A written result type is checked against the body.
+- The effect row must be empty or omitted, and parameters cannot be `erased`.
+- Types inside a lambda body use the expression form of a type application,
+  `Eq::<T, z, x>`.
+
+The complete example is [logical-lambdas.kush](../examples/logical-lambdas.kush);
+it is also part of the corpus the [Kush kernel](kernel-in-kush.md) checks.
 
 ### Checked interoperability with executable functions
 
@@ -575,10 +694,35 @@ remains supported; kernel checking does not silently erase them.
 
 The frontend's existing input/token/nesting limits still apply. Resolution and
 elaboration each have a 128-frame nesting budget. Checked source modules are
-limited to 256 definitions. Each public kernel operation starts a fresh budget
-of 100000 weighted computation units and 128 nested frames. Traversals consume
-units; numeric operations additionally charge by the number of base-10^9 limbs
-touched. The significant-digit limit in section 8 bounds numeral storage.
+limited to 256 definitions.
+
+**Kernel budgets.** Each public kernel operation starts a fresh **step
+budget** of 100,000,000 weighted units (`kernel::DEFAULT_STEPS`; about a minute
+of work in a debug build, a few seconds in a release build). Traversals
+consume units; numeric operations additionally charge by the number of
+base-10^9 limbs touched, so fuel also bounds numeral size (section 8). The
+budget is deterministic: it is exhausted at the same point on every machine,
+so a build never passes or fails depending on load, and a dependency cannot
+make a build hang. A logical declaration may set its own budget:
+
+```rust
+#[kernel_steps(500_000_000)]
+total fn long_proof() -> ... ! {} { ... }
+```
+
+`#[kernel_steps(N)]` (a positive integer) applies to that declaration's
+elaboration and admission only, on `total fn`, `total enum`, `prop` and type
+aliases, also in programs with executable code; it is exported with the
+declaration (`kush core`, [kernel-exchange.md](kernel-exchange.md)). Lean's
+`set_option maxHeartbeats` is the same idea.
+
+**Nesting** is not a budget but a safety net. The kernel is recursive; when the
+stack segment it runs on is nearly full (512 KiB on the caller's thread, then
+240 MiB of each 256 MiB segment it creates), it continues the traversal on a
+fresh thread with a large stack, so deep but ordinary terms never overflow the
+native stack. The cap (`kernel::DEFAULT_DEPTH`, 100,000 levels) only turns a
+pathological depth into an error instead of exhausting memory.
+
 Budget exhaustion is an error, not a logical conclusion. Callers can configure
 kernel budgets, but changing budgets cannot admit unchecked globals or terms.
 
@@ -592,7 +736,7 @@ positivity/universe/result-index rejection, atomic global and data admission,
 cyclic source definitions, dependency ordering, lexical scopes, constructor
 ambiguity, unsupported features, source-level induction, transport, and data
 elimination, named/anonymous function-type binder scopes, higher-universe
-motives, compact-number conversion, carry/borrow behavior, digit/fuel budgets,
+motives, compact-number conversion, carry/borrow behavior, numeric fuel budgets,
 erasure at reference/native boundaries, and CLI diagnostics.
 
 Next work should extend the elaboration/type-checking boundary deliberately:
@@ -633,11 +777,15 @@ There is no longer a `0..32` literal restriction. A source literal larger than
 values, dependent indices, and equality proofs. See the
 [large-natural example](../examples/large-naturals.kush).
 
-The current compiler uses a **4096 significant decimal digit** budget per
-natural number. Leading zeroes and source separators do not consume that budget;
-the frontend's file/token limits still apply. Parsing over-budget literals or
-normalizing a successor beyond that budget reports an error. This is an explicit
-compiler resource limit, not wrapping arithmetic or a fixed-width machine type.
+There is **no digit limit**. An earlier 4096-significant-digit budget was
+removed: it bounded nothing that fuel does not. Every numeric operation
+(inference of a literal, normalizing or copying it, successor, predecessor) is
+charged per base-10^9 limb it touches, so fuel bounds a numeral's size along
+with everything else, and source literals are
+bounded by the frontend's file size limit anyway. Parsing into limbs is linear,
+so there is no quadratic conversion to guard against (the reason Python limits
+`int`/`str` conversion). Lean, Rocq and Agda likewise bound numerals only by
+memory. An exhausted budget is an error, never wrapping or truncation.
 Checking a definition does not promise that every future application can be
 normalized within resource budgets. Mathematical `Nat` remains distinct from
 future runtime machine integers and allocator-backed runtime big integers.

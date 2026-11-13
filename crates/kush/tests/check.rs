@@ -26,14 +26,14 @@ fn checks_source_proofs_and_computes_through_forward_references() {
     assert_eq!(
         result
             .kernel
-            .normalize_closed(&T::Global("answer".into()))
+            .normalize_closed(&T::global("answer"))
             .unwrap(),
         nat(2)
     );
     assert_eq!(
         result
             .kernel
-            .normalize_closed(&T::Global("proof_of_answer".into()))
+            .normalize_closed(&T::global("proof_of_answer"))
             .unwrap(),
         T::refl(T::Nat, nat(2))
     );
@@ -42,7 +42,7 @@ fn checks_source_proofs_and_computes_through_forward_references() {
 fn proof_terms_really_depend_on_value_parameters() {
     let result =
         check("total fn same<T: Type>(x: T) -> Eq<T, x, x> ! {} { refl::<T>(x) }").unwrap();
-    let applied = T::app(T::app(T::Global("same".into()), T::Nat), nat(4));
+    let applied = T::app(T::app(T::global("same"), T::Nat), nat(4));
     result
         .kernel
         .check_closed(&applied, &T::eq(T::Nat, nat(4), nat(4)))
@@ -73,7 +73,7 @@ fn false_proof_and_wrong_application_are_rejected() {
 fn generic_and_let_shadowing_is_capture_avoiding() {
     let result =
         check("total fn f<T: Type>(x: T) -> T ! {} { let x: T = x; { let y: T = x; y } }").unwrap();
-    let applied = T::app(T::app(T::Global("f".into()), T::Nat), nat(3));
+    let applied = T::app(T::app(T::global("f"), T::Nat), nat(3));
     assert_eq!(result.kernel.normalize_closed(&applied).unwrap(), nat(3));
     // A local called refl must not accidentally invoke the builtin proof constructor.
     rejects(
@@ -86,7 +86,7 @@ fn universes_are_explicit_and_not_type_in_type() {
     check("total fn good() -> Type<1> ! {} { Type }").unwrap();
     rejects("total fn bad() -> Type ! {} { Type }", "type mismatch");
     rejects("type U = Type<256>;", "universe levels");
-    rejects("type U = Type<Nat>;", "literal universe level");
+    rejects("type U = Type<Nat>;", "expected a universe level");
     // No implicit cumulativity.
     rejects("total fn bad() -> Type<1> ! {} { Nat }", "type mismatch");
 }
@@ -158,7 +158,10 @@ fn unimplemented_forms_are_rejected_instead_of_erasing_their_meaning() {
     check("total fn f() -> Nat ! {} { 33 }").unwrap();
     // Machine carriers and literals are admitted as checked logical values.
     check("total fn f() -> Bool ! {} { true }").unwrap();
-    rejects("total fn f() -> Bool ! {} { 1 }", "type mismatch");
+    rejects(
+        "total fn f() -> Bool ! {} { 1 }",
+        "cannot have a Bool or Unit carrier",
+    );
 }
 #[test]
 fn namespace_resolution_and_dependency_order_are_deterministic() {
@@ -167,10 +170,7 @@ fn namespace_resolution_and_dependency_order_are_deterministic() {
     let result = check(source).unwrap();
     assert_eq!(result.definitions, ["last", "first"]);
     assert_eq!(
-        result
-            .kernel
-            .normalize_closed(&T::Global("first".into()))
-            .unwrap(),
+        result.kernel.normalize_closed(&T::global("first")).unwrap(),
         nat(1)
     );
     let first = check(include_str!("../../../examples/proofs.kush"))
@@ -227,18 +227,18 @@ fn total_enums_are_admitted_and_eliminate_by_checked_recursion() {
                 .position(|n| n == "count")
                 .unwrap()
     );
-    let applied = T::app(T::Global("double".into()), nat(3));
+    let applied = T::app(T::global("double"), nat(3));
     assert_eq!(
         result.kernel.infer_closed(&applied).unwrap(),
-        T::Global("Even".into())
+        T::global("Even")
     );
     // `double 3` is an Even value, and count computes its height.
-    let count = T::app(T::Global("count".into()), applied);
+    let count = T::app(T::global("count"), applied);
     assert_eq!(result.kernel.normalize_closed(&count).unwrap(), nat(3));
     assert_eq!(
         result
             .kernel
-            .normalize_closed(&T::Global("count_two".into()))
+            .normalize_closed(&T::global("count_two"))
             .unwrap(),
         T::refl(T::Nat, nat(2))
     );
@@ -268,15 +268,12 @@ fn indexed_vector_data_supports_dependent_motive_proofs() {
     assert_eq!(
         result
             .kernel
-            .normalize_closed(&T::Global("length_two".into()))
+            .normalize_closed(&T::global("length_two"))
             .unwrap(),
         T::refl(T::Nat, nat(2))
     );
-    let two = T::Global("two".into());
-    let length = T::app(
-        T::app(T::app(T::Global("length".into()), T::Nat), nat(2)),
-        two,
-    );
+    let two = T::global("two");
+    let length = T::app(T::app(T::app(T::global("length"), T::Nat), nat(2)), two);
     assert_eq!(result.kernel.normalize_closed(&length).unwrap(), nat(2));
 }
 
@@ -324,7 +321,7 @@ fn general_equality_elimination_is_available_for_proofs() {
     "#;
     let result = check(source).unwrap();
     let applied = T::app(
-        T::app(T::app(T::Global("j_symmetry".into()), T::Nat), nat(3)),
+        T::app(T::app(T::global("j_symmetry"), T::Nat), nat(3)),
         nat(3),
     );
     let applied = T::app(applied, T::refl(T::Nat, nat(3)));
@@ -349,14 +346,14 @@ fn non_recursive_fields_can_hold_other_logical_data() {
     assert_eq!(
         result
             .kernel
-            .normalize_closed(&T::Global("round_trip".into()))
+            .normalize_closed(&T::global("round_trip"))
             .unwrap(),
-        T::refl(T::Global("B".into()), T::Global("B::Only".into()))
+        T::refl(T::global("B"), T::global("B::Only"))
     );
-    let value = T::app(T::Global("un_mk".into()), T::Global("mk".into()));
+    let value = T::app(T::global("un_mk"), T::global("mk"));
     assert_eq!(
         result.kernel.normalize_closed(&value).unwrap(),
-        T::Global("B::Only".into())
+        T::global("B::Only")
     );
 }
 
@@ -382,10 +379,7 @@ fn multiple_recursive_fields_interleave_induction_hypotheses() {
     "#;
     let result = check(source).unwrap();
     assert_eq!(
-        result
-            .kernel
-            .normalize_closed(&T::Global("value".into()))
-            .unwrap(),
+        result.kernel.normalize_closed(&T::global("value")).unwrap(),
         nat(2)
     );
 }
@@ -413,19 +407,16 @@ fn prop_declarations_are_checked_as_propositions() {
     assert!(result.definitions.contains(&"True".to_owned()));
     assert!(result.definitions.contains(&"And".to_owned()));
     assert_eq!(
-        result
-            .kernel
-            .normalize_closed(&T::Global("both".into()))
-            .unwrap(),
+        result.kernel.normalize_closed(&T::global("both")).unwrap(),
         T::app(
             T::app(
                 T::app(
-                    T::app(T::Global("And::Both".into()), T::Global("True".into())),
-                    T::Global("True".into())
+                    T::app(T::global("And::Both"), T::global("True")),
+                    T::global("True")
                 ),
-                T::Global("True::Trivial".into())
+                T::global("True::Trivial")
             ),
-            T::Global("True::Trivial".into())
+            T::global("True::Trivial")
         )
     );
     // A proposition is not a Type and Prop is not a proposition.
@@ -667,4 +658,22 @@ fn finite_indexed_data_can_be_eliminated_into_propositions() {
         }
     "#;
     check(source).unwrap();
+}
+
+#[test]
+fn source_functions_are_equal_up_to_eta() {
+    // `apply<f>` normalizes to `λn. f n`, which is convertible with `f` only
+    // through eta.
+    check(
+        "type Arrow = fn(n: Nat) -> Nat ! {};
+         total fn apply(f: Arrow, n: Nat) -> Nat ! {} { f(n) }
+         total fn eta(f: Arrow) -> Eq<Arrow, apply<f>, f> ! {} { refl::<Arrow>(f) }",
+    )
+    .unwrap();
+    rejects(
+        "type Arrow = fn(n: Nat) -> Nat ! {};
+         total fn twice(f: Arrow, n: Nat) -> Nat ! {} { f(f(n)) }
+         total fn bad(f: Arrow) -> Eq<Arrow, twice<f>, f> ! {} { refl::<Arrow>(f) }",
+        "type mismatch",
+    );
 }

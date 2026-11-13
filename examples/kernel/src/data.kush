@@ -1,0 +1,278 @@
+module kernel.data;
+
+// Telescope construction for positive indexed data families: the pieces of
+// `define_data` and `IndElim` typing that need no inference (those live in
+// kernel.check). Same definitions as the Rust kernel's `define_indexed_data`,
+// `branch_type` and `data_at` (crates/kush/src/kernel.rs).
+//
+// A family `D` has a parameter telescope `params`; each constructor (a
+// `term.CTOR` object) has constructor-local binders, fields, and one result
+// index per parameter, each relative to the binders before it:
+//
+//     c : (params) -> (locals) -> (fields) -> D results
+
+use std.result.Result;
+use kernel.store;
+use kernel.store.Store;
+use kernel.subst;
+use kernel.term;
+
+/// Whether the global `name` occurs anywhere in `t` (the conservative
+/// positivity test). Shared subterms are visited once.
+
+pub fn mentions(s: &mut Store, t: i64, name: i64) -> Bool ! {alloc, panic} {
+    let generation = store.fresh_generation(s);
+    visit(s, t, name, generation)
+}
+
+fn visit(s: &mut Store, t: i64, name: i64, generation: i64) -> Bool ! {alloc, panic} {
+    let hit = store.cached(s, generation, t, -4);
+    if hit >= 0 { return hit == 1; }
+    let tag = term.tag(s, t);
+    let mut found = false;
+    if tag == term.GLOBAL {
+        found = term.field(s, t, 0) == name;
+    } else if tag == term.INDELIM {
+        found = visit(s, term.field(s, t, 1), name, generation)
+            || visit(s, term.field(s, t, 2), name, generation)
+            || visit(s, term.field(s, t, 3), name, generation);
+    } else if tag == term.LIST {
+        let n = term.list_len(s, t);
+        let mut i = 0;
+        while i < n && !found {
+            found = visit(s, term.list_at(s, t, i), name, generation);
+            i = i + 1;
+        }
+    } else if tag != term.VAR && tag != term.SORT && tag != term.LIT && tag != term.SCALAR
+        && tag != term.I64 && tag != term.BOOL {
+        let n = store.size(s, t) - 1;
+        let mut i = 0;
+        while i < n && !found {
+            found = visit(s, term.field(s, t, i), name, generation);
+            i = i + 1;
+        }
+    }
+    store.remember(s, generation, t, -4, if found { 1 } else { 0 });
+    found
+}
+
+/// Whether a field is a direct recursive occurrence: the family itself
+/// applied to exactly one argument per parameter.
+pub fn direct(s: &Store, field: i64, name: i64, params: i64) -> Bool ! {panic} {
+    let head = subst.head(s, field);
+    term.tag(s, head) == term.GLOBAL && term.field(s, head, 0) == name
+        && subst.argument_count(s, field) == params
+}
+
+/// A family's parameters and constructors at universe levels `levels`.
+pub struct Info { pub params: i64, pub constructors: i64 }
+
+fn instantiate_list(s: &mut Store, list: i64, levels: i64) -> Result<i64, i64> ! {alloc, panic} {
+    let n = term.list_len(s, list);
+    let mut items: Vec<i64> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let item = term.list_at(s, list, i);
+        let instantiated = subst.instantiate_levels(s, item, levels)?;
+        items = items.push(instantiated);
+        i = i + 1;
+    }
+    Result.Ok(term.list(s, &items))
+}
+
+pub fn at_levels(s: &mut Store, params: i64, constructors: i64, levels: i64) -> Result<Info, i64> ! {alloc, panic} {
+    if term.list_len(s, levels) == 0 {
+        return Result.Ok(Info { params: params, constructors: constructors });
+    }
+    let new_params = instantiate_list(s, params, levels)?;
+    let n = term.list_len(s, constructors);
+    let mut items: Vec<i64> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let c = term.list_at(s, constructors, i);
+        let name = term.field(s, c, 0);
+        let locals = instantiate_list(s, term.field(s, c, 1), levels)?;
+        let fields = instantiate_list(s, term.field(s, c, 2), levels)?;
+        let result = instantiate_list(s, term.field(s, c, 3), levels)?;
+        items = items.push(term.ctor(s, name, locals, fields, result));
+        i = i + 1;
+    }
+    Result.Ok(Info { params: new_params, constructors: term.list(s, &items) })
+}
+
+/// `Var` for the binder at `position` (outermost 0) in a telescope of
+/// `length` binders.
+fn variable(s: &mut Store, length: i64, position: i64) -> i64 ! {alloc, panic} {
+    term.var(s, length - 1 - position)
+}
+
+/// The variables for the given telescope positions, as a list.
+fn variables(s: &mut Store, length: i64, positions: &Vec<i64>) -> i64 ! {alloc, panic} {
+    let mut items: Vec<i64> = Vec.with_capacity(positions.len());
+    let mut i = 0;
+    while i < positions.len() {
+        items = items.push(variable(s, length, positions[i]));
+        i = i + 1;
+    }
+    term.list(s, &items)
+}
+
+/// The type of the branch for constructor `c` of family `name` (with
+/// parameter list `params`, at universe levels `levels`) under `motive`:
+///
+///     (params) -> (locals)
+///       -> (fields, with an induction hypothesis after each direct
+///           recursive field) -> motive (results) (c params locals fields)
+pub fn branch_type(
+    s: &mut Store,
+    name: i64,
+    params: i64,
+    levels: i64,
+    c: i64,
+    motive: i64,
+) -> Result<i64, i64> ! {alloc, panic} {
+    let k = term.list_len(s, params);
+    let locals = term.field(s, c, 1);
+    let fields = term.field(s, c, 2);
+    let results = term.field(s, c, 3);
+    let mut steps: Vec<i64> = Vec.new();
+    // Telescope positions of the parameters, locals and fields.
+    let mut positions: Vec<i64> = Vec.new();
+    let mut i = 0;
+    while i < k {
+        positions = positions.push(i);
+        i = i + 1;
+    }
+    let mut length = k;
+    i = 0;
+    while i < term.list_len(s, locals) {
+        steps = steps.push(term.list_at(s, locals, i));
+        positions = positions.push(length);
+        length = length + 1;
+        i = i + 1;
+    }
+    i = 0;
+    while i < term.list_len(s, fields) {
+        let field = term.list_at(s, fields, i);
+        let arguments = variables(s, length, &positions);
+        let rewritten = subst.rewrite_outer(s, field, arguments)?;
+        steps = steps.push(rewritten);
+        let before = positions.len();
+        positions = positions.push(length);
+        length = length + 1;
+        if direct(s, field, name, k) {
+            // The hypothesis sees the fields before this one, as the field
+            // type does; this field is the newest binder, Var 0.
+            let mut earlier: Vec<i64> = Vec.with_capacity(before);
+            let mut j = 0;
+            while j < before {
+                earlier = earlier.push(positions[j]);
+                j = j + 1;
+            }
+            let arguments = variables(s, length, &earlier);
+            let mut hypothesis = subst.shift(s, motive, length, 0);
+            let indices = subst.arguments(s, field);
+            let mut j = 0;
+            while j < indices.len() {
+                let index = subst.rewrite_outer(s, indices[j], arguments)?;
+                hypothesis = term.app(s, hypothesis, index);
+                j = j + 1;
+            }
+            let newest = term.var(s, 0);
+            hypothesis = term.app(s, hypothesis, newest);
+            steps = steps.push(hypothesis);
+            length = length + 1;
+        }
+        i = i + 1;
+    }
+    let arguments = variables(s, length, &positions);
+    let mut body = subst.shift(s, motive, length, 0);
+    i = 0;
+    while i < term.list_len(s, results) {
+        let result = subst.rewrite_outer(s, term.list_at(s, results, i), arguments)?;
+        body = term.app(s, body, result);
+        i = i + 1;
+    }
+    let mut constructed = term.global(s, term.field(s, c, 0), levels);
+    i = 0;
+    while i < term.list_len(s, arguments) {
+        constructed = term.app(s, constructed, term.list_at(s, arguments, i));
+        i = i + 1;
+    }
+    body = term.app(s, body, constructed);
+    let mut branch = body;
+    let mut j = steps.len() - 1;
+    while j >= 0 {
+        branch = term.pi(s, steps[j], branch);
+        j = j - 1;
+    }
+    j = k - 1;
+    while j >= 0 {
+        branch = term.pi(s, term.list_at(s, params, j), branch);
+        j = j - 1;
+    }
+    Result.Ok(branch)
+}
+
+/// The constructor type `(params) -> (locals) -> (fields) -> D results`, for
+/// family `name` at its own levels.
+pub fn constructor_type(s: &mut Store, name: i64, params: i64, own_levels: i64, c: i64) -> i64 ! {alloc, panic} {
+    let mut ty = application(s, name, own_levels, term.field(s, c, 3));
+    let mut telescope: Vec<i64> = Vec.new();
+    let mut i = 0;
+    while i < term.list_len(s, params) {
+        telescope = telescope.push(term.list_at(s, params, i));
+        i = i + 1;
+    }
+    let locals = term.field(s, c, 1);
+    i = 0;
+    while i < term.list_len(s, locals) {
+        telescope = telescope.push(term.list_at(s, locals, i));
+        i = i + 1;
+    }
+    let fields = term.field(s, c, 2);
+    i = 0;
+    while i < term.list_len(s, fields) {
+        telescope = telescope.push(term.list_at(s, fields, i));
+        i = i + 1;
+    }
+    let mut j = telescope.len() - 1;
+    while j >= 0 {
+        ty = term.pi(s, telescope[j], ty);
+        j = j - 1;
+    }
+    ty
+}
+
+/// `D a0 a1 ...` for the family at `levels` and the argument list `list`.
+pub fn application(s: &mut Store, name: i64, levels: i64, list: i64) -> i64 ! {alloc, panic} {
+    let mut t = term.global(s, name, levels);
+    let mut i = 0;
+    while i < term.list_len(s, list) {
+        t = term.app(s, t, term.list_at(s, list, i));
+        i = i + 1;
+    }
+    t
+}
+
+/// The list of a family's own universe parameters, `(u 0) ... (u n-1)`.
+pub fn own_levels(s: &mut Store, count: i64) -> i64 ! {alloc, panic} {
+    let mut items: Vec<i64> = Vec.with_capacity(count);
+    let mut i = 0;
+    while i < count {
+        items = items.push(term.level_var(s, i));
+        i = i + 1;
+    }
+    term.list(s, &items)
+}
+
+/// `(p1 : P1) -> ... -> (pk : Pk) -> sort`.
+pub fn family_type(s: &mut Store, params: i64, sort: i64) -> i64 ! {alloc, panic} {
+    let mut ty = sort;
+    let mut j = term.list_len(s, params) - 1;
+    while j >= 0 {
+        ty = term.pi(s, term.list_at(s, params, j), ty);
+        j = j - 1;
+    }
+    ty
+}

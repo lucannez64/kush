@@ -16,7 +16,9 @@ and use conservative build concurrency (start with two jobs).
   before building. mbx storage is capped at 20 GiB (`gc.max_total_size`);
   `mbx gc` is the safe cleanup, but run it only when no build is in progress.
 - Use `--no-fail-fast` for full test runs so one failing test file does not hide
-  the rest.
+  the rest. `scripts/test-all.sh` runs the whole suite with cargo-nextest,
+  sized to the machine's free memory and cores (about 3.5 minutes instead of
+  about 40 with `mbx test -j 2`); targeted runs can stay on `mbx test`.
 - Preserve all existing uncommitted work. The initial cooperative task system is implemented; see `docs/async.md` for its limits.
 - Work plan: `plan/plan.json` is the dependency graph of remaining work. View it
   with `scripts/plan-server.py` (http://127.0.0.1:4318/). Update it with

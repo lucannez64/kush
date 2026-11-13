@@ -248,6 +248,53 @@ fn destructured_field_loans_release_at_last_use_and_keep_live_aliases() {
     );
 }
 
+#[test]
+fn record_loans_taken_in_a_condition_end_with_the_condition() {
+    // LANG-DROP-AFTER-BORROW: `size(&r)` in a condition is a call-scoped
+    // borrow; the branch may then drop or move `r`.
+    agrees(
+        r#"
+        struct N { limbs: Vec<i64>, count: i64 }
+        fn size(n: &N) -> i64 ! {panic} { Vec.len(&n.limbs) + n.count }
+        fn bump(n: &mut N) -> i64 ! {panic} {
+            n.count = n.count + 1;
+            n.count
+        }
+        fn first() -> i64 ! {alloc, panic} {
+            let r = N { limbs: Vec.new(), count: 0 };
+            if size(&r) == 0 { drop(r); return 1; }
+            0
+        }
+        fn second() -> i64 ! {alloc, panic} {
+            let mut r = N { limbs: Vec.new(), count: 0 };
+            while bump(&mut r) < 3 {}
+            if bump(&mut r) > 3 { let moved = r; return size(&moved); }
+            0
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            print_i64(first());
+            print_i64(second());
+            0
+        }
+        "#,
+        0,
+        "1\n4\n",
+    );
+    // A loan that is still live is still enforced.
+    rejects(
+        r#"
+        struct N { limbs: Vec<i64> }
+        fn both(n: &N, m: N) -> i64 ! {} { 0 }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let r = N { limbs: Vec.new() };
+            if both(&r, r) == 0 { return 1; }
+            0
+        }
+        "#,
+        "while it is borrowed by this call",
+    );
+}
+
 fn rejects(source: &str, fragment: &str) {
     let error = check(source).unwrap_err();
     assert!(

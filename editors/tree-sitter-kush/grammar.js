@@ -39,7 +39,7 @@ module.exports = grammar({
       'ensures', 'is', 'const', 'dyn', 'for'),
     boolean: $ => choice('true', 'false'),
     primitive_type: $ => choice('i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64',
-      'Bool', 'Unit', 'Char', 'Nat', 'Prop', 'Grade', 'Effects', 'str'),
+      'Bool', 'Unit', 'Char', 'Nat', 'Prop', 'Level', 'Grade', 'Effects', 'str'),
     builtin_type: $ => choice('IO', 'Bytes', 'String', 'Str', 'Vec', 'Box', 'Arena', 'ArenaBox', 'AllocBox',
       'AllocVec', 'Allocator', 'Task', 'TaskExit', 'Slice', 'DynArray', 'Option', 'Result', 'Stdin', 'Stdout', 'Self'),
     builtin_function: $ => choice('print_i64', 'panic', 'drop', 'refl'),

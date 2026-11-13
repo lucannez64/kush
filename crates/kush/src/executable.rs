@@ -312,6 +312,9 @@ pub struct Executable {
     pub(crate) uses_tasks: bool,
     /// THREAD-SCOPE: the program runs OS threads (thread-safe runtime paths).
     pub(crate) uses_threads: bool,
+    /// LANG-STACK-SIZE: `#[stack_size(N)]` on main, in bytes. The native
+    /// runtime runs the program on a thread with a stack this large.
+    pub(crate) main_stack: Option<u64>,
     /// GPU-SUBSET: per function instance, whether it is a `#[gpu]` function.
     /// Functions added after checking (continuations) are never GPU code.
     pub(crate) gpu_functions: Vec<bool>,
@@ -5178,6 +5181,24 @@ pub fn check(source: &str) -> Result<Executable> {
     let program = crate::program::load_source("<input>", source).map_err(|(_, e)| e)?;
     check_program(&program)
 }
+/// The kernel-checked logical half of a program that may also contain
+/// executable code, exactly as `check_program` admits it, without checking
+/// executable bodies. Used by `kush core` to export the logical environment.
+pub fn logical_module(source: &str) -> Result<crate::check::CheckedModule> {
+    let program = crate::program::load_source("<input>", source).map_err(|(_, e)| e)?;
+    let injected = inject_allocator_protocol(&program)?;
+    let module = &injected.module;
+    let mut resolution = resolve::resolve_program(&injected)?;
+    collect_default_bindings(module, &mut resolution)?;
+    crate::grades::validate_algebras(&mut resolution)?;
+    let logical =
+        crate::kernel::on_kernel_stack(|| crate::check::check_program(module, &resolution))?;
+    Ok(crate::check::CheckedModule {
+        resolution,
+        kernel: logical.kernel,
+        definitions: logical.definitions,
+    })
+}
 /// The checked allocator-instance protocol. It is an ordinary trait declaration
 /// injected ahead of user items, so impls are checked exactly like any other
 /// trait: receiver modes, parameter/result layouts, grades, and effect rows must
@@ -5409,7 +5430,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     let resolution = &resolution;
     // Total functions and aliases are erased and checked by the trusted kernel
     // before any executable body can cite them as proof evidence.
-    let logical = crate::check::check_program(module, resolution)?;
+    let logical =
+        crate::kernel::on_kernel_stack(|| crate::check::check_program(module, resolution))?;
     // A trait object whose member set is open (a generic or blanket impl) or
     // that appears inside a laid-out nominal field cannot use the inline
     // closed-world union: its width would depend on impl collection, which in
@@ -5552,9 +5574,31 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     }
     let effect_operations = &effect_operations;
     let mut monomorphic = Vec::new();
+    let mut main_stack = None;
     for declaration in &module.items {
         let span = declaration.item.span;
-        if !declaration.attributes.is_empty()
+        // `#[kernel_steps(N)]` raises the kernel budget of a logical
+        // declaration; the logical checker has already validated and used it.
+        let logical_declaration = match &declaration.item.kind {
+            ast::ItemKind::Function(f) => f.total,
+            ast::ItemKind::Enum { total, .. } => *total,
+            ast::ItemKind::Prop { .. } | ast::ItemKind::Alias { .. } => true,
+            _ => false,
+        };
+        if let Some(attribute) = declaration
+            .attributes
+            .iter()
+            .find(|attribute| attribute.kind == "kernel_steps" && !logical_declaration)
+        {
+            return Err(Diagnostic::new(
+                attribute.span,
+                "#[kernel_steps(N)] applies to logical declarations only: total fn, total enum, prop and type aliases",
+            ));
+        }
+        if declaration
+            .attributes
+            .iter()
+            .any(|attribute| attribute.kind != "kernel_steps")
             && !matches!(
                 declaration.item.kind,
                 ast::ItemKind::Function(_)
@@ -5573,6 +5617,41 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             ast::ItemKind::Struct { .. } | ast::ItemKind::Enum { .. }
         );
         for attribute in &declaration.attributes {
+            if attribute.kind == "kernel_steps" {
+                continue;
+            }
+            if attribute.kind == "stack_size" {
+                // LANG-STACK-SIZE: only the program's own main, in MiB.
+                let is_main = matches!(&declaration.item.kind, ast::ItemKind::Function(f) if f.name == "main")
+                    && resolution
+                        .declarations
+                        .get(&span.start)
+                        .is_some_and(|binding| resolution.unit_of.get(binding) == Some(&0));
+                if !is_main {
+                    return Err(Diagnostic::new(
+                        attribute.span,
+                        "#[stack_size(N)] applies to the program's main function only",
+                    ));
+                }
+                let mebibytes = attribute
+                    .argument
+                    .as_deref()
+                    .and_then(|text| text.parse::<u64>().ok())
+                    .filter(|value| (1..=65536).contains(value))
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            attribute.span,
+                            "#[stack_size(N)] takes the main stack size in MiB, from 1 to 65536",
+                        )
+                    })?;
+                if main_stack.replace(mebibytes << 20).is_some() {
+                    return Err(Diagnostic::new(
+                        attribute.span,
+                        "#[stack_size(N)] may appear once",
+                    ));
+                }
+                continue;
+            }
             let valid = if function {
                 matches!(
                     attribute.kind.as_str(),
@@ -6137,6 +6216,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         bounds_proved: functions.bounds_proved,
         bounds_checked: functions.bounds_checked,
         uses_tasks: functions.uses_tasks,
+        main_stack,
         // A channel type anywhere needs the threaded runtime (its drop glue).
         uses_threads: functions.uses_threads
             || types

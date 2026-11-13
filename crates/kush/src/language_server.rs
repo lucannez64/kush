@@ -65,7 +65,10 @@ struct Server<W: Write> {
     out: W,
     launch_dir: PathBuf,
     documents: BTreeMap<PathBuf, Document>,
-    project: Option<Project>,
+    /// Every project an open file belongs to: the workspace's, found at
+    /// initialization, and any other found upward from an opened file (a
+    /// project in a subfolder of the workspace, as in a monorepo).
+    projects: Vec<Project>,
     published: BTreeMap<PathBuf, String>,
     /// Files the client closed. Their diagnostics stay cleared until a later
     /// didOpen explicitly opens them again, even if they remain imported.
@@ -81,7 +84,7 @@ impl<W: Write> Server<W> {
             out,
             launch_dir,
             documents: BTreeMap::new(),
-            project: None,
+            projects: Vec::new(),
             published: BTreeMap::new(),
             closed: BTreeSet::new(),
             initialized: false,
@@ -265,25 +268,62 @@ impl<W: Write> Server<W> {
                     .and_then(file_uri_to_path)
             })
             .unwrap_or_else(|| self.launch_dir.clone());
-        let Some(manifest) = project::find_manifest(&start) else {
-            if let Some(root) = &self.project {
-                eprintln!(
-                    "kush lsp: no {} found from {}; project was {}",
-                    project::MANIFEST_NAME,
-                    start.display(),
-                    root.manifest_path.display()
-                );
-            }
+        if let Some(manifest) = project::find_manifest(&start) {
+            self.load_project(&manifest);
+        }
+    }
+
+    fn load_project(&mut self, manifest: &Path) {
+        let manifest = normalize_path(manifest);
+        if self
+            .projects
+            .iter()
+            .any(|project| normalize_path(&project.manifest_path) == manifest)
+        {
             return;
-        };
+        }
         match project::load(&manifest) {
-            Ok(project) => self.project = Some(project),
+            Ok(project) => self.projects.push(project),
             Err(error) => {
                 eprintln!(
                     "kush lsp: cannot load project {}: {error}",
                     manifest.display()
                 );
             }
+        }
+    }
+
+    /// The project a file belongs to: the one whose own package contains
+    /// it, the innermost if several do; otherwise one that contains it as a
+    /// dependency.
+    fn project_for(&self, path: &Path) -> Option<&Project> {
+        let path = normalize_path(path);
+        let own = self
+            .projects
+            .iter()
+            .filter(|project| path.starts_with(normalize_path(&project.package.root)))
+            .max_by_key(|project| normalize_path(&project.package.root).components().count());
+        own.or_else(|| {
+            self.projects.iter().find(|project| {
+                project
+                    .all_packages()
+                    .any(|package| path.starts_with(normalize_path(&package.root)))
+            })
+        })
+    }
+
+    /// Load the project of a newly opened file when no loaded project owns
+    /// it: the nearest manifest above the file.
+    fn discover_project(&mut self, path: &Path) {
+        let owned = self
+            .projects
+            .iter()
+            .any(|project| path.starts_with(normalize_path(&project.package.root)));
+        if owned {
+            return;
+        }
+        if let Some(manifest) = path.parent().and_then(project::find_manifest) {
+            self.load_project(&manifest);
         }
     }
 
@@ -306,6 +346,7 @@ impl<W: Write> Server<W> {
             .and_then(Value::as_i64)
             .unwrap_or(0);
         let path = normalize_path(&path);
+        self.discover_project(&path);
         self.closed.remove(&path);
         self.documents.insert(
             path.clone(),
@@ -421,22 +462,22 @@ impl<W: Write> Server<W> {
         if self.documents.is_empty() {
             return analysis;
         }
-        match &self.project {
-            Some(project) => {
-                let entry = normalize_path(&project.package.entry_path());
-                analysis.merge(self.analyze_root(&entry));
-                // An open file that is not reachable from the entry still gets
-                // independent diagnostics rather than silently showing none.
-                for path in self.documents.keys() {
-                    if *path != entry && !analysis.loaded.contains(path) {
-                        analysis.merge(self.analyze_root(path));
-                    }
-                }
-            }
-            None => {
-                for path in self.documents.keys() {
-                    analysis.merge(self.analyze_root(path));
-                }
+        // Each project with an open file is analyzed from its entry.
+        let entries = self
+            .documents
+            .keys()
+            .filter_map(|path| self.project_for(path))
+            .map(|project| normalize_path(&project.package.entry_path()))
+            .collect::<BTreeSet<_>>();
+        for entry in &entries {
+            analysis.merge(self.analyze_root(entry));
+        }
+        // An open file that is not reachable from an entry (a test file, a
+        // file outside any project) still gets its own diagnostics rather
+        // than silently showing none.
+        for path in self.documents.keys() {
+            if !entries.contains(path) && !analysis.loaded.contains(path) {
+                analysis.merge(self.analyze_root(path));
             }
         }
         analysis
@@ -451,7 +492,8 @@ impl<W: Write> Server<W> {
             Some(text) => text,
             None => return Analysis::default(),
         };
-        if let Some(project) = &self.project
+        let project = self.project_for(&root);
+        if let Some(project) = project
             && root == normalize_path(&project.package.entry_path())
             && let (header, span) = parsed_entry_header(&text)
             && header != std::slice::from_ref(&project.package.name)
@@ -464,7 +506,7 @@ impl<W: Write> Server<W> {
             return analysis;
         }
         let modules = OverlayModules {
-            project: self.project.as_ref(),
+            project,
             documents: &self.documents,
             root: &root,
         };
@@ -515,7 +557,7 @@ impl<W: Write> Server<W> {
             return Value::Null;
         };
         let mut roots = Vec::new();
-        if let Some(project) = &self.project {
+        if let Some(project) = self.project_for(&document.path) {
             let entry = normalize_path(&project.package.entry_path());
             let in_project = project
                 .all_packages()
@@ -562,7 +604,7 @@ impl<W: Write> Server<W> {
             .document_text(root)
             .or_else(|| fs::read_to_string(root).ok())?;
         let modules = OverlayModules {
-            project: self.project.as_ref(),
+            project: self.project_for(root),
             documents: &self.documents,
             root,
         };
@@ -666,7 +708,7 @@ impl<W: Write> Server<W> {
             return Value::Null;
         };
         let mut roots = Vec::new();
-        if let Some(project) = &self.project {
+        if let Some(project) = self.project_for(&document.path) {
             let entry = normalize_path(&project.package.entry_path());
             let in_project = project
                 .all_packages()
@@ -1349,7 +1391,7 @@ const KEYWORD_BEFORE_NAME: &[&str] = &["is", "algebra", "dyn", "const", "for", "
 
 const PRIMITIVE_TYPE_WORDS: &[&str] = &[
     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f64", "bool", "char", "String", "Bytes",
-    "Nat", "Prop", "Unit", "Bool",
+    "Nat", "Prop", "Level", "Unit", "Bool",
 ];
 
 const KEYWORD: u64 = 0;

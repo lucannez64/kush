@@ -1,0 +1,497 @@
+module kernel.reader;
+
+// Reader for the kernel exchange format (docs/kernel-exchange.md). It parses
+// the text directly into store objects, with no intermediate tree. Errors
+// are the byte offset where reading failed; the Rust reader gives detailed
+// messages, this one only has to agree on what is well-formed.
+
+use std.natural;
+use std.result.Result;
+use std.text;
+use kernel.store.Store;
+use kernel.term;
+
+/// One item of an exchange file. Every field is a store id (or a count).
+
+pub enum Item {
+    /// name, number of universe parameters, type, value, step budget (-1
+    /// for the default)
+    Def(i64, i64, i64, i64, i64),
+    /// name, number of universe parameters, lives in Prop, parameter list,
+    /// constructor list (of `term.CTOR` objects), step budget (-1 for the
+    /// default)
+    Data(i64, i64, Bool, i64, i64, i64),
+    /// term, type
+    Check(i64, i64),
+    Infer(i64),
+    Normalize(i64),
+}
+
+/// A parsed value and the offset just after it.
+struct Parsed { value: i64, next: i64 }
+
+/// Nesting limit, as in the Rust reader.
+const MAX_DEPTH: i64 = 1024;
+
+// Form names packed six bits per character (a-z 1-26, A-Z 27-52, 0-9 53-62),
+// so the reader dispatches on an integer instead of comparing strings.
+const W_VAR: i64 = 90194;
+const W_GLOBAL: i64 = 7721459788;
+const W_SORT: i64 = 5043348;
+const W_PROP: i64 = 4269008;
+const W_PI: i64 = 1033;
+const W_LAM: i64 = 49229;
+const W_APP: i64 = 5136;
+const W_NAT: i64 = 57428;
+const W_ZERO: i64 = 6837391;
+const W_SUCC: i64 = 5066947;
+const W_LIT: i64 = 49748;
+const W_NATELIM: i64 = 963483320909;
+const W_EQ: i64 = 337;
+const W_REFL: i64 = 4739468;
+const W_TRANSPORT: i64 = 5708748446299284;
+const W_EQELIM: i64 = 5655282253;
+const W_INDELIM: i64 = 633576145485;
+const W_SCALAR: i64 = 20451737682;
+const W_I64: i64 = 40697;
+const W_BOOL: i64 = 586700;
+const W_UNIT: i64 = 5562964;
+const W_U: i64 = 21;
+const W_MAX: i64 = 53336;
+const W_DEF: i64 = 16710;
+const W_DATA: i64 = 1053953;
+const W_TYPE: i64 = 5346309;
+const W_CTOR: i64 = 869330;
+const W_CHECK: i64 = 52449483;
+const W_INFER: i64 = 154689874;
+const W_NORMALIZE: i64 = 4007871300802181;
+const W_BOOL_TYPE: i64 = 7402444;
+const W_UNIT_TYPE: i64 = 12378708;
+const W_TRUE: i64 = 5317957;
+const W_FALSE: i64 = 100975813;
+const W_STEPS: i64 = 324031507;
+
+fn is_space(byte: i64) -> Bool ! {} { byte == 32 || byte == 9 || byte == 10 || byte == 13 }
+
+/// Skip whitespace and `;` comments.
+fn skip(src: &Bytes, at: i64) -> i64 ! {panic} {
+    let n = src.len();
+    let mut at = at;
+    while at < n {
+        let byte = src[at];
+        if is_space(byte) {
+            at = at + 1;
+        } else if byte == 59 {
+            while at < n && src[at] != 10 {
+                at = at + 1;
+            }
+        } else {
+            return at;
+        }
+    }
+    at
+}
+
+/// The end of the atom starting at `at`.
+fn atom_end(src: &Bytes, at: i64) -> i64 ! {panic} {
+    let n = src.len();
+    let mut end = at;
+    while end < n {
+        let byte = src[end];
+        if is_space(byte) || byte == 40 || byte == 41 || byte == 59 { return end; }
+        end = end + 1;
+    }
+    end
+}
+
+/// The packed code of `src[start..end]`, or -1 if it is not a short word.
+fn word(src: &Bytes, start: i64, end: i64) -> i64 ! {panic} {
+    if end - start > 10 || end == start { return -1; }
+    let mut code = 0;
+    let mut i = start;
+    while i < end {
+        let byte = src[i];
+        let digit = if byte >= 97 && byte <= 122 {
+            byte - 96
+        } else if byte >= 65 && byte <= 90 {
+            byte - 64 + 26
+        } else if byte >= 48 && byte <= 57 {
+            byte - 48 + 53
+        } else {
+            return -1;
+        };
+        code = code * 64 + digit;
+        i = i + 1;
+    }
+    code
+}
+
+/// Read an atom; the error is its offset if there is none.
+fn atom(src: &Bytes, at: i64) -> Result<Parsed, i64> ! {panic} {
+    let start = skip(src, at);
+    if start >= src.len() { return Result.Err(start); }
+    let byte = src[start];
+    if byte == 40 || byte == 41 { return Result.Err(start); }
+    Result.Ok(Parsed { value: start, next: atom_end(src, start) })
+}
+
+/// Read an atom and return its packed word code.
+fn keyword(src: &Bytes, at: i64) -> Result<Parsed, i64> ! {panic} {
+    let Parsed { value: start, next: end } = atom(src, at)?;
+    Result.Ok(Parsed { value: word(src, start, end), next: end })
+}
+
+/// Read a decimal integer atom (optional leading `-`).
+fn integer(src: &Bytes, at: i64) -> Result<Parsed, i64> ! {alloc, panic} {
+    let Parsed { value: start, next: end } = atom(src, at)?;
+    let digits = match text.slice(src, start, end) {
+        Result.Ok(bytes) => bytes,
+        Result.Err(_) => return Result.Err(start),
+    };
+    match text.parse_i64(&digits) {
+        Result.Ok(value) => Result.Ok(Parsed { value: value, next: end }),
+        Result.Err(_) => Result.Err(start),
+    }
+}
+
+/// Read a nonnegative integer atom.
+fn count(src: &Bytes, at: i64) -> Result<Parsed, i64> ! {alloc, panic} {
+    let parsed = integer(src, at)?;
+    if parsed.value < 0 { return Result.Err(skip(src, at)); }
+    Result.Ok(parsed)
+}
+
+fn open(src: &Bytes, at: i64) -> Result<i64, i64> ! {panic} {
+    let at = skip(src, at);
+    if at < src.len() && src[at] == 40 { Result.Ok(at + 1) } else { Result.Err(at) }
+}
+
+fn close(src: &Bytes, at: i64) -> Result<i64, i64> ! {panic} {
+    let at = skip(src, at);
+    if at < src.len() && src[at] == 41 { Result.Ok(at + 1) } else { Result.Err(at) }
+}
+
+/// Whether the next token closes a list.
+fn at_close(src: &Bytes, at: i64) -> Bool ! {panic} {
+    let at = skip(src, at);
+    at < src.len() && src[at] == 41
+}
+
+fn name(s: &mut Store, src: &Bytes, at: i64) -> Result<Parsed, i64> ! {alloc, panic} {
+    let Parsed { value: start, next: end } = atom(src, at)?;
+    Result.Ok(Parsed { value: term.name_range(s, src, start, end), next: end })
+}
+
+fn level(s: &mut Store, src: &Bytes, at: i64, depth: i64) -> Result<Parsed, i64> ! {alloc, panic} {
+    let start = skip(src, at);
+    if depth > MAX_DEPTH { return Result.Err(start); }
+    if start < src.len() && src[start] != 40 {
+        let Parsed { value: constant, next: next } = count(src, start)?;
+        if constant > term.MAX_LEVEL { return Result.Err(start); }
+        return Result.Ok(Parsed { value: term.level_of(s, constant), next: next });
+    }
+    let after = open(src, start)?;
+    let Parsed { value: form, next: at } = keyword(src, after)?;
+    if form == W_U {
+        let Parsed { value: index, next: at } = count(src, at)?;
+        if index > term.MAX_LEVEL { return Result.Err(start); }
+        let value = term.level_var(s, index);
+        return Result.Ok(Parsed { value: value, next: close(src, at)? });
+    }
+    if form == W_SUCC {
+        let Parsed { value: inner, next: at } = level(s, src, at, depth + 1)?;
+        let value = match term.level_succ(s, inner) {
+            Result.Ok(value) => value,
+            Result.Err(_) => return Result.Err(start),
+        };
+        return Result.Ok(Parsed { value: value, next: close(src, at)? });
+    }
+    if form == W_MAX {
+        let Parsed { value: first, next: rest } = level(s, src, at, depth + 1)?;
+        let mut value = first;
+        let mut at = rest;
+        while !at_close(src, at) {
+            let Parsed { value: next_level, next: next } = level(s, src, at, depth + 1)?;
+            value = term.level_max(s, value, next_level);
+            at = next;
+        }
+        return Result.Ok(Parsed { value: value, next: close(src, at)? });
+    }
+    Result.Err(after)
+}
+
+/// `(term ...)`: zero or more terms up to the closing parenthesis, as a list.
+fn terms(s: &mut Store, src: &Bytes, at: i64, depth: i64) -> Result<Parsed, i64> ! {alloc, panic} {
+    let mut at = open(src, at)?;
+    let mut items: Vec<i64> = Vec.new();
+    while !at_close(src, at) {
+        let Parsed { value: item, next: next } = term_at(s, src, at, depth + 1)?;
+        items = items.push(item);
+        at = next;
+    }
+    let value = term.list(s, &items);
+    Result.Ok(Parsed { value: value, next: close(src, at)? })
+}
+
+/// Read `count` terms in a row.
+fn fields(
+    s: &mut Store, src: &Bytes, at: i64, depth: i64, wanted: i64,
+) -> Result<Parsed, i64> ! {alloc, panic} {
+    let mut at = at;
+    let mut items: Vec<i64> = Vec.with_capacity(wanted);
+    let mut i = 0;
+    while i < wanted {
+        let Parsed { value: item, next: next } = term_at(s, src, at, depth + 1)?;
+        items = items.push(item);
+        at = next;
+        i = i + 1;
+    }
+    // The terms come back as a list object; callers take its elements.
+    let value = term.list(s, &items);
+    Result.Ok(Parsed { value: value, next: at })
+}
+
+fn term_at(s: &mut Store, src: &Bytes, at: i64, depth: i64) -> Result<Parsed, i64> ! {alloc, panic} {
+    let start = skip(src, at);
+    if depth > MAX_DEPTH || start >= src.len() { return Result.Err(start); }
+    if src[start] != 40 {
+        let Parsed { value: form, next: next } = keyword(src, start)?;
+        let value = if form == W_PROP {
+            term.prop(s)
+        } else if form == W_NAT {
+            term.nat(s)
+        } else if form == W_ZERO {
+            term.zero(s)
+        } else if form == W_UNIT {
+            term.unit(s)
+        } else {
+            return Result.Err(start);
+        };
+        return Result.Ok(Parsed { value: value, next: next });
+    }
+    let after = open(src, start)?;
+    let Parsed { value: form, next: at } = keyword(src, after)?;
+    let mut at = at;
+    let value = if form == W_VAR {
+        let Parsed { value: index, next: next } = count(src, at)?;
+        at = next;
+        term.var(s, index)
+    } else if form == W_GLOBAL {
+        let Parsed { value: global, next: next } = name(s, src, at)?;
+        at = next;
+        let mut levels: Vec<i64> = Vec.new();
+        while !at_close(src, at) {
+            let Parsed { value: l, next: next } = level(s, src, at, depth + 1)?;
+            levels = levels.push(l);
+            at = next;
+        }
+        let list = term.list(s, &levels);
+        term.global(s, global, list)
+    } else if form == W_SORT {
+        let Parsed { value: l, next: next } = level(s, src, at, depth + 1)?;
+        at = next;
+        term.sort(s, l)
+    } else if form == W_LIT {
+        let Parsed { value: digits_start, next: end } = atom(src, at)?;
+        let digits = match text.slice(src, digits_start, end) {
+            Result.Ok(bytes) => bytes,
+            Result.Err(_) => return Result.Err(digits_start),
+        };
+        let value = match natural.parse(&digits) {
+            Result.Ok(value) => value,
+            Result.Err(_) => return Result.Err(digits_start),
+        };
+        at = end;
+        let id = term.natural_id(s, &value);
+        term.lit(s, id)
+    } else if form == W_INDELIM {
+        let Parsed { value: data, next: next } = name(s, src, at)?;
+        let Parsed { value: motive, next: next } = term_at(s, src, next, depth + 1)?;
+        let Parsed { value: branches, next: next } = terms(s, src, next, depth + 1)?;
+        let Parsed { value: scrutinee, next: next } = term_at(s, src, next, depth + 1)?;
+        at = next;
+        term.indelim(s, data, motive, branches, scrutinee)
+    } else if form == W_SCALAR {
+        let Parsed { value: kind, next: next } = keyword(src, at)?;
+        at = next;
+        let scalar = if kind == W_I64 {
+            term.SCALAR_I64
+        } else if kind == W_BOOL_TYPE {
+            term.SCALAR_BOOL
+        } else if kind == W_UNIT_TYPE {
+            term.SCALAR_UNIT
+        } else {
+            return Result.Err(after);
+        };
+        term.scalar(s, scalar)
+    } else if form == W_I64 {
+        let Parsed { value: v, next: next } = integer(src, at)?;
+        at = next;
+        term.int(s, v)
+    } else if form == W_BOOL {
+        let Parsed { value: b, next: next } = keyword(src, at)?;
+        at = next;
+        if b == W_TRUE {
+            term.boolean(s, true)
+        } else if b == W_FALSE {
+            term.boolean(s, false)
+        } else {
+            return Result.Err(after);
+        }
+    } else {
+        // The remaining forms take a fixed number of subterms.
+        let arity = if form == W_SUCC {
+            1
+        } else if form == W_PI || form == W_LAM || form == W_APP || form == W_REFL {
+            2
+        } else if form == W_EQ {
+            3
+        } else if form == W_NATELIM {
+            4
+        } else if form == W_TRANSPORT || form == W_EQELIM {
+            6
+        } else {
+            return Result.Err(after);
+        };
+        let Parsed { value: parts, next: next } = fields(s, src, at, depth, arity)?;
+        at = next;
+        let a = term.list_at(s, parts, 0);
+        if form == W_SUCC {
+            term.succ(s, a)
+        } else {
+            let b = term.list_at(s, parts, 1);
+            if form == W_PI {
+                term.pi(s, a, b)
+            } else if form == W_LAM {
+                term.lam(s, a, b)
+            } else if form == W_APP {
+                term.app(s, a, b)
+            } else if form == W_REFL {
+                term.reflexive(s, a, b)
+            } else {
+                let c = term.list_at(s, parts, 2);
+                if form == W_EQ {
+                    term.eq(s, a, b, c)
+                } else {
+                    let d = term.list_at(s, parts, 3);
+                    if form == W_NATELIM {
+                        term.natelim(s, a, b, c, d)
+                    } else {
+                        let e = term.list_at(s, parts, 4);
+                        let f = term.list_at(s, parts, 5);
+                        if form == W_TRANSPORT {
+                            term.transport(s, a, b, c, d, e, f)
+                        } else {
+                            term.eqelim(s, a, b, c, d, e, f)
+                        }
+                    }
+                }
+            }
+        }
+    };
+    Result.Ok(Parsed { value: value, next: close(src, at)? })
+}
+
+/// Read one term (exposed for tests).
+pub fn read_term(s: &mut Store, src: &Bytes) -> Result<i64, i64> ! {alloc, panic} {
+    let Parsed { value: value, next: next } = term_at(s, src, 0, 0)?;
+    let end = skip(src, next);
+    if end != src.len() { return Result.Err(end); }
+    Result.Ok(value)
+}
+
+/// `(ctor NAME (LOCALS) (FIELDS) (RESULT))`
+fn constructor(s: &mut Store, src: &Bytes, at: i64) -> Result<Parsed, i64> ! {alloc, panic} {
+    let after = open(src, at)?;
+    let Parsed { value: form, next: at } = keyword(src, after)?;
+    if form != W_CTOR { return Result.Err(after); }
+    let Parsed { value: ctor_name, next: at } = name(s, src, at)?;
+    let Parsed { value: locals, next: at } = terms(s, src, at, 1)?;
+    let Parsed { value: fields_list, next: at } = terms(s, src, at, 1)?;
+    let Parsed { value: result, next: at } = terms(s, src, at, 1)?;
+    let value = term.ctor(s, ctor_name, locals, fields_list, result);
+    Result.Ok(Parsed { value: value, next: close(src, at)? })
+}
+
+/// An optional `(steps N)` element: N, or -1 when absent.
+fn optional_steps(src: &Bytes, at: i64) -> Result<Parsed, i64> ! {alloc, panic} {
+    let start = skip(src, at);
+    if start >= src.len() || src[start] != 40 {
+        return Result.Ok(Parsed { value: -1, next: start });
+    }
+    let after = open(src, start)?;
+    let Parsed { value: form, next: next } = keyword(src, after)?;
+    if form != W_STEPS { return Result.Ok(Parsed { value: -1, next: start }); }
+    let Parsed { value: steps, next: next } = count(src, next)?;
+    if steps == 0 { return Result.Err(start); }
+    Result.Ok(Parsed { value: steps, next: close(src, next)? })
+}
+
+/// A parsed item and the offset after it.
+struct ParsedItem { item: Item, next: i64 }
+
+fn item(s: &mut Store, src: &Bytes, at: i64) -> Result<ParsedItem, i64> ! {alloc, panic} {
+    let after = open(src, at)?;
+    let Parsed { value: form, next: at } = keyword(src, after)?;
+    if form == W_DEF {
+        let Parsed { value: def_name, next: at } = name(s, src, at)?;
+        let Parsed { value: levels, next: at } = count(src, at)?;
+        let Parsed { value: ty, next: at } = term_at(s, src, at, 1)?;
+        let Parsed { value: value, next: at } = term_at(s, src, at, 1)?;
+        let Parsed { value: steps, next: at } = optional_steps(src, at)?;
+        let next = close(src, at)?;
+        return Result.Ok(ParsedItem { item: Item.Def(def_name, levels, ty, value, steps), next: next });
+    }
+    if form == W_DATA {
+        let Parsed { value: data_name, next: at } = name(s, src, at)?;
+        let Parsed { value: levels, next: at } = count(src, at)?;
+        let Parsed { value: sort, next: at } = keyword(src, at)?;
+        let prop = if sort == W_PROP {
+            true
+        } else if sort == W_TYPE {
+            false
+        } else {
+            return Result.Err(at);
+        };
+        let Parsed { value: params, next: at } = terms(s, src, at, 1)?;
+        let Parsed { value: steps, next: at } = optional_steps(src, at)?;
+        let mut at = at;
+        let mut constructors: Vec<i64> = Vec.new();
+        while !at_close(src, at) {
+            let Parsed { value: c, next: next } = constructor(s, src, at)?;
+            constructors = constructors.push(c);
+            at = next;
+        }
+        let list = term.list(s, &constructors);
+        let next = close(src, at)?;
+        return Result.Ok(ParsedItem {
+            item: Item.Data(data_name, levels, prop, params, list, steps),
+            next: next,
+        });
+    }
+    if form == W_CHECK {
+        let Parsed { value: t, next: at } = term_at(s, src, at, 1)?;
+        let Parsed { value: ty, next: at } = term_at(s, src, at, 1)?;
+        let next = close(src, at)?;
+        return Result.Ok(ParsedItem { item: Item.Check(t, ty), next: next });
+    }
+    if form == W_INFER || form == W_NORMALIZE {
+        let Parsed { value: t, next: at } = term_at(s, src, at, 1)?;
+        let next = close(src, at)?;
+        let parsed = if form == W_INFER { Item.Infer(t) } else { Item.Normalize(t) };
+        return Result.Ok(ParsedItem { item: parsed, next: next });
+    }
+    Result.Err(after)
+}
+
+/// Read every item of an exchange file. The error is a byte offset.
+pub fn read(s: &mut Store, src: &Bytes) -> Result<Vec<Item>, i64> ! {alloc, panic} {
+    let mut items: Vec<Item> = Vec.new();
+    let mut at = skip(src, 0);
+    while at < src.len() {
+        let ParsedItem { item: next_item, next: next } = item(s, src, at)?;
+        items = items.push(next_item);
+        at = skip(src, next);
+    }
+    Result.Ok(items)
+}

@@ -1,0 +1,486 @@
+module kernel.tests.main;
+
+use std.result.Result;
+use std.test;
+use std.text;
+use kernel.api;
+use kernel.check;
+use kernel.engine;
+use kernel.error;
+use kernel.normal;
+use kernel.printer;
+use kernel.reader;
+use kernel.store;
+use kernel.store.Store;
+use kernel.subst;
+use kernel.term;
+
+/// Read one term and print it back.
+
+fn round(s: &mut Store, source: &Bytes) -> Bytes ! {alloc, panic} {
+    match reader.read_term(s, source) {
+        Result.Ok(id) => printer.term_into(s, Bytes.with_capacity(0), id),
+        Result.Err(at) => text.format_i64_into(Bytes.from("error at "), at),
+    }
+}
+
+fn same(actual: &Bytes, expected: &Bytes) -> Unit ! {panic} {
+    test.is_true(text.eq(actual, expected));
+}
+
+#[test]
+fn equal_terms_share_one_id() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let n1 = term.nat(&mut s);
+    let a = term.pi(&mut s, n1, n1);
+    let n2 = term.nat(&mut s);
+    let b = term.pi(&mut s, n2, n2);
+    test.equal_i64(a, b);
+    let v0 = term.var(&mut s, 0);
+    let v1 = term.var(&mut s, 1);
+    test.is_true(v0 != v1);
+    let before = store.count(&s);
+    let again = term.var(&mut s, 0);
+    test.equal_i64(again, v0);
+    test.equal_i64(store.count(&s), before);
+}
+
+#[test]
+fn the_store_grows_and_keeps_every_id() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let mut ids: Vec<i64> = Vec.new();
+    let mut i = 0;
+    while i < 40000 {
+        ids = ids.push(term.var(&mut s, i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 40000 {
+        test.equal_i64(term.var(&mut s, i), ids[i]);
+        test.equal_i64(term.field(&s, ids[i], 0), i);
+        i = i + 1;
+    }
+}
+
+#[test]
+fn levels_are_canonical() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let u0 = term.level_var(&mut s, 0);
+    let u1 = term.level_var(&mut s, 1);
+    let one = term.level_of(&mut s, 1);
+    let u0_next = match term.level_succ(&mut s, u0) { Result.Ok(l) => l, Result.Err(_) => -1 };
+    // max(u, u + 1) = u + 1 and max(u + 1, 1) = u + 1, but max(u, 1) != u.
+    test.equal_i64(term.level_max(&mut s, u0, u0_next), u0_next);
+    test.equal_i64(term.level_max(&mut s, u0_next, one), u0_next);
+    test.is_true(term.level_max(&mut s, u0, one) != u0);
+    let left = term.level_max(&mut s, u0, u1);
+    let right = term.level_max(&mut s, u1, u0);
+    test.equal_i64(left, right);
+    test.is_true(term.level_leq(&mut s, u0, u0_next));
+    test.is_false(term.level_leq(&mut s, u1, u0));
+    let top = term.level_of(&mut s, term.MAX_LEVEL);
+    test.is_true(match term.level_succ(&mut s, top) { Result.Ok(_) => false, Result.Err(_) => true });
+}
+
+#[test]
+fn terms_round_trip_canonically() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    same(&round(&mut s, &Bytes.from("(pi nat (sort 0))")), &Bytes.from("(pi nat (sort 0))"));
+    same(&round(&mut s, &Bytes.from("(sort (max (u 0) (succ (u 0))))")), &Bytes.from("(sort (succ (u 0)))"));
+    same(&round(&mut s, &Bytes.from("(sort (max 1 (succ (u 0))))")), &Bytes.from("(sort (succ (u 0)))"));
+    same(&round(&mut s, &Bytes.from("(sort (max (u 1) 1 (u 0)))")), &Bytes.from("(sort (max 1 (u 0) (u 1)))"));
+    same(&round(&mut s, &Bytes.from("(sort (succ 4))")), &Bytes.from("(sort 5)"));
+    same(&round(&mut s, &Bytes.from("(lit 0)")), &Bytes.from("zero"));
+    same(&round(&mut s, &Bytes.from("(lit 000123)")), &Bytes.from("(lit 123)"));
+    same(&round(&mut s, &Bytes.from("(lit 1000000000000000000000)")), &Bytes.from("(lit 1000000000000000000000)"));
+    same(&round(&mut s, &Bytes.from("  ( app   (var 3) ; a comment\n unit )")), &Bytes.from("(app (var 3) unit)"));
+    same(&round(&mut s, &Bytes.from("(global List::Cons 1 (u 0))")), &Bytes.from("(global List::Cons 1 (u 0))"));
+    same(&round(&mut s, &Bytes.from("(indelim Even (lam (global Even) nat) ((lit 7) zero) (var 0))")), &Bytes.from("(indelim Even (lam (global Even) nat) ((lit 7) zero) (var 0))"));
+    same(&round(&mut s, &Bytes.from("(eqelim nat zero zero prop (refl nat zero) (var 0))")), &Bytes.from("(eqelim nat zero zero prop (refl nat zero) (var 0))"));
+    same(&round(&mut s, &Bytes.from("(scalar Bool)")), &Bytes.from("(scalar Bool)"));
+    same(&round(&mut s, &Bytes.from("(i64 -42)")), &Bytes.from("(i64 -42)"));
+    same(&round(&mut s, &Bytes.from("(bool false)")), &Bytes.from("(bool false)"));
+    same(&round(&mut s, &Bytes.from("(var x)")), &Bytes.from("error at 5"));
+    same(&round(&mut s, &Bytes.from("(frob)")), &Bytes.from("error at 1"));
+    same(&round(&mut s, &Bytes.from("(pi nat)")), &Bytes.from("error at 7"));
+    same(&round(&mut s, &Bytes.from("(pi nat nat")), &Bytes.from("error at 11"));
+    same(&round(&mut s, &Bytes.from("(var 1) extra")), &Bytes.from("error at 8"));
+}
+
+#[test]
+fn items_round_trip() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let source = Bytes.from("(def id 1 (pi (sort (u 0)) (pi (var 0) (var 1))) (lam (sort (u 0)) (lam (var 0) (var 0))))\n(data Fin 0 type (nat) (ctor FZero (nat) () ((succ (var 0)))) (ctor FSucc (nat) ((app (global Fin) (var 0))) ((succ (var 1)))))\n(data Two 0 prop () (ctor First () () ()) (ctor Second () () ()))\n(check (global First) (global Two))\n(infer (global id 0))\n(normalize (global id 0))\n");
+    let items = match reader.read(&mut s, &source) {
+        Result.Ok(items) => items,
+        Result.Err(_) => return test.fail(),
+    };
+    test.equal_i64(items.len(), 6);
+    let mut out = Bytes.with_capacity(0);
+    let mut i = 0;
+    while i < items.len() {
+        out = printer.item_into(&s, out, items[i]);
+        i = i + 1;
+    }
+    same(&out, &source);
+    let bad = Bytes.from("(def x 0 nat zero)\n(launch)\n");
+    test.is_true(match reader.read(&mut s, &bad) { Result.Ok(_) => false, Result.Err(at) => at == 20 });
+}
+
+fn parse(s: &mut Store, source: &Bytes) -> i64 ! {alloc, panic} {
+    match reader.read_term(s, source) {
+        Result.Ok(id) => id,
+        Result.Err(_) => panic(),
+    }
+}
+
+fn shows(s: &Store, id: i64, expected: &Bytes) -> Unit ! {alloc, panic} {
+    same(&printer.term_into(s, Bytes.with_capacity(0), id), expected);
+}
+
+/// A list of terms parsed from `(t ...)` source.
+fn terms(s: &mut Store, items: &Bytes) -> i64 ! {alloc, panic} {
+    let wrapped = parse(s, items);
+    // `(app f a)` gives two items; build the list from an application spine.
+    let mut list: Vec<i64> = Vec.new();
+    list = list.push(term.field(s, wrapped, 0)).push(term.field(s, wrapped, 1));
+    term.list(s, &list)
+}
+
+#[test]
+fn shifting_moves_only_free_indices_at_or_above_the_cutoff() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let t = parse(&mut s, &Bytes.from("(lam nat (app (var 0) (var 1)))"));
+    let up = subst.shift(&mut s, t, 2, 0);
+    shows(&s, up, &Bytes.from("(lam nat (app (var 0) (var 3)))"));
+    let u = parse(&mut s, &Bytes.from("(app (var 0) (var 1))"));
+    let above = subst.shift(&mut s, u, 1, 1);
+    shows(&s, above, &Bytes.from("(app (var 0) (var 2))"));
+    // A closed term is returned as is, without building anything.
+    let closed = parse(&mut s, &Bytes.from("(pi nat (lam nat (var 1)))"));
+    test.equal_i64(term.range(&s, closed), 0);
+    let before = store.count(&s);
+    test.equal_i64(subst.shift(&mut s, closed, 5, 0), closed);
+    test.equal_i64(store.count(&s), before);
+}
+
+#[test]
+fn substitution_lowers_indices_and_never_captures() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let body = parse(&mut s, &Bytes.from("(app (var 0) (var 1))"));
+    let five = parse(&mut s, &Bytes.from("(lit 5)"));
+    let applied = subst.substitute(&mut s, body, five);
+    shows(&s, applied, &Bytes.from("(app (lit 5) (var 0))"));
+    // Under a binder the value is shifted, so its free variable still refers
+    // to the outer binder: (λz. y z w)[y := x] keeps x free.
+    let under = parse(&mut s, &Bytes.from("(lam nat (app (var 1) (var 2)))"));
+    let x = term.var(&mut s, 0);
+    let result = subst.substitute(&mut s, under, x);
+    shows(&s, result, &Bytes.from("(lam nat (app (var 1) (var 1)))"));
+    // The Rust kernel's capture test: λx. (λy. λz. y) x, reduced by hand.
+    let inner = parse(&mut s, &Bytes.from("(lam nat (var 1))"));
+    let reduced = subst.substitute(&mut s, inner, x);
+    shows(&s, reduced, &Bytes.from("(lam nat (var 1))"));
+}
+
+#[test]
+fn outer_binders_are_rewritten_in_parallel() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    // Arguments are outermost first: (var 1) is the first, (var 0) the second.
+    let args = terms(&mut s, &Bytes.from("(app (lit 1) (lit 2))"));
+    let t = parse(&mut s, &Bytes.from("(app (var 0) (var 1))"));
+    let r = match subst.rewrite_outer(&mut s, t, args) { Result.Ok(r) => r, Result.Err(_) => -1 };
+    shows(&s, r, &Bytes.from("(app (lit 2) (lit 1))"));
+    let under = parse(&mut s, &Bytes.from("(lam nat (app (var 0) (var 2)))"));
+    let r2 = match subst.rewrite_outer(&mut s, under, args) { Result.Ok(r) => r, Result.Err(_) => -1 };
+    shows(&s, r2, &Bytes.from("(lam nat (app (var 0) (lit 1)))"));
+    // Replacement terms are shifted under the binders they move below.
+    let open = terms(&mut s, &Bytes.from("(app (var 0) (var 5))"));
+    let r3 = match subst.rewrite_outer(&mut s, under, open) { Result.Ok(r) => r, Result.Err(_) => -1 };
+    shows(&s, r3, &Bytes.from("(lam nat (app (var 0) (var 1)))"));
+    let far = parse(&mut s, &Bytes.from("(var 2)"));
+    test.is_true(match subst.rewrite_outer(&mut s, far, args) {
+        Result.Ok(_) => false,
+        Result.Err(code) => code == error.OUT_OF_RANGE,
+    });
+}
+
+#[test]
+fn universe_parameters_are_instantiated_everywhere() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let t = parse(&mut s, &Bytes.from("(pi (sort (u 0)) (app (global id (max 1 (u 1))) (sort (succ (u 1)))))"));
+    let three = term.level_of(&mut s, 3);
+    let u0 = term.level_var(&mut s, 0);
+    let mut levels: Vec<i64> = Vec.new();
+    levels = levels.push(three).push(u0);
+    let list = term.list(&mut s, &levels);
+    let r = match subst.instantiate_levels(&mut s, t, list) { Result.Ok(r) => r, Result.Err(_) => -1 };
+    shows(&s, r, &Bytes.from("(pi (sort 3) (app (global id (max 1 (u 0))) (sort (succ (u 0)))))"));
+    let mut short: Vec<i64> = Vec.new();
+    short = short.push(three);
+    let one = term.list(&mut s, &short);
+    test.is_true(match subst.instantiate_levels(&mut s, t, one) {
+        Result.Ok(_) => false,
+        Result.Err(code) => code == error.UNBOUND_LEVEL,
+    });
+}
+
+#[test]
+fn shared_subterms_are_visited_once() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    // t(k+1) = app(t(k), t(k)): 2^60 nodes as a tree, 61 in the store.
+    let mut t = term.var(&mut s, 0);
+    let mut expected = term.var(&mut s, 1);
+    let mut k = 0;
+    while k < 60 {
+        t = term.app(&mut s, t, t);
+        expected = term.app(&mut s, expected, expected);
+        k = k + 1;
+    }
+    test.equal_i64(subst.shift(&mut s, t, 1, 0), expected);
+    let zero = term.zero(&mut s);
+    let replaced = subst.substitute(&mut s, t, zero);
+    test.equal_i64(term.range(&s, replaced), 0);
+}
+
+#[test]
+fn spines_split_and_rebuild_applications() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let t = parse(&mut s, &Bytes.from("(app (app (app (global f) zero) nat) (var 0))"));
+    let head = subst.head(&s, t);
+    shows(&s, head, &Bytes.from("(global f)"));
+    let args = subst.arguments(&s, t);
+    test.equal_i64(args.len(), 3);
+    shows(&s, args[0], &Bytes.from("zero"));
+    shows(&s, args[2], &Bytes.from("(var 0)"));
+    test.equal_i64(subst.apply(&mut s, head, &args), t);
+}
+
+fn reduce(k: &mut engine.Kernel, source: &Bytes, full: Bool) -> Bytes ! {alloc, panic} {
+    let t = parse(&mut k.store, source);
+    engine.begin(k);
+    let result = if full { normal.normal(k, t) } else { normal.whnf(k, t) };
+    match result {
+        Result.Ok(r) => printer.term_into(&k.store, Bytes.with_capacity(0), r),
+        Result.Err(code) => text.format_i64_into(Bytes.from("error "), code),
+    }
+}
+
+#[test]
+fn weak_head_reduction_stops_at_the_head() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let name = term.name(&mut k.store, &Bytes.from("two"));
+    let ty = term.nat(&mut k.store);
+    let value = parse(&mut k.store, &Bytes.from("(succ (succ zero))"));
+    engine.admit_def(&mut k, name, 0, ty, value);
+    // Beta and delta at the head; the body under the binder is left alone.
+    let source = Bytes.from("(app (lam nat (lam nat (app (lam nat (var 0)) (var 1)))) (global two))");
+    same(
+        &reduce(&mut k, &source, false),
+        &Bytes.from("(lam nat (app (lam nat (var 0)) (global two)))"),
+    );
+    same(&reduce(&mut k, &source, true), &Bytes.from("(lam nat (lit 2))"));
+    same(&reduce(&mut k, &Bytes.from("(global two)"), false), &Bytes.from("(succ (succ zero))"));
+    // A stuck elimination is its own weak head normal form.
+    same(
+        &reduce(&mut k, &Bytes.from("(natelim (lam nat nat) zero (lam nat (lam nat (var 0))) (var 3))"), false),
+        &Bytes.from("(natelim (lam nat nat) zero (lam nat (lam nat (var 0))) (var 3))"),
+    );
+}
+
+#[test]
+fn reduction_budgets_fail_closed() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let deep = Bytes.from("(natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 20))");
+    same(&reduce(&mut k, &deep, true), &Bytes.from("(lit 20)"));
+    k.max_steps = 50;
+    same(&reduce(&mut k, &deep, true), &text.format_i64_into(Bytes.from("error "), error.BUDGET));
+    k.max_steps = engine.STEPS;
+    k.max_depth = 3;
+    same(
+        &reduce(&mut k, &Bytes.from("(succ (succ (succ (succ (var 0)))))"), true),
+        &text.format_i64_into(Bytes.from("error "), error.DEPTH),
+    );
+}
+
+#[test]
+fn definitions_are_admitted_only_after_checking() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let two = term.name(&mut k.store, &Bytes.from("two"));
+    let ty = parse(&mut k.store, &Bytes.from("nat"));
+    let value = parse(&mut k.store, &Bytes.from("(succ (succ zero))"));
+    test.is_true(match check.define(&mut k, two, 0, ty, value) { Result.Ok(_) => true, Result.Err(_) => false });
+    // A duplicate, and a value of the wrong type, are rejected and not admitted.
+    test.is_true(match check.define(&mut k, two, 0, ty, value) { Result.Ok(_) => false, Result.Err(code) => code == error.DUPLICATE });
+    let bad = term.name(&mut k.store, &Bytes.from("bad"));
+    let sort = parse(&mut k.store, &Bytes.from("(sort 0)"));
+    test.is_true(match check.define(&mut k, bad, 0, ty, sort) { Result.Ok(_) => false, Result.Err(code) => code == error.TYPE_MISMATCH });
+    test.is_false(engine.contains(&k, bad));
+    // The definition computes: refl 2 : two = 2.
+    let proof = parse(&mut k.store, &Bytes.from("(refl nat (lit 2))"));
+    let claim = parse(&mut k.store, &Bytes.from("(eq nat (global two) (lit 2))"));
+    test.is_true(match check.check_closed(&mut k, proof, claim) { Result.Ok(_) => true, Result.Err(_) => false });
+    let wrong = parse(&mut k.store, &Bytes.from("(eq nat (global two) (lit 3))"));
+    test.is_true(match check.check_closed(&mut k, proof, wrong) { Result.Ok(_) => false, Result.Err(code) => code == error.TYPE_MISMATCH });
+}
+
+#[test]
+fn data_families_are_admitted_and_eliminated() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let source = Bytes.from("(data Even 0 type () (ctor E0 () () ()) (ctor ES () ((global Even)) ()))\n(data Bad 0 type () (ctor B () ((pi (global Bad) nat)) ()))\n");
+    let items = match reader.read(&mut k.store, &source) {
+        Result.Ok(items) => items,
+        Result.Err(_) => return test.fail(),
+    };
+    let mut verdicts: Vec<i64> = Vec.new();
+    let mut i = 0;
+    while i < items.len() {
+        match items[i] {
+            reader.Item.Data(name, levels, prop, params, constructors, _) => {
+                let code = match check.define_data(&mut k, name, levels, prop, params, constructors) {
+                    Result.Ok(_) => 0,
+                    Result.Err(code) => code,
+                };
+                verdicts = verdicts.push(code);
+            },
+            _ => {},
+        }
+        i = i + 1;
+    }
+    test.equal_i64(verdicts[0], 0);
+    test.equal_i64(verdicts[1], error.POSITIVITY);
+    // Height of ES (ES E0) by elimination is 2.
+    let height = parse(&mut k.store, &Bytes.from("(indelim Even (lam (global Even) nat) (zero (lam (global Even) (lam nat (succ (var 0))))) (app (global ES) (app (global ES) (global E0))))"));
+    let result = check.normalize_closed(&mut k, height);
+    let value = match result {
+        Result.Ok(n) => printer.term_into(&k.store, Bytes.with_capacity(0), n),
+        Result.Err(code) => text.format_i64_into(Bytes.from("error "), code),
+    };
+    same(&value, &Bytes.from("(lit 2)"));
+}
+
+fn show(k: &engine.Kernel, id: i64) -> Bytes ! {alloc, panic} {
+    printer.term_into(&k.store, Bytes.with_capacity(0), id)
+}
+
+#[test]
+fn the_api_works_in_a_context() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let nat = parse(&mut k.store, &Bytes.from("nat"));
+    let mut context: Vec<i64> = Vec.new();
+    context = context.push(nat);
+    // n : Nat |- n : Nat, succ n : Nat, and (λx. x) n reduces to n.
+    let n = parse(&mut k.store, &Bytes.from("(var 0)"));
+    let inferred = api.infer(&mut k, &context, n);
+    test.is_true(match inferred { Result.Ok(ty) => ty == nat, Result.Err(_) => false });
+    let next = parse(&mut k.store, &Bytes.from("(succ (var 0))"));
+    let checked = api.check_term(&mut k, &context, next, nat);
+    test.is_true(match checked { Result.Ok(_) => true, Result.Err(_) => false });
+    let redex = parse(&mut k.store, &Bytes.from("(app (lam nat (var 0)) (var 0))"));
+    let head = api.whnf(&mut k, &context, redex);
+    test.is_true(match head { Result.Ok(t) => t == n, Result.Err(_) => false });
+    let same = api.defeq(&mut k, &context, redex, n);
+    test.is_true(match same { Result.Ok(b) => b, Result.Err(_) => false });
+    // A context entry that is not a type is rejected.
+    let zero = parse(&mut k.store, &Bytes.from("zero"));
+    let mut bad: Vec<i64> = Vec.new();
+    bad = bad.push(zero);
+    let rejected = api.infer(&mut k, &bad, zero);
+    test.is_true(match rejected { Result.Ok(_) => false, Result.Err(code) => code == error.NOT_A_TYPE });
+    // An unchecked term is not reduced: (succ (sort 0)) is ill-typed.
+    let ill = parse(&mut k.store, &Bytes.from("(succ (sort 0))"));
+    let refused = api.normalize(&mut k, &context, ill);
+    test.is_true(match refused { Result.Ok(_) => false, Result.Err(code) => code == error.TYPE_MISMATCH });
+}
+
+#[test]
+fn failures_say_which_term_failed_and_why() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let nat = parse(&mut k.store, &Bytes.from("nat"));
+    let sort = parse(&mut k.store, &Bytes.from("(sort 0)"));
+    let empty: Vec<i64> = Vec.new();
+    // (sort 0) is not a Nat: the failure names the term and both types.
+    let result = api.check_term(&mut k, &empty, sort, nat);
+    let code = match result { Result.Ok(_) => 0, Result.Err(code) => code };
+    test.equal_i64(code, error.TYPE_MISMATCH);
+    let failure = api.last_failure(&k, code);
+    test.equal_i64(failure.term, sort);
+    test.equal_i64(failure.expected, nat);
+    same(&show(&k, failure.actual), &Bytes.from("(sort 1)"));
+    test.equal_i64(failure.depth, 0);
+    same(&api.describe(code), &Bytes.from("a term does not have the expected type"));
+    // Applying a non-function names the function and its type, under the
+    // binder it was found in.
+    let applied = parse(&mut k.store, &Bytes.from("(lam nat (app (var 0) zero))"));
+    let result = api.infer(&mut k, &empty, applied);
+    let code = match result { Result.Ok(_) => 0, Result.Err(code) => code };
+    test.equal_i64(code, error.NOT_A_FUNCTION);
+    let failure = api.last_failure(&k, code);
+    same(&show(&k, failure.term), &Bytes.from("(var 0)"));
+    same(&show(&k, failure.actual), &Bytes.from("nat"));
+    test.equal_i64(failure.depth, 1);
+}
+
+#[test]
+fn abstraction_builds_rewrite_motives() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    // Every occurrence of `succ zero` becomes the new variable.
+    let t = parse(&mut k.store, &Bytes.from("(app (app (global f) (succ zero)) (succ zero))"));
+    let u = parse(&mut k.store, &Bytes.from("(succ zero)"));
+    let abstracted = api.abstract(&mut k, t, u);
+    same(&show(&k, abstracted), &Bytes.from("(app (app (global f) (var 0)) (var 0))"));
+    // Under a binder the occurrence is found shifted, and free variables of
+    // the term move one binder out.
+    let t2 = parse(&mut k.store, &Bytes.from("(lam nat (app (app (var 0) (var 2)) (var 1)))"));
+    let u2 = parse(&mut k.store, &Bytes.from("(var 0)"));
+    let abstracted2 = api.abstract(&mut k, t2, u2);
+    same(&show(&k, abstracted2), &Bytes.from("(lam nat (app (app (var 0) (var 3)) (var 1)))"));
+    // Instantiating the abstraction with the term gives the original back.
+    test.equal_i64(api.instantiate(&mut k, abstracted, u), t);
+    test.equal_i64(api.instantiate(&mut k, abstracted2, u2), t2);
+}
+
+#[test]
+fn rewinding_drops_new_objects_and_keeps_old_ones() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let kept = parse(&mut s, &Bytes.from("(pi nat (sort 0))"));
+    let start = store.mark(&s);
+    let before = store.count(&s);
+    let mut i = 0;
+    while i < 50000 {
+        term.var(&mut s, i);
+        i = i + 1;
+    }
+    test.is_true(store.count(&s) > before + 40000);
+    store.rewind(&mut s, start);
+    test.equal_i64(store.count(&s), before);
+    // Old ids still mean the same objects and are still found when rebuilt.
+    let again = parse(&mut s, &Bytes.from("(pi nat (sort 0))"));
+    test.equal_i64(again, kept);
+    same(&printer.term_into(&s, Bytes.with_capacity(0), kept), &Bytes.from("(pi nat (sort 0))"));
+    // Dropped objects are created afresh, at the freed ids.
+    let fresh = term.var(&mut s, 7);
+    test.equal_i64(fresh, before);
+    test.equal_i64(term.field(&s, fresh, 0), 7);
+    test.equal_i64(term.var(&mut s, 7), fresh);
+}
+
+#[test]
+fn checking_a_definition_leaves_only_its_entry_behind() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let name = term.name(&mut k.store, &Bytes.from("thirty"));
+    let ty = parse(&mut k.store, &Bytes.from("(eq nat (natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 30)) (lit 30))"));
+    let value = parse(&mut k.store, &Bytes.from("(refl nat (lit 30))"));
+    let before = store.count(&k.store);
+    let result = check.define(&mut k, name, 0, ty, value);
+    test.is_true(match result { Result.Ok(_) => true, Result.Err(_) => false });
+    // Normalizing the induction built many terms; only the entry remains.
+    test.is_true(store.count(&k.store) <= before + 2);
+    test.is_true(engine.contains(&k, name));
+    let query = parse(&mut k.store, &Bytes.from("(refl nat (lit 30))"));
+    let claim = parse(&mut k.store, &Bytes.from("(eq nat (global thirty) (global thirty))"));
+    let start = api.mark(&k);
+    let checked = check.check_closed(&mut k, query, claim);
+    test.is_false(match checked { Result.Ok(_) => true, Result.Err(_) => false });
+    api.rewind(&mut k, start);
+}

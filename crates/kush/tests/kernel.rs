@@ -4,24 +4,24 @@ fn nat(n: u32) -> T {
     T::natural(u64::from(n).into())
 }
 fn identity() -> T {
-    T::lam(T::Universe(0), T::lam(T::Var(0), T::Var(0)))
+    T::lam(T::universe(0), T::lam(T::Var(0), T::Var(0)))
 }
 fn identity_type() -> T {
-    T::pi(T::Universe(0), T::pi(T::Var(0), T::Var(1)))
+    T::pi(T::universe(0), T::pi(T::Var(0), T::Var(1)))
 }
 
 #[test]
 fn universes_are_stratified_and_noncumulative() {
     let k = Kernel::default();
-    assert_eq!(k.infer_closed(&T::Universe(0)).unwrap(), T::Universe(1));
-    assert_eq!(k.infer_closed(&T::Universe(3)).unwrap(), T::Universe(4));
-    assert!(k.check_closed(&T::Universe(0), &T::Universe(0)).is_err());
-    assert!(k.check_closed(&T::Nat, &T::Universe(1)).is_err());
-    assert!(k.infer_closed(&T::Universe(u32::MAX)).is_err());
+    assert_eq!(k.infer_closed(&T::universe(0)).unwrap(), T::universe(1));
+    assert_eq!(k.infer_closed(&T::universe(3)).unwrap(), T::universe(4));
+    assert!(k.check_closed(&T::universe(0), &T::universe(0)).is_err());
+    assert!(k.check_closed(&T::Nat, &T::universe(1)).is_err());
+    assert!(k.infer_closed(&T::universe(u32::MAX)).is_err());
     assert_eq!(
-        k.infer_closed(&T::pi(T::Universe(2), T::Universe(1)))
+        k.infer_closed(&T::pi(T::universe(2), T::universe(1)))
             .unwrap(),
-        T::Universe(3)
+        T::universe(3)
     );
 }
 #[test]
@@ -56,12 +56,12 @@ fn dependent_binder_types_are_shifted_on_lookup() {
     let k = Kernel::default();
     // ∀A:Type. ∀x:A. ∀B:Type. x : A, with A at index 2 in the body.
     let term = T::lam(
-        T::Universe(0),
-        T::lam(T::Var(0), T::lam(T::Universe(0), T::Var(1))),
+        T::universe(0),
+        T::lam(T::Var(0), T::lam(T::universe(0), T::Var(1))),
     );
     let expected = T::pi(
-        T::Universe(0),
-        T::pi(T::Var(0), T::pi(T::Universe(0), T::Var(2))),
+        T::universe(0),
+        T::pi(T::Var(0), T::pi(T::universe(0), T::Var(2))),
     );
     k.check_closed(&term, &expected).unwrap();
 }
@@ -71,12 +71,12 @@ fn free_variables_malformed_types_and_bad_calls_are_rejected() {
     for term in [
         T::Var(0),
         T::Var(usize::MAX),
-        T::Global("missing".into()),
+        T::global("missing"),
         T::app(T::Zero, T::Zero),
         T::succ(T::Nat),
         T::lam(T::Zero, T::Var(0)),
         T::pi(T::Nat, T::Zero),
-        T::app(T::lam(T::Nat, T::Var(0)), T::Universe(0)),
+        T::app(T::lam(T::Nat, T::Var(0)), T::universe(0)),
     ] {
         assert!(k.infer_closed(&term).is_err(), "{term:?}");
     }
@@ -94,7 +94,7 @@ fn equality_reflexivity_rejects_false_statements() {
             .is_err()
     );
     assert!(k.infer_closed(&T::eq(T::Nat, T::Nat, T::Zero)).is_err());
-    assert!(k.infer_closed(&T::refl(T::Nat, T::Universe(0))).is_err());
+    assert!(k.infer_closed(&T::refl(T::Nat, T::universe(0))).is_err());
 }
 fn induction() -> T {
     T::NatElim {
@@ -217,18 +217,12 @@ fn global_admission_is_atomic_and_rejects_recursion_or_axioms() {
     let mut k = Kernel::default();
     assert!(k.define("bad".into(), T::Nat, T::Nat).is_err());
     assert!(!k.contains("bad"));
-    assert!(
-        k.define("loop".into(), T::Nat, T::Global("loop".into()))
-            .is_err()
-    );
+    assert!(k.define("loop".into(), T::Nat, T::global("loop")).is_err());
     assert!(!k.contains("loop"));
     k.define("id".into(), identity_type(), identity()).unwrap();
-    let value = T::app(T::app(T::Global("id".into()), T::Nat), nat(2));
+    let value = T::app(T::app(T::global("id"), T::Nat), nat(2));
     k.define("two".into(), T::Nat, value).unwrap();
-    assert_eq!(
-        k.normalize_closed(&T::Global("two".into())).unwrap(),
-        nat(2)
-    );
+    assert_eq!(k.normalize_closed(&T::global("two")).unwrap(), nat(2));
     assert!(k.define("two".into(), T::Nat, T::Zero).is_err());
     assert_eq!(k.definition_type("two"), Some(&T::Nat));
 }
@@ -267,7 +261,7 @@ fn computation_limits_fail_closed() {
 fn induction_shifts_a_free_motive_under_both_step_binders() {
     let k = Kernel::default();
     // Generic induction: P, z, and s are variables, not closed syntactic lambdas.
-    let motive_type = T::pi(T::Nat, T::Universe(0));
+    let motive_type = T::pi(T::Nat, T::universe(0));
     let zero_type = T::app(T::Var(0), T::Zero);
     let step_type = T::pi(
         T::Nat,
@@ -348,7 +342,7 @@ fn vect() -> Kernel {
             },
             ConstructorSpec {
                 name: "Vect::cons".into(),
-                fields: vec![T::Nat, T::app(T::Global("Vect".into()), T::Var(1))],
+                fields: vec![T::Nat, T::app(T::global("Vect"), T::Var(1))],
                 result: vec![T::succ(T::Var(2))],
             },
         ],
@@ -357,19 +351,13 @@ fn vect() -> Kernel {
     k
 }
 fn nil() -> T {
-    T::app(T::Global("Vect::nil".into()), T::Zero)
+    T::app(T::global("Vect::nil"), T::Zero)
 }
 fn cons(n: u32, head: T, tail: T) -> T {
-    T::app(
-        T::app(T::app(T::Global("Vect::cons".into()), nat(n)), head),
-        tail,
-    )
+    T::app(T::app(T::app(T::global("Vect::cons"), nat(n)), head), tail)
 }
 fn length_motive() -> T {
-    T::lam(
-        T::Nat,
-        T::lam(T::app(T::Global("Vect".into()), T::Var(0)), T::Nat),
-    )
+    T::lam(T::Nat, T::lam(T::app(T::global("Vect"), T::Var(0)), T::Nat))
 }
 fn length_branches() -> Vec<T> {
     vec![
@@ -379,7 +367,7 @@ fn length_branches() -> Vec<T> {
             T::lam(
                 T::Nat,
                 T::lam(
-                    T::app(T::Global("Vect".into()), T::Var(1)),
+                    T::app(T::global("Vect"), T::Var(1)),
                     T::lam(T::Nat, T::succ(T::Var(0))),
                 ),
             ),
@@ -392,24 +380,18 @@ fn positive_logical_data_is_admitted_with_checked_constructors() {
     let k = vect();
     let info = k.data("Vect").unwrap();
     assert_eq!(info.params.len(), 1);
-    assert_eq!(info.sort, 0);
+    assert_eq!(info.sort, 0.into());
     assert_eq!(info.constructors.len(), 2);
     assert!(info.constructors[0].recursive.is_empty());
     assert_eq!(info.constructors[1].recursive, [false, true]);
     // Vect : Nat -> Universe(0), constructors are checked globals.
-    k.check_closed(&nil(), &T::app(T::Global("Vect".into()), T::Zero))
+    k.check_closed(&nil(), &T::app(T::global("Vect"), T::Zero))
         .unwrap();
-    k.check_closed(
-        &cons(0, nat(5), nil()),
-        &T::app(T::Global("Vect".into()), nat(1)),
-    )
-    .unwrap();
+    k.check_closed(&cons(0, nat(5), nil()), &T::app(T::global("Vect"), nat(1)))
+        .unwrap();
     assert!(
-        k.check_closed(
-            &cons(0, nat(5), nil()),
-            &T::app(T::Global("Vect".into()), nat(2))
-        )
-        .is_err()
+        k.check_closed(&cons(0, nat(5), nil()), &T::app(T::global("Vect"), nat(2)))
+            .is_err()
     );
     assert!(k.data("Vect::nil").is_none());
     assert!(k.data("missing").is_none());
@@ -434,8 +416,8 @@ fn dependent_elimination_reduces_on_constructor_scrutinees() {
 fn elimination_on_a_neutral_scrutinee_stays_stuck() {
     let k = vect();
     let body = T::elim("Vect", length_motive(), length_branches(), T::Var(0));
-    let term = T::lam(T::app(T::Global("Vect".into()), T::Zero), body);
-    let expected = T::pi(T::app(T::Global("Vect".into()), T::Zero), T::Nat);
+    let term = T::lam(T::app(T::global("Vect"), T::Zero), body);
+    let expected = T::pi(T::app(T::global("Vect"), T::Zero), T::Nat);
     k.check_closed(&term, &expected).unwrap();
     let normal = k.normalize_closed(&term).unwrap();
     let T::Lam { body, .. } = normal else {
@@ -502,7 +484,7 @@ fn negative_nested_and_malformed_data_are_rejected_atomically() {
         vec![],
         vec![ConstructorSpec {
             name: "Bad::mk".into(),
-            fields: vec![T::pi(T::Global("Bad".into()), T::Nat)],
+            fields: vec![T::pi(T::global("Bad"), T::Nat)],
             result: vec![],
         }],
     );
@@ -515,7 +497,7 @@ fn negative_nested_and_malformed_data_are_rejected_atomically() {
             params: vec![],
             constructors: vec![ConstructorSpec {
                 name: "Nested::mk".into(),
-                fields: vec![T::app(T::Global("Vect".into()), T::Global("Nested".into()))],
+                fields: vec![T::app(T::global("Vect"), T::global("Nested"))],
                 result: vec![],
             }],
         })
@@ -526,24 +508,16 @@ fn negative_nested_and_malformed_data_are_rejected_atomically() {
     let error = reject(
         &mut k,
         "Indexed",
-        vec![T::Universe(0)],
+        vec![T::universe(0)],
         vec![ConstructorSpec {
             name: "Indexed::mk".into(),
-            fields: vec![T::app(
-                T::Global("Indexed".into()),
-                T::Global("Indexed".into()),
-            )],
+            fields: vec![T::app(T::global("Indexed"), T::global("Indexed"))],
             result: vec![T::Var(0)],
         }],
     );
     assert!(error.0.contains("non-strictly-positive"), "{error}");
     // Self-reference in a parameter/kind.
-    let error = reject(
-        &mut k,
-        "SelfParam",
-        vec![T::Global("SelfParam".into())],
-        vec![],
-    );
+    let error = reject(&mut k, "SelfParam", vec![T::global("SelfParam")], vec![]);
     assert!(error.0.contains("own parameter"), "{error}");
     // Result arity.
     let error = reject(
@@ -565,7 +539,7 @@ fn negative_nested_and_malformed_data_are_rejected_atomically() {
         vec![ConstructorSpec {
             name: "Malformed::mk".into(),
             fields: vec![],
-            result: vec![T::Global("Vect".into())],
+            result: vec![T::global("Vect")],
         }],
     );
     assert!(error.0.contains("unknown kernel global"), "{error}");
@@ -616,10 +590,9 @@ fn empty_data_families_are_sound_and_have_zero_branches() {
     })
     .unwrap();
     assert!(k.data("Void").unwrap().constructors.is_empty());
-    let motive = T::lam(T::Global("Void".into()), T::Nat);
+    let motive = T::lam(T::global("Void"), T::Nat);
     let term = T::elim("Void", motive, vec![], T::Var(0));
-    k.check_open(&term, &T::Nat, &[T::Global("Void".into())])
-        .unwrap();
+    k.check_open(&term, &T::Nat, &[T::global("Void")]).unwrap();
 }
 
 #[test]
@@ -649,7 +622,7 @@ fn equality_elimination_j_checks_and_reduces() {
         T::Zero,
         T::Zero,
         T::lam(T::Nat, T::lam(T::eq(T::Nat, T::Zero, T::Var(0)), T::Nat)),
-        T::Universe(0),
+        T::universe(0),
         T::refl(T::Nat, T::Zero),
     );
     assert!(k.infer_closed(&bad).is_err());
@@ -687,13 +660,10 @@ fn constructor_results_may_depend_on_field_values_at_the_kernel_level() {
     })
     .unwrap();
     // mk 0 3 : Dep 3, because the result index is the field itself.
-    let value = T::app(T::app(T::Global("Dep::mk".into()), T::Zero), nat(3));
-    k.check_closed(&value, &T::app(T::Global("Dep".into()), nat(3)))
+    let value = T::app(T::app(T::global("Dep::mk"), T::Zero), nat(3));
+    k.check_closed(&value, &T::app(T::global("Dep"), nat(3)))
         .unwrap();
-    let motive = T::lam(
-        T::Nat,
-        T::lam(T::app(T::Global("Dep".into()), T::Var(0)), T::Nat),
-    );
+    let motive = T::lam(T::Nat, T::lam(T::app(T::global("Dep"), T::Var(0)), T::Nat));
     let branch = T::lam(T::Nat, T::lam(T::Nat, T::Var(0)));
     let term = T::elim("Dep", motive, vec![branch], value);
     assert_eq!(k.normalize_closed(&term).unwrap(), nat(3));
@@ -735,23 +705,23 @@ fn data_universes_are_derived_instead_of_escaping() {
         params: vec![],
         constructors: vec![ConstructorSpec {
             name: "Large::mk".into(),
-            fields: vec![T::Universe(0)],
+            fields: vec![T::universe(0)],
             result: vec![],
         }],
     })
     .unwrap();
-    assert_eq!(k.data("Large").unwrap().sort, 1);
-    k.check_closed(&T::Global("Large".into()), &T::Universe(1))
+    assert_eq!(k.data("Large").unwrap().sort, 1.into());
+    k.check_closed(&T::global("Large"), &T::universe(1))
         .unwrap();
     assert!(
-        k.check_closed(&T::Global("Large".into()), &T::Universe(0))
+        k.check_closed(&T::global("Large"), &T::universe(0))
             .is_err()
     );
     // Small data remains small even with a Type-valued index parameter.
     let mut k = Kernel::default();
     k.define_data(DataSpec {
         name: "Phantom".into(),
-        params: vec![T::Universe(0)],
+        params: vec![T::universe(0)],
         constructors: vec![ConstructorSpec {
             name: "Phantom::mk".into(),
             fields: vec![],
@@ -759,10 +729,10 @@ fn data_universes_are_derived_instead_of_escaping() {
         }],
     })
     .unwrap();
-    assert_eq!(k.data("Phantom").unwrap().sort, 0);
+    assert_eq!(k.data("Phantom").unwrap().sort, 0.into());
     k.check_closed(
-        &T::app(T::Global("Phantom::mk".into()), T::Nat),
-        &T::app(T::Global("Phantom".into()), T::Nat),
+        &T::app(T::global("Phantom::mk"), T::Nat),
+        &T::app(T::global("Phantom"), T::Nat),
     )
     .unwrap();
 }
@@ -775,6 +745,7 @@ fn fin() -> Kernel {
         name: "Fin".into(),
         params: vec![T::Nat],
         prop: false,
+        levels: 0,
         constructors: vec![
             IndexedConstructorSpec {
                 name: "Fin::fzero".into(),
@@ -785,7 +756,7 @@ fn fin() -> Kernel {
             IndexedConstructorSpec {
                 name: "Fin::fsucc".into(),
                 locals: vec![T::Nat],
-                fields: vec![T::app(T::Global("Fin".into()), T::Var(0))],
+                fields: vec![T::app(T::global("Fin"), T::Var(0))],
                 result: vec![T::succ(T::Var(1))],
             },
         ],
@@ -794,16 +765,16 @@ fn fin() -> Kernel {
     k
 }
 fn fin_fzero(n: u32, m: u32) -> T {
-    T::app(T::app(T::Global("Fin::fzero".into()), nat(n)), nat(m))
+    T::app(T::app(T::global("Fin::fzero"), nat(n)), nat(m))
 }
 fn fin_fsucc(n: u32, m: u32, pred: T) -> T {
     T::app(
-        T::app(T::app(T::Global("Fin::fsucc".into()), nat(n)), nat(m)),
+        T::app(T::app(T::global("Fin::fsucc"), nat(n)), nat(m)),
         pred,
     )
 }
 fn fin_type(n: u32) -> T {
-    T::app(T::Global("Fin".into()), nat(n))
+    T::app(T::global("Fin"), nat(n))
 }
 
 #[test]
@@ -833,10 +804,7 @@ fn constructor_local_binders_produce_finite_index_values() {
 #[test]
 fn elimination_over_constructor_local_binders_checks_and_reduces() {
     let k = fin();
-    let motive = T::lam(
-        T::Nat,
-        T::lam(T::app(T::Global("Fin".into()), T::Var(0)), T::Nat),
-    );
+    let motive = T::lam(T::Nat, T::lam(T::app(T::global("Fin"), T::Var(0)), T::Nat));
     // (N) -> (n) -> Nat
     let zero_branch = T::lam(T::Nat, T::lam(T::Nat, T::Zero));
     // (N) -> (n) -> (pred : Fin n) -> (motive n pred) -> Nat
@@ -845,7 +813,7 @@ fn elimination_over_constructor_local_binders_checks_and_reduces() {
         T::lam(
             T::Nat,
             T::lam(
-                T::app(T::Global("Fin".into()), T::Var(0)),
+                T::app(T::global("Fin"), T::Var(0)),
                 T::lam(T::Nat, T::succ(T::Var(0))),
             ),
         ),
@@ -871,7 +839,7 @@ fn elimination_over_constructor_local_binders_checks_and_reduces() {
     // Wrong motive index domain.
     let bad = T::elim(
         "Fin",
-        T::lam(T::Universe(0), T::Nat),
+        T::lam(T::universe(0), T::Nat),
         vec![],
         fin_fzero(1, 1),
     );
@@ -881,42 +849,42 @@ fn elimination_over_constructor_local_binders_checks_and_reduces() {
 #[test]
 fn prop_is_a_sort_not_a_member_of_itself_and_is_impredicative() {
     let k = Kernel::default();
-    assert_eq!(k.infer_closed(&T::Prop).unwrap(), T::Universe(0));
+    assert_eq!(k.infer_closed(&T::Prop).unwrap(), T::universe(0));
     assert!(k.check_closed(&T::Prop, &T::Prop).is_err());
     // `Prop` is a Type at level 0; it is not itself a proposition, and there
     // is no cumulativity to higher Type levels.
-    k.check_closed(&T::Prop, &T::Universe(0)).unwrap();
-    assert!(k.check_closed(&T::Prop, &T::Universe(1)).is_err());
+    k.check_closed(&T::Prop, &T::universe(0)).unwrap();
+    assert!(k.check_closed(&T::Prop, &T::universe(1)).is_err());
     // `Prop` is itself a sort/type, not a proposition: quantifying over a
     // universe and returning the sort `Prop` is a Type-level function.
     assert_eq!(
-        k.sort_closed(&T::pi(T::Universe(3), T::Prop)).unwrap(),
-        Sort::Type(4)
+        k.sort_closed(&T::pi(T::universe(3), T::Prop)).unwrap(),
+        Sort::Type(4.into())
     );
     // Prop is impredicative: quantification into an actual proposition stays
     // in Prop, regardless of the domain's universe.
     let props = true_prop();
     assert_eq!(
         props
-            .sort_closed(&T::pi(T::Universe(3), T::Global("True".into())))
+            .sort_closed(&T::pi(T::universe(3), T::global("True")))
             .unwrap(),
         Sort::Prop
     );
     assert_eq!(
         props
-            .sort_closed(&T::pi(T::Prop, T::Global("True".into())))
+            .sort_closed(&T::pi(T::Prop, T::global("True")))
             .unwrap(),
         Sort::Prop
     );
     // But predicative Type-valued quantification still raises the level.
     assert_eq!(
-        k.sort_closed(&T::pi(T::Universe(3), T::Universe(0)))
+        k.sort_closed(&T::pi(T::universe(3), T::universe(0)))
             .unwrap(),
-        Sort::Type(4)
+        Sort::Type(4.into())
     );
     assert_eq!(
-        k.sort_closed(&T::pi(T::Prop, T::Universe(0))).unwrap(),
-        Sort::Type(1)
+        k.sort_closed(&T::pi(T::Prop, T::universe(0))).unwrap(),
+        Sort::Type(1.into())
     );
 }
 
@@ -926,6 +894,7 @@ fn true_prop() -> Kernel {
         name: "True".into(),
         params: vec![],
         prop: true,
+        levels: 0,
         constructors: vec![IndexedConstructorSpec {
             name: "True::trivial".into(),
             locals: vec![],
@@ -942,6 +911,7 @@ fn two_prop() -> Kernel {
         name: "Two".into(),
         params: vec![],
         prop: true,
+        levels: 0,
         constructors: vec![
             IndexedConstructorSpec {
                 name: "Two::first".into(),
@@ -961,8 +931,9 @@ fn two_prop() -> Kernel {
     // A Type-valued family indexed by a proof.
     k.define_indexed_data(IndexedDataSpec {
         name: "Indexed".into(),
-        params: vec![T::Global("Two".into())],
+        params: vec![T::global("Two")],
         prop: false,
+        levels: 0,
         constructors: vec![IndexedConstructorSpec {
             name: "Indexed::mk".into(),
             locals: vec![],
@@ -977,8 +948,8 @@ fn two_prop() -> Kernel {
 #[test]
 fn proof_irrelevance_is_limited_to_prop_inhabitants() {
     let k = two_prop();
-    let first = T::Global("Two::first".into());
-    let second = T::Global("Two::second".into());
+    let first = T::global("Two::first");
+    let second = T::global("Two::second");
     assert!(k.proof_closed(&first).unwrap());
     assert!(k.proof_closed(&second).unwrap());
     assert!(!k.proof_closed(&T::Zero).unwrap());
@@ -989,11 +960,11 @@ fn proof_irrelevance_is_limited_to_prop_inhabitants() {
     assert!(!k.proof_closed(&T::lam(T::Nat, T::Zero)).unwrap());
     assert!(!k.proof_closed(&T::pi(T::Nat, T::Prop)).unwrap());
     // mk first : Indexed first is accepted where Indexed second is expected.
-    let mk_first = T::app(T::Global("Indexed::mk".into()), first.clone());
-    let indexed_second = T::app(T::Global("Indexed".into()), second.clone());
+    let mk_first = T::app(T::global("Indexed::mk"), first.clone());
+    let indexed_second = T::app(T::global("Indexed"), second.clone());
     k.check_closed(&mk_first, &indexed_second).unwrap();
     // But two different propositions are not interchangeable.
-    let indexed_true = T::app(T::Global("Indexed".into()), T::Global("True".into()));
+    let indexed_true = T::app(T::global("Indexed"), T::global("True"));
     assert!(k.check_closed(&mk_first, &indexed_true).is_err());
     // Type-valued indices remain distinct; Nat values are not proofs.
     let mut at = two_prop();
@@ -1001,6 +972,7 @@ fn proof_irrelevance_is_limited_to_prop_inhabitants() {
         name: "At".into(),
         params: vec![T::Nat],
         prop: false,
+        levels: 0,
         constructors: vec![IndexedConstructorSpec {
             name: "At::mk".into(),
             locals: vec![],
@@ -1009,9 +981,9 @@ fn proof_irrelevance_is_limited_to_prop_inhabitants() {
         }],
     })
     .unwrap();
-    let mk_zero = T::app(T::Global("At::mk".into()), T::Zero);
+    let mk_zero = T::app(T::global("At::mk"), T::Zero);
     assert!(
-        at.check_closed(&mk_zero, &T::app(T::Global("At".into()), nat(1)))
+        at.check_closed(&mk_zero, &T::app(T::global("At"), nat(1)))
             .is_err()
     );
 }
@@ -1019,21 +991,21 @@ fn proof_irrelevance_is_limited_to_prop_inhabitants() {
 #[test]
 fn prop_elimination_into_type_is_rejected_but_prop_motives_work() {
     let k = two_prop();
-    let first = T::Global("Two::first".into());
-    let second = T::Global("Two::second".into());
-    let type_motive = T::lam(T::Global("Two".into()), T::Nat);
+    let first = T::global("Two::first");
+    let second = T::global("Two::second");
+    let type_motive = T::lam(T::global("Two"), T::Nat);
     let term = T::elim("Two", type_motive, vec![T::Zero, nat(1)], first.clone());
     let error = k.infer_closed(&term).unwrap_err();
     assert!(error.0.contains("large elimination"), "{error}");
     // The same family can be eliminated into a proposition.
-    let true_motive = T::lam(T::Global("Two".into()), T::Global("True".into()));
-    let branch = T::Global("True::trivial".into());
+    let true_motive = T::lam(T::global("Two"), T::global("True"));
+    let branch = T::global("True::trivial");
     let term = T::elim("Two", true_motive, vec![branch.clone(), branch], first);
-    k.check_closed(&term, &T::Global("True".into())).unwrap();
+    k.check_closed(&term, &T::global("True")).unwrap();
     // Reduction still selects the constructor branch.
     assert_eq!(
         k.normalize_closed(&term).unwrap(),
-        T::Global("True::trivial".into())
+        T::global("True::trivial")
     );
     let _ = second;
 }
@@ -1047,6 +1019,7 @@ fn malformed_prop_and_local_data_declarations_are_rejected_atomically() {
             name: "BadField".into(),
             params: vec![],
             prop: true,
+            levels: 0,
             constructors: vec![IndexedConstructorSpec {
                 name: "BadField::mk".into(),
                 locals: vec![],
@@ -1063,9 +1036,10 @@ fn malformed_prop_and_local_data_declarations_are_rejected_atomically() {
             name: "BadLocal".into(),
             params: vec![],
             prop: true,
+            levels: 0,
             constructors: vec![IndexedConstructorSpec {
                 name: "BadLocal::mk".into(),
-                locals: vec![T::Global("BadLocal".into())],
+                locals: vec![T::global("BadLocal")],
                 fields: vec![],
                 result: vec![],
             }],
@@ -1079,6 +1053,7 @@ fn malformed_prop_and_local_data_declarations_are_rejected_atomically() {
             name: "BadResult".into(),
             params: vec![T::Nat],
             prop: false,
+            levels: 0,
             constructors: vec![IndexedConstructorSpec {
                 name: "BadResult::mk".into(),
                 locals: vec![],
@@ -1096,6 +1071,7 @@ fn malformed_prop_and_local_data_declarations_are_rejected_atomically() {
             name: "Duplicate".into(),
             params: vec![],
             prop: true,
+            levels: 0,
             constructors: vec![
                 IndexedConstructorSpec {
                     name: "Duplicate::mk".into(),
@@ -1123,23 +1099,20 @@ fn constructor_local_universes_raise_type_valued_families() {
         name: "Code".into(),
         params: vec![],
         prop: false,
+        levels: 0,
         constructors: vec![IndexedConstructorSpec {
             name: "Code::mk".into(),
             // The local is a type at level 0, so it can be exposed by
             // elimination and the family must not remain in Universe(0).
-            locals: vec![T::Universe(0)],
+            locals: vec![T::universe(0)],
             fields: vec![],
             result: vec![],
         }],
     })
     .unwrap();
-    assert_eq!(k.data("Code").unwrap().sort, 1);
-    k.check_closed(&T::Global("Code".into()), &T::Universe(1))
-        .unwrap();
-    assert!(
-        k.check_closed(&T::Global("Code".into()), &T::Universe(0))
-            .is_err()
-    );
+    assert_eq!(k.data("Code").unwrap().sort, 1.into());
+    k.check_closed(&T::global("Code"), &T::universe(1)).unwrap();
+    assert!(k.check_closed(&T::global("Code"), &T::universe(0)).is_err());
     // A Prop family ignores local universe levels because elimination stays
     // inside Prop.
     let mut props = Kernel::default();
@@ -1148,9 +1121,10 @@ fn constructor_local_universes_raise_type_valued_families() {
             name: "PropCode".into(),
             params: vec![],
             prop: true,
+            levels: 0,
             constructors: vec![IndexedConstructorSpec {
                 name: "PropCode::mk".into(),
-                locals: vec![T::Universe(0)],
+                locals: vec![T::universe(0)],
                 fields: vec![],
                 result: vec![],
             }],
@@ -1158,7 +1132,7 @@ fn constructor_local_universes_raise_type_valued_families() {
         .unwrap();
     assert!(props.data("PropCode").unwrap().prop);
     assert_eq!(
-        props.sort_closed(&T::Global("PropCode".into())).unwrap(),
+        props.sort_closed(&T::global("PropCode")).unwrap(),
         Sort::Prop
     );
 }
@@ -1181,9 +1155,9 @@ fn open_sort_and_proof_classification_validate_the_context() {
 fn machine_scalar_carriers_are_checked_symbolic_indices_not_proofs() {
     let k = Kernel::default();
     // Carriers are ordinary types and literals have the matching carrier.
-    assert_eq!(k.infer_closed(&T::i64_type()).unwrap(), T::Universe(0));
-    assert_eq!(k.infer_closed(&T::bool_type()).unwrap(), T::Universe(0));
-    assert_eq!(k.infer_closed(&T::unit_type()).unwrap(), T::Universe(0));
+    assert_eq!(k.infer_closed(&T::i64_type()).unwrap(), T::universe(0));
+    assert_eq!(k.infer_closed(&T::bool_type()).unwrap(), T::universe(0));
+    assert_eq!(k.infer_closed(&T::unit_type()).unwrap(), T::universe(0));
     assert_eq!(k.infer_closed(&T::i64(i64::MIN)).unwrap(), T::i64_type());
     assert_eq!(k.infer_closed(&T::i64(i64::MAX)).unwrap(), T::i64_type());
     assert_eq!(k.infer_closed(&T::boolean(true)).unwrap(), T::bool_type());
@@ -1194,7 +1168,7 @@ fn machine_scalar_carriers_are_checked_symbolic_indices_not_proofs() {
     assert_eq!(
         k.sort_closed(&T::eq(T::i64_type(), T::i64(3), T::i64(3)))
             .unwrap(),
-        kush::kernel::Sort::Type(0)
+        kush::kernel::Sort::Type(0.into())
     );
     let proof = T::refl(T::i64_type(), T::i64(3));
     k.check_closed(&proof, &T::eq(T::i64_type(), T::i64(3), T::i64(3)))
@@ -1232,4 +1206,152 @@ fn machine_scalar_carriers_are_checked_symbolic_indices_not_proofs() {
     );
     // A scalar value is not a valid hypothesis type either.
     assert!(k.sort_open(&T::Prop, &[T::i64(1)]).is_err());
+}
+
+#[test]
+fn functions_are_convertible_up_to_eta() {
+    let k = Kernel::default();
+    let arrow = T::pi(T::Nat, T::Nat);
+    // f : Nat -> Nat ⊢ refl(f) : Eq(Nat -> Nat, λx. f x, f), in both orders.
+    let eta = T::lam(T::Nat, T::app(T::Var(1), T::Var(0)));
+    let context = vec![arrow.clone()];
+    for (left, right) in [(eta.clone(), T::Var(0)), (T::Var(0), eta.clone())] {
+        k.check_open(
+            &T::refl(arrow.clone(), T::Var(0)),
+            &T::eq(arrow.clone(), left, right),
+            &context,
+        )
+        .unwrap();
+    }
+    // Nested: λx. λy. g x y ≡ g for g : Nat -> Nat -> Nat.
+    let binary = T::pi(T::Nat, T::pi(T::Nat, T::Nat));
+    let nested = T::lam(
+        T::Nat,
+        T::lam(T::Nat, T::app(T::app(T::Var(2), T::Var(1)), T::Var(0))),
+    );
+    k.check_open(
+        &T::refl(binary.clone(), T::Var(0)),
+        &T::eq(binary.clone(), nested, T::Var(0)),
+        std::slice::from_ref(&binary),
+    )
+    .unwrap();
+    // Eta through a global: λx. succ' x ≡ succ' for a defined function.
+    let mut k = Kernel::default();
+    k.define(
+        "succ'".into(),
+        arrow.clone(),
+        T::lam(T::Nat, T::succ(T::Var(0))),
+    )
+    .unwrap();
+    let global = T::global("succ'");
+    k.check_closed(
+        &T::refl(arrow.clone(), global.clone()),
+        &T::eq(
+            arrow.clone(),
+            T::lam(T::Nat, T::app(global.clone(), T::Var(0))),
+            global,
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn eta_does_not_identify_different_functions() {
+    let k = Kernel::default();
+    let arrow = T::pi(T::Nat, T::Nat);
+    let context = vec![arrow.clone(), arrow.clone()];
+    // Context: f = Var(1), g = Var(0); under one more binder f = Var(2).
+    // λx. f x is not g, λx. f (succ x) is not f, and λx. f (f x) is not f.
+    for (left, right) in [
+        (T::lam(T::Nat, T::app(T::Var(2), T::Var(0))), T::Var(0)),
+        (
+            T::lam(T::Nat, T::app(T::Var(2), T::succ(T::Var(0)))),
+            T::Var(1),
+        ),
+        (
+            T::lam(T::Nat, T::app(T::Var(2), T::app(T::Var(2), T::Var(0)))),
+            T::Var(1),
+        ),
+    ] {
+        // Both sides are well-typed, so only conversion can fail.
+        k.check_open(&left, &arrow, &context).unwrap();
+        assert!(
+            k.check_open(
+                &T::refl(arrow.clone(), left.clone()),
+                &T::eq(arrow.clone(), left.clone(), right.clone()),
+                &context,
+            )
+            .is_err(),
+            "{left:?} ~ {right:?}"
+        );
+    }
+}
+
+#[test]
+fn deep_terms_grow_the_stack_instead_of_overflowing_it() {
+    // A test thread has a 2 MiB stack; these recurse tens of thousands of
+    // levels deep, so the kernel must continue on stacks of its own.
+    let k = Kernel::default();
+    let unary = (0..60_000).fold(T::Zero, |n, _| T::succ(n));
+    assert_eq!(k.normalize_closed(&unary).unwrap(), nat(60_000));
+    let count = T::NatElim {
+        motive: Box::new(T::lam(T::Nat, T::Nat)),
+        zero: Box::new(T::Zero),
+        step: Box::new(T::lam(T::Nat, T::lam(T::Nat, T::succ(T::Var(0))))),
+        value: Box::new(nat(20_000)),
+    };
+    assert_eq!(k.normalize_closed(&count).unwrap(), nat(20_000));
+    // The nesting cap still turns a pathological depth into an error.
+    let shallow = Kernel::new(Limits {
+        steps: 100_000_000,
+        depth: 1_000,
+    });
+    assert!(
+        shallow
+            .normalize_closed(&unary)
+            .unwrap_err()
+            .0
+            .contains("nesting")
+    );
+}
+
+#[test]
+#[ignore = "measurement: cargo test --release -- --ignored kernel_throughput --nocapture"]
+fn kernel_throughput() {
+    let k = Kernel::new(Limits {
+        steps: usize::MAX,
+        depth: 1_000_000,
+    });
+    let count = T::NatElim {
+        motive: Box::new(T::lam(T::Nat, T::Nat)),
+        zero: Box::new(T::Zero),
+        step: Box::new(T::lam(T::Nat, T::lam(T::Nat, T::succ(T::Var(0))))),
+        value: Box::new(nat(100_000)),
+    };
+    let start = std::time::Instant::now();
+    k.normalize_closed(&count).unwrap();
+    let elapsed = start.elapsed();
+    let mut budget = Kernel::new(Limits {
+        steps: 1,
+        depth: 1_000_000,
+    });
+    // Find the steps it used by bisection on the budget.
+    let (mut low, mut high) = (1usize, 1usize << 40);
+    while low < high {
+        let mid = (low + high) / 2;
+        budget = Kernel::new(Limits {
+            steps: mid,
+            depth: 1_000_000,
+        });
+        if budget.normalize_closed(&count).is_ok() {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    let _ = budget;
+    eprintln!(
+        "{low} steps in {elapsed:?}: {:.1} M steps/s",
+        low as f64 / elapsed.as_secs_f64() / 1e6
+    );
 }

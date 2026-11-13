@@ -3,7 +3,7 @@
 use crate::{
     Diagnostic, Span,
     ast::*,
-    kernel::{Kernel, Scalar, Term},
+    kernel::{Kernel, Level, Scalar, Term},
     lexer::Kind,
     parse,
     resolve::{self, BindingId, BindingKind, Resolution},
@@ -30,10 +30,19 @@ pub(crate) struct LogicalEnvironment {
     /// Number of constructors per admitted logical data family.
     pub constructor_counts: BTreeMap<BindingId, usize>,
     pub nullary: BTreeMap<BindingId, usize>,
+    /// Universe parameter count of each polymorphic logical declaration
+    /// (absent means monomorphic). A constructor uses its family's count.
+    pub levels: BTreeMap<BindingId, u32>,
     pub definitions: Vec<String>,
 }
 
 pub fn check(source: &str) -> Result<CheckedModule> {
+    // The whole pass runs on one large stack, so deep kernel recursion never
+    // has to move between stacks (see `kernel::on_kernel_stack`).
+    crate::kernel::on_kernel_stack(|| check_on_kernel_stack(source))
+}
+
+fn check_on_kernel_stack(source: &str) -> Result<CheckedModule> {
     let module = parse(source)?;
     let resolution = resolve::resolve(&module)?;
     // Reject unimplemented features before admitting *any* source definitions.
@@ -605,7 +614,16 @@ fn logical_type(
                 BindingKind::Builtin => {
                     matches!(
                         binding.name.as_str(),
-                        "Type" | "Nat" | "Eq" | "Prop" | "i64" | "Bool" | "Unit"
+                        "Type"
+                            | "Nat"
+                            | "Eq"
+                            | "Prop"
+                            | "i64"
+                            | "Bool"
+                            | "Unit"
+                            | "Level"
+                            | "Level.succ"
+                            | "Level.max"
                     )
                 }
                 BindingKind::Generic => true,
@@ -657,13 +675,48 @@ fn logical_data_ids(module: &Module, resolution: &Resolution) -> BTreeSet<Bindin
 }
 
 /// Reject declarations that are not part of the trusted logical fragment.
+/// The step budget a logical declaration asks for with
+/// `#[kernel_steps(N)]`, if any. Rejects a malformed or repeated attribute.
+pub(crate) fn kernel_steps(declaration: &Declaration) -> Result<Option<usize>> {
+    let mut steps = None;
+    for attribute in &declaration.attributes {
+        if attribute.kind != "kernel_steps" {
+            continue;
+        }
+        if steps.is_some() {
+            return Err(Diagnostic::new(
+                attribute.span,
+                "#[kernel_steps(N)] may appear once per declaration",
+            ));
+        }
+        let value = attribute
+            .argument
+            .as_deref()
+            .and_then(|text| text.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    attribute.span,
+                    "#[kernel_steps(N)] takes a positive integer step budget",
+                )
+            })?;
+        steps = Some(value);
+    }
+    Ok(steps)
+}
+
 fn validate(declaration: &Declaration) -> Result<()> {
-    if !declaration.attributes.is_empty() {
+    if let Some(attribute) = declaration
+        .attributes
+        .iter()
+        .find(|attribute| attribute.kind != "kernel_steps")
+    {
         return Err(Diagnostic::new(
-            declaration.attributes[0].span,
-            "attributes/resource contracts are not supported by logical checking yet",
+            attribute.span,
+            "logical declarations support only #[kernel_steps(N)]; other attributes and resource contracts are not supported by logical checking",
         ));
     }
+    kernel_steps(declaration)?;
     match &declaration.item.kind {
         ItemKind::Module(_) => Ok(()),
         ItemKind::Function(f) if !f.total => Err(Diagnostic::new(
@@ -696,6 +749,18 @@ fn validate(declaration: &Declaration) -> Result<()> {
             "logical checking supports total functions, type aliases, and total logical data declarations only",
         )),
     }
+}
+
+/// Whether a generic binds a universe level (`<u: Level>`).
+fn level_bound(resolution: &Resolution, generic: &Generic) -> bool {
+    let Some(bound) = &generic.bound else {
+        return false;
+    };
+    matches!(&bound.kind, TypeKind::Named { arguments, .. } if arguments.is_empty())
+        && resolution.reference(bound.span).is_some_and(|id| {
+            let binding = &resolution.bindings[id];
+            binding.kind == BindingKind::Builtin && binding.name == "Level"
+        })
 }
 
 fn check_selected(
@@ -806,10 +871,36 @@ fn check_selected(
         }
         constructor_counts.insert(*id, count);
     }
+    let mut levels = BTreeMap::new();
+    for id in selected {
+        let generics = match declarations.get(id).map(|d| &d.item.kind) {
+            Some(ItemKind::Function(f)) => f.generics.as_slice(),
+            Some(ItemKind::Alias { generics, .. })
+            | Some(ItemKind::Enum { generics, .. })
+            | Some(ItemKind::Prop { generics, .. }) => generics.as_slice(),
+            _ => continue,
+        };
+        let count = generics
+            .iter()
+            .take_while(|generic| level_bound(resolution, generic))
+            .count();
+        if count > 0 {
+            levels.insert(*id, count as u32);
+        }
+    }
     let mut kernel = Kernel::default();
     let mut definitions = Vec::new();
     for id in order {
         let declaration = declarations[&id];
+        let own_levels = levels.get(&id).copied().unwrap_or(0);
+        kernel.set_level_scope(own_levels);
+        // A raised step budget applies to this declaration only, including
+        // the kernel queries its elaboration makes.
+        let steps = kernel_steps(declaration)?;
+        kernel.set_limits(crate::kernel::Limits {
+            steps: steps.unwrap_or(crate::kernel::DEFAULT_STEPS),
+            depth: crate::kernel::DEFAULT_DEPTH,
+        });
         let mut elaborator = Elaborator {
             resolution,
             kernel: &kernel,
@@ -818,6 +909,8 @@ fn check_selected(
             constructors: &constructors,
             constructor_counts: &constructor_counts,
             nullary: &nullary,
+            levels: &levels,
+            level_params: Vec::new(),
             aliases: &EMPTY_ALIASES,
             literals: &EMPTY_LITERALS,
             locals: Vec::new(),
@@ -834,6 +927,7 @@ fn check_selected(
             } => {
                 debug_assert_eq!(name, data[&id]);
                 let spec = elaborator.data(id, &name, generics, variants, false)?;
+                kernel.set_level_scope(0);
                 kernel.define_indexed_data(spec).map_err(|e| {
                     Diagnostic::new(
                         declaration.item.span,
@@ -848,6 +942,7 @@ fn check_selected(
             } => {
                 debug_assert_eq!(name, data[&id]);
                 let spec = elaborator.data(id, &name, generics, variants, true)?;
+                kernel.set_level_scope(0);
                 kernel.define_indexed_data(spec).map_err(|e| {
                     Diagnostic::new(
                         declaration.item.span,
@@ -863,7 +958,7 @@ fn check_selected(
         let (ty, value) = match &declaration.item.kind {
             ItemKind::Function(f) => elaborator.function(f)?,
             ItemKind::Alias { generics, ty, .. } => {
-                let domains = elaborator.generics(generics)?;
+                let domains = elaborator.generics(generics, true)?;
                 let mut value = elaborator.ty(ty)?;
                 for domain in domains.iter().rev() {
                     value = Term::lam(domain.clone(), value);
@@ -888,11 +983,13 @@ fn check_selected(
             }
             _ => unreachable!(),
         };
+        kernel.set_level_scope(0);
         kernel
-            .define(name.clone(), ty, value)
+            .define_polymorphic(name.clone(), own_levels, ty, value)
             .map_err(|e| Diagnostic::new(declaration.item.span, format!("in '{name}': {e}")))?;
         definitions.push(name);
     }
+    kernel.set_limits(crate::kernel::Limits::default());
     Ok(LogicalEnvironment {
         kernel,
         names,
@@ -900,6 +997,7 @@ fn check_selected(
         constructors,
         constructor_counts,
         nullary,
+        levels,
         definitions,
     })
 }
@@ -958,6 +1056,10 @@ struct Elaborator<'a> {
     constructors: &'a BTreeMap<BindingId, String>,
     constructor_counts: &'a BTreeMap<BindingId, usize>,
     nullary: &'a BTreeMap<BindingId, usize>,
+    /// Universe parameter counts of polymorphic declarations.
+    levels: &'a BTreeMap<BindingId, u32>,
+    /// The current declaration's level generics; position is the parameter.
+    level_params: Vec<BindingId>,
     locals: Vec<Option<BindingId>>,
     /// Symbolic scalar bindings introduced as by-value aliases of an earlier
     /// binder. The value is the absolute outer-to-inner position in `locals`,
@@ -1015,6 +1117,98 @@ impl Elaborator<'_> {
             _ => None,
         })
     }
+    /// Elaborate a universe level: a literal, a level generic of the current
+    /// declaration, `Level.succ<l>` or `Level.max<a, b>`.
+    fn level(&mut self, ty: &Type) -> Result<Level> {
+        let expected = "expected a universe level: a literal, a level generic, Level.succ<l>, or Level.max<a, b>";
+        match &ty.kind {
+            TypeKind::Integer(value) => value
+                .parse::<u32>()
+                .ok()
+                .filter(|level| *level <= 255)
+                .map(Level::constant)
+                .ok_or_else(|| {
+                    Diagnostic::new(ty.span, "surface universe levels must be in 0..255")
+                }),
+            TypeKind::Named { arguments, .. } => {
+                let id = self
+                    .resolution
+                    .reference(ty.span)
+                    .ok_or_else(|| Diagnostic::new(ty.span, expected))?;
+                if let Some(position) = self.level_params.iter().position(|param| *param == id) {
+                    if !arguments.is_empty() {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            "a universe level takes no arguments",
+                        ));
+                    }
+                    return Ok(Level::param(position as u32));
+                }
+                let binding = &self.resolution.bindings[id];
+                let level = match (binding.kind, binding.name.as_str(), arguments.as_slice()) {
+                    (BindingKind::Builtin, "Level.succ", [inner]) => self
+                        .level(inner)?
+                        .succ()
+                        .map_err(|e| Diagnostic::new(ty.span, e.to_string()))?,
+                    (BindingKind::Builtin, "Level.max", [left, right]) => {
+                        self.level(left)?.max(&self.level(right)?)
+                    }
+                    _ => return Err(Diagnostic::new(ty.span, expected)),
+                };
+                Ok(level)
+            }
+            _ => Err(Diagnostic::new(ty.span, expected)),
+        }
+    }
+    /// A reference applied to arguments. A universe-polymorphic global takes
+    /// its level arguments first; they are consumed here and the remaining
+    /// arguments are returned for ordinary application.
+    fn applied_reference<'t>(
+        &mut self,
+        span: Span,
+        arguments: &'t [Type],
+    ) -> Result<(Term, &'t [Type])> {
+        let mut term = self.reference(span)?;
+        let Some(id) = self.resolution.reference(span) else {
+            return Ok((term, arguments));
+        };
+        let binding = &self.resolution.bindings[id];
+        let owner = match binding.kind {
+            BindingKind::Constructor => binding.owner,
+            BindingKind::Function | BindingKind::Alias | BindingKind::Data => Some(id),
+            _ => None,
+        };
+        let count = owner
+            .and_then(|owner| self.levels.get(&owner))
+            .copied()
+            .unwrap_or(0) as usize;
+        if count == 0 {
+            return Ok((term, arguments));
+        }
+        if arguments.len() < count {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "'{}' is universe polymorphic: pass its {count} universe level argument(s) first",
+                    binding.name
+                ),
+            ));
+        }
+        let levels = arguments[..count]
+            .iter()
+            .map(|argument| self.level(argument))
+            .collect::<Result<Vec<_>>>()?;
+        match &mut term {
+            Term::Global(_, slot) => *slot = levels,
+            _ => {
+                return Err(Diagnostic::new(
+                    span,
+                    "internal error: polymorphic reference is not a global",
+                ));
+            }
+        }
+        Ok((term, &arguments[count..]))
+    }
     fn reference(&self, span: Span) -> Result<Term> {
         let id = self.resolution.reference(span).ok_or_else(|| {
             Diagnostic::new(
@@ -1022,6 +1216,12 @@ impl Elaborator<'_> {
                 "dependent member projection is not supported by logical checking yet",
             )
         })?;
+        if self.level_params.contains(&id) {
+            return Err(Diagnostic::new(
+                span,
+                "a universe level can only appear in Type<...> or as a universe argument",
+            ));
+        }
         if let Some(term) = self.literals.get(&id) {
             return Ok(term.clone());
         }
@@ -1072,7 +1272,7 @@ impl Elaborator<'_> {
             BindingKind::Function | BindingKind::Alias => self
                 .names
                 .get(&id)
-                .map(|name| Term::Global(name.clone()))
+                .map(|name| Term::global(name.clone()))
                 .ok_or_else(|| {
                     Diagnostic::new(
                         span,
@@ -1083,7 +1283,7 @@ impl Elaborator<'_> {
                     )
                 }),
             BindingKind::Builtin => match binding.name.as_str() {
-                "Type" => Ok(Term::Universe(0)),
+                "Type" => Ok(Term::universe(0)),
                 "Prop" => Ok(Term::Prop),
                 "Nat" => Ok(Term::Nat),
                 "i64" => Ok(Term::i64_type()),
@@ -1092,7 +1292,7 @@ impl Elaborator<'_> {
                 "Nat.zero" => Ok(Term::Zero),
                 "Nat.succ" => Ok(Term::lam(Term::Nat, Term::succ(Term::Var(0)))),
                 "Eq" => Ok(Term::lam(
-                    Term::Universe(0),
+                    Term::universe(0),
                     Term::lam(
                         Term::Var(0),
                         Term::lam(
@@ -1102,7 +1302,7 @@ impl Elaborator<'_> {
                     ),
                 )),
                 "refl" => Ok(Term::lam(
-                    Term::Universe(0),
+                    Term::universe(0),
                     Term::lam(Term::Var(0), Term::refl(Term::Var(1), Term::Var(0))),
                 )),
                 "Nat.induct" | "Eq.transport" | "Eq.elim" | "Data.elim" => Err(Diagnostic::new(
@@ -1120,7 +1320,7 @@ impl Elaborator<'_> {
             BindingKind::Data => self
                 .data
                 .get(&id)
-                .map(|name| Term::Global(name.clone()))
+                .map(|name| Term::global(name.clone()))
                 .ok_or_else(|| {
                     Diagnostic::new(
                         span,
@@ -1133,7 +1333,7 @@ impl Elaborator<'_> {
             BindingKind::Constructor => self
                 .constructors
                 .get(&id)
-                .map(|name| Term::Global(name.clone()))
+                .map(|name| Term::global(name.clone()))
                 .ok_or_else(|| {
                     Diagnostic::new(
                         span,
@@ -1164,9 +1364,28 @@ impl Elaborator<'_> {
             .map(Term::natural)
             .map_err(|e: crate::natural::Error| Diagnostic::new(span, e.to_string()))
     }
-    fn generics(&mut self, generics: &[Generic]) -> Result<Vec<Term>> {
+    fn generics(&mut self, generics: &[Generic], levels_allowed: bool) -> Result<Vec<Term>> {
         let mut domains = Vec::new();
         for generic in generics {
+            if level_bound(self.resolution, generic) {
+                if !levels_allowed {
+                    return Err(Diagnostic::new(
+                        generic.span,
+                        "universe level generics belong to the declaration, not to a constructor",
+                    ));
+                }
+                if !domains.is_empty() {
+                    return Err(Diagnostic::new(
+                        generic.span,
+                        "universe level generics must come before every other generic",
+                    ));
+                }
+                let id = self.resolution.binder(generic.span).ok_or_else(|| {
+                    Diagnostic::new(generic.span, "internal error: unresolved level binder")
+                })?;
+                self.level_params.push(id);
+                continue;
+            }
             if let Some(excludes) = &generic.excludes {
                 return Err(Diagnostic::new(
                     excludes.span,
@@ -1181,7 +1400,7 @@ impl Elaborator<'_> {
             }
             let domain = match &generic.bound {
                 Some(bound) => self.ty(bound)?,
-                None => Term::Universe(0),
+                None => Term::universe(0),
             };
             domains.push(domain.clone());
             self.bind_ty(generic.span, domain)?;
@@ -1189,14 +1408,14 @@ impl Elaborator<'_> {
         Ok(domains)
     }
     fn function(&mut self, f: &Function) -> Result<(Term, Term)> {
-        let mut domains = self.generics(&f.generics)?;
+        let mut domains = self.generics(&f.generics, true)?;
         for parameter in &f.parameters {
             let domain = self.ty(&parameter.ty)?;
             domains.push(domain.clone());
             self.bind_ty(parameter.span, domain)?;
         }
         let mut ty = self.ty(&f.result)?;
-        let mut value = self.block(f.body.as_ref().expect("validated body"))?;
+        let mut value = self.block_expected(f.body.as_ref().expect("validated body"), Some(&ty))?;
         for domain in domains.into_iter().rev() {
             ty = Term::pi(domain.clone(), ty);
             value = Term::lam(domain, value);
@@ -1234,12 +1453,17 @@ impl Elaborator<'_> {
         carriers: &[Option<Term>],
         ty: &Type,
     ) -> Result<Term> {
+        let own_levels = self.level_params.len();
         if let TypeKind::Named { arguments, .. } = &ty.kind
             && self.resolution.reference(ty.span) == Some(id)
-            && arguments.len() == arity
+            && arguments.len() == own_levels + arity
         {
-            let mut term = Term::Global(name.to_owned());
-            for (argument, carrier) in arguments.iter().zip(carriers) {
+            let levels = arguments[..own_levels]
+                .iter()
+                .map(|argument| self.level(argument))
+                .collect::<Result<Vec<_>>>()?;
+            let mut term = Term::Global(name.to_owned(), levels);
+            for (argument, carrier) in arguments[own_levels..].iter().zip(carriers) {
                 term = Term::app(term, self.ty_expected(argument, carrier.as_ref())?);
             }
             return Ok(term);
@@ -1259,8 +1483,9 @@ impl Elaborator<'_> {
         prop: bool,
     ) -> Result<crate::kernel::IndexedDataSpec> {
         let param_base = self.locals.len();
-        let params = self.generics(generics)?;
-        let arity = generics.len();
+        let params = self.generics(generics, true)?;
+        let own_levels = self.level_params.len();
+        let arity = params.len();
         // The declared carrier of each family index, when it is an admitted
         // machine scalar. Constructor result indices use it to interpret
         // literals such as `IsZeroI<0>` as `i64` rather than mathematical `Nat`.
@@ -1273,7 +1498,7 @@ impl Elaborator<'_> {
         let mut constructors = Vec::with_capacity(variants.len());
         for variant in variants {
             let base = self.locals.len();
-            let locals = self.generics(&variant.locals)?;
+            let locals = self.generics(&variant.locals, false)?;
             let mut fields = Vec::new();
             match &variant.payload {
                 Payload::Unit => {}
@@ -1323,16 +1548,34 @@ impl Elaborator<'_> {
                             "a constructor result must name its own declared total data family or proposition",
                         ));
                     }
-                    if arguments.len() != arity {
+                    if arguments.len() != own_levels + arity {
                         return Err(Diagnostic::new(
                             ty.span,
-                            format!(
-                                "constructor result for '{}' expects {arity} index arguments, found {}",
-                                variant.name,
-                                arguments.len()
-                            ),
+                            if own_levels == 0 {
+                                format!(
+                                    "constructor result for '{}' expects {arity} index arguments, found {}",
+                                    variant.name,
+                                    arguments.len()
+                                )
+                            } else {
+                                format!(
+                                    "constructor result for '{}' expects {} arguments ({own_levels} universe levels, then {arity} indices), found {}",
+                                    variant.name,
+                                    own_levels + arity,
+                                    arguments.len()
+                                )
+                            },
                         ));
                     }
+                    for (index, argument) in arguments[..own_levels].iter().enumerate() {
+                        if self.level(argument)? != Level::param(index as u32) {
+                            return Err(Diagnostic::new(
+                                argument.span,
+                                "a constructor result must use the family at its own universe levels, in order",
+                            ));
+                        }
+                    }
+                    let arguments = &arguments[own_levels..];
                     let mut result = Vec::with_capacity(arguments.len());
                     for (index, argument) in arguments.iter().enumerate() {
                         result.push(self.ty_expected(argument, param_carriers[index].as_ref())?);
@@ -1360,6 +1603,7 @@ impl Elaborator<'_> {
             params,
             constructors,
             prop,
+            levels: own_levels as u32,
         })
     }
     /// The machine carrier an expected kernel type denotes, if any. A literal
@@ -1404,12 +1648,10 @@ impl Elaborator<'_> {
                 if binding.kind == BindingKind::Builtin {
                     match binding.name.as_str() {
                         "Type" if !arguments.is_empty() => {
-                            if let [Node { kind: TypeKind::Integer(level), .. }] = arguments.as_slice() {
-                                let level = level.parse::<u32>().ok().filter(|level| *level <= 255)
-                                    .ok_or_else(|| Diagnostic::new(ty.span, "surface universe levels must be in 0..255"))?;
-                                return Ok(Term::Universe(level));
+                            if let [level] = arguments.as_slice() {
+                                return Ok(Term::Universe(e.level(level)?));
                             }
-                            return Err(Diagnostic::new(ty.span, "Type expects one literal universe level"));
+                            return Err(Diagnostic::new(ty.span, "Type expects one universe level"));
                         }
                         // Equality is built directly so the carrier may be a
                         // Type at any level, a proposition, or an admitted
@@ -1431,13 +1673,13 @@ impl Elaborator<'_> {
                         _ => {}
                     }
                 }
-                let mut term = e.reference(ty.span)?;
+                let (mut term, arguments) = e.applied_reference(ty.span, arguments)?;
                 // A fully applied data family's parameter carriers are known
                 // from its admitted declaration. This avoids needing the whole
                 // surrounding context to be admitted while the current family
                 // is still being defined, and keeps literals correctly typed
                 // after a recursive field.
-                if let Term::Global(name) = &term
+                if let Term::Global(name, _) = &term
                     && let Some(info) = e.kernel.data(name).cloned()
                     && info.params.len() == arguments.len()
                 {
@@ -1490,7 +1732,127 @@ impl Elaborator<'_> {
             _ => Err(Diagnostic::new(ty.span, "this type form is not supported by logical checking yet (borrows, grades, unions, tuples, and slices are deferred)")),
         })
     }
+    fn shift(&self, term: &Term, amount: usize) -> Result<Term> {
+        self.kernel
+            .shift_open(term, amount)
+            .map_err(|e| Diagnostic::new(Span::default(), e.to_string()))
+    }
+    /// `(i1 : I1) -> ... -> D i1 .. ik -> Sort` for an admitted family (its
+    /// universe parameters at level 0): the expected type of a `Data.elim`
+    /// motive, used only to supply lambda parameter types.
+    fn data_motive_type(&self, name: &str) -> Option<Term> {
+        let info = self.kernel.data(name)?;
+        if info.levels > 0 {
+            return None;
+        }
+        let k = info.params.len();
+        let mut family = Term::global(name);
+        for index in (0..k).rev() {
+            family = Term::app(family, Term::Var(index));
+        }
+        let mut ty = Term::pi(family, Term::universe(0));
+        for param in info.params.iter().rev() {
+            ty = Term::pi(param.clone(), ty);
+        }
+        Some(ty)
+    }
+    /// A logical lambda `fn(x: A, y: B) -> R { body }` elaborates to nested
+    /// kernel lambdas. A parameter without a type takes the domain of the
+    /// expected function type (a typed parameter, an argument position, a
+    /// motive or step of an eliminator); otherwise it needs an annotation. A
+    /// written result type is checked against the body. The effect row must
+    /// be empty or omitted: a logical lambda is a total function.
+    fn lambda(&mut self, lambda: &Lambda, expected: Option<&Term>, span: Span) -> Result<Term> {
+        if lambda
+            .effects
+            .iter()
+            .any(|effect| !matches!(effect.kind, TypeKind::Infer))
+        {
+            return Err(Diagnostic::new(
+                span,
+                "logical lambdas require an empty effect row",
+            ));
+        }
+        if lambda.parameters.is_empty() {
+            return Err(Diagnostic::new(
+                span,
+                "a logical lambda needs at least one parameter",
+            ));
+        }
+        // The expected type, reduced, so its binders can supply domains.
+        let mut expected = match expected {
+            Some(ty) => self.kernel.normalize_open(ty, &self.local_types).ok(),
+            None => None,
+        };
+        let old_len = self.locals.len();
+        let mut domains = Vec::new();
+        let result = (|| {
+            for parameter in &lambda.parameters {
+                if parameter.erased {
+                    return Err(Diagnostic::new(
+                        parameter.span,
+                        "logical lambda parameters cannot be erased; every logical binder is already erased",
+                    ));
+                }
+                let from_expected = match expected.take() {
+                    Some(Term::Pi { domain, codomain }) => {
+                        expected = Some(*codomain);
+                        Some(*domain)
+                    }
+                    _ => None,
+                };
+                let domain = match (&parameter.ty.kind, from_expected) {
+                    (TypeKind::Infer, Some(domain)) => domain,
+                    (TypeKind::Infer, None) => {
+                        return Err(Diagnostic::new(
+                            parameter.span,
+                            format!(
+                                "annotate the type of lambda parameter '{}': no expected function type supplies it",
+                                parameter.name
+                            ),
+                        ));
+                    }
+                    _ => self.ty(&parameter.ty)?,
+                };
+                domains.push(domain.clone());
+                self.bind_ty(parameter.span, domain)?;
+            }
+            let declared = if matches!(lambda.result.kind, TypeKind::Infer) {
+                None
+            } else {
+                Some(self.ty(&lambda.result)?)
+            };
+            let body =
+                self.block_expected(&lambda.body, declared.as_ref().or(expected.as_ref()))?;
+            if let Some(declared) = declared {
+                self.kernel
+                    .check_open(&body, &declared, &self.local_types)
+                    .map_err(|error| {
+                        Diagnostic::new(
+                            lambda.result.span,
+                            format!(
+                                "the lambda body does not have its declared result type: {error}"
+                            ),
+                        )
+                    })?;
+            }
+            Ok(body)
+        })();
+        self.locals.truncate(old_len);
+        self.local_types.truncate(old_len);
+        let mut term = result?;
+        for domain in domains.into_iter().rev() {
+            term = Term::lam(domain, term);
+        }
+        Ok(term)
+    }
     fn block(&mut self, block: &Block) -> Result<Term> {
+        self.block_expected(block, None)
+    }
+    /// A block whose value is expected to have type `expected` (relative to
+    /// the context before the block), when known: the tail sees it shifted
+    /// under the block's let bindings.
+    fn block_expected(&mut self, block: &Block, expected: Option<&Term>) -> Result<Term> {
         self.nested(block.span, |e| {
             let old_len = e.locals.len();
             let mut bindings = Vec::new();
@@ -1502,12 +1864,17 @@ impl Elaborator<'_> {
                     return Err(Diagnostic::new(pattern.span, "logical let bindings require a single name"));
                 }
                 let domain = e.ty(ty)?;
-                let value = e.expr(value)?;
+                let value = e.expr_expected(value, Some(&domain))?;
                 e.bind_ty(pattern.span, domain.clone())?;
                 bindings.push((domain, value));
             }
             let tail = block.tail.as_ref().ok_or_else(|| Diagnostic::new(block.span, "logical blocks require a tail expression"))?;
-            let mut term = e.expr(tail)?;
+            let expected = match expected {
+                Some(ty) if !bindings.is_empty() => e.shift(ty, bindings.len()).ok(),
+                Some(ty) => Some(ty.clone()),
+                None => None,
+            };
+            let mut term = e.expr_expected(tail, expected.as_ref())?;
             for (domain, value) in bindings.into_iter().rev() { term = Term::app(Term::lam(domain, term), value); }
             e.locals.truncate(old_len);
             e.local_types.truncate(old_len);
@@ -1564,10 +1931,21 @@ impl Elaborator<'_> {
                         "Nat.induct expects no generic arguments and exactly four values: motive, zero, step, value",
                     ));
                 }
+                // Expected types let lambda arguments omit parameter types;
+                // the codomain sorts are placeholders the kernel never sees.
+                let motive_type = Term::pi(Term::Nat, Term::universe(0));
+                let motive = self.expr_expected(&arguments[0], Some(&motive_type))?;
+                let step_type = Term::pi(
+                    Term::Nat,
+                    Term::pi(
+                        Term::app(self.shift(&motive, 1)?, Term::Var(0)),
+                        Term::app(self.shift(&motive, 2)?, Term::succ(Term::Var(1))),
+                    ),
+                );
                 Ok(Some(Term::NatElim {
-                    motive: Box::new(self.expr(&arguments[0])?),
+                    motive: Box::new(motive),
                     zero: Box::new(self.expr(&arguments[1])?),
-                    step: Box::new(self.expr(&arguments[2])?),
+                    step: Box::new(self.expr_expected(&arguments[2], Some(&step_type))?),
                     value: Box::new(self.expr(&arguments[3])?),
                 }))
             }
@@ -1579,11 +1957,12 @@ impl Elaborator<'_> {
                     ));
                 }
                 let carrier = self.ty(&types[0])?;
+                let motive_type = Term::pi(carrier.clone(), Term::universe(0));
                 Ok(Some(Term::Transport {
                     ty: Box::new(carrier.clone()),
                     from: Box::new(self.expr_expected(&arguments[0], Some(&carrier))?),
                     to: Box::new(self.expr_expected(&arguments[1], Some(&carrier))?),
-                    motive: Box::new(self.expr(&arguments[2])?),
+                    motive: Box::new(self.expr_expected(&arguments[2], Some(&motive_type))?),
                     proof: Box::new(self.expr(&arguments[3])?),
                     value: Box::new(self.expr(&arguments[4])?),
                 }))
@@ -1596,11 +1975,24 @@ impl Elaborator<'_> {
                     ));
                 }
                 let carrier = self.ty(&types[0])?;
+                let left = self.expr_expected(&arguments[0], Some(&carrier))?;
+                // motive : (y : T) -> Eq<T, left, y> -> Sort
+                let motive_type = Term::pi(
+                    carrier.clone(),
+                    Term::pi(
+                        Term::eq(
+                            self.shift(&carrier, 1)?,
+                            self.shift(&left, 1)?,
+                            Term::Var(0),
+                        ),
+                        Term::universe(0),
+                    ),
+                );
                 Ok(Some(Term::eq_elim(
                     carrier.clone(),
-                    self.expr_expected(&arguments[0], Some(&carrier))?,
+                    left,
                     self.expr_expected(&arguments[1], Some(&carrier))?,
-                    self.expr(&arguments[2])?,
+                    self.expr_expected(&arguments[2], Some(&motive_type))?,
                     self.expr(&arguments[3])?,
                     self.expr(&arguments[4])?,
                 )))
@@ -1646,10 +2038,17 @@ impl Elaborator<'_> {
                         ),
                     ));
                 }
-                let motive = self.expr(&arguments[0])?;
+                let motive_type = self.data_motive_type(&name);
+                let motive = self.expr_expected(&arguments[0], motive_type.as_ref())?;
+                // Branch types supply the parameter types of lambda branches.
+                let expected = self.kernel.branch_types(&name, &motive).ok();
                 let branches = arguments[1..1 + count]
                     .iter()
-                    .map(|branch| self.expr(branch))
+                    .enumerate()
+                    .map(|(index, branch)| {
+                        let ty = expected.as_ref().and_then(|types| types.get(index));
+                        self.expr_expected(branch, ty)
+                    })
                     .collect::<Result<Vec<_>>>()?;
                 let scrutinee = self.expr(&arguments[1 + count])?;
                 Ok(Some(Term::elim(name, motive, branches, scrutinee)))
@@ -1670,7 +2069,9 @@ impl Elaborator<'_> {
     }
     fn expr_expected(&mut self, expr: &Expr, expected: Option<&Term>) -> Result<Term> {
         self.nested(expr.span, |e| match &expr.kind {
-            ExprKind::Name(_) | ExprKind::Field { .. } => e.reference(expr.span),
+            ExprKind::Name(_) | ExprKind::Field { .. } => {
+                Ok(e.applied_reference(expr.span, &[])?.0)
+            }
             ExprKind::Integer(value) => match e.expected_scalar(expected) {
                 Some(Scalar::I64) => Self::machine_i64(value, expr.span),
                 Some(Scalar::Bool | Scalar::Unit) => Err(Diagnostic::new(
@@ -1702,7 +2103,12 @@ impl Elaborator<'_> {
                 e.apply_expression(term, arguments)
             }
             ExprKind::Specialize { callee, arguments } => {
-                let mut term = e.expr(callee)?;
+                let (mut term, arguments) = match &callee.kind {
+                    ExprKind::Name(_) | ExprKind::Field { .. } => {
+                        e.applied_reference(callee.span, arguments)?
+                    }
+                    _ => (e.expr(callee)?, arguments.as_slice()),
+                };
                 for argument in arguments {
                     let domain = e.application_domain(&term)?;
                     let value = e.ty_expected(argument, domain.as_ref())?;
@@ -1711,7 +2117,8 @@ impl Elaborator<'_> {
                 Ok(term)
             }
             ExprKind::Block(block) => e.block(block),
-            _ => Err(Diagnostic::new(expr.span, "this expression is not supported by logical checking yet; use names, natural literals, calls, specialization, or typed immutable lets")),
+            ExprKind::Lambda(lambda) => e.lambda(lambda, expected, expr.span),
+            _ => Err(Diagnostic::new(expr.span, "this expression is not supported by logical checking yet; use names, natural literals, calls, specialization, lambdas, or typed immutable lets")),
         })
     }
 }
@@ -1737,6 +2144,8 @@ pub(crate) fn elaborate_type(
         constructors: &environment.constructors,
         constructor_counts: &environment.constructor_counts,
         nullary: &environment.nullary,
+        levels: &environment.levels,
+        level_params: Vec::new(),
         locals: locals.iter().map(|(id, _)| Some(*id)).collect(),
         aliases: &EMPTY_ALIASES,
         literals: &EMPTY_LITERALS,
@@ -1766,6 +2175,8 @@ pub(crate) fn elaborate_value_with_aliases(
         constructors: &environment.constructors,
         constructor_counts: &environment.constructor_counts,
         nullary: &environment.nullary,
+        levels: &environment.levels,
+        level_params: Vec::new(),
         locals: locals.iter().map(|(id, _)| Some(*id)).collect(),
         aliases,
         literals,

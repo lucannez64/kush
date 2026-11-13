@@ -1,0 +1,279 @@
+module kernel.store;
+
+// The hash-consed store (docs/kernel-in-kush.md, section 2).
+//
+// Every object the kernel builds (a term node, a universe level, a natural,
+// a name, a list of handles) is a list of i64 cells, interned exactly once.
+// An object's id is its position in the store, so two objects are equal
+// exactly when their ids are equal, and sharing costs nothing. An id stays
+// valid, and denotes the same object, until the store is rewound past it:
+// `mark` records the store's size and `rewind` drops every object created
+// since, which frees the intermediate terms of a finished check. Ids below
+// the mark are never affected, which is what lets a backtracking tactic
+// engine copy handles freely (TACTICS-HANDLERS).
+//
+// Objects are built in a scratch buffer and then interned:
+//
+//     store.begin(s, term.APP);
+//     store.add(s, f);
+//     store.add(s, a);
+//     let id = store.finish(s, range);
+
+pub struct Store {
+    /// Number of objects and of cells in use. The vectors below may be
+    /// longer after a rewind; entries past these counts are free and are
+    /// overwritten as new objects are added.
+    object_count: i64,
+    cell_count: i64,
+    /// The cells of every object, concatenated.
+    cells: Vec<i64>,
+    /// Per object: first cell, number of cells, hash.
+    starts: Vec<i64>,
+    lens: Vec<i64>,
+    hashes: Vec<i64>,
+    /// Per object: one more than the largest free de Bruijn index of a term
+    /// (0 for a closed term and for every non-term object). Set by the
+    /// caller of `finish`, which knows the object's layout.
+    ranges: Vec<i64>,
+    /// A direct-mapped cache for traversals (`kernel.subst`): slot ->
+    /// (generation, key, depth, result). Each traversal uses a fresh
+    /// generation, so stale entries never match.
+    cache_generation: Vec<i64>,
+    cache_key: Vec<i64>,
+    cache_depth: Vec<i64>,
+    cache_value: Vec<i64>,
+    generation: i64,
+    /// Open addressing over object ids: `id + 1`, 0 for an empty slot, or
+    /// -1 for a slot freed by `rewind` (probing continues past it). The size
+    /// is a power of two, kept at least twice the objects plus freed slots.
+    table: Vec<i64>,
+    tombstones: i64,
+    /// The object being built by `begin`/`add`/`finish`.
+    scratch: Vec<i64>,
+}
+
+const SEED: i64 = 1469598103934665603;
+/// Traversal cache slots (a power of two).
+const CACHE: i64 = 65536;
+const PRIME: i64 = 1099511628211;
+
+fn zeros(count: i64) -> Vec<i64> ! {alloc, panic} {
+    let mut out: Vec<i64> = Vec.with_capacity(count);
+    let mut i = 0;
+    while i < count {
+        out = out.push(0);
+        i = i + 1;
+    }
+    out
+}
+
+pub fn new() -> Store ! {alloc, panic} {
+    Store {
+        object_count: 0,
+        cell_count: 0,
+        cells: Vec.with_capacity(65536),
+        starts: Vec.with_capacity(16384),
+        lens: Vec.with_capacity(16384),
+        hashes: Vec.with_capacity(16384),
+        ranges: Vec.with_capacity(16384),
+        cache_generation: zeros(CACHE),
+        cache_key: zeros(CACHE),
+        cache_depth: zeros(CACHE),
+        cache_value: zeros(CACHE),
+        generation: 0,
+        table: zeros(32768),
+        tombstones: 0,
+        scratch: Vec.with_capacity(64),
+    }
+}
+
+/// Number of objects interned so far.
+pub fn count(s: &Store) -> i64 ! {} { s.object_count }
+
+/// Number of cells of object `id`.
+pub fn size(s: &Store, id: i64) -> i64 ! {panic} { s.lens[id] }
+
+/// Cell `k` of object `id`.
+pub fn get(s: &Store, id: i64, k: i64) -> i64 ! {panic} {
+    let start = s.starts[id];
+    s.cells[start + k]
+}
+
+/// Start building a new object whose first cell is `tag`.
+pub fn begin(s: &mut Store, tag: i64) -> Unit ! {alloc, panic} {
+    s.scratch.clear();
+    s.scratch.push(tag);
+}
+
+/// Append one cell to the object being built.
+pub fn add(s: &mut Store, cell: i64) -> Unit ! {alloc, panic} {
+    s.scratch.push(cell);
+}
+
+fn mix(hash: i64, cell: i64) -> i64 ! {} { Int.wrapping_mul(hash ^ cell, PRIME) }
+
+/// Whether object `id` has exactly the cells of the scratch buffer.
+fn matches_scratch(s: &Store, id: i64) -> Bool ! {panic} {
+    let n = s.scratch.len();
+    if s.lens[id] != n { return false; }
+    let start = s.starts[id];
+    let mut i = 0;
+    while i < n {
+        if s.cells[start + i] != s.scratch[i] { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+/// The free-variable range recorded for `id` (see `ranges`).
+pub fn range(s: &Store, id: i64) -> i64 ! {panic} { s.ranges[id] }
+
+/// Intern the object being built: return the id of an equal object if one
+/// exists, otherwise store it under a new id with free-variable range
+/// `range`. Equal objects have equal ranges, so an existing id keeps its own.
+pub fn finish(s: &mut Store, range: i64) -> i64 ! {alloc, panic} {
+    let n = s.scratch.len();
+    let mut hash = SEED;
+    let mut i = 0;
+    while i < n {
+        hash = mix(hash, s.scratch[i]);
+        i = i + 1;
+    }
+    let mask = s.table.len() - 1;
+    let mut slot = hash & mask;
+    loop {
+        let entry = s.table[slot];
+        if entry == 0 { break; }
+        if entry > 0 {
+            let id = entry - 1;
+            if s.hashes[id] == hash && matches_scratch(s, id) { return id; }
+        }
+        slot = (slot + 1) & mask;
+    }
+    let id = s.object_count;
+    let start = s.cell_count;
+    if id < s.starts.len() {
+        s.starts[id] = start;
+        s.lens[id] = n;
+        s.hashes[id] = hash;
+        s.ranges[id] = range;
+    } else {
+        s.starts.push(start);
+        s.lens.push(n);
+        s.hashes.push(hash);
+        s.ranges.push(range);
+    }
+    let mut k = 0;
+    while k < n {
+        let cell = s.scratch[k];
+        let at = start + k;
+        if at < s.cells.len() {
+            s.cells[at] = cell;
+        } else {
+            s.cells.push(cell);
+        }
+        k = k + 1;
+    }
+    s.object_count = id + 1;
+    s.cell_count = start + n;
+    s.table[slot] = id + 1;
+    if 2 * (id + 1 + s.tombstones) > s.table.len() { grow(s); }
+    id
+}
+
+/// Double the table and reinsert every object by its stored hash.
+fn grow(s: &mut Store) -> Unit ! {alloc, panic} {
+    let size = 2 * s.table.len();
+    rebuild(s, size);
+}
+
+/// Rebuild the table at `size` slots from the objects in use.
+fn rebuild(s: &mut Store, size: i64) -> Unit ! {alloc, panic} {
+    s.tombstones = 0;
+    let mask = size - 1;
+    let mut table = zeros(size);
+    let total = s.object_count;
+    let mut id = 0;
+    while id < total {
+        let mut slot = s.hashes[id] & mask;
+        while table[slot] != 0 {
+            slot = (slot + 1) & mask;
+        }
+        table[slot] = id + 1;
+        id = id + 1;
+    }
+    let old = s.table.replace(table);
+    drop(old);
+}
+
+/// Start a traversal: a generation number no cache entry has yet.
+pub fn fresh_generation(s: &mut Store) -> i64 ! {panic} {
+    s.generation = s.generation + 1;
+    s.generation
+}
+
+fn cache_slot(key: i64, depth: i64) -> i64 ! {panic} {
+    Int.wrapping_mul(mix(SEED, key), Int.wrapping_add(PRIME, depth)) & (CACHE - 1)
+}
+
+/// The cached result of visiting `key` at binder depth `depth` in traversal
+/// `generation`, or -1.
+pub fn cached(s: &Store, generation: i64, key: i64, depth: i64) -> i64 ! {panic} {
+    let slot = cache_slot(key, depth);
+    if s.cache_generation[slot] == generation
+        && s.cache_key[slot] == key
+        && s.cache_depth[slot] == depth {
+        s.cache_value[slot]
+    } else {
+        -1
+    }
+}
+
+pub fn remember(
+    s: &mut Store,
+    generation: i64,
+    key: i64,
+    depth: i64,
+    value: i64,
+) -> Unit ! {panic} {
+    let slot = cache_slot(key, depth);
+    s.cache_generation[slot] = generation;
+    s.cache_key[slot] = key;
+    s.cache_depth[slot] = depth;
+    s.cache_value[slot] = value;
+}
+
+/// The store's size at some point: objects and cells in use.
+pub struct Mark { pub objects: i64, pub cells: i64 }
+
+pub fn mark(s: &Store) -> Mark ! {} {
+    Mark { objects: s.object_count, cells: s.cell_count }
+}
+
+/// Drop every object created since `m`. Ids below the mark keep their
+/// meaning; ids at or above it become free and must no longer be used. The
+/// traversal caches are invalidated, since they may hold dropped ids.
+pub fn rewind(s: &mut Store, m: Mark) -> Unit ! {alloc, panic} {
+    if m.objects >= s.object_count { return; }
+    // Free the slot of each dropped object: the cost is proportional to what
+    // is dropped, not to the store. Freed slots are reclaimed by a rebuild
+    // once they make up a quarter of the table.
+    let mask = s.table.len() - 1;
+    let mut id = m.objects;
+    while id < s.object_count {
+        let mut slot = s.hashes[id] & mask;
+        while s.table[slot] != id + 1 {
+            slot = (slot + 1) & mask;
+        }
+        s.table[slot] = -1;
+        id = id + 1;
+    }
+    s.tombstones = s.tombstones + (s.object_count - m.objects);
+    s.object_count = m.objects;
+    s.cell_count = m.cells;
+    if 4 * s.tombstones > s.table.len() {
+        let size = s.table.len();
+        rebuild(s, size);
+    }
+    fresh_generation(s);
+}

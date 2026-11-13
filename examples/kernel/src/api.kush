@@ -1,0 +1,151 @@
+module kernel.api;
+
+// The kernel's interface for clients that build terms, first of all a
+// tactic engine (TACTICS-HANDLERS; docs/kernel-in-kush.md, section 5).
+//
+// A client works with store ids (`Tm` handles) in a context: a list of
+// hypothesis types, outermost first, each relative to the ones before it.
+// Every operation validates the context (each entry must be a type or a
+// proposition) and checks its terms before computing with them; there is no
+// unchecked reduction. Handles never move (the store only grows), so a proof
+// state is a few integers and can be copied freely, which is what a
+// backtracking (multishot) handler needs.
+//
+// Declarations are admitted with `check.define` and `check.define_data`.
+// A failed operation returns an error code (kernel.error); `last_failure`
+// then says which term failed and why, and `describe` names the code.
+
+use std.result.Result;
+use kernel.check;
+use kernel.engine;
+use kernel.engine.Kernel;
+use kernel.error;
+use kernel.normal;
+use kernel.store;
+use kernel.store.Mark;
+use kernel.subst;
+
+/// The innermost failure of the last operation. `term`, `expected` and
+/// `actual` are store ids, or -1 where the failure has none; they are
+/// relative to a context of `depth` hypotheses (the operation's context
+/// followed by the binders it had entered).
+
+pub struct Failure {
+    pub code: i64,
+    pub term: i64,
+    pub expected: i64,
+    pub actual: i64,
+    pub depth: i64,
+}
+
+pub fn last_failure(k: &Kernel, code: i64) -> Failure ! {} {
+    Failure {
+        code: code,
+        term: k.failure_term,
+        expected: k.failure_expected,
+        actual: k.failure_actual,
+        depth: k.failure_depth,
+    }
+}
+
+/// A short description of an error code.
+pub fn describe(code: i64) -> Bytes ! {alloc, panic} {
+    if code == error.BUDGET { return Bytes.from("the step budget ran out"); }
+    if code == error.DEPTH { return Bytes.from("the nesting cap was reached"); }
+    if code == error.UNBOUND_LEVEL { return Bytes.from("a universe level mentions a parameter out of scope"); }
+    if code == error.LEVEL_OVERFLOW { return Bytes.from("a universe level is too large"); }
+    if code == error.OUT_OF_RANGE { return Bytes.from("a position outside its telescope"); }
+    if code == error.UNKNOWN_GLOBAL { return Bytes.from("an unknown global"); }
+    if code == error.MISSING_BRANCH { return Bytes.from("an eliminator lacks a branch"); }
+    if code == error.UNBOUND_VARIABLE { return Bytes.from("a variable outside the context"); }
+    if code == error.NOT_A_FUNCTION { return Bytes.from("an application of something that is not a function"); }
+    if code == error.NOT_A_TYPE { return Bytes.from("a term used as a type is not a type or proposition"); }
+    if code == error.TYPE_MISMATCH { return Bytes.from("a term does not have the expected type"); }
+    if code == error.LEVEL_ARITY { return Bytes.from("a global with the wrong number of universe arguments"); }
+    if code == error.DUPLICATE { return Bytes.from("a name that is already declared"); }
+    if code == error.BAD_FAMILY { return Bytes.from("a motive or type family of the wrong shape"); }
+    if code == error.POSITIVITY { return Bytes.from("a data family occurring other than strictly positively"); }
+    if code == error.UNIVERSE_ESCAPE { return Bytes.from("a constructor outside its family's universe"); }
+    if code == error.BAD_DATA { return Bytes.from("a malformed data declaration or eliminator"); }
+    if code == error.LARGE_ELIMINATION { return Bytes.from("a proposition eliminated into a type"); }
+    Bytes.from("an unsupported construct")
+}
+
+/// Start an operation in `context`, validating each hypothesis.
+fn enter(k: &mut Kernel, context: &Vec<i64>) -> Result<Unit, i64> ! {alloc, panic} {
+    engine.begin(k);
+    let mut i = 0;
+    while i < context.len() {
+        let hypothesis = context[i];
+        check.sort_of(k, hypothesis)?;
+        engine.assume(k, hypothesis);
+        i = i + 1;
+    }
+    Result.Ok(())
+}
+
+/// The type of `t` in `context` (not normalized; see `whnf`).
+pub fn infer(k: &mut Kernel, context: &Vec<i64>, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    enter(k, context)?;
+    check.infer(k, t)
+}
+
+/// Check `t` against the type `ty` in `context`.
+pub fn check_term(k: &mut Kernel, context: &Vec<i64>, t: i64, ty: i64) -> Result<Unit, i64> ! {alloc, panic} {
+    enter(k, context)?;
+    check.sort_of(k, ty)?;
+    check.check(k, t, ty)
+}
+
+/// The sort of a type in `context`: a level id, or `check.PROP_SORT`.
+pub fn sort(k: &mut Kernel, context: &Vec<i64>, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    enter(k, context)?;
+    check.sort_of(k, t)
+}
+
+/// The weak head normal form of a well-typed term: what a tactic looks at
+/// to see a goal's head (a Pi to introduce, an Eq to rewrite with, ...).
+pub fn whnf(k: &mut Kernel, context: &Vec<i64>, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    enter(k, context)?;
+    check.infer(k, t)?;
+    normal.whnf(k, t)
+}
+
+/// The full normal form of a well-typed term.
+pub fn normalize(k: &mut Kernel, context: &Vec<i64>, t: i64) -> Result<i64, i64> ! {alloc, panic} {
+    enter(k, context)?;
+    check.infer(k, t)?;
+    normal.normal(k, t)
+}
+
+/// Whether two well-typed terms are definitionally equal. Terms of
+/// different types are not.
+pub fn defeq(k: &mut Kernel, context: &Vec<i64>, a: i64, b: i64) -> Result<Bool, i64> ! {alloc, panic} {
+    enter(k, context)?;
+    let left = check.infer(k, a)?;
+    let right = check.infer(k, b)?;
+    if !check.defeq(k, left, right)? { return Result.Ok(false); }
+    check.defeq(k, a, b)
+}
+
+/// `t` with every occurrence of `u` replaced by a new innermost variable
+/// (see `subst.abstract`): `λy. abstract(t, u)` is the motive that rewrites
+/// `u` in `t`, and `instantiate(abstract(t, u), u)` is `t`.
+pub fn abstract(k: &mut Kernel, t: i64, u: i64) -> i64 ! {alloc, panic} {
+    subst.abstract(&mut k.store, t, u)
+}
+
+/// The body of a binder applied to `value`: index 0 replaced by `value`.
+pub fn instantiate(k: &mut Kernel, body: i64, value: i64) -> i64 ! {alloc, panic} {
+    subst.substitute(&mut k.store, body, value)
+}
+
+/// The store's current size, to `rewind` to later.
+pub fn mark(k: &Kernel) -> Mark ! {} { store.mark(&k.store) }
+
+/// Drop every term created since `m`, freeing their memory. Handles created
+/// before the mark keep their meaning; later ones must not be used again.
+/// A tactic engine rewinds when it abandons a branch of its search.
+pub fn rewind(k: &mut Kernel, m: Mark) -> Unit ! {alloc, panic} {
+    store.rewind(&mut k.store, m);
+}

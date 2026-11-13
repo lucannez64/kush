@@ -1,7 +1,10 @@
+/// A size well past the old 4096-digit budget, which no longer exists.
+const BIG: usize = 5000;
+
 use kush::{
     check,
     kernel::{Kernel, Limits, Term as T},
-    natural::{Error, MAX_DIGITS, Natural},
+    natural::{Error, Natural},
 };
 
 fn number(text: &str) -> Natural {
@@ -41,15 +44,15 @@ fn parsing_and_display_are_canonical_across_limb_boundaries() {
 
 #[test]
 fn successor_and_predecessor_handle_long_carry_and_borrow_chains() {
-    for digits in [1, 8, 9, 10, 17, 18, 19, 100, MAX_DIGITS - 1] {
+    for digits in [1, 8, 9, 10, 17, 18, 19, 100, BIG] {
         let nines = number(&"9".repeat(digits));
         let power = number(&format!("1{}", "0".repeat(digits)));
-        assert_eq!(nines.successor().unwrap(), power);
+        assert_eq!(nines.successor(), power);
         assert_eq!(power.predecessor().unwrap(), nines);
-        assert_eq!(nines.predecessor().unwrap().successor().unwrap(), nines);
+        assert_eq!(nines.predecessor().unwrap().successor(), nines);
     }
     assert_eq!(Natural::default().predecessor(), None);
-    assert_eq!(Natural::default().successor().unwrap(), Natural::from(1));
+    assert_eq!(Natural::default().successor(), Natural::from(1));
     assert_eq!(Natural::from(1).predecessor().unwrap(), Natural::default());
 }
 
@@ -62,7 +65,7 @@ fn deterministic_numeric_corpus_agrees_with_independent_u128_arithmetic() {
         assert_eq!(value.to_string(), state.to_string());
         assert_eq!(number(&state.to_string()), value);
         assert_eq!(
-            value.successor().unwrap().to_string(),
+            value.successor().to_string(),
             (u128::from(state) + 1).to_string()
         );
         assert_eq!(
@@ -71,34 +74,36 @@ fn deterministic_numeric_corpus_agrees_with_independent_u128_arithmetic() {
         );
     }
     assert_eq!(
-        Natural::from(u64::MAX).successor().unwrap().to_string(),
+        Natural::from(u64::MAX).successor().to_string(),
         "18446744073709551616"
     );
     assert_eq!(
-        number(&u128::MAX.to_string())
-            .successor()
-            .unwrap()
-            .to_string(),
+        number(&u128::MAX.to_string()).successor().to_string(),
         "340282366920938463463374607431768211456"
     );
 }
 
 #[test]
-fn digit_budget_is_explicit_and_never_wraps_or_truncates() {
-    let max = number(&"9".repeat(MAX_DIGITS));
-    assert_eq!(max.decimal_digits(), MAX_DIGITS);
-    assert_eq!(max.successor(), Err(Error::DigitLimit));
+fn there_is_no_digit_limit_and_nothing_wraps_or_truncates() {
+    let max = number(&"9".repeat(BIG));
+    assert_eq!(max.decimal_digits(), BIG);
+    let next = max.successor();
+    assert_eq!(next.to_string(), format!("1{}", "0".repeat(BIG)));
+    assert_eq!(next.decimal_digits(), BIG + 1);
     assert_eq!(
-        format!("1{}", "0".repeat(MAX_DIGITS)).parse::<Natural>(),
-        Err(Error::DigitLimit)
+        format!("1{}", "0".repeat(4 * BIG))
+            .parse::<Natural>()
+            .unwrap()
+            .decimal_digits(),
+        4 * BIG + 1
     );
-    // Leading zeroes consume source bytes, not significant-digit budget.
-    assert_eq!(number(&"0".repeat(MAX_DIGITS + 1)), Natural::default());
+    // Leading zeroes normalize away.
+    assert_eq!(number(&"0".repeat(BIG + 1)), Natural::default());
     assert_eq!(
-        number(&format!("{}1", "0".repeat(MAX_DIGITS + 1))),
+        number(&format!("{}1", "0".repeat(BIG + 1))),
         Natural::from(1)
     );
-    assert_eq!(max.predecessor().unwrap().successor().unwrap(), max);
+    assert_eq!(max.predecessor().unwrap().successor(), max);
 }
 
 #[test]
@@ -134,7 +139,7 @@ fn large_literal_magnitude_does_not_consume_syntax_nesting() {
         steps: 10_000,
         depth: 4,
     });
-    let value = term(&"9".repeat(MAX_DIGITS));
+    let value = term(&"9".repeat(BIG));
     assert_eq!(k.infer_closed(&value).unwrap(), T::Nat);
     assert_eq!(k.normalize_closed(&value).unwrap(), value);
     let too_little_fuel = Kernel::new(Limits {
@@ -219,13 +224,22 @@ fn induction_retains_its_constructor_equations_for_literals() {
 
 #[test]
 fn numeric_budget_exhaustion_cannot_produce_a_false_proof_or_admit_a_global() {
-    let mut k = Kernel::default();
-    let too_large = T::succ(term(&"9".repeat(MAX_DIGITS)));
+    // Numeric work is charged per base-10^9 limb: a million-digit numeral
+    // (about 111,000 limbs) exhausts a 100,000-unit budget.
+    let mut k = Kernel::new(Limits {
+        steps: 100_000,
+        depth: 128,
+    });
+    let too_large = T::succ(term(&"9".repeat(1_000_000)));
+    assert!(
+        Kernel::default().normalize_closed(&too_large).is_ok(),
+        "the default budget covers it"
+    );
     assert!(
         k.normalize_closed(&too_large)
             .unwrap_err()
             .0
-            .contains("significant-digit budget")
+            .contains("budget exhausted")
     );
     let false_type = T::eq(T::Nat, too_large, T::Zero);
     assert!(
@@ -242,7 +256,7 @@ fn source_large_naturals_and_proofs_check_end_to_end() {
     assert_eq!(
         checked
             .kernel
-            .normalize_closed(&T::Global("large".into()))
+            .normalize_closed(&T::global("large"))
             .unwrap(),
         term("340282366920938463463374607431768211456")
     );
@@ -259,20 +273,14 @@ fn source_large_naturals_and_proofs_check_end_to_end() {
 }
 
 #[test]
-fn source_digit_budget_reports_a_span_and_universe_levels_stay_separate() {
-    let source = format!(
-        "total fn huge() -> Nat ! {{}} {{ 1{} }}",
-        "0".repeat(MAX_DIGITS)
-    );
-    let error = check(&source).unwrap_err();
-    assert!(error.message.contains("significant-digit budget"));
-    assert_eq!(
-        &source[error.span.start..error.span.end],
-        format!("1{}", "0".repeat(MAX_DIGITS))
-    );
+fn source_literals_have_no_digit_limit_and_universe_levels_stay_separate() {
+    let huge = format!("1{}", "0".repeat(BIG));
+    let proof =
+        format!("total fn huge() -> Eq<Nat, {huge}, {huge}> ! {{}} {{ refl::<Nat>({huge}) }}");
+    check(&proof).unwrap();
     let max_proof = format!(
         "total fn max() -> Eq<Nat, {0}, {0}> ! {{}} {{ refl::<Nat>({0}) }}",
-        "9".repeat(MAX_DIGITS)
+        "9".repeat(BIG)
     );
     check(&max_proof).unwrap();
     assert!(

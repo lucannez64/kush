@@ -1,1 +1,3 @@
 /target/
+# Kush project build outputs (kush test, kush build).
+examples/**/target/

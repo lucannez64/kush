@@ -81,8 +81,10 @@ extern int64_t kush_entry(void);
    KUSH_HAS_THREADS: shared counters become atomic, and allocator pools,
    handler stacks, the current task and the abort word become per thread.
    Single-threaded programs keep the plain paths. */
-#ifdef KUSH_HAS_THREADS
+#if defined(KUSH_HAS_THREADS) || defined(KUSH_MAIN_STACK)
 #include <pthread.h>
+#endif
+#ifdef KUSH_HAS_THREADS
 #define KUSH_TLS _Thread_local
 #define KUSH_ADD(x, n) __atomic_add_fetch(&(x), (n), __ATOMIC_RELAXED)
 #define KUSH_SUB(x, n) __atomic_sub_fetch(&(x), (n), __ATOMIC_RELAXED)
@@ -156,8 +158,27 @@ static void kush_stack_guard_init(void) {
     if (sigaction(SIGSEGV, &action, NULL) != 0) kush_panic();
     if (sigaction(SIGBUS, &action, NULL) != 0) kush_panic();
 }
+/* A program's main may run on a thread with a larger stack
+   (`#[stack_size(N)]`). That thread gets its own signal stack, and the
+   ceiling moves to its first frame. */
+#ifdef KUSH_MAIN_STACK
+static void kush_stack_guard_thread(void *signal_stack, size_t size) {
+    stack_t stack;
+    memset(&stack, 0, sizeof(stack));
+    stack.ss_sp = signal_stack;
+    stack.ss_size = size;
+    if (sigaltstack(&stack, NULL) != 0) kush_panic();
+    kush_stack_ceiling = (uintptr_t)__builtin_frame_address(0);
+}
+#endif
 #else
 static void kush_stack_guard_init(void) {}
+#ifdef KUSH_MAIN_STACK
+static void kush_stack_guard_thread(void *signal_stack, size_t size) {
+    (void)signal_stack;
+    (void)size;
+}
+#endif
 #endif
 int64_t kush_print_i64(int64_t value) {
     char buffer[32];
@@ -3029,6 +3050,23 @@ uint64_t kush_thread_join(uint64_t handle, void *out) {
 }
 #endif
 #ifndef KUSH_NO_MAIN
+#ifdef KUSH_MAIN_STACK
+/* `#[stack_size(N)]` on main: the program runs on a thread with a stack of
+   KUSH_MAIN_STACK bytes (reserved, committed as it is used), with the same
+   stack-exhaustion panic as the process stack. */
+static int64_t kush_main_result;
+static char kush_main_signal_stack[1 << 16];
+static void *kush_main_thread(void *unused) {
+    (void)unused;
+    kush_stack_guard_thread(kush_main_signal_stack, sizeof(kush_main_signal_stack));
+#ifdef KUSH_HAS_TASKS
+    kush_task_init();
+#endif
+    kush_main_result = kush_entry();
+    kush_task_finish();
+    return NULL;
+}
+#endif
 int main(int argc, char **argv) {
     kush_host_init(argc, argv);
     /* Broken pipes become recoverable EPIPE results instead of process signals. */
@@ -3036,11 +3074,24 @@ int main(int argc, char **argv) {
     kush_stack_guard_init();
     /* Formatting and parse-back must never depend on the host locale. */
     if (setlocale(LC_NUMERIC, "C") == NULL) kush_panic();
+#ifdef KUSH_MAIN_STACK
+    {
+        pthread_t thread;
+        pthread_attr_t attributes;
+        if (pthread_attr_init(&attributes) != 0) kush_panic();
+        if (pthread_attr_setstacksize(&attributes, (size_t)KUSH_MAIN_STACK) != 0) kush_panic();
+        if (pthread_create(&thread, &attributes, kush_main_thread, NULL) != 0) kush_panic();
+        pthread_attr_destroy(&attributes);
+        if (pthread_join(thread, NULL) != 0) kush_panic();
+    }
+    int64_t result = kush_main_result;
+#else
 #ifdef KUSH_HAS_TASKS
     kush_task_init();
 #endif
     int64_t result = kush_entry();
     kush_task_finish();
+#endif
     /* Retained pool storage is physical only; release it before the live
        allocation check so a normal exit owns nothing either way. */
     kush_pool_drain();
@@ -3677,6 +3728,9 @@ pub fn build_with_codegen(
     if program.uses_threads {
         defines.push("-DKUSH_HAS_THREADS=1".to_owned());
     }
+    if let Some(bytes) = program.main_stack {
+        defines.push(format!("-DKUSH_MAIN_STACK={bytes}ULL"));
+    }
     if stats {
         defines.push("-DKUSH_STATS=1".to_owned());
         defines.push(format!("-DKUSH_FUSION_COUNT={}", program.fusion_count()));
@@ -3709,7 +3763,7 @@ pub fn build_with_codegen(
         command.arg(format!("-l{name}"));
     }
     command.arg("-o").arg(&binary_path).arg("-lm");
-    if program.uses_threads {
+    if program.uses_threads || program.main_stack.is_some() {
         command.arg("-pthread");
     }
     let result = crate::timing::time("link", || command.output())

@@ -7,6 +7,7 @@ mod coverage;
 mod eval;
 pub use eval::DEFAULT_EVAL_FUEL;
 pub use eval::Host;
+pub mod exchange;
 pub mod executable;
 mod facts;
 mod float;

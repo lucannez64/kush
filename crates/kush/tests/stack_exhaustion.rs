@@ -288,3 +288,79 @@ fn a_sent_fault_signal_keeps_its_default_action() {
         assert_eq!(status.signal(), Some(number), "{name}: {status:?}");
     }
 }
+
+/// LANG-STACK-SIZE: `#[stack_size(N)]` on main runs the program on an N MiB
+/// stack. A depth that exhausts the default process stack completes, and an
+/// unbounded recursion still panics with the stack-exhaustion message.
+#[test]
+fn a_larger_main_stack_holds_deeper_recursion_and_still_panics_when_exhausted() {
+    let source = format!(
+        "enum Result<T, E> {{ Ok(T), Err(E) }}
+        {DOWN}
+        #[stack_size(1024)]
+        fn main() -> i64 ! {{io, alloc, panic}} {{
+            let values = salt();
+            print_int(down(depth(), &values[..]));
+            0
+        }}"
+    );
+    // On the default 8 MiB stack this depth is exhausted.
+    let default = source.replace("#[stack_size(1024)]", "");
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let root = scratch.path();
+    for (name, text) in [("big", &source), ("default", &default)] {
+        fs::write(root.join(format!("{name}.kush")), text).unwrap();
+        let built = Command::new(env!("CARGO_BIN_EXE_kush"))
+            .current_dir(root)
+            .args(["build", &format!("{name}.kush"), "-o", name])
+            .env_remove("KUSH_BACKEND")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+    }
+    let deep = "2000000";
+    let default_run = Command::new(root.join("default"))
+        .arg(deep)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&default_run.stderr).contains("panic: stack exhausted"));
+    let big_run = Command::new(root.join("big")).arg(deep).output().unwrap();
+    assert!(
+        big_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&big_run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&big_run.stdout), "5000000\n");
+    let unbounded = Command::new(root.join("big"))
+        .arg("4000000000")
+        .output()
+        .unwrap();
+    assert_eq!(unbounded.status.signal(), Some(6));
+    assert!(String::from_utf8_lossy(&unbounded.stderr).contains("panic: stack exhausted"));
+    // Only the program's own main, with a size in MiB.
+    for (text, expected) in [
+        (
+            "#[stack_size(0)]\nfn main() -> i64 ! {} { 0 }",
+            "from 1 to 65536",
+        ),
+        (
+            "#[stack_size]\nfn main() -> i64 ! {} { 0 }",
+            "from 1 to 65536",
+        ),
+        (
+            "#[stack_size(64)]\nfn helper() -> i64 ! {} { 0 }\nfn main() -> i64 ! {} { 0 }",
+            "main function only",
+        ),
+        (
+            "#[stack_size(64)]\n#[stack_size(64)]\nfn main() -> i64 ! {} { 0 }",
+            "once",
+        ),
+    ] {
+        let error = kush::executable::check(text).unwrap_err();
+        assert!(error.message.contains(expected), "{text}: {error:?}");
+    }
+}
