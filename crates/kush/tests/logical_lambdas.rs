@@ -125,14 +125,15 @@ fn lambda_errors() {
          total fn bad() -> Nat ! {} { apply(fn(x: Type) { x }, 1) }",
         "type mismatch",
     );
-    // Data.elim branches carry their types: no expected type supplies them.
-    rejects(
+    // A lambda branch's parameter types come from its branch type.
+    check(
         "total enum Even { EvenZero: Even, EvenSucc(Even): Even }
-         total fn bad(e: Even) -> Nat ! {} {
+         total fn height(e: Even) -> Nat ! {} {
              Data.elim::<Even>(fn(v) { Nat }, 0, fn(v, ih) { Nat.succ(ih) }, e)
-         }",
-        "annotate the type",
-    );
+         }
+         total fn two() -> Eq<Nat, height<EvenSucc<EvenSucc<EvenZero>>>, 2> ! {} { refl::<Nat>(2) }",
+    )
+    .unwrap();
 }
 
 #[test]

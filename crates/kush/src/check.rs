@@ -37,6 +37,12 @@ pub(crate) struct LogicalEnvironment {
 }
 
 pub fn check(source: &str) -> Result<CheckedModule> {
+    // The whole pass runs on one large stack, so deep kernel recursion never
+    // has to move between stacks (see `kernel::on_kernel_stack`).
+    crate::kernel::on_kernel_stack(|| check_on_kernel_stack(source))
+}
+
+fn check_on_kernel_stack(source: &str) -> Result<CheckedModule> {
     let module = parse(source)?;
     let resolution = resolve::resolve(&module)?;
     // Reject unimplemented features before admitting *any* source definitions.
@@ -2034,9 +2040,15 @@ impl Elaborator<'_> {
                 }
                 let motive_type = self.data_motive_type(&name);
                 let motive = self.expr_expected(&arguments[0], motive_type.as_ref())?;
+                // Branch types supply the parameter types of lambda branches.
+                let expected = self.kernel.branch_types(&name, &motive).ok();
                 let branches = arguments[1..1 + count]
                     .iter()
-                    .map(|branch| self.expr(branch))
+                    .enumerate()
+                    .map(|(index, branch)| {
+                        let ty = expected.as_ref().and_then(|types| types.get(index));
+                        self.expr_expected(branch, ty)
+                    })
                     .collect::<Result<Vec<_>>>()?;
                 let scrutinee = self.expr(&arguments[1 + count])?;
                 Ok(Some(Term::elim(name, motive, branches, scrutinee)))

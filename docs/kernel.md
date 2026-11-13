@@ -620,9 +620,9 @@ total fn symmetry<T: Type>(x: T, y: T, p: Eq<T, x, y>) -> Eq<T, y, x> ! {} {
   the eliminator positions: `Nat.induct`'s motive (`Nat -> Sort`) and step
   (`(n : Nat) -> motive n -> motive (succ n)`), the motives of
   `Eq.transport` (`T -> Sort`), `Eq.elim` (`(y : T) -> Eq<T, x, y> -> Sort`)
-  and `Data.elim` (the family's indices, then the family, for a monomorphic
-  family). Otherwise the parameter needs an annotation. `Data.elim` branches
-  are not inferred: annotate their parameters.
+  and `Data.elim` (the family's indices, then the family) and its branches
+  (each constructor's branch type for the given motive), for a monomorphic
+  family. Otherwise the parameter needs an annotation.
 - A written result type is checked against the body.
 - The effect row must be empty or omitted, and parameters cannot be `erased`.
 - Types inside a lambda body use the expression form of a type application,

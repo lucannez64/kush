@@ -1080,6 +1080,21 @@ impl Kernel {
     /// Shift every free de Bruijn variable in an already checked open term by
     /// `amount`, as required when the surrounding telescope grows after the
     /// term was elaborated. Used by stable erased proof-valued local aliases.
+    /// The type each branch of `IndElim(data, motive, ...)` must have, in
+    /// constructor order, for a monomorphic family (the motive is relative
+    /// to the caller's context, as in the eliminator). A frontend uses them
+    /// as expected types; the eliminator itself is checked as usual.
+    pub fn branch_types(&self, data: &str, motive: &Term) -> Result<Vec<Term>> {
+        let mut e = self.engine();
+        let info = e.data_info(data)?;
+        if info.levels > 0 {
+            return fail("branch types of a universe-polymorphic family need its levels");
+        }
+        info.constructors
+            .iter()
+            .map(|constructor| e.branch_type(&info, &[], constructor, motive))
+            .collect()
+    }
     pub(crate) fn shift_open(&self, term: &Term, amount: usize) -> Result<Term> {
         let mut e = self.engine();
         e.shift(term, amount, 0)
@@ -1117,6 +1132,32 @@ const CALLER_STACK_ALLOWANCE: usize = 512 * 1024;
 const SEGMENT_STACK_SIZE: usize = 256 * 1024 * 1024;
 const SEGMENT_STACK_ALLOWANCE: usize = 240 * 1024 * 1024;
 
+/// Name of the threads that run kernel work on a large stack.
+const KERNEL_THREAD: &str = "kush-kernel";
+
+/// Run `f` on a thread with a kernel-sized stack: directly when already on
+/// one, otherwise on a new scoped thread. Frontends wrap a whole checking
+/// pass in it, so the kernel recurses on one large stack instead of moving
+/// to a new one whenever the caller's small stack fills up.
+pub fn on_kernel_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    if std::thread::current().name() == Some(KERNEL_THREAD) {
+        return f();
+    }
+    std::thread::scope(|scope| {
+        match std::thread::Builder::new()
+            .name(KERNEL_THREAD.into())
+            .stack_size(SEGMENT_STACK_SIZE)
+            .spawn_scoped(scope, f)
+        {
+            Ok(handle) => match handle.join() {
+                Ok(value) => value,
+                Err(panic) => std::panic::resume_unwind(panic),
+            },
+            Err(error) => panic!("cannot create the kernel thread: {error}"),
+        }
+    })
+}
+
 fn stack_address() -> usize {
     let marker = 0u8;
     std::hint::black_box(&marker) as *const u8 as usize
@@ -1130,7 +1171,13 @@ impl Engine<'_> {
             max_depth: limits.depth,
             levels: 0,
             stack_base: stack_address(),
-            stack_allowance: CALLER_STACK_ALLOWANCE,
+            // On a kernel thread the whole segment is available (measured
+            // from here, which is above where the thread started).
+            stack_allowance: if std::thread::current().name() == Some(KERNEL_THREAD) {
+                SEGMENT_STACK_ALLOWANCE
+            } else {
+                CALLER_STACK_ALLOWANCE
+            },
         }
     }
     /// Reject a level that mentions a parameter not in scope.
@@ -1229,7 +1276,7 @@ impl Engine<'_> {
         let saved = (self.stack_base, self.stack_allowance);
         let outcome = std::thread::scope(|scope| {
             std::thread::Builder::new()
-                .name("kush-kernel".into())
+                .name(KERNEL_THREAD.into())
                 .stack_size(SEGMENT_STACK_SIZE)
                 .spawn_scoped(scope, || {
                     self.stack_base = stack_address();
@@ -1527,6 +1574,26 @@ impl Engine<'_> {
     }
     /// Whether `term` is a proof, i.e. its type is classified by `Prop`.
     fn proof(&mut self, term: &Term, context: &mut Vec<Term>) -> Result<bool> {
+        // Types, numerals, scalar values and `refl` are never proofs: the
+        // type of a type is a sort, whose own sort is a universe, and
+        // numerals, scalars and equality proofs live in universes too. Saying
+        // so without inference does not change the relation, only its cost.
+        if matches!(
+            term,
+            Term::Universe(_)
+                | Term::Prop
+                | Term::Pi { .. }
+                | Term::Nat
+                | Term::Eq { .. }
+                | Term::Scalar(_)
+                | Term::Literal(_)
+                | Term::Zero
+                | Term::Succ(_)
+                | Term::Refl { .. }
+                | Term::ScalarLiteral(_)
+        ) {
+            return Ok(false);
+        }
         let ty = self.infer(term, context)?;
         Ok(self.sort(&ty, context)?.is_prop())
     }

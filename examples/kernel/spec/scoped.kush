@@ -1,0 +1,574 @@
+module kernel_spec.scoped;
+
+// A specification of the kernel's syntax, checked by the kernel itself
+// (docs/kernel-in-kush.md, section 4; plan node KIK-SPEC).
+//
+// `Tm<n>` is the type of terms with at most `n` free variables: a variable
+// is a `Fin<n>`, and a binder's body is a `Tm<n + 1>`. Renaming, shifting
+// and substitution are total functions whose *types* say that they preserve
+// scope; that the Rust kernel admits them is the theorem "weakening and
+// substitution preserve well-scopedness". The lemmas below are equations
+// between them, proved by induction. Function extensionality is not
+// available, so lemmas about renamings and substitutions take pointwise
+// hypotheses.
+//
+// `Fin` is defined by recursion rather than as an indexed family:
+//
+//     Fin<0> = Empty        Fin<n + 1> = Maybe<Fin<n>>
+//
+// `None` is the newest variable (de Bruijn index 0) and `Some x` is `x` one
+// binder further out. `Fin<n + 1>` is `Maybe<Fin<n>>` by computation, so
+// going under a binder is a `Maybe` case analysis, with no index inversion.
+
+// ---------------------------------------------------------------- equality
+
+total fn sym<A: Type>(x: A, y: A, p: Eq<A, x, y>) -> Eq<A, y, x> ! {} {
+    Eq.transport::<A>(x, y, fn(w) { Eq::<A, w, x> }, p, refl::<A>(x))
+}
+
+total fn trans<A: Type>(x: A, y: A, z: A, p: Eq<A, x, y>, q: Eq<A, y, z>) -> Eq<A, x, z> ! {} {
+    Eq.transport::<A>(y, z, fn(w) { Eq::<A, x, w> }, q, p)
+}
+
+/// Congruence: equal arguments give equal results.
+total fn ap<A: Type, B: Type>(f: fn(a: A) -> B ! {}, x: A, y: A, p: Eq<A, x, y>)
+    -> Eq<B, f<x>, f<y>> ! {} {
+    Eq.transport::<A>(x, y, fn(w) { Eq::<B, f<x>, f<w>> }, p, refl::<B>(f(x)))
+}
+
+total fn ap2<A: Type, B: Type, C: Type>(
+    f: fn(a: A, b: B) -> C ! {},
+    x: A, x2: A, y: B, y2: B,
+    p: Eq<A, x, x2>, q: Eq<B, y, y2>,
+) -> Eq<C, f<x, y>, f<x2, y2>> ! {} {
+    trans::<C>(
+        f(x, y), f(x2, y), f(x2, y2),
+        ap::<A, C>(fn(a) { f(a, y) }, x, x2, p),
+        ap::<B, C>(fn(b) { f(x2, b) }, y, y2, q),
+    )
+}
+
+// ------------------------------------------------------------ Maybe and Fin
+
+total enum Empty {}
+
+total enum Maybe<A: Type> {
+    None: Maybe<A>,
+    Some(value: A): Maybe<A>,
+}
+
+type CaseMotive<R: Type, A: Type, x: Maybe<A>> = fn(none: R, some: fn(a: A) -> R ! {}) -> R ! {};
+
+total fn case_at<R: Type, A: Type>(x: Maybe<A>) -> CaseMotive<R, A, x> ! {} {
+    Data.elim::<Maybe>(CaseMotive::<R>, fn(a) { fn(none, some) { none } }, fn(a, v) { fn(none, some) { some(v) } }, x)
+}
+
+/// `case(x, none, some)`: `none` for `None`, `some(v)` for `Some(v)`.
+total fn case<A: Type, R: Type>(x: Maybe<A>, none: R, some: fn(a: A) -> R ! {}) -> R ! {} {
+    case_at::<R, A>(x)(none, some)
+}
+
+total fn map_maybe<A: Type, B: Type>(f: fn(a: A) -> B ! {}) -> fn(x: Maybe<A>) -> Maybe<B> ! {} ! {} {
+    fn(x) { case::<A, Maybe<B>>(x, Maybe.None::<B>, fn(v) { Maybe.Some::<B>(f(v)) }) }
+}
+
+/// The variables of a scope of `n` binders.
+total fn Fin(n: Nat) -> Type ! {} {
+    Nat.induct(fn(k) { Type }, Empty, fn(k, f) { Maybe::<f> }, n)
+}
+
+// ------------------------------------------------------------------- terms
+
+/// Terms with at most `N` free variables.
+total enum Tm<N: Nat> {
+    Var(x: Fin<N>): Tm<N>,
+    Sort(level: Nat): Tm<N>,
+    App(function: Tm<N>, argument: Tm<N>): Tm<N>,
+    Lam(domain: Tm<N>, body: Tm<Nat.succ<N>>): Tm<N>,
+    Pi(domain: Tm<N>, codomain: Tm<Nat.succ<N>>): Tm<N>,
+}
+
+type Renaming<n: Nat, m: Nat> = fn(x: Fin<n>) -> Fin<m> ! {};
+type Substitution<n: Nat, m: Nat> = fn(x: Fin<n>) -> Tm<m> ! {};
+
+/// A renaming extended under one binder: the new variable to itself, the
+/// others renamed.
+total fn lift<n: Nat, m: Nat>(r: Renaming<n, m>) -> Renaming<Nat.succ<n>, Nat.succ<m>> ! {} {
+    map_maybe::<Fin<n>, Fin<m>>(r)
+}
+
+type RenameMotive<N: Nat, t: Tm<N>> = fn(m: Nat, r: Renaming<N, m>) -> Tm<m> ! {};
+
+total fn rename_at<N: Nat>(t: Tm<N>) -> RenameMotive<N, t> ! {} {
+    Data.elim::<Tm>(
+        RenameMotive,
+        fn(n, x) { fn(m, r) { Tm.Var::<m>(r(x)) } },
+        fn(n, level) { fn(m, r) { Tm.Sort::<m>(level) } },
+        fn(n, f, ihf, a, iha) { fn(m, r) { Tm.App::<m>(ihf(m, r), iha(m, r)) } },
+        fn(n, d, ihd, b, ihb) { fn(m, r) { Tm.Lam::<m>(ihd(m, r), ihb(Nat.succ(m), lift::<n, m>(r))) } },
+        fn(n, d, ihd, b, ihb) { fn(m, r) { Tm.Pi::<m>(ihd(m, r), ihb(Nat.succ(m), lift::<n, m>(r))) } },
+        t,
+    )
+}
+
+/// Renaming: its type is the statement that it preserves scope.
+total fn rename<n: Nat, m: Nat>(t: Tm<n>, r: Renaming<n, m>) -> Tm<m> ! {} {
+    rename_at::<n>(t)(m, r)
+}
+
+/// The renaming that moves every variable one binder out.
+total fn weaken<n: Nat>() -> Renaming<n, Nat.succ<n>> ! {} {
+    fn(x) { Maybe.Some::<Fin<n>>(x) }
+}
+
+/// Weakening: a term of scope `n` is a term of scope `n + 1`.
+total fn shift<n: Nat>(t: Tm<n>) -> Tm<Nat.succ<n>> ! {} {
+    rename::<n, Nat.succ<n>>(t, weaken::<n>)
+}
+
+/// A substitution of terms for variables of type `A`, extended under one
+/// binder (used with `A = Fin<n>`).
+total fn under<A: Type, m: Nat>(s: fn(a: A) -> Tm<m> ! {}) -> fn(x: Maybe<A>) -> Tm<Nat.succ<m>> ! {} ! {} {
+    fn(x) {
+        case::<A, Tm<Nat.succ<m>>>(
+            x,
+            Tm.Var::<Nat.succ<m>>(Maybe.None::<Fin<m>>),
+            fn(v) { shift::<m>(s(v)) },
+        )
+    }
+}
+
+type SubstMotive<N: Nat, t: Tm<N>> = fn(m: Nat, s: Substitution<N, m>) -> Tm<m> ! {};
+
+total fn subst_at<N: Nat>(t: Tm<N>) -> SubstMotive<N, t> ! {} {
+    Data.elim::<Tm>(
+        SubstMotive,
+        fn(n, x) { fn(m, s) { s(x) } },
+        fn(n, level) { fn(m, s) { Tm.Sort::<m>(level) } },
+        fn(n, f, ihf, a, iha) { fn(m, s) { Tm.App::<m>(ihf(m, s), iha(m, s)) } },
+        fn(n, d, ihd, b, ihb) { fn(m, s) { Tm.Lam::<m>(ihd(m, s), ihb(Nat.succ(m), under::<Fin<n>, m>(s))) } },
+        fn(n, d, ihd, b, ihb) { fn(m, s) { Tm.Pi::<m>(ihd(m, s), ihb(Nat.succ(m), under::<Fin<n>, m>(s))) } },
+        t,
+    )
+}
+
+/// Simultaneous substitution: scope `n` to scope `m`.
+total fn subst<n: Nat, m: Nat>(t: Tm<n>, s: Substitution<n, m>) -> Tm<m> ! {} {
+    subst_at::<n>(t)(m, s)
+}
+
+/// `u` for the newest variable, every other variable one binder in.
+total fn single<n: Nat>(u: Tm<n>) -> Substitution<Nat.succ<n>, n> ! {} {
+    fn(x) { case::<Fin<n>, Tm<n>>(x, u, fn(y) { Tm.Var::<n>(y) }) }
+}
+
+/// Substitute `u` for the newest variable of `b`: the body of a binder
+/// applied to `u`.
+total fn subst0<n: Nat>(b: Tm<Nat.succ<n>>, u: Tm<n>) -> Tm<n> ! {} {
+    subst::<Nat.succ<n>, n>(b, single::<n>(u))
+}
+
+/// `s` after `r`, for a renaming from any variable type `A`.
+total fn compose<A: Type, k: Nat, m: Nat>(s: Substitution<k, m>, r: fn(a: A) -> Fin<k> ! {})
+    -> fn(a: A) -> Tm<m> ! {} ! {} {
+    fn(a) { s(r(a)) }
+}
+
+// ------------------------------------------------------------------ lemmas
+
+type MapIdMotive<A: Type, x: Maybe<A>> = fn(
+    r: fn(a: A) -> A ! {},
+    h: fn(a: A) -> Eq<A, r<a>, a> ! {},
+) -> Eq<Maybe<A>, map_maybe<A, A, r, x>, x> ! {};
+
+/// Mapping a pointwise identity over `Maybe` is the identity.
+total fn map_id<A: Type>(r: fn(a: A) -> A ! {}, h: fn(a: A) -> Eq<A, r<a>, a> ! {}, x: Maybe<A>)
+    -> Eq<Maybe<A>, map_maybe<A, A, r, x>, x> ! {} {
+    Data.elim::<Maybe>(
+        MapIdMotive,
+        fn(b) { fn(r2, h2) { refl::<Maybe<b>>(Maybe.None::<b>) } },
+        fn(b, v) { fn(r2, h2) { ap::<b, Maybe<b>>(fn(z) { Maybe.Some::<b>(z) }, r2(v), v, h2(v)) } },
+        x,
+    )(r, h)
+}
+
+type RenameIdMotive<N: Nat, t: Tm<N>> = fn(
+    r: Renaming<N, N>,
+    h: fn(x: Fin<N>) -> Eq<Fin<N>, r<x>, x> ! {},
+) -> Eq<Tm<N>, rename<N, N, t, r>, t> ! {};
+
+/// Renaming by a pointwise identity is the identity.
+total fn rename_id<N: Nat>(t: Tm<N>, r: Renaming<N, N>, h: fn(x: Fin<N>) -> Eq<Fin<N>, r<x>, x> ! {})
+    -> Eq<Tm<N>, rename<N, N, t, r>, t> ! {} {
+    Data.elim::<Tm>(
+        RenameIdMotive,
+        fn(n, x) { fn(r2, h2) { ap::<Fin<n>, Tm<n>>(fn(y) { Tm.Var::<n>(y) }, r2(x), x, h2(x)) } },
+        fn(n, level) { fn(r2, h2) { refl::<Tm<n>>(Tm.Sort::<n>(level)) } },
+        fn(n, f, ihf, a, iha) {
+            fn(r2, h2) {
+                ap2::<Tm<n>, Tm<n>, Tm<n>>(
+                    fn(p, q) { Tm.App::<n>(p, q) },
+                    rename::<n, n>(f, r2), f, rename::<n, n>(a, r2), a,
+                    ihf(r2, h2), iha(r2, h2),
+                )
+            }
+        },
+        fn(n, d, ihd, b, ihb) {
+            fn(r2, h2) {
+                ap2::<Tm<n>, Tm<Nat.succ<n>>, Tm<n>>(
+                    fn(p, q) { Tm.Lam::<n>(p, q) },
+                    rename::<n, n>(d, r2), d,
+                    rename::<Nat.succ<n>, Nat.succ<n>>(b, lift::<n, n>(r2)), b,
+                    ihd(r2, h2),
+                    ihb(lift::<n, n>(r2), fn(x) { map_id::<Fin<n>>(r2, h2, x) }),
+                )
+            }
+        },
+        fn(n, d, ihd, b, ihb) {
+            fn(r2, h2) {
+                ap2::<Tm<n>, Tm<Nat.succ<n>>, Tm<n>>(
+                    fn(p, q) { Tm.Pi::<n>(p, q) },
+                    rename::<n, n>(d, r2), d,
+                    rename::<Nat.succ<n>, Nat.succ<n>>(b, lift::<n, n>(r2)), b,
+                    ihd(r2, h2),
+                    ihb(lift::<n, n>(r2), fn(x) { map_id::<Fin<n>>(r2, h2, x) }),
+                )
+            }
+        },
+        t,
+    )(r, h)
+}
+
+type UnderExtMotive<m: Nat, A: Type, x: Maybe<A>> = fn(
+    s: fn(a: A) -> Tm<m> ! {},
+    s2: fn(a: A) -> Tm<m> ! {},
+    h: fn(a: A) -> Eq<Tm<m>, s<a>, s2<a>> ! {},
+) -> Eq<Tm<Nat.succ<m>>, under<A, m, s, x>, under<A, m, s2, x>> ! {};
+
+/// Extending pointwise-equal substitutions under a binder keeps them equal.
+total fn under_ext<A: Type, m: Nat>(
+    s: fn(a: A) -> Tm<m> ! {},
+    s2: fn(a: A) -> Tm<m> ! {},
+    h: fn(a: A) -> Eq<Tm<m>, s<a>, s2<a>> ! {},
+    x: Maybe<A>,
+) -> Eq<Tm<Nat.succ<m>>, under<A, m, s, x>, under<A, m, s2, x>> ! {} {
+    Data.elim::<Maybe>(
+        UnderExtMotive::<m>,
+        fn(b) { fn(f, g, k) { refl::<Tm<Nat.succ<m>>>(Tm.Var::<Nat.succ<m>>(Maybe.None::<Fin<m>>)) } },
+        fn(b, v) { fn(f, g, k) { ap::<Tm<m>, Tm<Nat.succ<m>>>(fn(z) { shift::<m>(z) }, f(v), g(v), k(v)) } },
+        x,
+    )(s, s2, h)
+}
+
+type SubstExtMotive<N: Nat, t: Tm<N>> = fn(
+    m: Nat,
+    s: Substitution<N, m>,
+    s2: Substitution<N, m>,
+    h: fn(x: Fin<N>) -> Eq<Tm<m>, s<x>, s2<x>> ! {},
+) -> Eq<Tm<m>, subst<N, m, t, s>, subst<N, m, t, s2>> ! {};
+
+/// Substitution respects pointwise equality of substitutions.
+total fn subst_ext<N: Nat>(
+    t: Tm<N>,
+    m: Nat,
+    s: Substitution<N, m>,
+    s2: Substitution<N, m>,
+    h: fn(x: Fin<N>) -> Eq<Tm<m>, s<x>, s2<x>> ! {},
+) -> Eq<Tm<m>, subst<N, m, t, s>, subst<N, m, t, s2>> ! {} {
+    Data.elim::<Tm>(
+        SubstExtMotive,
+        fn(n, x) { fn(k, f, g, e) { e(x) } },
+        fn(n, level) { fn(k, f, g, e) { refl::<Tm<k>>(Tm.Sort::<k>(level)) } },
+        fn(n, a, iha, b, ihb) {
+            fn(k, f, g, e) {
+                ap2::<Tm<k>, Tm<k>, Tm<k>>(
+                    fn(p, q) { Tm.App::<k>(p, q) },
+                    subst::<n, k>(a, f), subst::<n, k>(a, g),
+                    subst::<n, k>(b, f), subst::<n, k>(b, g),
+                    iha(k, f, g, e), ihb(k, f, g, e),
+                )
+            }
+        },
+        fn(n, d, ihd, b, ihb) {
+            fn(k, f, g, e) {
+                ap2::<Tm<k>, Tm<Nat.succ<k>>, Tm<k>>(
+                    fn(p, q) { Tm.Lam::<k>(p, q) },
+                    subst::<n, k>(d, f), subst::<n, k>(d, g),
+                    subst::<Nat.succ<n>, Nat.succ<k>>(b, under::<Fin<n>, k>(f)),
+                    subst::<Nat.succ<n>, Nat.succ<k>>(b, under::<Fin<n>, k>(g)),
+                    ihd(k, f, g, e),
+                    ihb(Nat.succ(k), under::<Fin<n>, k>(f), under::<Fin<n>, k>(g),
+                        fn(x) { under_ext::<Fin<n>, k>(f, g, e, x) }),
+                )
+            }
+        },
+        fn(n, d, ihd, b, ihb) {
+            fn(k, f, g, e) {
+                ap2::<Tm<k>, Tm<Nat.succ<k>>, Tm<k>>(
+                    fn(p, q) { Tm.Pi::<k>(p, q) },
+                    subst::<n, k>(d, f), subst::<n, k>(d, g),
+                    subst::<Nat.succ<n>, Nat.succ<k>>(b, under::<Fin<n>, k>(f)),
+                    subst::<Nat.succ<n>, Nat.succ<k>>(b, under::<Fin<n>, k>(g)),
+                    ihd(k, f, g, e),
+                    ihb(Nat.succ(k), under::<Fin<n>, k>(f), under::<Fin<n>, k>(g),
+                        fn(x) { under_ext::<Fin<n>, k>(f, g, e, x) }),
+                )
+            }
+        },
+        t,
+    )(m, s, s2, h)
+}
+
+type UnderComposeMotive<k: Nat, m: Nat, A: Type, x: Maybe<A>> = fn(
+    r: fn(a: A) -> Fin<k> ! {},
+    s: Substitution<k, m>,
+) -> Eq<
+    Tm<Nat.succ<m>>,
+    under<Fin<k>, m, s, map_maybe<A, Fin<k>, r, x>>,
+    under<A, m, compose<A, k, m, s, r>, x>,
+> ! {};
+
+/// Lifting a renaming, then a substitution, is lifting their composition.
+total fn under_compose<k: Nat, m: Nat, A: Type>(r: fn(a: A) -> Fin<k> ! {}, s: Substitution<k, m>, x: Maybe<A>)
+    -> Eq<Tm<Nat.succ<m>>, under<Fin<k>, m, s, map_maybe<A, Fin<k>, r, x>>, under<A, m, compose<A, k, m, s, r>, x>> ! {} {
+    Data.elim::<Maybe>(
+        UnderComposeMotive::<k, m>,
+        fn(b) { fn(f, g) { refl::<Tm<Nat.succ<m>>>(Tm.Var::<Nat.succ<m>>(Maybe.None::<Fin<m>>)) } },
+        fn(b, v) { fn(f, g) { refl::<Tm<Nat.succ<m>>>(shift::<m>(g(f(v)))) } },
+        x,
+    )(r, s)
+}
+
+/// The binder case of `subst_rename`, for a binder constructor `c`: the
+/// domain by its induction hypothesis, the body by its hypothesis and
+/// `subst_ext` with `under_compose`.
+total fn binder_rename<n: Nat, j: Nat, l: Nat>(
+    c: fn(p: Tm<l>, q: Tm<Nat.succ<l>>) -> Tm<l> ! {},
+    d: Tm<n>,
+    b: Tm<Nat.succ<n>>,
+    f: Renaming<n, j>,
+    g: Substitution<j, l>,
+    ihd: Eq<Tm<l>, subst<j, l, rename<n, j, d, f>, g>, subst<n, l, d, compose<Fin<n>, j, l, g, f>>>,
+    ihb: Eq<
+        Tm<Nat.succ<l>>,
+        subst<Nat.succ<j>, Nat.succ<l>, rename<Nat.succ<n>, Nat.succ<j>, b, lift<n, j, f>>, under<Fin<j>, l, g>>,
+        subst<Nat.succ<n>, Nat.succ<l>, b, compose<Fin<Nat.succ<n>>, Nat.succ<j>, Nat.succ<l>, under<Fin<j>, l, g>, lift<n, j, f>>>,
+    >,
+) -> Eq<
+    Tm<l>,
+    c<
+        subst<j, l, rename<n, j, d, f>, g>,
+        subst<Nat.succ<j>, Nat.succ<l>, rename<Nat.succ<n>, Nat.succ<j>, b, lift<n, j, f>>, under<Fin<j>, l, g>>,
+    >,
+    c<
+        subst<n, l, d, compose<Fin<n>, j, l, g, f>>,
+        subst<Nat.succ<n>, Nat.succ<l>, b, under<Fin<n>, l, compose<Fin<n>, j, l, g, f>>>,
+    >,
+> ! {} {
+    ap2::<Tm<l>, Tm<Nat.succ<l>>, Tm<l>>(
+        c,
+        subst::<j, l>(rename::<n, j>(d, f), g),
+        subst::<n, l>(d, compose::<Fin<n>, j, l>(g, f)),
+        subst::<Nat.succ<j>, Nat.succ<l>>(rename::<Nat.succ<n>, Nat.succ<j>>(b, lift::<n, j>(f)), under::<Fin<j>, l>(g)),
+        subst::<Nat.succ<n>, Nat.succ<l>>(b, under::<Fin<n>, l>(compose::<Fin<n>, j, l>(g, f))),
+        ihd,
+        trans::<Tm<Nat.succ<l>>>(
+            subst::<Nat.succ<j>, Nat.succ<l>>(rename::<Nat.succ<n>, Nat.succ<j>>(b, lift::<n, j>(f)), under::<Fin<j>, l>(g)),
+            subst::<Nat.succ<n>, Nat.succ<l>>(b, compose::<Fin<Nat.succ<n>>, Nat.succ<j>, Nat.succ<l>>(under::<Fin<j>, l>(g), lift::<n, j>(f))),
+            subst::<Nat.succ<n>, Nat.succ<l>>(b, under::<Fin<n>, l>(compose::<Fin<n>, j, l>(g, f))),
+            ihb,
+            subst_ext::<Nat.succ<n>>(
+                b,
+                Nat.succ(l),
+                compose::<Fin<Nat.succ<n>>, Nat.succ<j>, Nat.succ<l>>(under::<Fin<j>, l>(g), lift::<n, j>(f)),
+                under::<Fin<n>, l>(compose::<Fin<n>, j, l>(g, f)),
+                fn(x) { under_compose::<j, l, Fin<n>>(f, g, x) },
+            ),
+        ),
+    )
+}
+
+type SubstRenameMotive<N: Nat, t: Tm<N>> = fn(
+    k: Nat,
+    m: Nat,
+    r: Renaming<N, k>,
+    s: Substitution<k, m>,
+) -> Eq<Tm<m>, subst<k, m, rename<N, k, t, r>, s>, subst<N, m, t, compose<Fin<N>, k, m, s, r>>> ! {};
+
+/// Renaming then substituting is substituting the composition.
+total fn subst_rename<N: Nat>(t: Tm<N>, k: Nat, m: Nat, r: Renaming<N, k>, s: Substitution<k, m>)
+    -> Eq<Tm<m>, subst<k, m, rename<N, k, t, r>, s>, subst<N, m, t, compose<Fin<N>, k, m, s, r>>> ! {} {
+    Data.elim::<Tm>(
+        SubstRenameMotive,
+        fn(n, x) { fn(j, l, f, g) { refl::<Tm<l>>(g(f(x))) } },
+        fn(n, level) { fn(j, l, f, g) { refl::<Tm<l>>(Tm.Sort::<l>(level)) } },
+        fn(n, a, iha, b, ihb) {
+            fn(j, l, f, g) {
+                ap2::<Tm<l>, Tm<l>, Tm<l>>(
+                    fn(p, q) { Tm.App::<l>(p, q) },
+                    subst::<j, l>(rename::<n, j>(a, f), g), subst::<n, l>(a, compose::<Fin<n>, j, l>(g, f)),
+                    subst::<j, l>(rename::<n, j>(b, f), g), subst::<n, l>(b, compose::<Fin<n>, j, l>(g, f)),
+                    iha(j, l, f, g), ihb(j, l, f, g),
+                )
+            }
+        },
+        fn(n, d, ihd, b, ihb) {
+            fn(j, l, f, g) {
+                binder_rename::<n, j, l>(
+                    fn(p, q) { Tm.Lam::<l>(p, q) },
+                    d, b, f, g, ihd(j, l, f, g),
+                    ihb(Nat.succ(j), Nat.succ(l), lift::<n, j>(f), under::<Fin<j>, l>(g)),
+                )
+            }
+        },
+        fn(n, d, ihd, b, ihb) {
+            fn(j, l, f, g) {
+                binder_rename::<n, j, l>(
+                    fn(p, q) { Tm.Pi::<l>(p, q) },
+                    d, b, f, g, ihd(j, l, f, g),
+                    ihb(Nat.succ(j), Nat.succ(l), lift::<n, j>(f), under::<Fin<j>, l>(g)),
+                )
+            }
+        },
+        t,
+    )(k, m, r, s)
+}
+
+type UnderVarMotive<m: Nat, A: Type, x: Maybe<A>> = fn(
+    v: fn(a: A) -> Fin<m> ! {},
+    s: fn(a: A) -> Tm<m> ! {},
+    h: fn(a: A) -> Eq<Tm<m>, s<a>, Tm.Var<m, v<a>>> ! {},
+) -> Eq<Tm<Nat.succ<m>>, under<A, m, s, x>, Tm.Var<Nat.succ<m>, map_maybe<A, Fin<m>, v, x>>> ! {};
+
+/// A substitution of variables stays one under a binder.
+total fn under_var_map<m: Nat, A: Type>(
+    v: fn(a: A) -> Fin<m> ! {},
+    s: fn(a: A) -> Tm<m> ! {},
+    h: fn(a: A) -> Eq<Tm<m>, s<a>, Tm.Var<m, v<a>>> ! {},
+    x: Maybe<A>,
+) -> Eq<Tm<Nat.succ<m>>, under<A, m, s, x>, Tm.Var<Nat.succ<m>, map_maybe<A, Fin<m>, v, x>>> ! {} {
+    Data.elim::<Maybe>(
+        UnderVarMotive::<m>,
+        fn(b) { fn(f, g, k) { refl::<Tm<Nat.succ<m>>>(Tm.Var::<Nat.succ<m>>(Maybe.None::<Fin<m>>)) } },
+        fn(b, a) { fn(f, g, k) { ap::<Tm<m>, Tm<Nat.succ<m>>>(fn(z) { shift::<m>(z) }, g(a), Tm.Var::<m>(f(a)), k(a)) } },
+        x,
+    )(v, s, h)
+}
+
+/// The identity renaming.
+total fn identity<n: Nat>() -> Renaming<n, n> ! {} { fn(x) { x } }
+
+/// Under a binder, a substitution of each variable by itself is still one.
+total fn under_var<n: Nat>(
+    s: Substitution<n, n>,
+    h: fn(x: Fin<n>) -> Eq<Tm<n>, s<x>, Tm.Var<n, x>> ! {},
+    x: Fin<Nat.succ<n>>,
+) -> Eq<Tm<Nat.succ<n>>, under<Fin<n>, n, s, x>, Tm.Var<Nat.succ<n>, x>> ! {} {
+    trans::<Tm<Nat.succ<n>>>(
+        under::<Fin<n>, n>(s)(x),
+        Tm.Var::<Nat.succ<n>>(map_maybe::<Fin<n>, Fin<n>>(identity::<n>)(x)),
+        Tm.Var::<Nat.succ<n>>(x),
+        under_var_map::<n, Fin<n>>(identity::<n>, s, h, x),
+        ap::<Fin<Nat.succ<n>>, Tm<Nat.succ<n>>>(
+            fn(y) { Tm.Var::<Nat.succ<n>>(y) },
+            map_maybe::<Fin<n>, Fin<n>>(identity::<n>)(x),
+            x,
+            map_id::<Fin<n>>(identity::<n>, fn(a) { refl::<Fin<n>>(a) }, x),
+        ),
+    )
+}
+
+type SubstVarMotive<N: Nat, t: Tm<N>> = fn(
+    s: Substitution<N, N>,
+    h: fn(x: Fin<N>) -> Eq<Tm<N>, s<x>, Tm.Var<N, x>> ! {},
+) -> Eq<Tm<N>, subst<N, N, t, s>, t> ! {};
+
+/// Substituting each variable by itself is the identity.
+total fn subst_var<N: Nat>(t: Tm<N>, s: Substitution<N, N>, h: fn(x: Fin<N>) -> Eq<Tm<N>, s<x>, Tm.Var<N, x>> ! {})
+    -> Eq<Tm<N>, subst<N, N, t, s>, t> ! {} {
+    Data.elim::<Tm>(
+        SubstVarMotive,
+        fn(n, x) { fn(f, e) { e(x) } },
+        fn(n, level) { fn(f, e) { refl::<Tm<n>>(Tm.Sort::<n>(level)) } },
+        fn(n, a, iha, b, ihb) {
+            fn(f, e) {
+                ap2::<Tm<n>, Tm<n>, Tm<n>>(
+                    fn(p, q) { Tm.App::<n>(p, q) },
+                    subst::<n, n>(a, f), a, subst::<n, n>(b, f), b,
+                    iha(f, e), ihb(f, e),
+                )
+            }
+        },
+        fn(n, d, ihd, b, ihb) {
+            fn(f, e) {
+                ap2::<Tm<n>, Tm<Nat.succ<n>>, Tm<n>>(
+                    fn(p, q) { Tm.Lam::<n>(p, q) },
+                    subst::<n, n>(d, f), d,
+                    subst::<Nat.succ<n>, Nat.succ<n>>(b, under::<Fin<n>, n>(f)), b,
+                    ihd(f, e),
+                    ihb(under::<Fin<n>, n>(f), fn(x) { under_var::<n>(f, e, x) }),
+                )
+            }
+        },
+        fn(n, d, ihd, b, ihb) {
+            fn(f, e) {
+                ap2::<Tm<n>, Tm<Nat.succ<n>>, Tm<n>>(
+                    fn(p, q) { Tm.Pi::<n>(p, q) },
+                    subst::<n, n>(d, f), d,
+                    subst::<Nat.succ<n>, Nat.succ<n>>(b, under::<Fin<n>, n>(f)), b,
+                    ihd(f, e),
+                    ihb(under::<Fin<n>, n>(f), fn(x) { under_var::<n>(f, e, x) }),
+                )
+            }
+        },
+        t,
+    )(s, h)
+}
+
+/// The defining equation of a binder applied to an argument it does not
+/// use: substituting into a weakened term gives the term back.
+total fn subst0_shift<n: Nat>(t: Tm<n>, u: Tm<n>) -> Eq<Tm<n>, subst0<n, shift<n, t>, u>, t> ! {} {
+    trans::<Tm<n>>(
+        subst0::<n>(shift::<n>(t), u),
+        subst::<n, n>(t, compose::<Fin<n>, Nat.succ<n>, n>(single::<n>(u), weaken::<n>)),
+        t,
+        subst_rename::<n>(t, Nat.succ(n), n, weaken::<n>, single::<n>(u)),
+        subst_var::<n>(t, compose::<Fin<n>, Nat.succ<n>, n>(single::<n>(u), weaken::<n>), fn(x) { refl::<Tm<n>>(Tm.Var::<n>(x)) }),
+    )
+}
+
+// ------------------------------------------------------------------ examples
+
+// The operations compute: `(λ. 0) u` reduces to `u`, and a variable that
+// is not the substituted one moves one binder out.
+total fn zero_var<n: Nat>() -> Fin<Nat.succ<n>> ! {} { Maybe.None::<Fin<n>> }
+
+total fn substituted() -> Eq<Tm<0>, subst0<0, Tm.Var<1, zero_var<0>>, Tm.Sort<0, 3>>, Tm.Sort<0, 3>> ! {} {
+    refl::<Tm<0>>(Tm.Sort::<0>(3))
+}
+
+total fn moved_out() -> Eq<
+    Tm<1>,
+    subst0<1, Tm.Var<2, Maybe.Some<Fin<1>, zero_var<0>>>, Tm.Sort<1, 7>>,
+    Tm.Var<1, zero_var<0>>,
+> ! {} {
+    refl::<Tm<1>>(Tm.Var::<1>(zero_var::<0>))
+}
+
+// Weakening under a binder leaves the bound variable alone and moves the
+// free one: shift (λ. 0 1) = λ. 0 2.
+total fn one_var<n: Nat>() -> Fin<Nat.succ<Nat.succ<n>>> ! {} {
+    Maybe.Some::<Fin<Nat.succ<n>>>(zero_var::<n>)
+}
+
+total fn two_var<n: Nat>() -> Fin<Nat.succ<Nat.succ<Nat.succ<n>>>> ! {} {
+    Maybe.Some::<Fin<Nat.succ<Nat.succ<n>>>>(one_var::<n>)
+}
+
+total fn shifted() -> Eq<
+    Tm<2>,
+    shift<1, Tm.Lam<1, Tm.Sort<1, 0>, Tm.App<2, Tm.Var<2, zero_var<1>>, Tm.Var<2, one_var<0>>>>>,
+    Tm.Lam<2, Tm.Sort<2, 0>, Tm.App<3, Tm.Var<3, zero_var<2>>, Tm.Var<3, two_var<0>>>>,
+> ! {} {
+    refl::<Tm<2>>(Tm.Lam::<2>(Tm.Sort::<2>(0), Tm.App::<3>(Tm.Var::<3>(zero_var::<2>), Tm.Var::<3>(two_var::<0>))))
+}

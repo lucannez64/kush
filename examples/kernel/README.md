@@ -42,6 +42,10 @@ kush test --manifest-path Kush.toml
   occurrences, level instantiation, branch and constructor types).
 - `src/error.kush`: kernel error codes.
 - `src/main.kush`: the command line.
+- `spec/scoped.kush`: a specification of the kernel's syntax in the logical
+  fragment: well-scoped terms `Tm<n>`, renaming, weakening and substitution
+  typed so that they preserve scope, and their equational lemmas (up to
+  `subst0(shift t, u) = t`). Both the Rust kernel and this kernel check it.
 
 The Rust test `crates/kush/tests/kernel_in_kush.rs` runs the package tests
 and checks that every exchange file dumped from the example corpus prints back

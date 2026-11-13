@@ -264,26 +264,45 @@ definitions are erased and executable code cannot call or mention them
 syntax and its basic operations in the logical fragment, where the Rust kernel
 checks them, and to tie that specification to the implementation by testing.
 
-`examples/kernel/spec/scoped.kush`, a logical-only file:
+[`examples/kernel/spec/scoped.kush`](../examples/kernel/spec/scoped.kush), a
+logical-only file (implemented, KIK-SPEC; 53 definitions):
 
-- **Well-scoped syntax.** `total enum Tm<n: Nat>` with a `Var(Fin<n>)`
-  constructor and binders that take `Tm<Nat.succ<n>>` bodies (the M1 fragment:
-  sorts, Pi, Lam, App, Nat, Zero, Succ). A term of type `Tm<n>` has at most `n`
-  free variables by construction.
-- **Renaming and substitution with scope in their types.**
-  `rename: (r: fn(Fin<n>) -> Fin<m>) -> Tm<n> -> Tm<m>`, `lift` of a renaming
-  under a binder, `shift: Tm<n> -> Tm<Nat.succ<n>>`, simultaneous substitution
-  `fn(Fin<n>) -> Tm<m>`, and `subst0: Tm<Nat.succ<n>> -> Tm<n> -> Tm<n>`. That
-  these definitions are accepted *is* the statement "weakening and substitution
-  preserve well-scopedness".
-- **Equational lemmas**, proved by `Data.elim` with pointwise hypotheses
-  (there is no function extensionality): renaming by a pointwise identity is
-  the identity; renamings compose; `subst0(shift(t), u) = t`; substituting a
-  variable for itself is the identity.
+- **Well-scoped syntax.** `total enum Tm<N: Nat>` with `Var(x: Fin<N>)`,
+  `Sort(level: Nat)`, `App`, and the binders `Lam` and `Pi`, whose bodies are
+  `Tm<Nat.succ<N>>`. A term of type `Tm<n>` has at most `n` free variables by
+  construction. (`Nat`, `Zero` and `Succ` would add only congruence cases.)
+- **Variables by recursion.** `Fin<0> = Empty`, `Fin<n + 1> = Maybe<Fin<n>>`,
+  defined with `Nat.induct` into `Type`: `None` is the newest variable and
+  `Some x` is `x` one binder out. Because `Fin<n + 1>` *is* `Maybe<Fin<n>>` by
+  computation, going under a binder is a `Maybe` case analysis. An indexed
+  `Fin` family would need index inversion (heterogeneous equality) for the
+  lemmas below, which this kernel does not provide.
+- **Operations with scope in their types.** `rename<n, m>(t: Tm<n>, r:
+  fn(x: Fin<n>) -> Fin<m>) -> Tm<m>`, `lift` of a renaming under a binder,
+  `shift<n>(t: Tm<n>) -> Tm<n + 1>`, simultaneous substitution
+  `subst<n, m>(t: Tm<n>, s: fn(x: Fin<n>) -> Tm<m>) -> Tm<m>` with `under` (a
+  substitution under a binder), and `subst0<n>(b: Tm<n + 1>, u: Tm<n>) ->
+  Tm<n>`. That these definitions are admitted *is* the statement "renaming,
+  weakening and substitution preserve well-scopedness".
+- **Equational lemmas**, by `Data.elim` with pointwise hypotheses (there is
+  no function extensionality):
+  - `map_id`, `rename_id`: renaming by a pointwise identity is the identity;
+  - `under_ext`, `subst_ext`: substitution respects pointwise equality;
+  - `under_compose`, `subst_rename`: renaming then substituting is
+    substituting the composition;
+  - `under_var`, `subst_var`: substituting each variable by itself is the
+    identity;
+  - `subst0_shift`: `subst0(shift(t), u) = t`, from the three above.
+- **Computed examples**: `(λ. 0) u` reduces to `u`, a non-substituted
+  variable moves one binder out, and `shift (λ. 0 1) = λ. 0 2`, each proved by
+  `refl`.
 
-These are checked by `kush check`, so the Rust kernel checks the invariants.
-The same file is also in the differential corpus, so the Kush kernel checks the
-proofs about its own syntax as well.
+`kush check` admits the file, so the Rust kernel checks these invariants
+(about a minute in a debug build). The Kush kernel admits the same
+declarations from the exchange dump, in about 4 seconds, and rejects a
+corrupted proof (`crates/kush/tests/kernel_spec.rs`). So Kush checks the proofs
+about its own syntax. The full comparison including every normal-form query is
+an ignored test that `scripts/kernel-diff.sh` runs.
 
 **Linking the specification to the implementation.** The Rust kernel can
 compute with the specification: normalizing `subst0(t, u)` for concrete closed

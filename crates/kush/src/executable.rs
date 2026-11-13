@@ -5188,7 +5188,8 @@ pub fn logical_module(source: &str) -> Result<crate::check::CheckedModule> {
     let mut resolution = resolve::resolve_program(&injected)?;
     collect_default_bindings(module, &mut resolution)?;
     crate::grades::validate_algebras(&mut resolution)?;
-    let logical = crate::check::check_program(module, &resolution)?;
+    let logical =
+        crate::kernel::on_kernel_stack(|| crate::check::check_program(module, &resolution))?;
     Ok(crate::check::CheckedModule {
         resolution,
         kernel: logical.kernel,
@@ -5426,7 +5427,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     let resolution = &resolution;
     // Total functions and aliases are erased and checked by the trusted kernel
     // before any executable body can cite them as proof evidence.
-    let logical = crate::check::check_program(module, resolution)?;
+    let logical =
+        crate::kernel::on_kernel_stack(|| crate::check::check_program(module, resolution))?;
     // A trait object whose member set is open (a generic or blanket impl) or
     // that appears inside a laid-out nominal field cannot use the inline
     // closed-world union: its width would depend on impl collection, which in
