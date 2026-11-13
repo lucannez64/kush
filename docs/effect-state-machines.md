@@ -624,7 +624,9 @@ cannot be done through the token value. Instead the handler is specialized:
   one-shot token, whose representation differs), so its body is always
   suspendable and a call that may perform the operation, or a task spawned
   to perform it, is rejected. Multishot resumption through a chain of called
-  functions (the frame-chain copy of section 10) is not implemented.
+  functions uses `multi fn` tokens on a continuation stack instead of the
+  frame-chain copy of section 10
+  ([multishot capabilities](multishot-capabilities.md)).
 
 ### 14.3 Measured overhead (E-PERF)
 

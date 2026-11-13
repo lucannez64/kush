@@ -1,8 +1,9 @@
 # Multishot capabilities across calls (design)
 
-Status: **design approved 2026-11-13** (plan node EFF-CAP-RESUME-MULTISHOT),
-all five decisions of section 10. Implementation is in progress. It removes the blocker recorded in the plan log
-on 2026-11-06 and is the base for TACTICS-HANDLERS, whose backtracking search
+Status: **implemented** (plan node EFF-CAP-RESUME-MULTISHOT; design approved
+2026-11-13, all five decisions of section 10). Section 11 describes what was
+built and where it departs from the design. It removes the blocker recorded
+in the plan log on 2026-11-06 and is the base for TACTICS-HANDLERS, whose backtracking search
 resumes a continuation captured inside recursive proof-search functions.
 
 Revision 2 (2026-11-13): the first draft recommended reference-counted
@@ -429,3 +430,64 @@ same stack, which section 5 would also cover and which would save a
 4. `cap Op` and `cap multi Op` kept distinct.
 5. Checks backing the soundness argument: epochs in the evaluator, poisoning
    in native tests.
+
+## 11. As built
+
+Tests: `crates/kush/tests/multishot_capabilities.rs` (every executable test
+runs in the evaluator with balanced allocations and natively with
+`KUSH_KSTACK_POISON=1`); example: [examples/multishot.kush](../examples/multishot.kush),
+which counts the solutions of 1- to 6-queens and is part of the LLVM parity
+list in `crates/kush/tests/llvm_backend.rs`.
+
+- **Type.** `Type::Multi(arrow)`: two words, copyable, owns nothing. Its
+  arrow is interned like a `fn` arrow (not once, not linear); the variant
+  carries the mode. `cap multi Op ! {e}` lowers to
+  `fn(P, multi fn(R) -> R ! {}) -> R ! {e}`, so passing a one-shot handler
+  where a multishot one is expected (or the reverse) is an ordinary type
+  mismatch. Between tokens, arrow subtyping applies without an adapter;
+  there is no conversion to or from `fn`, `once fn` or `linear once fn`.
+- **Second-class rules** are one pass over the checked IR before ownership
+  (`crates/kush/src/multishot.rs`): a token is never a function result, a
+  field, element, union member or arrow result, never captured by a
+  closure, and never graded. The suspension lowering adds the rule that a
+  token is never live across a `perform` (the only token a continuation
+  captures is a resumable entry's own `k`).
+- **Handlers.** A handler whose token parameter is exactly
+  `multi fn(R) -> R ! {}` is multishot without handler specialization; it
+  may be any handler value (the `fn(R) -> R` form keeps its restriction to
+  known noncapturing handlers that only call the token). Tail-resumptive
+  `multi fn` handlers continue in place with an identity token whose
+  environment is null. Tokens are pure: a handler that may abort, or an
+  abort through a token, is rejected as for other multishot tokens without
+  the operation in their row.
+- **Continuations** are the existing continuation functions with
+  `Function::shared_environment` set: the prologue copies the captures and
+  leaves the environment in place. A handled body with `multi fn` tokens is
+  wrapped in `ExprKind::ContinuationScope`. Every call of a `multi fn`
+  value (including a region's finish `k`) is bracketed by mark and restore
+  in both backends.
+- **Across calls.** Resumable entries keep the key
+  `EntryKey::Capability(slot)`; whether the entry is multishot follows from
+  the parameter's type (`capability_multi`). A multishot entry takes
+  `k: multi fn(T) -> R`, its tokens are `multi fn`, and its live values
+  must be copyable and ungraded. A noncapturing multishot handler bound
+  `as op` makes calls passing `op` await points (`capability_resumable`);
+  a tail-resumptive one is passed to direct entries, whose performs use the
+  identity token.
+- **Native ABI.** Environment: one word holding its size, then the
+  captures. Runtime (`kush_kstack_push`, `kush_kstack_mark`,
+  `kush_kstack_restore`): one stack per handler context (per task and per
+  OS thread), 64 KiB chunks from `kush_alloc`, one spare chunk kept; an
+  emptied stack gives its chunk back, so the exit check for live
+  allocations reports any missing restore. `KUSH_KSTACK_POISON=1` fills
+  released bytes with `0xA5`; `KUSH_KSTACK_STATS=1` (stats builds) prints
+  the peak bytes in use. An abortive scope also restores the stack where it
+  lands, though no abort can currently leave a multishot `handle`.
+- **Evaluator.** `Value::Token` names a stack entry and its epoch; a call
+  checks the epoch ("use of a released continuation environment"), copies
+  the captures, and truncates the stack when the call returns. Pushes and
+  releases count as allocations, so the balance check also checks every
+  restore.
+- **Not done.** Capturing multishot handlers across calls (they stay
+  rejected), tokens naming abortive operations, and the measurement row in
+  `benchmarks/effects` (section 8, group 6).

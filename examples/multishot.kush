@@ -1,0 +1,69 @@
+// Multishot capabilities across calls (docs/multishot-capabilities.md).
+//
+// `place` searches for queen placements row by row. It asks for a column
+// with `perform op(n)` through a `cap multi` capability; the handler resumes
+// the rest of the search once per column and adds up the solutions found.
+// The board is one copyable integer, three bits per row, so every
+// resumption starts from its own copy of it.
+//
+//   kush run examples/multishot.kush   # 1 0 0 2 10 4
+effect Choose: i64 -> i64;
+
+/// Whether a queen at `column` in row `row` is attacked by the queens of the
+/// rows above, most recent in the lowest three bits of `placed`.
+fn safe(placed: i64, row: i64, column: i64) -> Bool ! {panic} {
+    let mut ok = true;
+    let mut distance = 1;
+    let mut rest = placed;
+    while distance <= row {
+        let other = rest % 8;
+        if other == column || other - column == distance || column - other == distance {
+            ok = false;
+        }
+        rest = rest / 8;
+        distance = distance + 1;
+    }
+    ok
+}
+
+/// The number of ways to finish the board from `row` on.
+fn place(op: cap multi Choose ! {panic}, n: i64, row: i64, placed: i64) -> i64 ! {panic} {
+    if row == n {
+        1
+    } else {
+        let column = perform op(n);
+        if safe(placed, row, column) {
+            place(op, n, row + 1, placed * 8 + column)
+        } else {
+            0
+        }
+    }
+}
+
+/// Count the solutions of the `n`-queens puzzle: every choice is tried by
+/// resuming the same continuation once per column.
+fn solutions(n: i64) -> i64 ! {alloc, panic} {
+    handle Choose: i64 -> i64 as op with fn(
+        width: i64,
+        resume: multi fn(i64) -> i64 ! {},
+    ) -> i64 ! {panic} {
+        let mut total = 0;
+        let mut column = 0;
+        while column < width {
+            total = total + resume(column);
+            column = column + 1;
+        }
+        total
+    } {
+        place(op, n, 0, 0)
+    }
+}
+
+fn main() -> i64 ! {alloc, io, panic} {
+    let mut n = 1;
+    while n <= 6 {
+        print_i64(solutions(n));
+        n = n + 1;
+    }
+    0
+}

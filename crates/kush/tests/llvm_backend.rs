@@ -45,7 +45,7 @@ fn run(example: &str, flags: &[&str], stdin: &str) -> Output {
 
 /// Programs covering integers, floats, text, closures, traits, ownership,
 /// slices, tasks, effects and standard input.
-const EXAMPLES: [(&str, &str); 22] = [
+const EXAMPLES: [(&str, &str); 23] = [
     ("first.kush", ""),
     ("floats.kush", ""),
     ("strings.kush", ""),
@@ -71,6 +71,7 @@ const EXAMPLES: [(&str, &str); 22] = [
         "json.kush",
         "{\"a\": [1, 2.5, \"x\\u00e9\"], \"b\": null}\n",
     ),
+    ("multishot.kush", ""),
 ];
 
 #[test]

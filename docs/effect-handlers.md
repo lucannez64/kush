@@ -195,7 +195,12 @@ linear token is consumed on every normal path:
 A handler may instead declare the copyable **multishot** token
 `fn(Result) -> Result ! {}` and resume zero, one, or several times; each
 resumption re-runs the rest of the body from the perform point with its own
-copy of the live values (see the multishot lowering below).
+copy of the live values (see the multishot lowering below). A handler may
+also declare the token `multi fn(Result) -> Result ! {}`: a copyable,
+second-class token whose environment lives on the task's continuation
+stack, which needs no handler specialization and also resumes performs in
+called functions through `cap multi Op` capabilities
+([multishot capabilities](multishot-capabilities.md)).
 
 There are three resumption lowerings:
 
@@ -309,10 +314,12 @@ reference evaluator.
 - a perform cannot be captured across a nested non-tail handler or a nested
   declared-operation handler (no multi-prompt capture), nor through function
   values, trait objects, `Task.scope` or vector callbacks;
-- multishot continuations with live values need a known noncapturing handler
-  that only calls its token, and copyable ungraded live values; multishot
-  resumption through called functions is not implemented, and a multishot
-  handler for a declared operation is not visible to called functions;
+- multishot continuations with live values need copyable ungraded live
+  values, and with the `fn(R) -> R` token a known noncapturing handler that
+  only calls its token; multishot resumption through called functions needs
+  a `multi fn` token and a `cap multi Op` capability, and a multishot
+  handler for a declared operation is not visible to called functions by
+  name;
 - non-tail handlers nest one activation per pending perform, so stack use is
   linear in the number of performs resumed before the body ends; the reference
   evaluator's fixed nesting budget allows only about ten of them;
