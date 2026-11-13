@@ -6294,10 +6294,21 @@
         "LOGIC-LAMBDA",
         "KERNEL-BUDGET-ATTR"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Tm<n> with Fin variables, rename/shift/subst with scope in their types, pointwise lemmas; also in the diff corpus.",
-      "commit": null,
-      "log": []
+      "commit": "5536ce4",
+      "log": [
+        {
+          "time": "2026-11-13 10:19:13",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 10:45:40",
+          "who": "agent",
+          "text": "done 5536ce4"
+        }
+      ]
     },
     {
       "id": "KIK-SPEC-DIFF",
