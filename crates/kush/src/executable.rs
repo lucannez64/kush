@@ -35002,10 +35002,19 @@ impl Checker<'_, '_> {
                         == self.resume_type_with(result_ty, multishot, effects);
                 (named.then_some(effects), multishot)
             }
+            Type::Multi(id) => {
+                let effects = self.types.function_types[id].effects;
+                let named = effects != 0
+                    && effects & !self.abortive_bits() == 0
+                    && signature.parameters[1]
+                        == Type::Multi(self.types.multi_token_with(result_ty, effects));
+                (named.then_some(effects), true)
+            }
             _ => (None, false),
         };
         let multi_token = Type::Multi(self.types.multi_token(result_ty));
-        let multi = signature.parameters[1] == multi_token;
+        let multi = signature.parameters[1] == multi_token
+            || (matches!(signature.parameters[1], Type::Multi(_)) && token_effects.is_some());
         let multishot = if multi {
             true
         } else if signature.parameters[1] == one_shot
@@ -35093,7 +35102,10 @@ impl Checker<'_, '_> {
                 ));
             }
         }
-        let declared = declared.filter(|_| !capability_only);
+        // A multishot handler bound `as op` is never on the dynamic stack (a
+        // perform by name would bring a one-shot token), so it is
+        // capability-only too: it does not discharge `Op` for its body.
+        let declared = declared.filter(|_| !capability_only && !(multi && capability.is_some()));
         let handler_type = handler_value.ty;
         let slot = self.fresh_local(span, handler_type)?;
         if let Some((_, binder)) = &capability {
@@ -35151,10 +35163,28 @@ impl Checker<'_, '_> {
         // dynamically visible; it gets a frame under a private operation id
         // that only its trampoline looks up.
         let private_frame = capability_only && !multishot && !noncapturing;
-        let framed = capability.is_some()
+        // Types of the handler's captured values. An opaque handler value
+        // (not a lambda or function here) was checked where it was built;
+        // its captures are not visible.
+        let known_captures = self.closure_capture_types(&handler_value);
+        let copyable_captures = matches!(handler_value.ty, Type::Once(_))
+            && !signature.linear
+            && known_captures.as_ref().is_some_and(|captures| {
+                !captures.is_empty()
+                    && captures
+                        .iter()
+                        .all(|ty| !self.owned_type(*ty) && !self.linear_type(*ty))
+            });
+        // EFF-CAP-RESUME-MULTISHOT: a capturing `multi fn` handler whose
+        // captures are copyable gets a reusable frame under a private
+        // operation id; callees reach it through a trampoline that passes
+        // their `multi fn` token on, once per perform.
+        let multi_framed = capability.is_some() && multi && !noncapturing && copyable_captures;
+        let framed = (capability.is_some()
             && (declared.is_some() || private_frame)
             && !multishot
-            && !noncapturing;
+            && !noncapturing)
+            || multi_framed;
         let region = ((!tail_resumptive_handler(self.resolution, handler)
             || shadows_handler_effects)
             && (lexical || declared.is_some() || capability_awaits))
@@ -35169,7 +35199,7 @@ impl Checker<'_, '_> {
         // `cap multi` entries (docs/multishot-capabilities.md section 6.1).
         let capability_resumable = capability.is_some()
             && region
-            && ((!multishot && (noncapturing || framed)) || (multi && noncapturing));
+            && ((!multishot && (noncapturing || framed)) || (multi && (noncapturing || framed)));
         if capability_resumable {
             self.capability_resumable.insert(slot);
         }
@@ -35180,14 +35210,18 @@ impl Checker<'_, '_> {
                 .binder(*binder)
                 .is_some_and(|id| block_passes_binding(self.resolution, body, id))
         });
+        // A multishot handler is never found by name: its frame is private.
         let private_operation =
-            (framed && region && passes_capability && declared.is_none()).then(|| {
+            (framed && region && passes_capability && (declared.is_none() || multi)).then(|| {
                 self.functions.private_operations += 1;
                 PRIVATE_OPERATION_BASE + self.functions.private_operations
             });
         if framed
             && region
-            && let Some(operation_id) = declared.map(|declared| declared.id).or(private_operation)
+            && let Some(operation_id) = declared
+                .filter(|_| !multi)
+                .map(|declared| declared.id)
+                .or(private_operation)
         {
             self.capability_framed
                 .insert(slot, (operation_id, handler_id, signature.effects));
@@ -35198,25 +35232,11 @@ impl Checker<'_, '_> {
         };
         let handler_writes = self.closure_writes.get(&slot).cloned().unwrap_or_default();
         let handler_refs = self.closure_reference_targets(&handler_value);
-        // Types of the handler's captured values. An opaque handler value
-        // (not a lambda or function here) was checked where it was built;
-        // its captures are not visible.
-        let known_captures = self.closure_capture_types(&handler_value);
         // A capturing tail-resumptive handler of a declared operation whose
         // captures are all copyable (references, by-reference scalars,
         // plain values) can serve every perform from a copy of its
         // environment, like a noncapturing `fn`.
-        let reusable = declared.is_some()
-            && !multishot
-            && !region
-            && matches!(handler_value.ty, Type::Once(_))
-            && !signature.linear
-            && known_captures.as_ref().is_some_and(|captures| {
-                !captures.is_empty()
-                    && captures
-                        .iter()
-                        .all(|ty| !self.owned_type(*ty) && !self.linear_type(*ty))
-            });
+        let reusable = declared.is_some() && !multishot && !region && copyable_captures;
         let handler_capture_types = known_captures.unwrap_or_default();
         self.handlers.push(HandlerScope {
             operation: operation.to_owned(),
@@ -35294,7 +35314,8 @@ impl Checker<'_, '_> {
                         resource: None,
                     }),
                     body: Box::new(inner),
-                    reusable,
+                    // A multishot frame serves every perform of every branch.
+                    reusable: reusable || multi_framed,
                 },
                 ty,
                 span,
@@ -36338,7 +36359,7 @@ impl Checker<'_, '_> {
     /// handler declares one, otherwise `resume_type_with`.
     fn token_type(&mut self, result: Type, multishot: bool, multi: bool, effects: u16) -> Type {
         if multi {
-            Type::Multi(self.types.multi_token(result))
+            Type::Multi(self.types.multi_token_with(result, effects))
         } else {
             self.resume_type_with(result, multishot, effects)
         }
@@ -36346,8 +36367,8 @@ impl Checker<'_, '_> {
     /// The identity `multi fn(R) -> R` token of a perform that continues in
     /// place. It takes (and ignores) an environment word; its environment
     /// is null, so nothing is pushed on the continuation stack.
-    fn multi_identity(&mut self, result: Type, span: Span) -> Result<Expr> {
-        let id = self.types.multi_token(result);
+    fn multi_identity(&mut self, result: Type, effects: u16, span: Span) -> Result<Expr> {
+        let id = self.types.multi_token_with(result, effects);
         let signature = self.types.function_types[id].clone();
         let locals = vec![Local {
             ty: result,
@@ -36943,8 +36964,9 @@ impl Checker<'_, '_> {
         self.require(arrow.effects, span)?;
         let payload = self.expr_expected(value, Some(arrow.parameters[0]))?;
         let payload = self.coerce_argument(payload, arrow.parameters[0], span)?;
-        let resume = if matches!(arrow.parameters[1], Type::Multi(_)) {
-            self.multi_identity(arrow.result, span)?
+        let resume = if let Type::Multi(token) = arrow.parameters[1] {
+            let effects = self.types.function_types[token].effects;
+            self.multi_identity(arrow.result, effects, span)?
         } else {
             self.resume_value(arrow.result, false, span)?
         };
@@ -37077,7 +37099,7 @@ impl Checker<'_, '_> {
             };
         }
         let resume = if multi {
-            self.multi_identity(result, span)?
+            self.multi_identity(result, token_effects, span)?
         } else {
             self.resume_value_with(result, multishot, token_effects, span)?
         };

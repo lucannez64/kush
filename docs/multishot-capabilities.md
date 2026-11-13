@@ -488,6 +488,25 @@ list in `crates/kush/tests/llvm_backend.rs`.
   the captures, and truncates the stack when the call returns. Pushes and
   releases count as allocations, so the balance check also checks every
   restore.
-- **Not done.** Capturing multishot handlers across calls (they stay
-  rejected), tokens naming abortive operations, and the measurement row in
-  `benchmarks/effects` (section 8, group 6).
+- **Capturing handlers across calls.** A capturing `multi fn` handler whose
+  captures are copyable gets a reusable dynamic frame under a private
+  operation id (the CAP-CAPTURING-LEXICAL mechanism), and callees receive a
+  trampoline that finds the frame and calls the handler with their token,
+  once per perform and per resumed branch. As for capturing one-shot
+  handlers, the parameter must allow `panic` (`cap multi Op ! {panic}`). A
+  handler that owns a capture stays rejected.
+- **Capability-only.** A multishot handler bound `as op` is never on the
+  dynamic stack, so it does not discharge `Op` for its body (a callee that
+  performs `Op` by name needs `Op` in the enclosing row), whatever its own
+  row. A pure tail-resumptive `cap multi` handler therefore runs in place,
+  like a one-shot one, instead of making its body suspendable.
+- **Tokens naming abortive operations.** `multi fn(R) -> R ! {F}` with
+  abortive operations `F` is accepted as for the `fn(R) -> R ! {F}` form: an
+  abort leaves through the token, and the abortive scope where it lands
+  restores the continuation stack (tested 50 times in a loop natively, where
+  a leftover chunk would fail the exit check). Capability arrows keep pure
+  tokens, as for one-shot capabilities.
+- **Cost.** `benchmarks/effects`: a `cap multi` perform in a callee under a
+  tail-resumptive handler costs about 7.3 ns (4.4 ns one-shot; the stack's
+  save and restore around the token call is the difference), and a
+  resumption that builds an environment about 20.6 ns (23.5 ns one-shot).

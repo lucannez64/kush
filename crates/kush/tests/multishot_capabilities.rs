@@ -632,3 +632,160 @@ fn the_stack_grows_with_the_depth_not_with_the_branches() {
         "depth 8: {shallow} bytes, depth 16: {deep} bytes"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Capturing multishot handlers across calls
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_capturing_multishot_handler_serves_callees() {
+    // The handler captures `scale` (copyable): it lives in a private,
+    // reusable frame that the callee reaches through a trampoline, once per
+    // perform and per resumed branch. a in {0, 1}, b in {0, 2}, scaled.
+    let source = |row: &str| {
+        format!(
+            "effect Choose: i64 -> i64;
+             fn two(op: cap multi Choose ! {{{row}}}, base: i64) -> i64 ! {{{row}}} {{
+                 let a = perform op(1);
+                 let b = perform op(2);
+                 base + a * 10 + b
+             }}
+             fn main() -> i64 ! {{alloc, panic}} {{
+                 let scale = 3;
+                 handle Choose: i64 -> i64 as op with fn(
+                     n: i64,
+                     resume: multi fn(i64) -> i64 ! {{}},
+                 ) -> i64 ! {{panic}} {{ resume(0) + resume(n * scale) * 0 + resume(n) }} {{
+                     two(op, 100)
+                 }}
+             }}"
+        )
+    };
+    // Each choice sums three runs (0, n * scale weighted 0, n).
+    agrees(&source("panic"), 424, "");
+    // The trampoline can panic (a missing frame), so the parameter must
+    // allow it, as for capturing one-shot capabilities.
+    rejects(&source(""), "this capability's handler is capturing");
+}
+
+#[test]
+fn a_multishot_handler_owning_a_capture_stays_rejected() {
+    rejects(
+        "effect Choose: i64 -> i64;
+         fn one(op: cap multi Choose ! {panic}) -> i64 ! {panic} { perform op(1) }
+         fn main() -> i64 ! {alloc, panic} {
+             let b = Box.new(3);
+             handle Choose: i64 -> i64 as op with fn(
+                 n: i64,
+                 resume: multi fn(i64) -> i64 ! {},
+             ) -> i64 ! {panic} { resume(0) + Box.take(b) } { one(op) }
+         }",
+        "capturing or multishot",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tokens that name abortive operations
+// ---------------------------------------------------------------------------
+
+/// The multishot abort test of `abortive_handlers.rs` with a `multi fn`
+/// token: an abort out of one resumption leaves the handler (later
+/// resumptions do not run), past the continuation stack of the multishot
+/// `handle`, which the abortive scope releases where it lands.
+fn aborting(limit: &str) -> String {
+    format!(
+        "effect Fail: i64 -> Never;
+         fn main() -> i64 ! {{io, alloc, panic}} {{
+             let r = handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {{}} {{ c ^ 1024 }} {{
+                 let keep = Box.new(3);
+                 let v = handle Pick: i64 -> i64 with fn(
+                     x: i64,
+                     k: multi fn(i64) -> i64 ! {{Fail}},
+                 ) -> i64 ! {{Fail}} {{
+                     k(x) ^ k(x ^ {limit})
+                 }} {{
+                     let base = 2;
+                     let a = perform Pick(base);
+                     if a > 10 {{ perform Fail(a + base) }};
+                     print_i64(a);
+                     a * 100 + base
+                 }};
+                 v + Box.take(keep)
+             }};
+             r
+         }}"
+    )
+}
+
+#[test]
+fn an_abort_leaves_through_a_token_that_names_it() {
+    // Both resumptions finish: (202 ^ 302) + 3.
+    agrees(&aborting("1"), (202 ^ 302) + 3, "2\n3\n");
+    // The second resumption (2 ^ 20 = 22) aborts with 22 + 2; the first one
+    // printed.
+    agrees(&aborting("20"), 24 ^ 1024, "2\n");
+    // In a loop, so a leftover continuation environment would accumulate.
+    agrees(
+        &format!(
+            "{}",
+            aborting("20")
+                .replace("fn main()", "fn once()")
+                .replace("effect Fail: i64 -> Never;", "")
+                + "effect Fail: i64 -> Never;
+                   fn main() -> i64 ! {io, alloc, panic} {
+                       let mut total = 0;
+                       let mut i = 0;
+                       while i < 50 { total = total + once(); i = i + 1; }
+                       total & 255
+                   }"
+        ),
+        (50 * (24 ^ 1024)) & 255,
+        &"2\n".repeat(50),
+    );
+    // Without the operation in its row, the abort cannot leave.
+    rejects(
+        &aborting("20").replace(
+            "k: multi fn(i64) -> i64 ! {Fail},\n                 ) -> i64 ! {Fail}",
+            "k: multi fn(i64) -> i64 ! {},\n                 ) -> i64 ! {Fail}",
+        ),
+        "cannot leave the body of 'handle Pick'",
+    );
+}
+
+#[test]
+fn a_pure_tail_resumptive_multishot_capability_runs_in_place_in_a_loop() {
+    // Found by the benchmark: a pure handler for a declared operation used
+    // to be treated as dynamically visible and made the whole loop a state
+    // machine. Bound `as op`, a multishot handler is capability-only.
+    let stats = agrees(
+        "effect Tick: i64 -> i64;
+         fn work(op: cap multi Tick ! {}, x: i64) -> i64 ! {} { perform op(x) }
+         fn main() -> i64 ! {panic} {
+             handle Tick: i64 -> i64 as tick with fn(
+                 x: i64,
+                 resume: multi fn(i64) -> i64 ! {},
+             ) -> i64 ! {} { resume(x ^ 5) } {
+                 let mut s = 0;
+                 let mut i = 0;
+                 while i < 1000 { s = (s + work(tick, i)) & 1023; i = i + 1; }
+                 s & 255
+             }
+         }",
+        // sum of (i ^ 5) masked: computed below.
+        (0..1000_i64).fold(0, |s, i| (s + (i ^ 5)) & 1023) & 255,
+        "",
+    );
+    assert_eq!(stats.allocations, 0);
+    // A callee performing `Tick` by name is not served by it.
+    rejects(
+        "effect Tick: i64 -> i64;
+         fn named(x: i64) -> i64 ! {Tick} { perform Tick(x) }
+         fn main() -> i64 ! {panic} {
+             handle Tick: i64 -> i64 as tick with fn(
+                 x: i64,
+                 resume: multi fn(i64) -> i64 ! {},
+             ) -> i64 ! {} { resume(x ^ 5) } { named(1) }
+         }",
+        "operation requires effects {Tick}",
+    );
+}

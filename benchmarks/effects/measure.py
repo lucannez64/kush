@@ -19,6 +19,9 @@ PROGRAMS = [
     "dynamic-perform-in-callee",
     "checked-call",
     "may-abort-call",
+    "multishot-perform-in-callee",
+    "oneshot-resume-in-callee",
+    "multishot-resume-in-callee",
 ]
 
 def main():

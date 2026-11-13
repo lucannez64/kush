@@ -4490,10 +4490,15 @@ impl<'a> Types<'a> {
     }
     /// The arrow of a pure multishot token `multi fn(R) -> R ! {}`.
     pub fn multi_token(&mut self, result: Type) -> usize {
+        self.multi_token_with(result, 0)
+    }
+    /// A multishot token whose row names the abortive operations that may
+    /// leave through it: `multi fn(R) -> R ! {F}`.
+    pub fn multi_token_with(&mut self, result: Type, effects: u16) -> usize {
         self.function_type_with(
             vec![result],
             result,
-            0,
+            effects,
             vec![None],
             None,
             false,

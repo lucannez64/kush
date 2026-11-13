@@ -293,7 +293,8 @@ their token). Tests: `capturing_capabilit*` in
   uses; only its trampoline looks that id up, so performs by name still
   reach outer handlers (tested). The trampoline's row is the handler's row
   plus `panic`, so the parameter must be `cap Op ! {e, panic}`.
-- Still rejected: multishot capturing handlers, and performing a `once`
+- Still rejected: multishot capturing handlers with owned captures (copyable
+  ones work through `cap multi`, [multishot capabilities](multishot-capabilities.md)), and performing a `once`
   handler both in its own body and through a callee (the frame owns it).
 
 **Use-after-free review.** The environment is owned by the frame from the

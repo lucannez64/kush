@@ -2604,7 +2604,7 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
             .collect::<BTreeSet<_>>()
     };
     let callable_effects = |ty: Type| match ty {
-        Type::Fn(id) | Type::Once(id) => program.function_types[id].effects,
+        Type::Fn(id) | Type::Once(id) | Type::Multi(id) => program.function_types[id].effects,
         _ => 0,
     };
     let mut result = vec![BTreeSet::new(); program.functions.len()];
@@ -2749,7 +2749,7 @@ pub(crate) fn mark_abort_calls(program: &mut Executable) -> Result<()> {
             .collect()
     };
     let callable_effects = |ty: Type| match ty {
-        Type::Fn(id) | Type::Once(id) => program.function_types[id].effects,
+        Type::Fn(id) | Type::Once(id) | Type::Multi(id) => program.function_types[id].effects,
         _ => 0,
     };
     // Abortive operations each call may leave with, computed on the
@@ -3033,7 +3033,9 @@ fn check_unresumable_paths(
     fn walk(expr: &Expr, program: &Executable, context: &Context, operation: usize) -> Result<()> {
         let bit = program.effect_bits[operation];
         let callable = |ty: Type| match ty {
-            Type::Fn(id) | Type::Once(id) => program.function_types[id].effects & bit != 0,
+            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
+                program.function_types[id].effects & bit != 0
+            }
             _ => false,
         };
         let performs = |function: usize| {
