@@ -335,6 +335,24 @@ actually blocks the port; until then the workaround stands.
   `std.text`; that should be enough, but error positions and diagnostics may
   push on missing formatting helpers.
 
+### Found while building the port
+
+- **No enum equality**, so the store interns every object as a flat list of
+  `i64` cells and compares cells; term nodes are read by tag and field index
+  instead of by pattern matching on a `Node` enum. This turned out simpler
+  than a `Node` enum plus a hand-written equality.
+- **Call-scoped `&mut` loans last through later arguments**:
+  `f(level_max(&mut s, a, b), level_max(&mut s, b, a))` is rejected, by
+  design (`tests/borrowed_records.rs`). Store-building code names each result
+  with a `let` first.
+- **`std.env.arg` and `std.fs.read` append into the buffer's existing
+  capacity** and fail with `EFBIG` when it is full, so a zero-capacity buffer
+  always fails; `main.kush` reads files with a doubling retry.
+- **`refl` is a reserved name** even for a module function; the constructor is
+  `term.reflexive`.
+- An explicit `drop` after a condition's borrow was rejected; fixed in the
+  compiler (LANG-DROP-AFTER-BORROW).
+
 ## 7. Plan
 
 Sub-nodes of KERNEL-IN-KUSH, one small commit each:

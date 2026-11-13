@@ -1,0 +1,122 @@
+module kernel.tests.main;
+
+use std.result.Result;
+use std.test;
+use std.text;
+use kernel.printer;
+use kernel.reader;
+use kernel.store;
+use kernel.store.Store;
+use kernel.term;
+
+/// Read one term and print it back.
+
+fn round(s: &mut Store, source: &Bytes) -> Bytes ! {alloc, panic} {
+    match reader.read_term(s, source) {
+        Result.Ok(id) => printer.term_into(s, Bytes.with_capacity(0), id),
+        Result.Err(at) => text.format_i64_into(Bytes.from("error at "), at),
+    }
+}
+
+fn same(actual: &Bytes, expected: &Bytes) -> Unit ! {panic} {
+    test.is_true(text.eq(actual, expected));
+}
+
+#[test]
+fn equal_terms_share_one_id() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let n1 = term.nat(&mut s);
+    let a = term.pi(&mut s, n1, n1);
+    let n2 = term.nat(&mut s);
+    let b = term.pi(&mut s, n2, n2);
+    test.equal_i64(a, b);
+    let v0 = term.var(&mut s, 0);
+    let v1 = term.var(&mut s, 1);
+    test.is_true(v0 != v1);
+    let before = store.count(&s);
+    let again = term.var(&mut s, 0);
+    test.equal_i64(again, v0);
+    test.equal_i64(store.count(&s), before);
+}
+
+#[test]
+fn the_store_grows_and_keeps_every_id() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let mut ids: Vec<i64> = Vec.new();
+    let mut i = 0;
+    while i < 40000 {
+        ids = ids.push(term.var(&mut s, i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 40000 {
+        test.equal_i64(term.var(&mut s, i), ids[i]);
+        test.equal_i64(term.field(&s, ids[i], 0), i);
+        i = i + 1;
+    }
+}
+
+#[test]
+fn levels_are_canonical() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let u0 = term.level_var(&mut s, 0);
+    let u1 = term.level_var(&mut s, 1);
+    let one = term.level_of(&mut s, 1);
+    let u0_next = match term.level_succ(&mut s, u0) { Result.Ok(l) => l, Result.Err(_) => -1 };
+    // max(u, u + 1) = u + 1 and max(u + 1, 1) = u + 1, but max(u, 1) != u.
+    test.equal_i64(term.level_max(&mut s, u0, u0_next), u0_next);
+    test.equal_i64(term.level_max(&mut s, u0_next, one), u0_next);
+    test.is_true(term.level_max(&mut s, u0, one) != u0);
+    let left = term.level_max(&mut s, u0, u1);
+    let right = term.level_max(&mut s, u1, u0);
+    test.equal_i64(left, right);
+    test.is_true(term.level_leq(&mut s, u0, u0_next));
+    test.is_false(term.level_leq(&mut s, u1, u0));
+    let top = term.level_of(&mut s, term.MAX_LEVEL);
+    test.is_true(match term.level_succ(&mut s, top) { Result.Ok(_) => false, Result.Err(_) => true });
+}
+
+#[test]
+fn terms_round_trip_canonically() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    same(&round(&mut s, &Bytes.from("(pi nat (sort 0))")), &Bytes.from("(pi nat (sort 0))"));
+    same(&round(&mut s, &Bytes.from("(sort (max (u 0) (succ (u 0))))")), &Bytes.from("(sort (succ (u 0)))"));
+    same(&round(&mut s, &Bytes.from("(sort (max 1 (succ (u 0))))")), &Bytes.from("(sort (succ (u 0)))"));
+    same(&round(&mut s, &Bytes.from("(sort (max (u 1) 1 (u 0)))")), &Bytes.from("(sort (max 1 (u 0) (u 1)))"));
+    same(&round(&mut s, &Bytes.from("(sort (succ 4))")), &Bytes.from("(sort 5)"));
+    same(&round(&mut s, &Bytes.from("(lit 0)")), &Bytes.from("zero"));
+    same(&round(&mut s, &Bytes.from("(lit 000123)")), &Bytes.from("(lit 123)"));
+    same(&round(&mut s, &Bytes.from("(lit 1000000000000000000000)")), &Bytes.from("(lit 1000000000000000000000)"));
+    same(&round(&mut s, &Bytes.from("  ( app   (var 3) ; a comment\n unit )")), &Bytes.from("(app (var 3) unit)"));
+    same(&round(&mut s, &Bytes.from("(global List::Cons 1 (u 0))")), &Bytes.from("(global List::Cons 1 (u 0))"));
+    same(&round(&mut s, &Bytes.from("(indelim Even (lam (global Even) nat) ((lit 7) zero) (var 0))")), &Bytes.from("(indelim Even (lam (global Even) nat) ((lit 7) zero) (var 0))"));
+    same(&round(&mut s, &Bytes.from("(eqelim nat zero zero prop (refl nat zero) (var 0))")), &Bytes.from("(eqelim nat zero zero prop (refl nat zero) (var 0))"));
+    same(&round(&mut s, &Bytes.from("(scalar Bool)")), &Bytes.from("(scalar Bool)"));
+    same(&round(&mut s, &Bytes.from("(i64 -42)")), &Bytes.from("(i64 -42)"));
+    same(&round(&mut s, &Bytes.from("(bool false)")), &Bytes.from("(bool false)"));
+    same(&round(&mut s, &Bytes.from("(var x)")), &Bytes.from("error at 5"));
+    same(&round(&mut s, &Bytes.from("(frob)")), &Bytes.from("error at 1"));
+    same(&round(&mut s, &Bytes.from("(pi nat)")), &Bytes.from("error at 7"));
+    same(&round(&mut s, &Bytes.from("(pi nat nat")), &Bytes.from("error at 11"));
+    same(&round(&mut s, &Bytes.from("(var 1) extra")), &Bytes.from("error at 8"));
+}
+
+#[test]
+fn items_round_trip() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let source = Bytes.from("(def id 1 (pi (sort (u 0)) (pi (var 0) (var 1))) (lam (sort (u 0)) (lam (var 0) (var 0))))\n(data Fin 0 type (nat) (ctor FZero (nat) () ((succ (var 0)))) (ctor FSucc (nat) ((app (global Fin) (var 0))) ((succ (var 1)))))\n(data Two 0 prop () (ctor First () () ()) (ctor Second () () ()))\n(check (global First) (global Two))\n(infer (global id 0))\n(normalize (global id 0))\n");
+    let items = match reader.read(&mut s, &source) {
+        Result.Ok(items) => items,
+        Result.Err(_) => return test.fail(),
+    };
+    test.equal_i64(items.len(), 6);
+    let mut out = Bytes.with_capacity(0);
+    let mut i = 0;
+    while i < items.len() {
+        out = printer.item_into(&s, out, items[i]);
+        i = i + 1;
+    }
+    same(&out, &source);
+    let bad = Bytes.from("(def x 0 nat zero)\n(launch)\n");
+    test.is_true(match reader.read(&mut s, &bad) { Result.Ok(_) => false, Result.Err(at) => at == 20 });
+}

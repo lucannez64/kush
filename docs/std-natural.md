@@ -36,6 +36,7 @@ io.write(io.stdout(), &natural.format(&m));
 | `to_i64(&n)` | `Option<i64>`, `None` when it does not fit |
 | `work(&n)` | the limb count (at least 1), the unit the kernel charges numeric work in |
 | `copy(&n)` | an independent copy; a `Natural` owns its limbs and moves |
+| `limb_count(&n)`, `limb(&n, i)`, `from_limbs(v)` | the limbs, least significant first; `from_limbs` checks they are canonical (`EINVAL` otherwise) |
 
 This is exactly the arithmetic the kernel needs. There is no addition,
 multiplication or division yet; they would be added here when a client needs

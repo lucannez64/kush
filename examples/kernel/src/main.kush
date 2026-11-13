@@ -1,0 +1,88 @@
+module kernel;
+
+// The Kush kernel's command line (docs/kernel-in-kush.md).
+//
+//     kernel print FILE.kcore    read an exchange file and print it back
+//
+// `print` is the round-trip check of the reader and printer: on a file the
+// Rust side wrote (`kush core`), its output is identical to its input.
+
+use std.env;
+use std.fs;
+use std.io;
+use std.result.Result;
+use std.text;
+use kernel.printer;
+use kernel.reader;
+use kernel.store;
+
+fn say(message: &Bytes) -> Unit ! {io} {
+    match io.write(io.stdout(), message) {
+        Result.Ok(_) => {},
+        Result.Err(_) => {},
+    }
+}
+
+fn usage() -> i64 ! {io, alloc, panic} {
+    say(&Bytes.from("usage: kernel print FILE.kcore\n"));
+    2
+}
+
+/// Read a whole file, doubling the buffer while it does not fit (`fs.read`
+/// fails with EFBIG, 27, when the buffer is full).
+fn read_file(path: &Bytes) -> Result<Bytes, i64> ! {io, alloc, panic} {
+    let mut capacity = 1048576;
+    loop {
+        match fs.read(path, Bytes.with_capacity(capacity)) {
+            Result.Ok(bytes) => return Result.Ok(bytes),
+            Result.Err(27) => { capacity = 2 * capacity; },
+            Result.Err(code) => return Result.Err(code),
+        }
+    }
+}
+
+fn print_file(path: &Bytes) -> i64 ! {io, alloc, panic} {
+    let source = match read_file(path) {
+        Result.Ok(bytes) => bytes,
+        Result.Err(code) => {
+            say(&text.format_i64_into(Bytes.from("error: cannot read the file: errno "), code).push(10));
+            return 1;
+        },
+    };
+    let mut s = store.new();
+    let items = match reader.read(&mut s, &source) {
+        Result.Ok(items) => items,
+        Result.Err(at) => {
+            say(&text.format_i64_into(Bytes.from("error: malformed exchange input at byte "), at).push(10));
+            return 1;
+        },
+    };
+    let mut out = Bytes.with_capacity(source.len());
+    let mut i = 0;
+    while i < items.len() {
+        out = printer.item_into(&s, out, items[i]);
+        i = i + 1;
+    }
+    say(&out);
+    0
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let count = match env.arg_count() {
+        Result.Ok(count) => count,
+        Result.Err(_) => 0,
+    };
+    if count != 3 { return usage(); }
+    let command = match env.arg(1, Bytes.with_capacity(64)) {
+        Result.Ok(bytes) => bytes,
+        Result.Err(_) => return usage(),
+    };
+    let path = match env.arg(2, Bytes.with_capacity(4096)) {
+        Result.Ok(bytes) => bytes,
+        Result.Err(_) => return usage(),
+    };
+    if text.eq(&command, &Bytes.from("print")) {
+        return print_file(&path);
+    }
+    usage()
+}

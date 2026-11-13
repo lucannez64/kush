@@ -1,0 +1,198 @@
+module kernel.printer;
+
+// Canonical printer for the kernel exchange format. It prints exactly what
+// the Rust printer (crates/kush/src/exchange.rs) prints for the same object,
+// so outputs of the two kernels can be compared as text.
+
+use std.natural;
+use std.text;
+use kernel.reader.Item;
+use kernel.store.Store;
+use kernel.term;
+
+fn word(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < value.len() {
+        out = out.push(value[i]);
+        i = i + 1;
+    }
+    out
+}
+
+fn open(out: Bytes, tag: &Bytes) -> Bytes ! {alloc, panic} {
+    word(out.push(40), tag)
+}
+
+fn space(out: Bytes) -> Bytes ! {alloc, panic} { out.push(32) }
+
+fn close(out: Bytes) -> Bytes ! {alloc, panic} { out.push(41) }
+
+fn number(out: Bytes, value: i64) -> Bytes ! {alloc, panic} { text.format_i64_into(out, value) }
+
+/// `(u i)` wrapped in `offset` successors.
+fn level_param_into(out: Bytes, index: i64, offset: i64) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut k = 0;
+    while k < offset {
+        out = space(open(out, &Bytes.from("succ")));
+        k = k + 1;
+    }
+    out = close(number(space(open(out, &Bytes.from("u"))), index));
+    k = 0;
+    while k < offset {
+        out = close(out);
+        k = k + 1;
+    }
+    out
+}
+
+pub fn level_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
+    let pairs = term.level_pairs(s, id);
+    let constant = term.level_constant(s, id);
+    let with_constant = constant > 0 || pairs == 0;
+    let parts = pairs + if with_constant { 1 } else { 0 };
+    let mut out = out;
+    if parts > 1 { out = open(out, &Bytes.from("max")); }
+    let mut first = true;
+    if with_constant {
+        if parts > 1 { out = space(out); }
+        out = number(out, constant);
+        first = false;
+    }
+    let mut i = 0;
+    while i < pairs {
+        if parts > 1 { out = space(out); }
+        out = level_param_into(out, term.level_param(s, id, i), term.level_offset(s, id, i));
+        first = false;
+        i = i + 1;
+    }
+    if !first && parts > 1 { out = close(out); }
+    out
+}
+
+/// `(a b ...)` for a list of terms.
+fn terms_into(s: &Store, out: Bytes, list: i64) -> Bytes ! {alloc, panic} {
+    let mut out = out.push(40);
+    let n = term.list_len(s, list);
+    let mut i = 0;
+    while i < n {
+        if i > 0 { out = space(out); }
+        out = term_into(s, out, term.list_at(s, list, i));
+        i = i + 1;
+    }
+    close(out)
+}
+
+/// `(tag f0 f1 ...)` printing the first `arity` fields as terms.
+fn form_into(s: &Store, out: Bytes, tag: &Bytes, id: i64, arity: i64) -> Bytes ! {alloc, panic} {
+    let mut out = open(out, tag);
+    let mut k = 0;
+    while k < arity {
+        out = term_into(s, space(out), term.field(s, id, k));
+        k = k + 1;
+    }
+    close(out)
+}
+
+pub fn term_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
+    let tag = term.tag(s, id);
+    if tag == term.VAR {
+        return close(number(space(open(out, &Bytes.from("var"))), term.field(s, id, 0)));
+    }
+    if tag == term.GLOBAL {
+        let mut out = term.name_into(s, space(open(out, &Bytes.from("global"))), term.field(s, id, 0));
+        let levels = term.field(s, id, 1);
+        let n = term.list_len(s, levels);
+        let mut i = 0;
+        while i < n {
+            out = level_into(s, space(out), term.list_at(s, levels, i));
+            i = i + 1;
+        }
+        return close(out);
+    }
+    if tag == term.SORT {
+        return close(level_into(s, space(open(out, &Bytes.from("sort"))), term.field(s, id, 0)));
+    }
+    if tag == term.PROP { return word(out, &Bytes.from("prop")); }
+    if tag == term.NAT { return word(out, &Bytes.from("nat")); }
+    if tag == term.ZERO { return word(out, &Bytes.from("zero")); }
+    if tag == term.UNIT { return word(out, &Bytes.from("unit")); }
+    if tag == term.PI { return form_into(s, out, &Bytes.from("pi"), id, 2); }
+    if tag == term.LAM { return form_into(s, out, &Bytes.from("lam"), id, 2); }
+    if tag == term.APP { return form_into(s, out, &Bytes.from("app"), id, 2); }
+    if tag == term.SUCC { return form_into(s, out, &Bytes.from("succ"), id, 1); }
+    if tag == term.LIT {
+        let value = term.to_natural(s, term.field(s, id, 0));
+        return close(natural.format_into(space(open(out, &Bytes.from("lit"))), &value));
+    }
+    if tag == term.NATELIM { return form_into(s, out, &Bytes.from("natelim"), id, 4); }
+    if tag == term.EQ { return form_into(s, out, &Bytes.from("eq"), id, 3); }
+    if tag == term.REFL { return form_into(s, out, &Bytes.from("refl"), id, 2); }
+    if tag == term.TRANSPORT { return form_into(s, out, &Bytes.from("transport"), id, 6); }
+    if tag == term.EQELIM { return form_into(s, out, &Bytes.from("eqelim"), id, 6); }
+    if tag == term.INDELIM {
+        let mut out = term.name_into(s, space(open(out, &Bytes.from("indelim"))), term.field(s, id, 0));
+        out = term_into(s, space(out), term.field(s, id, 1));
+        out = terms_into(s, space(out), term.field(s, id, 2));
+        out = term_into(s, space(out), term.field(s, id, 3));
+        return close(out);
+    }
+    if tag == term.SCALAR {
+        let kind = term.field(s, id, 0);
+        let name = if kind == term.SCALAR_I64 {
+            Bytes.from("i64")
+        } else if kind == term.SCALAR_BOOL {
+            Bytes.from("Bool")
+        } else {
+            Bytes.from("Unit")
+        };
+        return close(word(space(open(out, &Bytes.from("scalar"))), &name));
+    }
+    if tag == term.I64 {
+        return close(number(space(open(out, &Bytes.from("i64"))), term.field(s, id, 0)));
+    }
+    // term.BOOL
+    let value = if term.field(s, id, 0) == 1 { Bytes.from("true") } else { Bytes.from("false") };
+    close(word(space(open(out, &Bytes.from("bool"))), &value))
+}
+
+fn ctor_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
+    let mut out = term.name_into(s, space(open(out, &Bytes.from("ctor"))), term.field(s, id, 0));
+    out = terms_into(s, space(out), term.field(s, id, 1));
+    out = terms_into(s, space(out), term.field(s, id, 2));
+    out = terms_into(s, space(out), term.field(s, id, 3));
+    close(out)
+}
+
+/// One item on one line, as the Rust printer writes it.
+pub fn item_into(s: &Store, out: Bytes, item: Item) -> Bytes ! {alloc, panic} {
+    let out = match item {
+        Item.Def(name, levels, ty, value) => {
+            let mut out = term.name_into(s, space(open(out, &Bytes.from("def"))), name);
+            out = number(space(out), levels);
+            out = term_into(s, space(out), ty);
+            close(term_into(s, space(out), value))
+        },
+        Item.Data(name, levels, prop, params, constructors) => {
+            let mut out = term.name_into(s, space(open(out, &Bytes.from("data"))), name);
+            out = number(space(out), levels);
+            out = word(space(out), &(if prop { Bytes.from("prop") } else { Bytes.from("type") }));
+            out = terms_into(s, space(out), params);
+            let n = term.list_len(s, constructors);
+            let mut i = 0;
+            while i < n {
+                out = ctor_into(s, space(out), term.list_at(s, constructors, i));
+                i = i + 1;
+            }
+            close(out)
+        },
+        Item.Check(t, ty) => {
+            let out = term_into(s, space(open(out, &Bytes.from("check"))), t);
+            close(term_into(s, space(out), ty))
+        },
+        Item.Infer(t) => close(term_into(s, space(open(out, &Bytes.from("infer"))), t)),
+        Item.Normalize(t) => close(term_into(s, space(open(out, &Bytes.from("normalize"))), t)),
+    };
+    out.push(10)
+}

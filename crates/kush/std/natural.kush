@@ -57,6 +57,28 @@ pub fn copy(n: &Natural) -> Natural ! {alloc, panic} {
 
 pub fn is_zero(n: &Natural) -> Bool ! {} { Vec.len(&n.limbs) == 0 }
 
+/// Number of base-10^9 limbs (0 for zero).
+pub fn limb_count(n: &Natural) -> i64 ! {} { Vec.len(&n.limbs) }
+
+/// Limb `i`, least significant first; `i` must be below `limb_count`.
+pub fn limb(n: &Natural, i: i64) -> i64 ! {panic} { Vec.get(&n.limbs, i) }
+
+/// The natural with these little-endian base-10^9 limbs. `EINVAL` unless the
+/// limbs are canonical: each in 0..10^9 and the last one nonzero.
+pub fn from_limbs(limbs: Vec<i64>) -> Result<Natural, i64> ! {panic} {
+    let count = Vec.len(&limbs);
+    let mut i = 0;
+    let mut valid = true;
+    while i < count {
+        let limb = Vec.get(&limbs, i);
+        if limb < 0 || limb >= base() { valid = false; }
+        i = i + 1;
+    }
+    if count > 0 && Vec.get(&limbs, count - 1) == 0 { valid = false; }
+    if !valid { return Result.Err(22); }
+    Result.Ok(Natural { limbs: limbs })
+}
+
 /// Storage touched by an operation on `n`, at least 1: the kernel charges
 /// numeric work in these units.
 pub fn work(n: &Natural) -> i64 ! {} {

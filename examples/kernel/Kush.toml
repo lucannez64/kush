@@ -1,0 +1,5 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+entry = "src/main.kush"
+test = "tests/main.kush"

@@ -1,0 +1,148 @@
+module kernel.store;
+
+// The hash-consed store (docs/kernel-in-kush.md, section 2).
+//
+// Every object the kernel builds (a term node, a universe level, a natural,
+// a name, a list of handles) is a list of i64 cells, interned exactly once.
+// An object's id is its position in the store, so two objects are equal
+// exactly when their ids are equal, and sharing costs nothing. The store only
+// grows: an id stays valid, and denotes the same object, for the store's
+// whole life. That is what lets a backtracking tactic engine copy handles
+// freely (TACTICS-HANDLERS).
+//
+// Objects are built in a scratch buffer and then interned:
+//
+//     store.begin(s, term.APP);
+//     store.add(s, f);
+//     store.add(s, a);
+//     let id = store.finish(s);
+
+pub struct Store {
+    /// The cells of every object, concatenated.
+    cells: Vec<i64>,
+    /// Per object: first cell, number of cells, hash.
+    starts: Vec<i64>,
+    lens: Vec<i64>,
+    hashes: Vec<i64>,
+    /// Open addressing over object ids: `id + 1`, or 0 for an empty slot.
+    /// The size is a power of two and kept at least twice the object count.
+    table: Vec<i64>,
+    /// The object being built by `begin`/`add`/`finish`.
+    scratch: Vec<i64>,
+}
+
+const SEED: i64 = 1469598103934665603;
+const PRIME: i64 = 1099511628211;
+
+fn zeros(count: i64) -> Vec<i64> ! {alloc, panic} {
+    let mut out: Vec<i64> = Vec.with_capacity(count);
+    let mut i = 0;
+    while i < count {
+        out = out.push(0);
+        i = i + 1;
+    }
+    out
+}
+
+pub fn new() -> Store ! {alloc, panic} {
+    Store {
+        cells: Vec.with_capacity(65536),
+        starts: Vec.with_capacity(16384),
+        lens: Vec.with_capacity(16384),
+        hashes: Vec.with_capacity(16384),
+        table: zeros(32768),
+        scratch: Vec.with_capacity(64),
+    }
+}
+
+/// Number of objects interned so far.
+pub fn count(s: &Store) -> i64 ! {} { s.starts.len() }
+
+/// Number of cells of object `id`.
+pub fn size(s: &Store, id: i64) -> i64 ! {panic} { s.lens[id] }
+
+/// Cell `k` of object `id`.
+pub fn get(s: &Store, id: i64, k: i64) -> i64 ! {panic} {
+    let start = s.starts[id];
+    s.cells[start + k]
+}
+
+/// Start building a new object whose first cell is `tag`.
+pub fn begin(s: &mut Store, tag: i64) -> Unit ! {alloc, panic} {
+    s.scratch.clear();
+    s.scratch.push(tag);
+}
+
+/// Append one cell to the object being built.
+pub fn add(s: &mut Store, cell: i64) -> Unit ! {alloc, panic} {
+    s.scratch.push(cell);
+}
+
+fn mix(hash: i64, cell: i64) -> i64 ! {} { Int.wrapping_mul(hash ^ cell, PRIME) }
+
+/// Whether object `id` has exactly the cells of the scratch buffer.
+fn matches_scratch(s: &Store, id: i64) -> Bool ! {panic} {
+    let n = s.scratch.len();
+    if s.lens[id] != n { return false; }
+    let start = s.starts[id];
+    let mut i = 0;
+    while i < n {
+        if s.cells[start + i] != s.scratch[i] { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+/// Intern the object being built: return the id of an equal object if one
+/// exists, otherwise store it under a new id.
+pub fn finish(s: &mut Store) -> i64 ! {alloc, panic} {
+    let n = s.scratch.len();
+    let mut hash = SEED;
+    let mut i = 0;
+    while i < n {
+        hash = mix(hash, s.scratch[i]);
+        i = i + 1;
+    }
+    let mask = s.table.len() - 1;
+    let mut slot = hash & mask;
+    loop {
+        let entry = s.table[slot];
+        if entry == 0 { break; }
+        let id = entry - 1;
+        if s.hashes[id] == hash && matches_scratch(s, id) { return id; }
+        slot = (slot + 1) & mask;
+    }
+    let id = s.starts.len();
+    let start = s.cells.len();
+    s.starts.push(start);
+    s.lens.push(n);
+    s.hashes.push(hash);
+    let mut k = 0;
+    while k < n {
+        let cell = s.scratch[k];
+        s.cells.push(cell);
+        k = k + 1;
+    }
+    s.table[slot] = id + 1;
+    if 2 * (id + 1) > s.table.len() { grow(s); }
+    id
+}
+
+/// Double the table and reinsert every object by its stored hash.
+fn grow(s: &mut Store) -> Unit ! {alloc, panic} {
+    let size = 2 * s.table.len();
+    let mask = size - 1;
+    let mut table = zeros(size);
+    let total = s.starts.len();
+    let mut id = 0;
+    while id < total {
+        let mut slot = s.hashes[id] & mask;
+        while table[slot] != 0 {
+            slot = (slot + 1) & mask;
+        }
+        table[slot] = id + 1;
+        id = id + 1;
+    }
+    let old = s.table.replace(table);
+    drop(old);
+}
