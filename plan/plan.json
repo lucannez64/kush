@@ -4212,7 +4212,8 @@
       "size": "L",
       "hard": false,
       "deps": [
-        "EFF-CAP-RESUME-CALLS"
+        "EFF-CAP-RESUME-CALLS",
+        "MS-STRESS-DOCS"
       ],
       "status": "in_progress",
       "desc": "Multishot capabilities across calls: needs new cap syntax for a copyable token (confirm spelling with the user, e.g. cap multi Op) and continuation-chain copying across calls, which does not exist for declared operations either.",
@@ -4237,6 +4238,11 @@
           "time": "2026-11-13 13:59:39",
           "who": "agent",
           "text": "Design revised: continuation stack released when each token call returns (sound by the no-escape rule), copyable second-class multi fn tokens only; refcounting kept as the option for future general closures. Awaiting approval."
+        },
+        {
+          "time": "2026-11-13 14:05:01",
+          "who": "agent",
+          "text": "Design approved by the user (section 10, decisions 1-5): continuation stack, copyable second-class multi fn tokens, copyable ungraded live values, cap/cap multi distinct, epochs + poisoning."
         }
       ]
     },
@@ -6533,6 +6539,77 @@
           "text": "done 66f0800"
         }
       ]
+    },
+    {
+      "id": "MS-TYPE",
+      "title": "multi fn token type and cap multi in the checker",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "EFF-CAP-RESUME-CALLS"
+      ],
+      "status": "in_progress",
+      "desc": "docs/multishot-capabilities.md section 9 step 1",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-13 14:05:18",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
+    },
+    {
+      "id": "MS-KSTACK",
+      "title": "Continuation stack in evaluator and native runtime",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "MS-TYPE"
+      ],
+      "status": "todo",
+      "desc": "docs/multishot-capabilities.md section 9 step 2",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "MS-TOKEN",
+      "title": "Lexical performs with multi fn tokens",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "MS-KSTACK"
+      ],
+      "status": "todo",
+      "desc": "docs/multishot-capabilities.md section 9 step 3",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "MS-CAP",
+      "title": "cap multi across calls through resumable entries",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "MS-TOKEN"
+      ],
+      "status": "todo",
+      "desc": "docs/multishot-capabilities.md section 9 step 4",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "MS-STRESS-DOCS",
+      "title": "Multishot stack stress, review and as-built docs",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "MS-CAP"
+      ],
+      "status": "todo",
+      "desc": "docs/multishot-capabilities.md section 9 step 5",
+      "commit": null,
+      "log": []
     }
   ]
 }

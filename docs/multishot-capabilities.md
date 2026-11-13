@@ -1,7 +1,7 @@
 # Multishot capabilities across calls (design)
 
-Status: **design, awaiting approval** (plan node EFF-CAP-RESUME-MULTISHOT).
-Nothing here is implemented. It removes the blocker recorded in the plan log
+Status: **design approved 2026-11-13** (plan node EFF-CAP-RESUME-MULTISHOT),
+all five decisions of section 10. Implementation is in progress. It removes the blocker recorded in the plan log
 on 2026-11-06 and is the base for TACTICS-HANDLERS, whose backtracking search
 resumes a continuation captured inside recursive proof-search functions.
 
@@ -135,8 +135,11 @@ What E gives up:
   internal error, and the native runtime can poison released memory in tests
   (section 7.1).
 - **Only tokens.** A first-class closure that outlives its scope does not
-  follow a stack discipline. If a general copyable closure is ever needed, it
-  is a separate node, probably with representation A.
+  follow a stack discipline. If a general multi-call closure is ever needed,
+  it is a separate node; the default candidate is an owned environment with
+  non-consuming calls, like `once fn` without the free on call (no counts).
+  Reference counting pays off only for closures copied often that capture
+  other closures, as continuations do.
 - **No tail call** for a token call that may allocate, since the restore runs
   after it returns. Deep handlers already hold one native frame per pending
   call, so this changes little; the tail-resumptive path keeps its identity
@@ -410,8 +413,8 @@ Each is one or a few commits with its tests, under EFF-CAP-RESUME-MULTISHOT:
    the as-built sections here, in `effect-capabilities.md` and in
    `effect-handlers.md`.
 
-Not in this node: general first-class `multi fn` closures (representation
-A, if a client needs them); moving one-shot non-tail environments onto the
+Not in this node: general first-class multi-call closures (an owned
+environment with non-consuming calls, if a client needs them); moving one-shot non-tail environments onto the
 same stack, which section 5 would also cover and which would save a
 `kush_alloc` per suspension (a possible follow-up, measured first).
 
