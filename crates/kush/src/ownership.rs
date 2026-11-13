@@ -7081,9 +7081,18 @@ impl Checker<'_> {
                 self.condition(condition)?;
                 let before = self.available.clone();
                 let loans = self.loans.clone();
+                // Call-scoped record loans taken in one branch (`f(&mut r)`)
+                // do not exist on the other path; both sets last until the
+                // enclosing full expression ends.
+                let exclusive_loans = self.exclusive_loans.clone();
+                let shared_record_loans = self.shared_record_loans.clone();
                 self.block(yes)?;
                 let yes_state = self.available.clone();
                 let yes_loans = self.loans.clone();
+                let yes_exclusive_loans =
+                    std::mem::replace(&mut self.exclusive_loans, exclusive_loans);
+                let yes_shared_record_loans =
+                    std::mem::replace(&mut self.shared_record_loans, shared_record_loans);
                 self.available = before;
                 self.loans = loans.clone();
                 self.temporary_shared = temporary_shared.clone();
@@ -7100,6 +7109,8 @@ impl Checker<'_> {
                 }
                 self.loans.extend(yes_loans);
                 self.loans.extend(loans);
+                self.exclusive_loans.extend(yes_exclusive_loans);
+                self.shared_record_loans.extend(yes_shared_record_loans);
             }
             ExprKind::Match(value, arms) => {
                 // `@[1]` on an owning value is also a linear obligation, even
@@ -7178,7 +7189,16 @@ impl Checker<'_> {
                 }
                 let mut joined: Option<Vec<bool>> = None;
                 let mut result_loans = loans.clone();
+                // Each arm starts from the scrutinee's call-scoped record
+                // loans, not those an earlier arm took; all of them last until
+                // the enclosing full expression ends.
+                let arm_exclusive_loans = self.exclusive_loans.clone();
+                let arm_shared_record_loans = self.shared_record_loans.clone();
+                let mut result_exclusive_loans = arm_exclusive_loans.clone();
+                let mut result_shared_record_loans = arm_shared_record_loans.clone();
                 for arm in arms {
+                    self.exclusive_loans = arm_exclusive_loans.clone();
+                    self.shared_record_loans = arm_shared_record_loans.clone();
                     self.pending_linear.truncate(pending_linear);
                     self.temporary_shared = temporary_shared.clone();
                     self.temporary_exclusive = temporary_exclusive.clone();
@@ -7309,6 +7329,8 @@ impl Checker<'_> {
                         self.available[slot] = false;
                     }
                     result_loans.extend(self.loans.iter().copied());
+                    result_exclusive_loans.extend(self.exclusive_loans.iter().copied());
+                    result_shared_record_loans.extend(self.shared_record_loans.iter().copied());
                     if arm.body.ty != Type::Never {
                         if let Some(joined) = &mut joined {
                             let current = self.available.clone();
@@ -7322,6 +7344,8 @@ impl Checker<'_> {
                 }
                 self.available = joined.unwrap_or(before);
                 self.loans = result_loans;
+                self.exclusive_loans = result_exclusive_loans;
+                self.shared_record_loans = result_shared_record_loans;
             }
             ExprKind::While(condition, body) => {
                 self.enter_loop();

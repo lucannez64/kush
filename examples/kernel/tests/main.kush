@@ -517,21 +517,17 @@ fn check_any(input: &Bytes) -> Unit ! {alloc, panic} {
     };
     let mut i = 0;
     while i < items.len() {
-        admit(&mut k, items[i]);
+        match items[i] {
+            reader.Item.Def(name, levels, ty, value, _) => {
+                match check.define(&mut k, name, levels, ty, value) { Result.Ok(_) => {}, Result.Err(_) => {} }
+            },
+            reader.Item.Data(name, levels, prop, params, constructors, _) => {
+                match check.define_data(&mut k, name, levels, prop, params, constructors) { Result.Ok(_) => {}, Result.Err(_) => {} }
+            },
+            reader.Item.Check(t, ty) => { match check.check_closed(&mut k, t, ty) { Result.Ok(_) => {}, Result.Err(_) => {} } },
+            reader.Item.Infer(t) => { match check.infer_closed(&mut k, t) { Result.Ok(_) => {}, Result.Err(_) => {} } },
+            reader.Item.Normalize(t) => { match check.normalize_closed(&mut k, t) { Result.Ok(_) => {}, Result.Err(_) => {} } },
+        }
         i = i + 1;
-    }
-}
-
-fn admit(k: &mut engine.Kernel, item: reader.Item) -> Unit ! {alloc, panic} {
-    match item {
-        reader.Item.Def(name, levels, ty, value, _) => {
-            match check.define(k, name, levels, ty, value) { Result.Ok(_) => {}, Result.Err(_) => {} }
-        },
-        reader.Item.Data(name, levels, prop, params, constructors, _) => {
-            match check.define_data(k, name, levels, prop, params, constructors) { Result.Ok(_) => {}, Result.Err(_) => {} }
-        },
-        reader.Item.Check(t, ty) => { match check.check_closed(k, t, ty) { Result.Ok(_) => {}, Result.Err(_) => {} } },
-        reader.Item.Infer(t) => { match check.infer_closed(k, t) { Result.Ok(_) => {}, Result.Err(_) => {} } },
-        reader.Item.Normalize(t) => { match check.normalize_closed(k, t) { Result.Ok(_) => {}, Result.Err(_) => {} } },
     }
 }

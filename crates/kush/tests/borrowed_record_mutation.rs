@@ -1313,3 +1313,52 @@ fn main() -> i64 ! {alloc, panic} {
         "",
     );
 }
+
+/// A call-scoped `&mut` record loan taken in one branch of an `if` or a
+/// `match` does not exist on the other path, so each branch may lend the
+/// same owner again. After the branches, the loans of all of them last until
+/// the enclosing full expression ends, so a later alias is still rejected.
+#[test]
+fn each_branch_lends_the_owner_independently() {
+    let common = "
+struct Kernel { n: i64 }
+enum Item { A(i64), B(i64, i64) }
+fn f(k: &mut Kernel, x: i64) -> i64 ! {panic} { k.n = k.n + x; k.n }
+fn both(a: i64, b: &Kernel) -> i64 ! {panic} { a + b.n }
+";
+    agrees(
+        &format!(
+            "{common}
+fn main() -> i64 ! {{alloc, panic}} {{
+    let mut k = Kernel {{ n: 0 }};
+    let x = 3;
+    if x > 1 {{ let _ = f(&mut k, x); }} else {{ let _ = f(&mut k, 1); }}
+    if x > 5 {{ let _ = f(&mut k, 100); }} else {{ k.n = k.n + 1; }}
+    let mut items: Vec<Item> = Vec.new();
+    items = items.push(Item.A(10));
+    items = items.push(Item.B(20, 5));
+    let mut i = 0;
+    while i < items.len() {{
+        match items[i] {{
+            Item.A(a) => {{ match f(&mut k, a) {{ 0 => {{}}, _ => {{}} }} }},
+            Item.B(a, b) => {{ match f(&mut k, a + b) {{ 0 => {{}}, _ => {{}} }} }},
+        }}
+        i = i + 1;
+    }}
+    k.n
+}}"
+        ),
+        39,
+        "",
+    );
+    rejects(
+        &format!(
+            "{common}
+fn main() -> i64 ! {{panic}} {{
+    let mut k = Kernel {{ n: 0 }};
+    both(if k.n > 0 {{ f(&mut k, 1) }} else {{ 0 }}, &k)
+}}"
+        ),
+        "an exclusive '&mut [T]' view of it is live",
+    );
+}
