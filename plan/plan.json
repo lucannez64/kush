@@ -6128,10 +6128,21 @@
       "deps": [
         "KIK-STORE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "shift, substitute, rewrite_outer, level substitution; unit tests.",
-      "commit": null,
-      "log": []
+      "commit": "0a3d7c2",
+      "log": [
+        {
+          "time": "2026-11-13 09:13:36",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 09:16:49",
+          "who": "agent",
+          "text": "done 0a3d7c2"
+        }
+      ]
     },
     {
       "id": "KIK-NORMAL",
