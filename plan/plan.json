@@ -6318,10 +6318,16 @@
       "deps": [
         "KIK-SPEC"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Rust kernel normalizes spec subst on generated Tm values; compare with the Kush kernel's substitute.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 11:03:12",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "KIK-API",

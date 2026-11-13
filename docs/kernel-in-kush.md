@@ -304,13 +304,19 @@ corrupted proof (`crates/kush/tests/kernel_spec.rs`). So Kush checks the proofs
 about its own syntax. The full comparison including every normal-form query is
 an ignored test that `scripts/kernel-diff.sh` runs.
 
-**Linking the specification to the implementation.** The Rust kernel can
-compute with the specification: normalizing `subst0(t, u)` for concrete closed
-`Tm` values yields a concrete `Tm`. A generator produces such cases, the Rust
-kernel prints the specification's answer, and the Kush implementation's
-`substitute` and `shift` on the corresponding raw terms must produce the same
-term. This is a differential test of the implementation against a
-kernel-checked specification, not a proof; it is the stretch goal of M3.
+**Linking the specification to the implementation** (implemented,
+KIK-SPEC-DIFF, `crates/kush/tests/kernel_spec_diff.rs`). The Rust kernel
+computes with the specification: for generated raw terms `b` (scope `n + 1`)
+and `u` (scope `n`), it normalizes `subst0<n>(b, u)` on their encodings as
+`Tm` values, and the normal form is decoded back to a raw term. The Kush
+kernel normalizes `λⁿ. (λ. b) u`, which runs its own `substitute` (and the
+`shift` it applies under binders) at depth `n`. The two terms must be equal.
+The generator never puts a lambda in function position and never substitutes
+one, so the normal form is exactly one substitution. A planted off-by-one in
+the Kush kernel's substitution is caught within the first cases. This is a
+differential test of the implementation against a kernel-checked
+specification, not a proof; 100 cases run in the default suite and
+`scripts/kernel-diff.sh` runs 1000.
 
 Executable-side facts that are arithmetic (a variable index is below the
 context depth, a handle is below the arena length) are stated with `ensures`
