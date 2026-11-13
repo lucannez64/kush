@@ -6778,14 +6778,19 @@
         "PF-INSTRUMENT",
         "PF-HARNESS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Driver: seeds, mutators, margin-guided corpus, budgets, timeouts, --list, exit codes.",
-      "commit": null,
+      "commit": "62a286a",
       "log": [
         {
           "time": "2026-11-13 17:31:27",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 18:09:28",
+          "who": "agent",
+          "text": "done 62a286a"
         }
       ]
     },
@@ -6797,10 +6802,16 @@
       "deps": [
         "PF-ENGINE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Tape shrinking, bug vs local, suggestions (erased precondition/ensures/invariant/refinement), kush test repro, --save, regression replay.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 18:09:28",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "PF-ENTRIES",
