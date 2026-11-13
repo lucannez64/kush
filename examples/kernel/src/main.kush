@@ -29,6 +29,7 @@ use kernel.engine;
 use kernel.error;
 use kernel.normal;
 use kernel.printer;
+use kernel.store;
 use kernel.term;
 use kernel.reader;
 
@@ -86,23 +87,30 @@ fn check_items(items: &Vec<reader.Item>, k: &mut engine.Kernel) -> Bytes ! {allo
                 k.max_steps = engine.STEPS;
                 out = verdict(k, out, result, name);
             },
+            // A query's terms are dropped once its answer is printed.
             reader.Item.Check(t, ty) => {
+                let start = store.mark(&k.store);
                 out = match check.check_closed(k, t, ty) {
                     Result.Ok(_) => word(out, &Bytes.from("ok\n")),
                     Result.Err(code) => failure(out, code),
                 };
+                store.rewind(&mut k.store, start);
             },
             reader.Item.Infer(t) => {
+                let start = store.mark(&k.store);
                 out = match check.infer_closed(k, t) {
                     Result.Ok(ty) => printer.term_into(&k.store, word(out, &Bytes.from(": ")), ty).push(10),
                     Result.Err(code) => failure(out, code),
                 };
+                store.rewind(&mut k.store, start);
             },
             reader.Item.Normalize(t) => {
+                let start = store.mark(&k.store);
                 out = match check.normalize_closed(k, t) {
                     Result.Ok(n) => printer.term_into(&k.store, word(out, &Bytes.from("= ")), n).push(10),
                     Result.Err(code) => failure(out, code),
                 };
+                store.rewind(&mut k.store, start);
             },
         }
         i = i + 1;
@@ -197,6 +205,9 @@ fn run_file(path: &Bytes, mode: i64) -> i64 ! {io, alloc, panic} {
     0
 }
 
+// The kernel recurses as deeply as its nesting cap allows (100,000 levels,
+// as the Rust kernel), which needs more than the default 8 MiB stack.
+#[stack_size(1024)]
 fn main() -> i64 ! {io, alloc, panic} {
     let count = match env.arg_count() {
         Result.Ok(count) => count,

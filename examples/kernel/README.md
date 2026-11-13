@@ -22,7 +22,8 @@ kush test --manifest-path Kush.toml
 ```
 
 - `src/store.kush`: the hash-consed store. Every object is an interned list
-  of `i64` cells, so equal objects have equal ids and ids never move.
+  of `i64` cells, so equal objects have equal ids and ids never move;
+  `mark`/`rewind` free everything created since a mark.
 - `src/term.kush`: term, level, natural, name and list objects; levels are in
   the Rust kernel's canonical form.
 - `src/reader.kush`, `src/printer.kush`: the
@@ -38,8 +39,9 @@ kush test --manifest-path Kush.toml
   reference's universe levels, numerals, lazy `NatElim`, `Transport` and `J`
   on `refl`, and constructor reduction of `IndElim`.
 - `src/check.kush`: inference, checking and the lazy conversion check
-  (proof irrelevance, eta, numerals against `succ`), `define`, and
-  `define_data` with `IndElim` typing.
+  (eta, numerals against `succ`, and proof irrelevance, tried last because it
+  is the only step that infers types), `define`, and `define_data` with
+  `IndElim` typing.
 - `src/data.kush`: telescope construction for data families (positivity
   occurrences, level instantiation, branch and constructor types).
 - `src/error.kush`: kernel error codes.

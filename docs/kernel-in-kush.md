@@ -130,13 +130,23 @@ existing handle. Then syntactic equality is handle equality, which turns the
 and sharing is free. Global names are interned, so a `Global` node holds an
 integer, not a byte string.
 
-The arena is append-only. A handle, once returned, stays valid and denotes the
-same term forever. That is the property TACTICS-HANDLERS needs: a backtracking
-handler that resumes a continuation twice only copies `Tm` handles, never
-terms, and both branches can keep allocating into the same store without
-invalidating each other. Garbage is never freed during a run; a `mark`/`rewind`
-pair (truncate the arena to an earlier length when nothing newer is live) is
-the escape hatch if memory becomes a problem.
+The arena grows by appending. A handle, once returned, denotes the same term
+until the store is rewound past it. That is the property TACTICS-HANDLERS
+needs: a backtracking handler that resumes a continuation twice only copies
+`Tm` handles, never terms, and both branches can keep allocating into the
+same store without invalidating each other.
+
+**Freeing memory.** `store.mark` records the store's size and `store.rewind`
+drops every object created since: their slots in the hash table become
+tombstones (reclaimed by a rebuild once they fill a quarter of the table),
+the cells are reused by later objects, and the traversal caches are
+invalidated. A rewind costs time proportional to what it drops. The kernel
+rewinds after checking each definition (keeping only its entry; a data
+family's types and universe level are rebuilt after the rewind) and the
+`check` command after answering each query. 2,000 normalize queries run in
+6 MB instead of 26 MB. After a failure the terms are kept, so the failure can
+be inspected (`api.last_failure`); `api.mark`/`api.rewind` let a client free
+what it built, for instance when a tactic search abandons a branch.
 
 ### De Bruijn indices, not locally nameless
 
@@ -167,10 +177,10 @@ category the Rust kernel reports.
 
 The Kush kernel has its own step budget with the Rust kernel's default
 (100,000,000 steps, raised per declaration by `(steps N)` in the exchange
-file) but its own charging points. Its nesting cap is 8,000: unlike the Rust
-kernel, which moves to a fresh large stack as it recurses (KERNEL-BUDGET-ATTR),
-it cannot choose its stack, and its 8 MB main stack overflows near 20,000
-levels (LANG-STACK-SIZE). A budget exhaustion is
+file) but its own charging points. Its nesting cap is the Rust kernel's,
+100,000 levels: its command line runs on a 1 GiB stack (`#[stack_size(1024)]`
+on `main`, LANG-STACK-SIZE), which holds that depth with a wide margin, while
+the default 8 MB stack overflowed near 20,000 levels. A budget exhaustion is
 reported as its own outcome, so the harness can tell "gave up" from
 "disagrees".
 
@@ -361,8 +371,8 @@ are built with `kernel.term` and read with `reader.read_term`.
   that is the term, the expected type and the inferred one; for an
   application of a non-function, the function and its type.
 - **Proof states are copyable.** A tactic's state holds only `Tm` handles
-  (integers), and the store only grows, so a handle stays valid and means the
-  same term forever. A multishot `Choose` handler can resume a continuation
+  (integers), and a handle stays valid and means the same term until the
+  store is rewound past it (`api.mark`/`api.rewind`). A multishot `Choose` handler can resume a continuation
   twice and both branches keep allocating into the same store
   ([effect handlers](effect-handlers.md); multishot resumption across calls
   is EFF-CAP-RESUME-MULTISHOT, already a dependency of TACTICS-HANDLERS). The
@@ -374,8 +384,8 @@ are built with `kernel.term` and read with `reader.read_term`.
 Each of these becomes its own plan node, with compiler tests and docs, when it
 actually blocks the port; until then the workaround stands.
 
-- **No shared ownership.** Handled by design with the arena (section 2). The
-  cost is that the arena is never collected during a check.
+- **No shared ownership.** Handled by design with the arena (section 2);
+  memory is reclaimed with `mark`/`rewind`.
 - **Collections.** The standard library has `Vec`, `Bytes` and a byte-keyed
   `bytemap`, no general hash map. The hash-cons table and the global
   environment are written by hand over `Vec<i64>`. If generic containers with a

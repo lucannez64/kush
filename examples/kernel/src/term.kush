@@ -395,3 +395,26 @@ pub fn level_instantiate(s: &mut Store, l: i64, levels: i64) -> Result<i64, i64>
     }
     Result.Ok(result)
 }
+
+/// The cells of a level object (constant, then parameter/offset pairs), to
+/// rebuild it with `level_from_cells` after the store is rewound.
+pub fn level_cells(s: &Store, l: i64) -> Vec<i64> ! {alloc, panic} {
+    let n = store.size(s, l);
+    let mut cells: Vec<i64> = Vec.with_capacity(n);
+    let mut i = 1;
+    while i < n {
+        cells = cells.push(store.get(s, l, i));
+        i = i + 1;
+    }
+    cells
+}
+
+pub fn level_from_cells(s: &mut Store, cells: &Vec<i64>) -> i64 ! {alloc, panic} {
+    store.begin(s, LEVEL);
+    let mut i = 0;
+    while i < cells.len() {
+        store.add(s, cells[i]);
+        i = i + 1;
+    }
+    store.finish(s, 0)
+}

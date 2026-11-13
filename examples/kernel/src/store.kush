@@ -5,10 +5,12 @@ module kernel.store;
 // Every object the kernel builds (a term node, a universe level, a natural,
 // a name, a list of handles) is a list of i64 cells, interned exactly once.
 // An object's id is its position in the store, so two objects are equal
-// exactly when their ids are equal, and sharing costs nothing. The store only
-// grows: an id stays valid, and denotes the same object, for the store's
-// whole life. That is what lets a backtracking tactic engine copy handles
-// freely (TACTICS-HANDLERS).
+// exactly when their ids are equal, and sharing costs nothing. An id stays
+// valid, and denotes the same object, until the store is rewound past it:
+// `mark` records the store's size and `rewind` drops every object created
+// since, which frees the intermediate terms of a finished check. Ids below
+// the mark are never affected, which is what lets a backtracking tactic
+// engine copy handles freely (TACTICS-HANDLERS).
 //
 // Objects are built in a scratch buffer and then interned:
 //
@@ -18,6 +20,11 @@ module kernel.store;
 //     let id = store.finish(s, range);
 
 pub struct Store {
+    /// Number of objects and of cells in use. The vectors below may be
+    /// longer after a rewind; entries past these counts are free and are
+    /// overwritten as new objects are added.
+    object_count: i64,
+    cell_count: i64,
     /// The cells of every object, concatenated.
     cells: Vec<i64>,
     /// Per object: first cell, number of cells, hash.
@@ -36,9 +43,11 @@ pub struct Store {
     cache_depth: Vec<i64>,
     cache_value: Vec<i64>,
     generation: i64,
-    /// Open addressing over object ids: `id + 1`, or 0 for an empty slot.
-    /// The size is a power of two and kept at least twice the object count.
+    /// Open addressing over object ids: `id + 1`, 0 for an empty slot, or
+    /// -1 for a slot freed by `rewind` (probing continues past it). The size
+    /// is a power of two, kept at least twice the objects plus freed slots.
     table: Vec<i64>,
+    tombstones: i64,
     /// The object being built by `begin`/`add`/`finish`.
     scratch: Vec<i64>,
 }
@@ -60,6 +69,8 @@ fn zeros(count: i64) -> Vec<i64> ! {alloc, panic} {
 
 pub fn new() -> Store ! {alloc, panic} {
     Store {
+        object_count: 0,
+        cell_count: 0,
         cells: Vec.with_capacity(65536),
         starts: Vec.with_capacity(16384),
         lens: Vec.with_capacity(16384),
@@ -71,12 +82,13 @@ pub fn new() -> Store ! {alloc, panic} {
         cache_value: zeros(CACHE),
         generation: 0,
         table: zeros(32768),
+        tombstones: 0,
         scratch: Vec.with_capacity(64),
     }
 }
 
 /// Number of objects interned so far.
-pub fn count(s: &Store) -> i64 ! {} { s.starts.len() }
+pub fn count(s: &Store) -> i64 ! {} { s.object_count }
 
 /// Number of cells of object `id`.
 pub fn size(s: &Store, id: i64) -> i64 ! {panic} { s.lens[id] }
@@ -132,33 +144,55 @@ pub fn finish(s: &mut Store, range: i64) -> i64 ! {alloc, panic} {
     loop {
         let entry = s.table[slot];
         if entry == 0 { break; }
-        let id = entry - 1;
-        if s.hashes[id] == hash && matches_scratch(s, id) { return id; }
+        if entry > 0 {
+            let id = entry - 1;
+            if s.hashes[id] == hash && matches_scratch(s, id) { return id; }
+        }
         slot = (slot + 1) & mask;
     }
-    let id = s.starts.len();
-    let start = s.cells.len();
-    s.starts.push(start);
-    s.lens.push(n);
-    s.hashes.push(hash);
-    s.ranges.push(range);
+    let id = s.object_count;
+    let start = s.cell_count;
+    if id < s.starts.len() {
+        s.starts[id] = start;
+        s.lens[id] = n;
+        s.hashes[id] = hash;
+        s.ranges[id] = range;
+    } else {
+        s.starts.push(start);
+        s.lens.push(n);
+        s.hashes.push(hash);
+        s.ranges.push(range);
+    }
     let mut k = 0;
     while k < n {
         let cell = s.scratch[k];
-        s.cells.push(cell);
+        let at = start + k;
+        if at < s.cells.len() {
+            s.cells[at] = cell;
+        } else {
+            s.cells.push(cell);
+        }
         k = k + 1;
     }
+    s.object_count = id + 1;
+    s.cell_count = start + n;
     s.table[slot] = id + 1;
-    if 2 * (id + 1) > s.table.len() { grow(s); }
+    if 2 * (id + 1 + s.tombstones) > s.table.len() { grow(s); }
     id
 }
 
 /// Double the table and reinsert every object by its stored hash.
 fn grow(s: &mut Store) -> Unit ! {alloc, panic} {
     let size = 2 * s.table.len();
+    rebuild(s, size);
+}
+
+/// Rebuild the table at `size` slots from the objects in use.
+fn rebuild(s: &mut Store, size: i64) -> Unit ! {alloc, panic} {
+    s.tombstones = 0;
     let mask = size - 1;
     let mut table = zeros(size);
-    let total = s.starts.len();
+    let total = s.object_count;
     let mut id = 0;
     while id < total {
         let mut slot = s.hashes[id] & mask;
@@ -207,4 +241,39 @@ pub fn remember(
     s.cache_key[slot] = key;
     s.cache_depth[slot] = depth;
     s.cache_value[slot] = value;
+}
+
+/// The store's size at some point: objects and cells in use.
+pub struct Mark { pub objects: i64, pub cells: i64 }
+
+pub fn mark(s: &Store) -> Mark ! {} {
+    Mark { objects: s.object_count, cells: s.cell_count }
+}
+
+/// Drop every object created since `m`. Ids below the mark keep their
+/// meaning; ids at or above it become free and must no longer be used. The
+/// traversal caches are invalidated, since they may hold dropped ids.
+pub fn rewind(s: &mut Store, m: Mark) -> Unit ! {alloc, panic} {
+    if m.objects >= s.object_count { return; }
+    // Free the slot of each dropped object: the cost is proportional to what
+    // is dropped, not to the store. Freed slots are reclaimed by a rebuild
+    // once they make up a quarter of the table.
+    let mask = s.table.len() - 1;
+    let mut id = m.objects;
+    while id < s.object_count {
+        let mut slot = s.hashes[id] & mask;
+        while s.table[slot] != id + 1 {
+            slot = (slot + 1) & mask;
+        }
+        s.table[slot] = -1;
+        id = id + 1;
+    }
+    s.tombstones = s.tombstones + (s.object_count - m.objects);
+    s.object_count = m.objects;
+    s.cell_count = m.cells;
+    if 4 * s.tombstones > s.table.len() {
+        let size = s.table.len();
+        rebuild(s, size);
+    }
+    fresh_generation(s);
 }

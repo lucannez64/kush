@@ -6488,6 +6488,17 @@
           "text": "done beef334"
         }
       ]
+    },
+    {
+      "id": "KIK-RESOURCES",
+      "title": "Kush kernel: free memory, cheaper conversion, deep recursion",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "store mark/rewind (tombstones, cost proportional to what is dropped) used after each definition and query; proof irrelevance tried after the structural comparison; nesting cap 100,000 on a 1 GiB main stack.",
+      "commit": null,
+      "log": []
     }
   ]
 }

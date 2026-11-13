@@ -439,3 +439,48 @@ fn abstraction_builds_rewrite_motives() -> Unit ! {io, alloc, panic} {
     test.equal_i64(api.instantiate(&mut k, abstracted, u), t);
     test.equal_i64(api.instantiate(&mut k, abstracted2, u2), t2);
 }
+
+#[test]
+fn rewinding_drops_new_objects_and_keeps_old_ones() -> Unit ! {io, alloc, panic} {
+    let mut s = store.new();
+    let kept = parse(&mut s, &Bytes.from("(pi nat (sort 0))"));
+    let start = store.mark(&s);
+    let before = store.count(&s);
+    let mut i = 0;
+    while i < 50000 {
+        term.var(&mut s, i);
+        i = i + 1;
+    }
+    test.is_true(store.count(&s) > before + 40000);
+    store.rewind(&mut s, start);
+    test.equal_i64(store.count(&s), before);
+    // Old ids still mean the same objects and are still found when rebuilt.
+    let again = parse(&mut s, &Bytes.from("(pi nat (sort 0))"));
+    test.equal_i64(again, kept);
+    same(&printer.term_into(&s, Bytes.with_capacity(0), kept), &Bytes.from("(pi nat (sort 0))"));
+    // Dropped objects are created afresh, at the freed ids.
+    let fresh = term.var(&mut s, 7);
+    test.equal_i64(fresh, before);
+    test.equal_i64(term.field(&s, fresh, 0), 7);
+    test.equal_i64(term.var(&mut s, 7), fresh);
+}
+
+#[test]
+fn checking_a_definition_leaves_only_its_entry_behind() -> Unit ! {io, alloc, panic} {
+    let mut k = engine.new();
+    let name = term.name(&mut k.store, &Bytes.from("thirty"));
+    let ty = parse(&mut k.store, &Bytes.from("(eq nat (natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 30)) (lit 30))"));
+    let value = parse(&mut k.store, &Bytes.from("(refl nat (lit 30))"));
+    let before = store.count(&k.store);
+    let result = check.define(&mut k, name, 0, ty, value);
+    test.is_true(match result { Result.Ok(_) => true, Result.Err(_) => false });
+    // Normalizing the induction built many terms; only the entry remains.
+    test.is_true(store.count(&k.store) <= before + 2);
+    test.is_true(engine.contains(&k, name));
+    let query = parse(&mut k.store, &Bytes.from("(refl nat (lit 30))"));
+    let claim = parse(&mut k.store, &Bytes.from("(eq nat (global thirty) (global thirty))"));
+    let start = api.mark(&k);
+    let checked = check.check_closed(&mut k, query, claim);
+    test.is_false(match checked { Result.Ok(_) => true, Result.Err(_) => false });
+    api.rewind(&mut k, start);
+}

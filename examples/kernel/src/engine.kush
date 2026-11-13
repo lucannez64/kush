@@ -28,12 +28,11 @@ pub const CONSTRUCTOR: i64 = 42;
 /// definition may raise it (`#[kernel_steps(N)]`, carried by the exchange
 /// format).
 pub const STEPS: i64 = 100000000;
-/// The nesting cap. The Rust kernel grows its stack and caps nesting at
-/// 100,000 as a safety net; Kush cannot choose a larger stack (LANG-STACK-SIZE),
-/// so this kernel stops at a depth its 8 MB main stack holds with margin (it
-/// overflows near 20,000 levels). A deeper computation is inconclusive
-/// (`budget`), never a crash.
-pub const NESTING: i64 = 8000;
+/// The nesting cap, the Rust kernel's (`kernel::DEFAULT_DEPTH`): a safety
+/// net, not a budget. The command line runs on a 1 GiB stack
+/// (`#[stack_size(1024)]` on main), which holds it with a wide margin; a
+/// deeper computation is inconclusive (`budget`), never a crash.
+pub const NESTING: i64 = 100000;
 
 pub struct Kernel {
     pub store: Store,

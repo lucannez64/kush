@@ -21,6 +21,8 @@ use kernel.engine;
 use kernel.engine.Kernel;
 use kernel.error;
 use kernel.normal;
+use kernel.store;
+use kernel.store.Mark;
 use kernel.subst;
 
 /// The innermost failure of the last operation. `term`, `expected` and
@@ -136,4 +138,14 @@ pub fn abstract(k: &mut Kernel, t: i64, u: i64) -> i64 ! {alloc, panic} {
 /// The body of a binder applied to `value`: index 0 replaced by `value`.
 pub fn instantiate(k: &mut Kernel, body: i64, value: i64) -> i64 ! {alloc, panic} {
     subst.substitute(&mut k.store, body, value)
+}
+
+/// The store's current size, to `rewind` to later.
+pub fn mark(k: &Kernel) -> Mark ! {} { store.mark(&k.store) }
+
+/// Drop every term created since `m`, freeing their memory. Handles created
+/// before the mark keep their meaning; later ones must not be used again.
+/// A tactic engine rewinds when it abandons a branch of its search.
+pub fn rewind(k: &mut Kernel, m: Mark) -> Unit ! {alloc, panic} {
+    store.rewind(&mut k.store, m);
 }
