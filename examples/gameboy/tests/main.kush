@@ -16,7 +16,8 @@ use gameboy.machine.Machine;
 fn rom(code: &Vec<u8>) -> Vec<u8> ! {alloc, panic} {
     let mut image = cartridge.zeroed(0x8000);
     let mut i = 0;
-    while i < code.len() {
+    // A program longer than the ROM after 0x0100 is cut (a fuzz input may be).
+    while i < code.len() && 0x100 + i < image.len() {
         image[0x100 + i] = code[i];
         i = i + 1;
     }

@@ -1017,7 +1017,7 @@ impl Session {
             };
             let function = report
                 .target
-                .map_or("?", |target| self.targets[target].name.as_str());
+                .map_or(report.function.as_str(), |target| self.targets[target].name.as_str());
             out.push_str(&format!(
                 "FOUND  {:<9}{function}  {}\n       check    {}\n",
                 report.kind.label(),
@@ -1027,7 +1027,7 @@ impl Session {
             let inputs: Vec<String> = finding
                 .inputs
                 .iter()
-                .map(|(name, value)| format!("{name} = {value}"))
+                .map(|(name, value)| format!("{name} = {}", abbreviated(value)))
                 .collect();
             let via = &self.targets[finding.target].name;
             let origin = if finding.run == 0 {
@@ -1094,6 +1094,17 @@ const BATCH: usize = 16;
 /// The shortest run time limit once a harness has finished a run (see
 /// `Worker::fuzz`).
 const QUICK_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// A decoded value as the text report shows it: a long one is cut, with its
+/// length (`--json` keeps it whole).
+fn abbreviated(value: &str) -> String {
+    const SHOWN: usize = 120;
+    if value.chars().count() <= SHOWN {
+        return value.to_owned();
+    }
+    let head: String = value.chars().take(SHOWN).collect();
+    format!("{head}... ({} characters)", value.chars().count())
+}
 
 /// Runs spent minimizing one counterexample.
 const SHRINK_BUDGET: usize = 300;

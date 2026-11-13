@@ -7000,10 +7000,16 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Kernel corpus seeds that reach universe levels, indexed families and table growth.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 00:42:38",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "PF-RECORDS",

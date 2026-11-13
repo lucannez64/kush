@@ -60,16 +60,20 @@ kush test --manifest-path Kush.toml
 the prover leaves in place. Almost every kernel function takes the store or
 the kernel, which no generator can build, so two `#[fuzz]` entries in
 `tests/main.kush` read arbitrary bytes as an exchange file: `read_any`
-prints what it read, `check_any` admits and answers every item. Their
-seeds in `fuzz/corpus/` are `kush core` dumps of two examples; random bytes
-alone never get through the reader.
+prints what it read, `check_any` admits and answers every item. Random
+bytes alone never get through the reader, so they are seeded from
+`fuzz/corpus/`: `kush core` dumps of six examples (among them `universes`
+for universe levels, `finite-proofs` and `logical-data` for inductive
+families), 700 definitions (enough to grow the name table) and a
+9000-step recursion (enough objects to rebuild the store's table).
 
 ```sh
-kush fuzz --runs 1000 --report     # about 10 seconds
+kush fuzz --runs 1000 --report     # about 12 seconds
 ```
 
-Of 369 checks, 78 are proved and 156 attacked: 63% proved or attacked (29%
-without the entries). Nothing reached through the entries failed. The four
+Of 316 checks (standard-library checks are not counted), 78 are proved and
+220 attacked: 94% proved or attacked (29% without the entries). Nothing
+reached through the entries failed. The four
 counterexamples are local: reader helpers (`skip`, `atom_end`, `word`)
 called directly with a negative offset or with `start = i64::MIN`, values
 their callers never pass. Turning them into proofs needs `0 <= at` facts

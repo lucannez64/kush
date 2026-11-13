@@ -287,7 +287,8 @@ does have, and the obligation is a lemma candidate (section 3).
   Implemented (PF-ENTRIES): an entry is any `#[fuzz] fn name(input:
   &Bytes) -> Unit` in the test target (the checker accepts the attribute
   like `#[test]`; other shapes are listed as `no generator`). Its input is
-  up to 4096 bytes, and two more mutations suit text: deleting or repeating
+  up to 65535 bytes (what its two-byte length addresses; large seeds are
+  how the kernel's tables are made to grow), and two more mutations suit text: deleting or repeating
   a run of bytes. Every site an entry reaches is shown, wherever it is; its
   findings are bugs, and their reproductions are tests in the test target
   that call the entry. Files in `fuzz/corpus/<entry>/` are seed inputs, run

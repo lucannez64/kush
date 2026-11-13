@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 
 /// Longest generated collection beyond its required minimum length.
 pub const MAX_EXTRA_LENGTH: usize = 64;
-/// Longest input of a `#[fuzz]` entry.
-pub const ENTRY_LENGTH: usize = 4096;
+/// Longest input of a `#[fuzz]` entry: what its two-byte length addresses.
+pub const ENTRY_LENGTH: usize = u16::MAX as usize;
 
 /// A scalar the tape can encode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
