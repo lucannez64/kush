@@ -333,6 +333,11 @@ pub struct Executable {
     /// GPU-SUBSET: per function instance, whether it is a `#[gpu]` function.
     /// Functions added after checking (continuations) are never GPU code.
     pub(crate) gpu_functions: Vec<bool>,
+    /// SIMD-NATIVE: per function instance, `(vector type, function name)` when
+    /// it is a function of a vector type in `std.simd`, which the native
+    /// backend may replace with vector instructions. The Kush body stays the
+    /// specification (and the evaluator's implementation).
+    pub(crate) simd_functions: Vec<Option<(String, String)>>,
     /// Effect-row bit of each declared operation, by operation id.
     pub(crate) effect_bits: Vec<u16>,
     /// Whether each declared operation is abortive (`-> Never`).
@@ -6292,8 +6297,25 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         .iter()
         .map(|signature| functions.gpu.contains(&signature.binding))
         .collect();
+    let simd_functions = functions
+        .signatures
+        .iter()
+        .map(|signature| {
+            let binding = signature.binding;
+            let unit = *resolution.unit_of.get(&binding)?;
+            let path = resolution.units.get(unit)?;
+            if path.len() != 2 || path[0] != "std" || path[1] != "simd" {
+                return None;
+            }
+            let declared = functions.declared.get(&binding)?;
+            let layout = declared.self_ty?.layout()?;
+            let ty = resolution.bindings[types.enums[layout].definition].name.clone();
+            Some((ty, declared.ast.name.clone()))
+        })
+        .collect();
     let mut executable = Executable {
         gpu_functions,
+        simd_functions,
         eval_fuel: crate::eval::DEFAULT_EVAL_FUEL,
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,

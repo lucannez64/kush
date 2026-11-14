@@ -114,6 +114,27 @@ left for later. Tests: `crates/kush/tests/simd_ops.rs` compares every lane
 of every operation of all eight types with a model computed in Rust, on
 both backends. Native vector instructions are SIMD-NATIVE.
 
+### Implementation (SIMD-NATIVE, 2026-11-14)
+
+The checker records, per function instance, `(vector type, name)` for the
+functions of `std.simd`'s vector types (`Executable::simd_functions`). On
+Cranelift, `function_call` replaces a recognised call with vector code: the
+two words are packed into a 128-bit register (`scalar_to_vector`,
+`insertlane`, a little-endian `bitcast` to the lane type), one instruction
+runs, and the result is unpacked. Lowered: `and`, `or`, `xor`, `not`,
+`wrapping_add`, `wrapping_sub`, `shl`, `shr` (signed types arithmetic),
+`eq_lanes`, and `shuffle`, `shuffle2`, `align_right` and `swap_bytes` when
+every index is a constant (a Cranelift `shuffle`). Everything else, and a
+shuffle with a run-time index, stays a call to the Kush body. Cranelift's
+inliner then removes the call boundary. On the x86-64 baseline (no SSSE3)
+Cranelift lowers a general byte shuffle to the libcall
+`__cranelift_x86_pshufb`, which the runtime implements in software;
+SIMD-CRANELIFT-FEATURES will let it use the instruction. The LLVM backend
+keeps the Kush bodies until its translator knows vector types (SIMD-LLVM).
+`native::build_with_clif` returns the Cranelift IR of a build, for tests.
+Tests: `crates/kush/tests/simd_ops.rs` (every lane against the evaluator,
+and the vector instructions in the IR).
+
 ## CPU features as capabilities [SIMD-CPU]
 
 Executing an instruction the CPU lacks is `SIGILL`, a crash no check can

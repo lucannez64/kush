@@ -260,3 +260,35 @@ fn shift_amounts_and_indices_are_proved() {
         "cannot prove",
     );
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn the_native_backend_emits_vector_instructions() {
+    // SIMD-NATIVE: the operations above become Cranelift vector
+    // instructions, not calls to their Kush bodies.
+    let program = check(
+        "use std.simd.u8x16;
+         use std.simd.u32x4;
+         use std.simd.i16x8;
+         fn main() -> i64 ! {} {
+             let a = u32x4.new(1, 2, 3, 4);
+             let b = u32x4.wrapping_add(a, u32x4.xor(a, u32x4.splat(9)));
+             let c = u32x4.shuffle(u32x4.shl(b, 3, _), 3, 2, 1, 0, _);
+             let d = u8x16.align_right(u8x16.from_bits(u32x4.to_bits(c)), u8x16.zero(), 4, _);
+             let e = i16x8.shr(i16x8.from_bits(u8x16.to_bits(d)), 2, _);
+             let f = u32x4.eq_lanes(u32x4.swap_bytes(c), u32x4.from_bits(i16x8.to_bits(e)));
+             Int.convert(u32x4.lane(f, 0, _) & 1)
+         }",
+    )
+    .unwrap();
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let clif = kush::native::build_with_clif(&program, &scratch.path().join("vector")).unwrap();
+    // Cranelift prints a value's type on the bitcast that makes it, and the
+    // operations on vectors without a suffix.
+    for instruction in [
+        "bitcast.i32x4", "bitcast.i16x8", "bitcast.i8x16", "= iadd ", "= bxor ", "= ishl ",
+        "= shuffle ", "= sshr ", "= icmp eq ",
+    ] {
+        assert!(clif.contains(instruction), "no {instruction:?} in:\n{clif}");
+    }
+}

@@ -1659,6 +1659,17 @@ int64_t kush_sys_getrandom(uint64_t buffer_handle, int64_t length, uint64_t *out
     *out = buffer_handle;
     return 0;
 }
+/* Cranelift lowers a byte shuffle to this libcall when the target lacks
+   SSSE3, as the portable x86-64 baseline does (SIMD-NATIVE): pshufb in
+   software. A clear top bit selects the byte at the low four bits. */
+#include <emmintrin.h>
+__m128i __cranelift_x86_pshufb(__m128i table, __m128i index) {
+    unsigned char t[16], m[16], r[16];
+    _mm_storeu_si128((__m128i *)t, table);
+    _mm_storeu_si128((__m128i *)m, index);
+    for (int i = 0; i < 16; ++i) r[i] = (m[i] & 0x80) ? 0 : t[m[i] & 15];
+    return _mm_loadu_si128((const __m128i *)r);
+}
 /* CPU features for std.cpu (SIMD-CPU), as bits: 1 SSSE3, 2 SSE4.1, 4 AVX2,
    8 SHA. Detected once with CPUID; AVX2 also needs the OS to save YMM state
    (OSXSAVE and XGETBV). KUSH_CPU_DISABLE=sha,avx2,... clears features so
@@ -4117,6 +4128,20 @@ pub fn build(program: &Executable, output: &Path) -> Result<()> {
     build_with_options(program, output, false, &LinkSpec::default())
 }
 
+thread_local! {
+    /// Set by `build_with_clif`: the Cranelift IR of every defined function.
+    static CLIF_DUMP: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Build like [`build`] and also return the Cranelift IR of every function as
+/// it is defined (after inlining), for tests and debugging.
+pub fn build_with_clif(program: &Executable, output: &Path) -> Result<String> {
+    CLIF_DUMP.with(|dump| *dump.borrow_mut() = Some(String::new()));
+    let result = build(program, output);
+    let text = CLIF_DUMP.with(|dump| dump.borrow_mut().take()).unwrap_or_default();
+    result.map(|()| text)
+}
+
 /// Build an executable that reports allocation diagnostics to stderr on a
 /// normal exit. The program's own stdout and exit status are unchanged.
 pub fn build_with_stats(program: &Executable, output: &Path, stats: bool) -> Result<()> {
@@ -5781,6 +5806,7 @@ fn lower(
         };
         let mut context = module.make_context();
         context.func = body;
+        let dump_clif = CLIF_DUMP.with(|dump| dump.borrow().is_some());
         if inline_calls {
             let bodies = inline_bodies_for(&mut context.func, index, &candidates, &by_id);
             context
@@ -5791,6 +5817,14 @@ fn lower(
                     budget: INLINE_CALLS_PER_CALLER,
                 })
                 .map_err(|e| failed(&e))?;
+        }
+        if dump_clif {
+            let text = format!("; {}\n{}\n", f.name, context.func.display());
+            CLIF_DUMP.with(|dump| {
+                if let Some(dump) = dump.borrow_mut().as_mut() {
+                    dump.push_str(&text);
+                }
+            });
         }
         let started = std::time::Instant::now();
         let defined = module.define_function(ids[index], &mut context);
@@ -8257,6 +8291,14 @@ impl Generator<'_, '_> {
         }])
     }
     fn function_call(&mut self, index: usize, mut values: Words) -> Words {
+        // SIMD-NATIVE: vector instructions for recognised std.simd functions
+        // (Cranelift only until the LLVM translator knows vector types).
+        if self.codegen.backend == Backend::Cranelift
+            && let Some(Some((ty, op))) = self.program.simd_functions.get(index).cloned()
+            && let Some(words) = self.simd_lowering(&ty, &op, &values)
+        {
+            return words;
+        }
         let function = &self.program.functions[index];
         let result = function.result;
         let erased_result = function.result_grade.is_some_and(Grade::is_zero);
@@ -12563,6 +12605,147 @@ impl Generator<'_, '_> {
             return self.load_words(address, 0, element_width);
         }
         vec![self.load_element(address, bytes)]
+    }
+    /// The value of an `iconst`, if `value` is one.
+    fn constant_value(&self, value: Value) -> Option<i64> {
+        let ir::ValueDef::Result(inst, _) = self.builder.func.dfg.value_def(value) else {
+            return None;
+        };
+        match self.builder.func.dfg.insts[inst] {
+            ir::InstructionData::UnaryImm {
+                opcode: ir::Opcode::Iconst,
+                imm,
+            } => Some(imm.bits()),
+            _ => None,
+        }
+    }
+    /// Two words (low first) as one 128-bit vector of `lanes`.
+    fn simd_pack(&mut self, low: Value, high: Value, lanes: ir::Type) -> Value {
+        let vector = self.builder.ins().scalar_to_vector(ir::types::I64X2, low);
+        let vector = self.builder.ins().insertlane(vector, high, 1);
+        self.simd_cast(vector, lanes)
+    }
+    /// A 128-bit vector back to its two words (low first).
+    fn simd_unpack(&mut self, vector: Value) -> Words {
+        let vector = self.simd_cast(vector, ir::types::I64X2);
+        vec![
+            self.builder.ins().extractlane(vector, 0),
+            self.builder.ins().extractlane(vector, 1),
+        ]
+    }
+    /// Reinterpret a 128-bit vector (x86 lane order on both sides).
+    fn simd_cast(&mut self, vector: Value, lanes: ir::Type) -> Value {
+        if self.builder.func.dfg.value_type(vector) == lanes {
+            return vector;
+        }
+        let flags = ir::MemFlagsData::new().with_endianness(ir::Endianness::Little);
+        self.builder.ins().bitcast(lanes, flags, vector)
+    }
+    /// A byte shuffle of `a` then `b` (indices 16 and up select `b`).
+    fn simd_shuffle(&mut self, a: Value, b: Value, bytes: &[u8]) -> Value {
+        let a = self.simd_cast(a, ir::types::I8X16);
+        let b = self.simd_cast(b, ir::types::I8X16);
+        let mask = self
+            .builder
+            .func
+            .dfg
+            .immediates
+            .push(ir::ConstantData::from(bytes.to_vec()));
+        self.builder.ins().shuffle(a, b, mask)
+    }
+    /// SIMD-NATIVE: the vector form of a std.simd function on a vector type,
+    /// or `None` to keep the call (an operation without a vector form, or a
+    /// shuffle index that is not a constant). Each result is exactly the
+    /// function's Kush specification; `crates/kush/tests/simd_ops.rs`
+    /// compares every lane against the evaluator.
+    fn simd_lowering(&mut self, ty: &str, op: &str, values: &[Value]) -> Option<Words> {
+        use ir::types::{I8X16, I16X8, I32X4, I64X2};
+        let (lanes, size) = match ty {
+            "u8x16" | "i8x16" => (I8X16, 1usize),
+            "u16x8" | "i16x8" => (I16X8, 2),
+            "u32x4" | "i32x4" => (I32X4, 4),
+            "u64x2" | "i64x2" => (I64X2, 8),
+            _ => return None,
+        };
+        let count = 16 / size;
+        let signed = ty.starts_with('i');
+        // Byte mask for a lane permutation: output lane k is input lane index[k].
+        let lane_bytes = |index: &[i64]| -> Option<Vec<u8>> {
+            let mut bytes = Vec::with_capacity(16);
+            for &lane in index {
+                let lane = usize::try_from(lane).ok()?;
+                if lane >= 2 * count {
+                    return None;
+                }
+                for byte in 0..size {
+                    bytes.push(u8::try_from(lane * size + byte).ok()?);
+                }
+            }
+            Some(bytes)
+        };
+        let result = match op {
+            "and" | "or" | "xor" | "wrapping_add" | "wrapping_sub" | "eq_lanes" if values.len() == 4 => {
+                let a = self.simd_pack(values[0], values[1], lanes);
+                let b = self.simd_pack(values[2], values[3], lanes);
+                match op {
+                    "and" => self.builder.ins().band(a, b),
+                    "or" => self.builder.ins().bor(a, b),
+                    "xor" => self.builder.ins().bxor(a, b),
+                    "wrapping_add" => self.builder.ins().iadd(a, b),
+                    "wrapping_sub" => self.builder.ins().isub(a, b),
+                    _ => self.builder.ins().icmp(IntCC::Equal, a, b),
+                }
+            }
+            "not" if values.len() == 2 => {
+                let a = self.simd_pack(values[0], values[1], lanes);
+                self.builder.ins().bnot(a)
+            }
+            // The amount was proved below the lane width.
+            "shl" | "shr" if values.len() == 3 => {
+                let a = self.simd_pack(values[0], values[1], lanes);
+                match (op, signed) {
+                    ("shl", _) => self.builder.ins().ishl(a, values[2]),
+                    (_, true) => self.builder.ins().sshr(a, values[2]),
+                    _ => self.builder.ins().ushr(a, values[2]),
+                }
+            }
+            "shuffle" if values.len() == 2 + count => {
+                let index = values[2..]
+                    .iter()
+                    .map(|value| self.constant_value(*value))
+                    .collect::<Option<Vec<_>>>()?;
+                let bytes = lane_bytes(&index)?;
+                let a = self.simd_pack(values[0], values[1], lanes);
+                self.simd_shuffle(a, a, &bytes)
+            }
+            "shuffle2" if values.len() == 4 + count => {
+                let index = values[4..]
+                    .iter()
+                    .map(|value| self.constant_value(*value))
+                    .collect::<Option<Vec<_>>>()?;
+                let bytes = lane_bytes(&index)?;
+                let a = self.simd_pack(values[0], values[1], lanes);
+                let b = self.simd_pack(values[2], values[3], lanes);
+                self.simd_shuffle(a, b, &bytes)
+            }
+            // `align_right(hi, lo, k)`: bytes k.. of `lo` then `hi`.
+            "align_right" if size == 1 && values.len() == 5 => {
+                let k = u8::try_from(self.constant_value(values[4])?).ok().filter(|k| *k <= 16)?;
+                let bytes = (0..16).map(|j| k + j).collect::<Vec<u8>>();
+                let hi = self.simd_pack(values[0], values[1], lanes);
+                let lo = self.simd_pack(values[2], values[3], lanes);
+                self.simd_shuffle(lo, hi, &bytes)
+            }
+            "swap_bytes" if size > 1 && values.len() == 2 => {
+                let bytes = (0..16)
+                    .map(|j| u8::try_from((j / size) * size + (size - 1 - j % size)).unwrap())
+                    .collect::<Vec<u8>>();
+                let a = self.simd_pack(values[0], values[1], lanes);
+                self.simd_shuffle(a, a, &bytes)
+            }
+            _ => return None,
+        };
+        Some(self.simd_unpack(result))
     }
     /// Whether a slice's byte flag is a known constant: `Some(true)` for a
     /// byte-backed view, `Some(false)` for a word-backed one.
