@@ -7618,14 +7618,24 @@
         "SIMD-CPU",
         "SIMD-LLVM"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "sha256rnds2/msg1/msg2 and sha1rnds4/nexte/msg1/msg2 taking a cpu.Sha token: Intel-exact evaluator semantics tested against the instruction, Cranelift via tiny target(sha) runtime routines, LLVM via llvm.x86 intrinsics.",
-      "commit": null,
+      "commit": "b231606",
       "log": [
         {
           "time": "2026-11-14 19:03:12",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 19:10:54",
+          "who": "agent",
+          "text": "done b231606"
+        },
+        {
+          "time": "2026-11-14 19:10:54",
+          "who": "agent",
+          "text": "Spec matches the CPU instructions on random inputs (both backends). Full suite on the second PC: 1985 passed."
         }
       ]
     },
@@ -7637,10 +7647,16 @@
       "deps": [
         "SIMD-X86-SHA"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Accelerated compress in Kush (empty effect row, proved loads) when cpu.sha() succeeds, proved portable code otherwise; tests compare both paths; benchmarks/crypto/hash.kush on both backends.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 19:10:54",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "SIMD-CRANELIFT-FEATURES",
