@@ -1659,6 +1659,23 @@ int64_t kush_sys_getrandom(uint64_t buffer_handle, int64_t length, uint64_t *out
     *out = buffer_handle;
     return 0;
 }
+/* SIMD-X86-SHA: the x86 SHA instructions, one routine each, for std.x86.
+   Only reached with a cpu.Sha token, which std.cpu hands out only when
+   CPUID reports SHA, SSSE3 and SSE4.1. */
+#include <immintrin.h>
+#define KUSH_SHA __attribute__((target("sha,sse4.1,ssse3")))
+KUSH_SHA __m128i kush_x86_sha256rnds2(__m128i cdgh, __m128i abef, __m128i wk) {
+    return _mm_sha256rnds2_epu32(cdgh, abef, wk);
+}
+KUSH_SHA __m128i kush_x86_sha256msg1(__m128i a, __m128i b) { return _mm_sha256msg1_epu32(a, b); }
+KUSH_SHA __m128i kush_x86_sha256msg2(__m128i a, __m128i b) { return _mm_sha256msg2_epu32(a, b); }
+KUSH_SHA __m128i kush_x86_sha1rnds4_0(__m128i a, __m128i b) { return _mm_sha1rnds4_epu32(a, b, 0); }
+KUSH_SHA __m128i kush_x86_sha1rnds4_1(__m128i a, __m128i b) { return _mm_sha1rnds4_epu32(a, b, 1); }
+KUSH_SHA __m128i kush_x86_sha1rnds4_2(__m128i a, __m128i b) { return _mm_sha1rnds4_epu32(a, b, 2); }
+KUSH_SHA __m128i kush_x86_sha1rnds4_3(__m128i a, __m128i b) { return _mm_sha1rnds4_epu32(a, b, 3); }
+KUSH_SHA __m128i kush_x86_sha1nexte(__m128i a, __m128i b) { return _mm_sha1nexte_epu32(a, b); }
+KUSH_SHA __m128i kush_x86_sha1msg1(__m128i a, __m128i b) { return _mm_sha1msg1_epu32(a, b); }
+KUSH_SHA __m128i kush_x86_sha1msg2(__m128i a, __m128i b) { return _mm_sha1msg2_epu32(a, b); }
 /* Cranelift lowers a byte shuffle to this libcall when the target lacks
    SSSE3, as the portable x86-64 baseline does (SIMD-NATIVE): pshufb in
    software. A clear top bit selects the byte at the low four bits. */
@@ -5819,7 +5836,18 @@ fn lower(
                 .map_err(|e| failed(&e))?;
         }
         if dump_clif {
-            let text = format!("; {}\n{}\n", f.name, context.func.display());
+            // Cranelift prints callees by index; name them for the reader.
+            let mut text = format!("; {}\n", f.name);
+            for (_, name) in context.func.params.user_named_funcs().iter() {
+                if name.namespace == 0 {
+                    let id = FuncId::from_u32(name.index);
+                    let declaration = module.declarations().get_function_decl(id);
+                    if let Some(symbol) = &declaration.name {
+                        text.push_str(&format!("; calls {symbol}\n"));
+                    }
+                }
+            }
+            text.push_str(&format!("{}\n", context.func.display()));
             CLIF_DUMP.with(|dump| {
                 if let Some(dump) = dump.borrow_mut().as_mut() {
                     dump.push_str(&text);
@@ -12652,6 +12680,40 @@ impl Generator<'_, '_> {
             .push(ir::ConstantData::from(bytes.to_vec()));
         self.builder.ins().shuffle(a, b, mask)
     }
+    /// SIMD-X86-SHA: an intrinsic of std.x86 as a call to the runtime routine
+    /// that runs the instruction (`kush_x86_*`, compiled with
+    /// `target("sha")`). The first argument is the `cpu.Sha` token, which
+    /// proves the CPU has the instruction; the vectors follow as two words
+    /// each. `sha1rnds4` needs a constant function index (one routine each).
+    fn x86_intrinsic(&mut self, op: &str, values: &[Value]) -> Option<Words> {
+        let (symbol, vectors) = match op {
+            "sha256rnds2" if values.len() == 7 => ("kush_x86_sha256rnds2".to_owned(), 3),
+            "sha256msg1" | "sha256msg2" | "sha1nexte" | "sha1msg1" | "sha1msg2" if values.len() == 5 => {
+                (format!("kush_x86_{op}"), 2)
+            }
+            "sha1rnds4" if values.len() == 6 => {
+                let func = self.constant_value(values[5]).filter(|f| (0..=3).contains(f))?;
+                (format!("kush_x86_sha1rnds4_{func}"), 2)
+            }
+            _ => return None,
+        };
+        let mut signature = self.module.make_signature();
+        for _ in 0..vectors {
+            signature.params.push(AbiParam::new(ir::types::I64X2));
+        }
+        signature.returns.push(AbiParam::new(ir::types::I64X2));
+        let id = self
+            .module
+            .declare_function(&symbol, Linkage::Import, &signature)
+            .ok()?;
+        let arguments = (0..vectors)
+            .map(|k| self.simd_pack(values[1 + 2 * k], values[2 + 2 * k], ir::types::I64X2))
+            .collect::<Vec<_>>();
+        let callee = self.module.declare_func_in_func(id, self.builder.func);
+        let call = self.builder.ins().call(callee, &arguments);
+        let result = self.builder.inst_results(call)[0];
+        Some(self.simd_unpack(result))
+    }
     /// SIMD-NATIVE: the vector form of a std.simd function on a vector type,
     /// or `None` to keep the call (an operation without a vector form, or a
     /// shuffle index that is not a constant). Each result is exactly the
@@ -12659,6 +12721,9 @@ impl Generator<'_, '_> {
     /// compares every lane against the evaluator.
     fn simd_lowering(&mut self, ty: &str, op: &str, values: &[Value]) -> Option<Words> {
         use ir::types::{I8X16, I16X8, I32X4, I64X2};
+        if ty == "x86" {
+            return self.x86_intrinsic(op, values);
+        }
         let (lanes, size) = match ty {
             "u8x16" | "i8x16" => (I8X16, 1usize),
             "u16x8" | "i16x8" => (I16X8, 2),

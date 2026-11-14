@@ -334,7 +334,8 @@ pub struct Executable {
     /// Functions added after checking (continuations) are never GPU code.
     pub(crate) gpu_functions: Vec<bool>,
     /// SIMD-NATIVE: per function instance, `(vector type, function name)` when
-    /// it is a function of a vector type in `std.simd`, which the native
+    /// it is a function of a vector type in `std.simd` (or `("x86", name)`
+    /// for an intrinsic of `std.x86`), which the native
     /// backend may replace with vector instructions. The Kush body stays the
     /// specification (and the evaluator's implementation).
     pub(crate) simd_functions: Vec<Option<(String, String)>>,
@@ -6304,10 +6305,17 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             let binding = signature.binding;
             let unit = *resolution.unit_of.get(&binding)?;
             let path = resolution.units.get(unit)?;
-            if path.len() != 2 || path[0] != "std" || path[1] != "simd" {
+            if path.len() != 2 || path[0] != "std" {
                 return None;
             }
             let declared = functions.declared.get(&binding)?;
+            // SIMD-X86-SHA: the intrinsics of std.x86, by function name.
+            if path[1] == "x86" && declared.self_ty.is_none() {
+                return Some(("x86".to_owned(), declared.ast.name.clone()));
+            }
+            if path[1] != "simd" {
+                return None;
+            }
             let layout = declared.self_ty?.layout()?;
             let ty = resolution.bindings[types.enums[layout].definition].name.clone();
             Some((ty, declared.ast.name.clone()))

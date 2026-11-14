@@ -7618,10 +7618,16 @@
         "SIMD-CPU",
         "SIMD-LLVM"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "sha256rnds2/msg1/msg2 and sha1rnds4/nexte/msg1/msg2 taking a cpu.Sha token: Intel-exact evaluator semantics tested against the instruction, Cranelift via tiny target(sha) runtime routines, LLVM via llvm.x86 intrinsics.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 19:03:12",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "SHA-NI-STD",

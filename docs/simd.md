@@ -180,6 +180,21 @@ detection against `/proc/cpuinfo`).
 with their Intel semantics. The implicit `xmm0` operand of `sha256rnds2`
 becomes an ordinary argument.
 
+### Implementation (SIMD-X86-SHA, 2026-11-14)
+
+`std.x86` defines `sha256rnds2`, `sha256msg1`, `sha256msg2`, `sha1rnds4`
+(function index an erased precondition `0..=3`), `sha1nexte`, `sha1msg1` and
+`sha1msg2` in checked Kush from Intel's definitions, each taking `&cpu.Sha`
+first. The evaluator runs that code. Native builds (both backends) replace
+each call with a call to a runtime routine `kush_x86_*` compiled with
+`target("sha,sse4.1,ssse3")` that runs the instruction, vectors passed and
+returned in XMM registers; `sha1rnds4` has one routine per function index
+and needs it constant. On LLVM these are still calls (LLVM does not inline
+across the target-feature difference); emitting the `llvm.x86.sha*`
+intrinsics directly is a possible follow-up if SHA-NI-STD needs it. Tests:
+`crates/kush/tests/simd_x86_sha.rs` compares the specification (evaluator)
+with the instructions (native) on random inputs, on both backends.
+
 ## Lowering
 
 All code is lowered once into Cranelift IR; the LLVM backend translates

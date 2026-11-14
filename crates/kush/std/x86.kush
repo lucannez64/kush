@@ -1,0 +1,162 @@
+module std.x86;
+
+// x86 SHA extension intrinsics (SIMD-X86-SHA, docs/simd.md). Each function
+// is the instruction of the same name, written from Intel's definition in
+// checked Kush: this code is what the reference evaluator runs, and the
+// specification the native backends' real instructions are tested against.
+// Every function takes a `cpu.Sha` token, which only exists on a CPU with
+// the SHA extensions (and SSSE3 and SSE4.1), so the native instruction can
+// never be reached on a CPU that lacks it.
+//
+// Lane 0 is bits 31:0. Intel names the dwords of a register from the top:
+// "SRC[127:96]" is lane 3.
+
+use std.cpu;
+use std.simd.u32x4;
+
+fn rotr(x: u32, n: u64, erased q: { 1 <= n && n <= 31 }) -> u32 ! {} {
+    (x >> n) | (x << (32 - n))
+}
+
+fn rotl(x: u32, n: u64, erased q: { 1 <= n && n <= 31 }) -> u32 ! {} {
+    (x << n) | (x >> (32 - n))
+}
+
+fn add(a: u32, b: u32) -> u32 ! {} {
+    Int.wrapping_add(a, b)
+}
+
+fn big0(x: u32) -> u32 ! {} { rotr(x, 2, _) ^ rotr(x, 13, _) ^ rotr(x, 22, _) }
+fn big1(x: u32) -> u32 ! {} { rotr(x, 6, _) ^ rotr(x, 11, _) ^ rotr(x, 25, _) }
+fn small0(x: u32) -> u32 ! {} { rotr(x, 7, _) ^ rotr(x, 18, _) ^ (x >> 3) }
+fn small1(x: u32) -> u32 ! {} { rotr(x, 17, _) ^ rotr(x, 19, _) ^ (x >> 10) }
+fn ch(e: u32, f: u32, g: u32) -> u32 ! {} { (e & f) ^ (!e & g) }
+fn maj(a: u32, b: u32, c: u32) -> u32 ! {} { (a & b) ^ (a & c) ^ (b & c) }
+
+/// SHA256RNDS2: two SHA-256 rounds. `cdgh` holds C, D, G, H in lanes 3 to
+/// 0, `abef` holds A, B, E, F, and lanes 0 and 1 of `wk` are the two
+/// message words plus round constants. The result is the new A, B, E, F.
+pub fn sha256rnds2(sha: &cpu.Sha, cdgh: u32x4, abef: u32x4, wk: u32x4) -> u32x4 ! {} {
+    let mut a = u32x4.lane(abef, 3, _);
+    let mut b = u32x4.lane(abef, 2, _);
+    let mut c = u32x4.lane(cdgh, 3, _);
+    let mut d = u32x4.lane(cdgh, 2, _);
+    let mut e = u32x4.lane(abef, 1, _);
+    let mut f = u32x4.lane(abef, 0, _);
+    let mut g = u32x4.lane(cdgh, 1, _);
+    let mut h = u32x4.lane(cdgh, 0, _);
+    // Round 1 with lane 0 of wk.
+    let t = add(add(add(ch(e, f, g), big1(e)), u32x4.lane(wk, 0, _)), h);
+    let a1 = add(add(t, maj(a, b, c)), big0(a));
+    let e1 = add(t, d);
+    h = g;
+    g = f;
+    f = e;
+    e = e1;
+    d = c;
+    c = b;
+    b = a;
+    a = a1;
+    // Round 2 with lane 1.
+    let t = add(add(add(ch(e, f, g), big1(e)), u32x4.lane(wk, 1, _)), h);
+    let a2 = add(add(t, maj(a, b, c)), big0(a));
+    let e2 = add(t, d);
+    u32x4.new(e, e2, a, a2)
+}
+
+/// SHA256MSG1: the sigma0 part of the message schedule.
+pub fn sha256msg1(sha: &cpu.Sha, a: u32x4, b: u32x4) -> u32x4 ! {} {
+    let w0 = u32x4.lane(a, 0, _);
+    let w1 = u32x4.lane(a, 1, _);
+    let w2 = u32x4.lane(a, 2, _);
+    let w3 = u32x4.lane(a, 3, _);
+    let w4 = u32x4.lane(b, 0, _);
+    u32x4.new(add(w0, small0(w1)), add(w1, small0(w2)), add(w2, small0(w3)), add(w3, small0(w4)))
+}
+
+/// SHA256MSG2: the sigma1 part of the message schedule.
+pub fn sha256msg2(sha: &cpu.Sha, a: u32x4, b: u32x4) -> u32x4 ! {} {
+    let w14 = u32x4.lane(b, 2, _);
+    let w15 = u32x4.lane(b, 3, _);
+    let w16 = add(u32x4.lane(a, 0, _), small1(w14));
+    let w17 = add(u32x4.lane(a, 1, _), small1(w15));
+    let w18 = add(u32x4.lane(a, 2, _), small1(w16));
+    let w19 = add(u32x4.lane(a, 3, _), small1(w17));
+    u32x4.new(w16, w17, w18, w19)
+}
+
+/// The SHA-1 round function and constant for SHA1RNDS4's function index.
+fn sha1_f(func: i64, b: u32, c: u32, d: u32) -> u32 ! {} {
+    if func == 0 {
+        (b & c) ^ (!b & d)
+    } else if func == 2 {
+        (b & c) ^ (b & d) ^ (c & d)
+    } else {
+        b ^ c ^ d
+    }
+}
+
+fn sha1_k(func: i64) -> u32 ! {} {
+    if func == 0 {
+        0x5a827999
+    } else if func == 1 {
+        0x6ed9eba1
+    } else if func == 2 {
+        0x8f1bbcdc
+    } else {
+        0xca62c1d6
+    }
+}
+
+/// SHA1RNDS4: four SHA-1 rounds with the function and constant of `func`
+/// (0 for rounds 0-19 .. 3 for rounds 60-79). `abcd` holds A, B, C, D in
+/// lanes 3 to 0; lane 3 of `we` is the first message word plus E, lanes 2,
+/// 1 and 0 the next three words.
+pub fn sha1rnds4(sha: &cpu.Sha, abcd: u32x4, we: u32x4, func: i64, erased q: { 0 <= func && func <= 3 }) -> u32x4 ! {} {
+    let k = sha1_k(func);
+    let mut a = u32x4.lane(abcd, 3, _);
+    let mut b = u32x4.lane(abcd, 2, _);
+    let mut c = u32x4.lane(abcd, 1, _);
+    let mut d = u32x4.lane(abcd, 0, _);
+    let mut e: u32 = 0;
+    let mut i = 0;
+    while i < 4 invariant { 0 <= i } {
+        let w = u32x4.lane(we, 3 - i, _);
+        let next = add(add(add(sha1_f(func, b, c, d), rotl(a, 5, _)), add(w, e)), k);
+        e = d;
+        d = c;
+        c = rotl(b, 30, _);
+        b = a;
+        a = next;
+        i = i + 1;
+    }
+    u32x4.new(d, c, b, a)
+}
+
+/// SHA1NEXTE: the next E (A rotated left by 30) added to lane 3 of `b`.
+pub fn sha1nexte(sha: &cpu.Sha, a: u32x4, b: u32x4) -> u32x4 ! {} {
+    u32x4.with_lane(b, 3, add(u32x4.lane(b, 3, _), rotl(u32x4.lane(a, 3, _), 30, _)), _)
+}
+
+/// SHA1MSG1: the first xor of the SHA-1 message schedule.
+pub fn sha1msg1(sha: &cpu.Sha, a: u32x4, b: u32x4) -> u32x4 ! {} {
+    let w0 = u32x4.lane(a, 3, _);
+    let w1 = u32x4.lane(a, 2, _);
+    let w2 = u32x4.lane(a, 1, _);
+    let w3 = u32x4.lane(a, 0, _);
+    let w4 = u32x4.lane(b, 3, _);
+    let w5 = u32x4.lane(b, 2, _);
+    u32x4.new(w5 ^ w3, w4 ^ w2, w3 ^ w1, w2 ^ w0)
+}
+
+/// SHA1MSG2: the final xor and rotation of the SHA-1 message schedule.
+pub fn sha1msg2(sha: &cpu.Sha, a: u32x4, b: u32x4) -> u32x4 ! {} {
+    let w13 = u32x4.lane(b, 2, _);
+    let w14 = u32x4.lane(b, 1, _);
+    let w15 = u32x4.lane(b, 0, _);
+    let w16 = rotl(u32x4.lane(a, 3, _) ^ w13, 1, _);
+    let w17 = rotl(u32x4.lane(a, 2, _) ^ w14, 1, _);
+    let w18 = rotl(u32x4.lane(a, 1, _) ^ w15, 1, _);
+    let w19 = rotl(u32x4.lane(a, 0, _) ^ w16, 1, _);
+    u32x4.new(w19, w18, w17, w16)
+}
