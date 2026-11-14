@@ -7200,14 +7200,24 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Long-running programs: the native runtime (crates/kush/src/native.rs, KUSH_MAX_TASKS) caps tasks at 255 spawned per run, a first-version shortcut. Causes: fixed arrays indexed by task ID (kush_tasks[256], kush_ready ring of 256, kush_handler_contexts[256] at ~41 KB each, ~10 MB static), and IDs from a counter that only resets at exit, because a joined child's ID stays in its parent's scope_ids and cancel_scope/scope_end treat a NULL slot as joined, so a reused slot would cancel or join an unrelated task. Fix: handles as slot | generation << 32; drop the ID from the parent's scope list on join (or check the generation); growable slot table with a free list; handler contexts allocated per task on first handler install; growable or intrusive ready queue. Optionally lift the 16-scope/64-children limits (scope_ids[16][64] embedded in KushTask). Then the bound is live tasks, set by memory. Follow-up to watch: 256 KiB task stacks reserve ~2.5 GB virtual at 10k connections.",
-      "commit": null,
+      "commit": "836b1d3",
       "log": [
         {
           "time": "2026-11-14 15:44:58",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 16:04:40",
+          "who": "agent",
+          "text": "done 836b1d3"
+        },
+        {
+          "time": "2026-11-14 16:04:40",
+          "who": "agent",
+          "text": "Full suite on the second PC: 1955 passed, 3 skipped (scripts/test-all.sh, 335 s with a cold build)."
         }
       ]
     },
