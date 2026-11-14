@@ -7670,14 +7670,24 @@
       "deps": [
         "SIMD-OPS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Cranelift lowering of recognised std.simd functions to vector instructions (I8X16..I64X2 iadd/isub/band/bor/bxor/ishl/ushr/sshr/icmp/shuffle/x86_pshufb), keeping the Kush bodies as the evaluator's specification; tests compare native vector code with the evaluator on random inputs. Split from SIMD-OPS 2026-11-14.",
-      "commit": null,
+      "commit": "f757251",
       "log": [
         {
           "time": "2026-11-14 18:48:05",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 18:56:11",
+          "who": "agent",
+          "text": "done f757251"
+        },
+        {
+          "time": "2026-11-14 18:56:12",
+          "who": "agent",
+          "text": "Full suite on the second PC: 1983 passed."
         }
       ]
     }
