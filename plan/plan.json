@@ -7721,14 +7721,24 @@
         "SIMD-LLVM",
         "SIMD-CPU"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "u8x32..u64x4 and signed forms with the same operations; Cranelift as two 128-bit halves (no 256-bit vectors there), LLVM as <8 x i32> etc.; AVX2-only intrinsics behind a cpu.Avx2 token. Decided 2026-11-14 (docs/simd.md decision 4).",
-      "commit": null,
+      "commit": "bef5047",
       "log": [
         {
           "time": "2026-11-14 19:30:57",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 19:39:21",
+          "who": "agent",
+          "text": "done bef5047"
+        },
+        {
+          "time": "2026-11-14 19:39:21",
+          "who": "agent",
+          "text": "No AVX2-only intrinsic yet (cpu.Avx2 has no consumer). Full suite on the second PC: 1990 passed."
         }
       ]
     },
