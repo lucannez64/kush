@@ -7676,14 +7676,24 @@
       "deps": [
         "SIMD-OPS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "--target-cpu native for Cranelift (the original SIMD node's first step), so SSE4.1/AVX forms are used when the build machine is the target.",
-      "commit": null,
+      "commit": "25809d5",
       "log": [
         {
           "time": "2026-11-14 19:25:49",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 19:30:57",
+          "who": "agent",
+          "text": "done 25809d5"
+        },
+        {
+          "time": "2026-11-14 19:30:57",
+          "who": "agent",
+          "text": "Full suite on the second PC: 1987 passed. SHA benchmarks unchanged (no shuffles in that path)."
         }
       ]
     },
@@ -7711,10 +7721,16 @@
         "SIMD-LLVM",
         "SIMD-CPU"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "u8x32..u64x4 and signed forms with the same operations; Cranelift as two 128-bit halves (no 256-bit vectors there), LLVM as <8 x i32> etc.; AVX2-only intrinsics behind a cpu.Avx2 token. Decided 2026-11-14 (docs/simd.md decision 4).",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 19:30:57",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "SIMD-NATIVE",
