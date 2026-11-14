@@ -206,6 +206,17 @@ on the x86-64 baseline: a general byte shuffle (`load_be` through
 so the accelerated path uses word shifts instead; `load_be` now assembles
 big-endian lanes with shifts for every type.
 
+### Implementation (SIMD-CRANELIFT-FEATURES, 2026-11-14)
+
+`--target-cpu native` (`CodegenOptions::native_cpu`) now also sets
+Cranelift's ISA flags from the host (`cranelift_native` with flag
+inference), so a byte shuffle becomes `pshufb` (or `vpshufb` with AVX)
+instead of the software `__cranelift_x86_pshufb` call. The default stays
+the portable baseline, so programs run on any x86-64. The SHA hashes avoid
+byte shuffles already and measure the same either way. Tests:
+`crates/kush/tests/simd_ops.rs` builds every lane-model program a second
+time with host features, and checks for the instruction with `objdump`.
+
 ## Lowering
 
 All code is lowered once into Cranelift IR; the LLVM backend translates

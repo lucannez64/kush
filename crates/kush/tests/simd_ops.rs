@@ -110,6 +110,14 @@ fn run(source: &str) -> String {
         let native = std::process::Command::new(&binary).output().unwrap();
         assert_eq!(native.status.code(), Some(0), "{}", String::from_utf8_lossy(&native.stderr));
         assert_eq!(String::from_utf8(native.stdout).unwrap(), output, "native and evaluator differ");
+        // SIMD-CRANELIFT-FEATURES: the same with the host's CPU features.
+        let host = scratch.path().join("simd-ops-host");
+        let mut options = kush::native::CodegenOptions::release();
+        options.native_cpu = true;
+        kush::native::build_with_codegen(&program, &host, false, &kush::native::LinkSpec::default(), options)
+            .unwrap();
+        let native = std::process::Command::new(&host).output().unwrap();
+        assert_eq!(String::from_utf8(native.stdout).unwrap(), output, "host-feature build differs");
     }
     output
 }
@@ -324,4 +332,43 @@ fn the_llvm_backend_emits_vector_operations() {
     ] {
         assert!(ir.contains(operation), "no {operation:?} in the LLVM IR");
     }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn host_features_turn_byte_shuffles_into_instructions() {
+    // Without SSSE3 (the x86-64 baseline) Cranelift calls a software
+    // pshufb; with `--target-cpu native` on an SSSE3 machine it emits the
+    // instruction. Checked with objdump when it is installed.
+    let ssse3 = std::fs::read_to_string("/proc/cpuinfo").unwrap().contains(" ssse3");
+    let objdump = std::process::Command::new("objdump").arg("--version").output().is_ok();
+    if !ssse3 || !objdump {
+        return;
+    }
+    let program = check(
+        "use std.simd.u8x16;
+         fn main() -> i64 ! {} {
+             let a = u8x16.new(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+             let b = u8x16.shuffle(a, 15, 3, 7, 1, 0, 2, 9, 4, 5, 6, 8, 10, 11, 12, 13, 14, _);
+             Int.convert(u8x16.lane(b, 0, _))
+         }",
+    )
+    .unwrap();
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let count = |native_cpu: bool| -> usize {
+        let binary = scratch.path().join(if native_cpu { "host" } else { "baseline" });
+        let mut options = kush::native::CodegenOptions::release();
+        options.native_cpu = native_cpu;
+        kush::native::build_with_codegen(&program, &binary, false, &kush::native::LinkSpec::default(), options)
+            .unwrap();
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert_eq!(output.status.code(), Some(15));
+        let disassembly = std::process::Command::new("objdump").arg("-d").arg(&binary).output().unwrap();
+        String::from_utf8_lossy(&disassembly.stdout)
+            .lines()
+            // The VEX form (vpshufb) when the host also has AVX.
+            .filter(|line| line.contains("\tpshufb ") || line.contains("\tvpshufb "))
+            .count()
+    };
+    assert!(count(true) > count(false), "no pshufb instruction with host features");
 }

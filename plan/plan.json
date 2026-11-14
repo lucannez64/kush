@@ -7676,10 +7676,16 @@
       "deps": [
         "SIMD-OPS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "--target-cpu native for Cranelift (the original SIMD node's first step), so SSE4.1/AVX forms are used when the build machine is the target.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 19:25:49",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "SIMD-REVIEW",

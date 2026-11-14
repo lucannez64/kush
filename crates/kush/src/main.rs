@@ -41,7 +41,7 @@ Native optimization (build/run, files or projects):\n\
   --release           speed optimization + scalar callback inlining\n\
   --backend <cranelift|llvm>  code generator; llvm needs clang and builds slower, runs faster\n\
   --no-deferred-overflow  (llvm) panic at the overflowing operation, not after its chunk of iterations\n\
-  --target-cpu <baseline|native>  (llvm) tune for the build machine\n\
+  --target-cpu <baseline|native>  use the build machine's CPU features\n\
   --opt-level <none|speed>  select backend optimization independently\n\
   --inline-scalars / --no-inline-scalars  control the restricted inliner\n\n\
   kush --help\n\

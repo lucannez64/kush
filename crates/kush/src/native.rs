@@ -3900,7 +3900,9 @@ pub struct CodegenOptions {
     /// arithmetic would. `None` follows the backend: on for LLVM, off for
     /// Cranelift.
     pub deferred_overflow: Option<bool>,
-    /// Tune LLVM code for the build machine's CPU (`-march=native`).
+    /// Use the build machine's CPU features: `-march=native` on LLVM, and the
+    /// host's ISA flags on Cranelift (SIMD-CRANELIFT-FEATURES). The program
+    /// then needs a CPU with the same features.
     pub native_cpu: bool,
     /// PROOF-FUZZ: instrument every obligation site (a run-time check the
     /// prover left in place) for `kush fuzz`; see docs/proof-fuzz.md.
@@ -4725,7 +4727,10 @@ fn lower(
             },
         )
         .map_err(error)?;
-    let isa = cranelift_native::builder_with_options(false)
+    // SIMD-CRANELIFT-FEATURES: `--target-cpu native` lets Cranelift use the
+    // build machine's CPU features (SSSE3 byte shuffles, SSE4.1, AVX2, ...);
+    // the default stays the portable x86-64 baseline.
+    let isa = cranelift_native::builder_with_options(codegen.native_cpu)
         .map_err(error)?
         .finish(settings::Flags::new(flags))
         .map_err(error)?;

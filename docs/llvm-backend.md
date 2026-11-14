@@ -15,7 +15,7 @@ kush build --manifest-path path/Kush.toml --release --backend llvm
 | `--backend <cranelift\|llvm>` | Code generator. `llvm` also turns on deferred overflow checks. |
 | `--release` | Speed optimization and scalar callback inlining, on either backend (`-O3` on LLVM; without it LLVM uses `-O1`). |
 | `--no-deferred-overflow` / `--deferred-overflow` | Panic at the overflowing operation instead of at the loop exit, or opt in on Cranelift. See [deferred-overflow.md](deferred-overflow.md). |
-| `--target-cpu <baseline\|native>` | LLVM only. `native` passes `-march=native`; the default is the portable x86-64 baseline, like Rust. |
+| `--target-cpu <baseline\|native>` | `native` uses the build machine's CPU features: `-march=native` on LLVM, the host's ISA flags on Cranelift (SSSE3, SSE4.1, AVX, ...). The default is the portable x86-64 baseline, like Rust. |
 
 Flags are processed in order and `--release` keeps an earlier `--backend`.
 `check`, `eval` and `test` are unaffected.
