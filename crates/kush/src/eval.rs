@@ -4554,6 +4554,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             return Ok(self.host_result(shape, 0, Value::Owned(id)));
         }
         let (status, value) = match symbol {
+            // The evaluator runs every intrinsic in software, so it reports
+            // every feature unless KUSH_CPU_DISABLE clears it, like the stub.
+            "kush_sys_cpu_features" => {
+                let disabled = std::env::var("KUSH_CPU_DISABLE").unwrap_or_default();
+                let mut bits = 15;
+                for (name, bit) in [("ssse3", 1), ("sse41", 2), ("avx2", 4), ("sha", 8)] {
+                    if disabled.split(',').any(|item| item == name) {
+                        bits &= !bit;
+                    }
+                }
+                (0, bits)
+            }
             "kush_sys_stdin" => (0, 0),
             "kush_sys_openat" => {
                 let (flags, mode) = (args[1].scalar(), args[2].scalar());

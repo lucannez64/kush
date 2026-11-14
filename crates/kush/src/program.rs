@@ -40,6 +40,7 @@ pub const STD: &[(&str, &str)] = &[
     ("std.hmac", include_str!("../std/hmac.kush")),
     ("std.random", include_str!("../std/random.kush")),
     ("std.simd", include_str!("../std/simd.kush")),
+    ("std.cpu", include_str!("../std/cpu.kush")),
 ];
 const MAX_MODULES: usize = 256;
 const MAX_TOTAL_SOURCE: usize = 16 * 1024 * 1024;

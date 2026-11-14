@@ -75,6 +75,9 @@ pub foreign "kush_sys_strerror" fn strerror(code: i64, buffer: Bytes) -> Result<
 /// random generator (getrandom(2)). The buffer comes back with its length
 /// advanced, or is freed on failure; EFBIG when it lacks room.
 pub foreign "kush_sys_getrandom" fn getrandom(buffer: Bytes, length: i64) -> Result<Bytes, i64> ! {io};
+/// CPU feature bits for std.cpu: 1 SSSE3, 2 SSE4.1, 4 AVX2, 8 SHA. Fixed for
+/// the process, so it needs no effect (the one exception, SIMD-CPU).
+pub foreign "kush_sys_cpu_features" fn cpu_features() -> Result<i64, i64> ! {};
 /// The standard input descriptor (0). A call rather than a constant, so the
 /// reference evaluator knows the program reads standard input.
 pub foreign "kush_sys_stdin" fn stdin() -> Result<i64, i64> ! {io};

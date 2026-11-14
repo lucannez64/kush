@@ -18,6 +18,9 @@ convention (return -1, set `errno`) into the bridge ABI (status plus out slot).
 
 ## Access rules
 
+- Every stub needs the `io` effect except `kush_sys_cpu_features`
+  (`std.cpu`), whose answer is fixed for the whole run.
+
 - Only a std module may declare a `foreign "kush_sys_..."` function. The root
   file never counts as std, even if it is named `std.x`.
 - Only std may call one. A program can `use std.sys` for its constants but a

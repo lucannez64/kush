@@ -131,6 +131,20 @@ on a CPU that has the feature:
   path natively too. The reference evaluator reports every feature as
   present unless the same variable says otherwise.
 
+### Implementation (SIMD-CPU, 2026-11-14)
+
+`std.cpu` declares `Ssse3`, `Sse41`, `Avx2` and `Sha`, each a struct with a
+private field, so only `std.cpu` builds one: `cpu.sha()` and the others
+return `Option<token>`. Detection is the runtime stub
+`kush_sys_cpu_features`: CPUID once per process; AVX2 also requires OS
+support for the 256-bit registers (OSXSAVE and XGETBV); `Sha` requires
+SSSE3 and SSE4.1 too, since every SHA sequence uses them. It is the one
+host stub std may declare without `io` (`PURE_HOST_SYMBOLS` in the
+checker): its answer never changes during a run. The reference evaluator
+reports every feature; `KUSH_CPU_DISABLE=sha,avx2,ssse3,sse41` clears
+features on both backends. Tests: `crates/kush/tests/simd_cpu.rs` (native
+detection against `/proc/cpuinfo`).
+
 ## x86 intrinsics [SIMD-X86-SHA]
 
 `x86.sha256rnds2`, `x86.sha256msg1`, `x86.sha256msg2`, `x86.sha1rnds4`

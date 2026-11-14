@@ -1659,6 +1659,53 @@ int64_t kush_sys_getrandom(uint64_t buffer_handle, int64_t length, uint64_t *out
     *out = buffer_handle;
     return 0;
 }
+/* CPU features for std.cpu (SIMD-CPU), as bits: 1 SSSE3, 2 SSE4.1, 4 AVX2,
+   8 SHA. Detected once with CPUID; AVX2 also needs the OS to save YMM state
+   (OSXSAVE and XGETBV). KUSH_CPU_DISABLE=sha,avx2,... clears features so
+   tests can run the portable paths natively. */
+#include <cpuid.h>
+static int64_t kush_cpu_feature_bits = -1;
+static int kush_cpu_disabled(const char *name) {
+    const char *list = getenv("KUSH_CPU_DISABLE");
+    if (list == NULL) return 0;
+    size_t length = strlen(name);
+    for (const char *p = list; *p != 0;) {
+        const char *end = strchr(p, ',');
+        size_t n = end == NULL ? strlen(p) : (size_t)(end - p);
+        if (n == length && strncmp(p, name, n) == 0) return 1;
+        if (end == NULL) break;
+        p = end + 1;
+    }
+    return 0;
+}
+int64_t kush_sys_cpu_features(int64_t *out) {
+    if (kush_cpu_feature_bits < 0) {
+        unsigned int a = 0, b = 0, c = 0, d = 0;
+        int64_t bits = 0;
+        if (__get_cpuid(1, &a, &b, &c, &d)) {
+            unsigned int leaf1_ecx = c;
+            if (leaf1_ecx & (1u << 9)) bits |= 1;   /* SSSE3 */
+            if (leaf1_ecx & (1u << 19)) bits |= 2;  /* SSE4.1 */
+            int ymm = 0;
+            if ((leaf1_ecx & (1u << 27)) && (leaf1_ecx & (1u << 28))) {
+                unsigned int lo, hi;
+                __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+                ymm = (lo & 6u) == 6u;
+            }
+            if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) {
+                if (ymm && (b & (1u << 5))) bits |= 4;  /* AVX2 */
+                if (b & (1u << 29)) bits |= 8;          /* SHA */
+            }
+        }
+        if (kush_cpu_disabled("ssse3")) bits &= ~1;
+        if (kush_cpu_disabled("sse41")) bits &= ~2;
+        if (kush_cpu_disabled("avx2")) bits &= ~4;
+        if (kush_cpu_disabled("sha")) bits &= ~8;
+        kush_cpu_feature_bits = bits;
+    }
+    *out = kush_cpu_feature_bits;
+    return 0;
+}
 /* The standard input descriptor. A separate call (not the constant 0) so the
    reference evaluator can tell which programs read standard input. */
 int64_t kush_sys_stdin(int64_t *out) { *out = 0; return 0; }

@@ -26,6 +26,10 @@ pub(crate) const ALLOC: u16 = 4;
 pub(crate) const SUSPEND: u16 = 8;
 pub(crate) const EFFECT_BITS: u16 = PANIC | IO | ALLOC | SUSPEND;
 pub(crate) const MAX_EFFECT_ROW_VARIABLES: usize = 16;
+/// Runtime host stubs whose answer is fixed for the process, so std may
+/// declare them without the `io` effect (SIMD-CPU). Only std can import a
+/// `kush_sys_*` symbol, so no program can add to this list.
+const PURE_HOST_SYMBOLS: &[&str] = &["kush_sys_cpu_features"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Type {
     I64,
@@ -5846,7 +5850,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 ));
             }
             let (effects, _) = crate::runtime_types::effect_bits_partial(resolution, &f.effects)?;
-            if effects & IO == 0 {
+            if effects & IO == 0 && !PURE_HOST_SYMBOLS.contains(&symbol.as_str()) {
                 return Err(Diagnostic::new(
                     span,
                     "a foreign call has unchecked host side effects and requires the 'io' effect in its declared row",
@@ -11830,7 +11834,7 @@ impl<'a> Functions<'a> {
         let effects =
             crate::runtime_types::effect_bits_with(resolution, &f.effects, &effect_substitution)?;
         let foreign = if let Some(symbol) = &f.foreign {
-            if effects & IO == 0 {
+            if effects & IO == 0 && !PURE_HOST_SYMBOLS.contains(&symbol.as_str()) {
                 return Err(Diagnostic::new(
                     declared.span,
                     "a foreign call has unchecked host side effects and requires the 'io' effect in its declared row",

@@ -1,0 +1,57 @@
+module std.cpu;
+
+// CPU features as capabilities (SIMD-CPU, docs/simd.md). An instruction the
+// CPU lacks kills the process with SIGILL, which no check can catch, so every
+// target-specific intrinsic takes a token that only exists when the feature
+// does:
+//
+//     use std.cpu;
+//     match cpu.sha() {
+//         Option.Some(sha) => x86.sha256rnds2(&sha, a, b, k),   // SIMD-X86-SHA
+//         Option.None => portable(..),
+//     }
+//
+// Each token has a private field, so only this module builds one, and only
+// after CPUID reported the feature. Tokens are copyable. Detection runs once
+// per process and needs no effect: its answer never changes. The reference
+// evaluator executes every intrinsic in software and reports every feature;
+// KUSH_CPU_DISABLE=sha,avx2,ssse3,sse41 clears features on both backends, so
+// tests can run the portable paths.
+
+use std.option.Option;
+use std.result.Result;
+use std.sys;
+
+/// SSSE3 (pshufb, palignr).
+pub struct Ssse3 { held: Bool }
+/// SSE4.1.
+pub struct Sse41 { held: Bool }
+/// AVX2 with OS support for the 256-bit registers.
+pub struct Avx2 { held: Bool }
+/// The SHA extensions, together with SSSE3 and SSE4.1, which every SHA
+/// sequence also needs.
+pub struct Sha { held: Bool }
+
+fn has(bit: i64) -> Bool ! {} {
+    let bits = match sys.cpu_features() {
+        Result.Ok(bits) => bits,
+        Result.Err(_) => 0,
+    };
+    (bits & bit) == bit
+}
+
+pub fn ssse3() -> Option<Ssse3> ! {} {
+    if has(1) { Option.Some(Ssse3 { held: true }) } else { Option.None }
+}
+
+pub fn sse41() -> Option<Sse41> ! {} {
+    if has(2) { Option.Some(Sse41 { held: true }) } else { Option.None }
+}
+
+pub fn avx2() -> Option<Avx2> ! {} {
+    if has(4) { Option.Some(Avx2 { held: true }) } else { Option.None }
+}
+
+pub fn sha() -> Option<Sha> ! {} {
+    if has(1 | 2 | 8) { Option.Some(Sha { held: true }) } else { Option.None }
+}
