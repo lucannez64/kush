@@ -99,6 +99,21 @@ instructions, Cranelift SIMD instructions, and LLVM vector operations:
   `load_le`, `Bytes` writes through `store`, each with an erased bounds
   precondition like `Bytes.at`.
 
+### Implementation (SIMD-OPS, 2026-11-14)
+
+Every operation above is generated into `std.simd` as checked Kush working
+on the two words with SWAR (SIMD within a register): lane-wise
+`wrapping_add`/`wrapping_sub` mask the top bit of each lane so carries
+never cross lanes; `shl`/`shr` (arithmetic for signed types) mask with a
+splatted lane mask; `eq_lanes` returns all-ones lanes; `shuffle`,
+`shuffle2`, `align_right` and `swap_bytes` move lanes with proved indices;
+`load_le`/`load_be` read 16 bytes with proved bounds and `push_le`/`push_be`
+append them. All have empty effect rows except the pushes (`Bytes.push`).
+Comparisons other than equality, and stores into an existing buffer, are
+left for later. Tests: `crates/kush/tests/simd_ops.rs` compares every lane
+of every operation of all eight types with a model computed in Rust, on
+both backends. Native vector instructions are SIMD-NATIVE.
+
 ## CPU features as capabilities [SIMD-CPU]
 
 Executing an instruction the CPU lacks is `SIGILL`, a crash no check can

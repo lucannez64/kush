@@ -8090,7 +8090,9 @@ fn collect_methods<'a>(
                 }
                 checked_method_receiver(types, &receiver.ty, self_key)?;
             }
-            if Checker::builtin_method(&f.name) {
+            // Builtin and field names only shadow dot-calls, which never
+            // reach an associated function.
+            if !associated_fn && Checker::builtin_method(&f.name) {
                 return Err(Diagnostic::new(
                     method.span,
                     format!(
@@ -8099,7 +8101,7 @@ fn collect_methods<'a>(
                     ),
                 ));
             }
-            if record_fields.contains(&f.name) {
+            if !associated_fn && record_fields.contains(&f.name) {
                 return Err(Diagnostic::new(
                     method.span,
                     format!(

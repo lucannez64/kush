@@ -9,6 +9,8 @@ module std.simd;
 //     let x = u32x4.lane(v, 2, _);              // 3; the index is proved
 //     let w = u32x4.with_lane(v, 0, 9, _);
 //     let bytes = u8x16.from_bits(u32x4.to_bits(v));
+//     let s = u32x4.wrapping_add(v, u32x4.splat(1));   // lane-wise (SIMD-OPS)
+//     let m = u32x4.load_be(&data, n, at, _);          // bounds proved
 //
 // Each type is two private u64 words in x86 lane order (lane 0 is the low
 // bits of the first word): a vector is exactly the two words of the XMM
@@ -79,6 +81,135 @@ impl u8x16 {
         let (w0, w1) = bits;
         Self { w0: w0, w1: w1 }
     }
+
+    /// Lane-wise `&`.
+    pub fn and(a: u8x16, b: u8x16) -> u8x16 ! {} {
+        Self { w0: a.w0 & b.w0, w1: a.w1 & b.w1 }
+    }
+
+    /// Lane-wise `|`.
+    pub fn or(a: u8x16, b: u8x16) -> u8x16 ! {} {
+        Self { w0: a.w0 | b.w0, w1: a.w1 | b.w1 }
+    }
+
+    /// Lane-wise `^`.
+    pub fn xor(a: u8x16, b: u8x16) -> u8x16 ! {} {
+        Self { w0: a.w0 ^ b.w0, w1: a.w1 ^ b.w1 }
+    }
+
+    /// Lane-wise `!`.
+    pub fn not(v: u8x16) -> u8x16 ! {} {
+        Self { w0: !v.w0, w1: !v.w1 }
+    }
+
+    /// Lane-wise addition modulo 2^8.
+    pub fn wrapping_add(a: u8x16, b: u8x16) -> u8x16 ! {} {
+        Self { w0: Int.wrapping_add::<u64>(a.w0 & 9187201950435737471, b.w0 & 9187201950435737471) ^ ((a.w0 ^ b.w0) & 9259542123273814144), w1: Int.wrapping_add::<u64>(a.w1 & 9187201950435737471, b.w1 & 9187201950435737471) ^ ((a.w1 ^ b.w1) & 9259542123273814144) }
+    }
+
+    /// Lane-wise subtraction modulo 2^8.
+    pub fn wrapping_sub(a: u8x16, b: u8x16) -> u8x16 ! {} {
+        Self { w0: Int.wrapping_sub::<u64>(a.w0 | 9259542123273814144, b.w0 & 9187201950435737471) ^ ((a.w0 ^ !b.w0) & 9259542123273814144), w1: Int.wrapping_sub::<u64>(a.w1 | 9259542123273814144, b.w1 & 9187201950435737471) ^ ((a.w1 ^ !b.w1) & 9259542123273814144) }
+    }
+
+    /// Every lane shifted left by `n` (high bits dropped).
+    pub fn shl(v: u8x16, n: i64, erased q: { 0 <= n && n <= 7 }) -> u8x16 ! {} {
+        let lanemax: u64 = 255;
+        let keep: u64 = Int.wrapping_mul::<u64>((lanemax << n) & lanemax, 72340172838076673);
+        Self { w0: (v.w0 << n) & keep, w1: (v.w1 << n) & keep }
+    }
+
+    /// Every lane shifted right by `n`.
+    pub fn shr(v: u8x16, n: i64, erased q: { 0 <= n && n <= 7 }) -> u8x16 ! {} {
+        let lanemax: u64 = 255;
+        let keep: u64 = Int.wrapping_mul::<u64>(lanemax >> n, 72340172838076673);
+        Self { w0: (v.w0 >> n) & keep, w1: (v.w1 >> n) & keep }
+    }
+
+    /// All ones in every lane where `a` and `b` are equal, zero elsewhere.
+    pub fn eq_lanes(a: u8x16, b: u8x16) -> u8x16 ! {} {
+        let lanemax: u64 = 255;
+        let x0 = a.w0 ^ b.w0;
+        let x1 = a.w1 ^ b.w1;
+        Self { w0: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x0 & 9187201950435737471, 9187201950435737471) | x0) & 9259542123273814144) & 9259542123273814144) >> 7, lanemax), w1: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x1 & 9187201950435737471, 9187201950435737471) | x1) & 9259542123273814144) & 9259542123273814144) >> 7, lanemax) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `v`.
+    pub fn shuffle(v: u8x16, i0: i64, i1: i64, i2: i64, i3: i64, i4: i64, i5: i64, i6: i64, i7: i64, i8: i64, i9: i64, i10: i64, i11: i64, i12: i64, i13: i64, i14: i64, i15: i64, erased q: { 0 <= i0 && i0 <= 15 && 0 <= i1 && i1 <= 15 && 0 <= i2 && i2 <= 15 && 0 <= i3 && i3 <= 15 && 0 <= i4 && i4 <= 15 && 0 <= i5 && i5 <= 15 && 0 <= i6 && i6 <= 15 && 0 <= i7 && i7 <= 15 && 0 <= i8 && i8 <= 15 && 0 <= i9 && i9 <= 15 && 0 <= i10 && i10 <= 15 && 0 <= i11 && i11 <= 15 && 0 <= i12 && i12 <= 15 && 0 <= i13 && i13 <= 15 && 0 <= i14 && i14 <= 15 && 0 <= i15 && i15 <= 15 }) -> u8x16 ! {} {
+        u8x16.new(u8x16.lane(v, i0, _), u8x16.lane(v, i1, _), u8x16.lane(v, i2, _), u8x16.lane(v, i3, _), u8x16.lane(v, i4, _), u8x16.lane(v, i5, _), u8x16.lane(v, i6, _), u8x16.lane(v, i7, _), u8x16.lane(v, i8, _), u8x16.lane(v, i9, _), u8x16.lane(v, i10, _), u8x16.lane(v, i11, _), u8x16.lane(v, i12, _), u8x16.lane(v, i13, _), u8x16.lane(v, i14, _), u8x16.lane(v, i15, _))
+    }
+
+    /// Lane `i` of `a` for `i < 16`, else lane `i - 16` of `b`.
+    fn pick(a: u8x16, b: u8x16, i: i64, erased q: { 0 <= i && i <= 31 }) -> u8 ! {} {
+        if i < 16 { u8x16.lane(a, i, _) } else { u8x16.lane(b, i - 16, _) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `a` then `b` side by side
+    /// (indices 16 and up name lanes of `b`).
+    pub fn shuffle2(a: u8x16, b: u8x16, i0: i64, i1: i64, i2: i64, i3: i64, i4: i64, i5: i64, i6: i64, i7: i64, i8: i64, i9: i64, i10: i64, i11: i64, i12: i64, i13: i64, i14: i64, i15: i64, erased q: { 0 <= i0 && i0 <= 31 && 0 <= i1 && i1 <= 31 && 0 <= i2 && i2 <= 31 && 0 <= i3 && i3 <= 31 && 0 <= i4 && i4 <= 31 && 0 <= i5 && i5 <= 31 && 0 <= i6 && i6 <= 31 && 0 <= i7 && i7 <= 31 && 0 <= i8 && i8 <= 31 && 0 <= i9 && i9 <= 31 && 0 <= i10 && i10 <= 31 && 0 <= i11 && i11 <= 31 && 0 <= i12 && i12 <= 31 && 0 <= i13 && i13 <= 31 && 0 <= i14 && i14 <= 31 && 0 <= i15 && i15 <= 31 }) -> u8x16 ! {} {
+        u8x16.new(u8x16.pick(a, b, i0, _), u8x16.pick(a, b, i1, _), u8x16.pick(a, b, i2, _), u8x16.pick(a, b, i3, _), u8x16.pick(a, b, i4, _), u8x16.pick(a, b, i5, _), u8x16.pick(a, b, i6, _), u8x16.pick(a, b, i7, _), u8x16.pick(a, b, i8, _), u8x16.pick(a, b, i9, _), u8x16.pick(a, b, i10, _), u8x16.pick(a, b, i11, _), u8x16.pick(a, b, i12, _), u8x16.pick(a, b, i13, _), u8x16.pick(a, b, i14, _), u8x16.pick(a, b, i15, _))
+    }
+
+    /// Bytes `k` to `k + 15` of `lo` then `hi` side by side (x86 `palignr hi, lo, k`).
+    pub fn align_right(hi: u8x16, lo: u8x16, k: i64, erased q: { 0 <= k && k <= 16 }) -> u8x16 ! {} {
+        u8x16.shuffle2(lo, hi, k + 0, k + 1, k + 2, k + 3, k + 4, k + 5, k + 6, k + 7, k + 8, k + 9, k + 10, k + 11, k + 12, k + 13, k + 14, k + 15, _)
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane little-endian. `n` is
+    /// `Bytes.len(data)`, an `i64` local of the caller.
+    pub fn load_le(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u8x16 ! {} {
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = b00 | (b01 << 8) | (b02 << 16) | (b03 << 24) | (b04 << 32) | (b05 << 40) | (b06 << 48) | (b07 << 56);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = b10 | (b11 << 8) | (b12 << 16) | (b13 << 24) | (b14 << 32) | (b15 << 40) | (b16 << 48) | (b17 << 56);
+        Self { w0: w0, w1: w1 }
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u8x16 ! {} {
+        u8x16.load_le(data, n, at, _)
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane little-endian.
+    pub fn push_le(out: Bytes, v: u8x16) -> Bytes ! {alloc, panic} {
+        let mut out = out;
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 56) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 56) & 255));
+        out
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane big-endian.
+    pub fn push_be(out: Bytes, v: u8x16) -> Bytes ! {alloc, panic} {
+        u8x16.push_le(out, v)
+    }
 }
 
 /// 8 lanes of `u16` in 128 bits.
@@ -143,6 +274,136 @@ impl u16x8 {
     pub fn from_bits(bits: (u64, u64)) -> u16x8 ! {} {
         let (w0, w1) = bits;
         Self { w0: w0, w1: w1 }
+    }
+
+    /// Lane-wise `&`.
+    pub fn and(a: u16x8, b: u16x8) -> u16x8 ! {} {
+        Self { w0: a.w0 & b.w0, w1: a.w1 & b.w1 }
+    }
+
+    /// Lane-wise `|`.
+    pub fn or(a: u16x8, b: u16x8) -> u16x8 ! {} {
+        Self { w0: a.w0 | b.w0, w1: a.w1 | b.w1 }
+    }
+
+    /// Lane-wise `^`.
+    pub fn xor(a: u16x8, b: u16x8) -> u16x8 ! {} {
+        Self { w0: a.w0 ^ b.w0, w1: a.w1 ^ b.w1 }
+    }
+
+    /// Lane-wise `!`.
+    pub fn not(v: u16x8) -> u16x8 ! {} {
+        Self { w0: !v.w0, w1: !v.w1 }
+    }
+
+    /// Lane-wise addition modulo 2^16.
+    pub fn wrapping_add(a: u16x8, b: u16x8) -> u16x8 ! {} {
+        Self { w0: Int.wrapping_add::<u64>(a.w0 & 9223231297218904063, b.w0 & 9223231297218904063) ^ ((a.w0 ^ b.w0) & 9223512776490647552), w1: Int.wrapping_add::<u64>(a.w1 & 9223231297218904063, b.w1 & 9223231297218904063) ^ ((a.w1 ^ b.w1) & 9223512776490647552) }
+    }
+
+    /// Lane-wise subtraction modulo 2^16.
+    pub fn wrapping_sub(a: u16x8, b: u16x8) -> u16x8 ! {} {
+        Self { w0: Int.wrapping_sub::<u64>(a.w0 | 9223512776490647552, b.w0 & 9223231297218904063) ^ ((a.w0 ^ !b.w0) & 9223512776490647552), w1: Int.wrapping_sub::<u64>(a.w1 | 9223512776490647552, b.w1 & 9223231297218904063) ^ ((a.w1 ^ !b.w1) & 9223512776490647552) }
+    }
+
+    /// Every lane shifted left by `n` (high bits dropped).
+    pub fn shl(v: u16x8, n: i64, erased q: { 0 <= n && n <= 15 }) -> u16x8 ! {} {
+        let lanemax: u64 = 65535;
+        let keep: u64 = Int.wrapping_mul::<u64>((lanemax << n) & lanemax, 281479271743489);
+        Self { w0: (v.w0 << n) & keep, w1: (v.w1 << n) & keep }
+    }
+
+    /// Every lane shifted right by `n`.
+    pub fn shr(v: u16x8, n: i64, erased q: { 0 <= n && n <= 15 }) -> u16x8 ! {} {
+        let lanemax: u64 = 65535;
+        let keep: u64 = Int.wrapping_mul::<u64>(lanemax >> n, 281479271743489);
+        Self { w0: (v.w0 >> n) & keep, w1: (v.w1 >> n) & keep }
+    }
+
+    /// All ones in every lane where `a` and `b` are equal, zero elsewhere.
+    pub fn eq_lanes(a: u16x8, b: u16x8) -> u16x8 ! {} {
+        let lanemax: u64 = 65535;
+        let x0 = a.w0 ^ b.w0;
+        let x1 = a.w1 ^ b.w1;
+        Self { w0: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x0 & 9223231297218904063, 9223231297218904063) | x0) & 9223512776490647552) & 9223512776490647552) >> 15, lanemax), w1: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x1 & 9223231297218904063, 9223231297218904063) | x1) & 9223512776490647552) & 9223512776490647552) >> 15, lanemax) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `v`.
+    pub fn shuffle(v: u16x8, i0: i64, i1: i64, i2: i64, i3: i64, i4: i64, i5: i64, i6: i64, i7: i64, erased q: { 0 <= i0 && i0 <= 7 && 0 <= i1 && i1 <= 7 && 0 <= i2 && i2 <= 7 && 0 <= i3 && i3 <= 7 && 0 <= i4 && i4 <= 7 && 0 <= i5 && i5 <= 7 && 0 <= i6 && i6 <= 7 && 0 <= i7 && i7 <= 7 }) -> u16x8 ! {} {
+        u16x8.new(u16x8.lane(v, i0, _), u16x8.lane(v, i1, _), u16x8.lane(v, i2, _), u16x8.lane(v, i3, _), u16x8.lane(v, i4, _), u16x8.lane(v, i5, _), u16x8.lane(v, i6, _), u16x8.lane(v, i7, _))
+    }
+
+    /// Lane `i` of `a` for `i < 8`, else lane `i - 8` of `b`.
+    fn pick(a: u16x8, b: u16x8, i: i64, erased q: { 0 <= i && i <= 15 }) -> u16 ! {} {
+        if i < 8 { u16x8.lane(a, i, _) } else { u16x8.lane(b, i - 8, _) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `a` then `b` side by side
+    /// (indices 8 and up name lanes of `b`).
+    pub fn shuffle2(a: u16x8, b: u16x8, i0: i64, i1: i64, i2: i64, i3: i64, i4: i64, i5: i64, i6: i64, i7: i64, erased q: { 0 <= i0 && i0 <= 15 && 0 <= i1 && i1 <= 15 && 0 <= i2 && i2 <= 15 && 0 <= i3 && i3 <= 15 && 0 <= i4 && i4 <= 15 && 0 <= i5 && i5 <= 15 && 0 <= i6 && i6 <= 15 && 0 <= i7 && i7 <= 15 }) -> u16x8 ! {} {
+        u16x8.new(u16x8.pick(a, b, i0, _), u16x8.pick(a, b, i1, _), u16x8.pick(a, b, i2, _), u16x8.pick(a, b, i3, _), u16x8.pick(a, b, i4, _), u16x8.pick(a, b, i5, _), u16x8.pick(a, b, i6, _), u16x8.pick(a, b, i7, _))
+    }
+
+    /// Every lane with its bytes reversed (big-endian <-> little-endian).
+    pub fn swap_bytes(v: u16x8) -> u16x8 ! {} {
+        let b = u8x16.from_bits(u16x8.to_bits(v));
+        u16x8.from_bits(u8x16.to_bits(u8x16.shuffle(b, 1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14, _)))
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane little-endian. `n` is
+    /// `Bytes.len(data)`, an `i64` local of the caller.
+    pub fn load_le(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u16x8 ! {} {
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = b00 | (b01 << 8) | (b02 << 16) | (b03 << 24) | (b04 << 32) | (b05 << 40) | (b06 << 48) | (b07 << 56);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = b10 | (b11 << 8) | (b12 << 16) | (b13 << 24) | (b14 << 32) | (b15 << 40) | (b16 << 48) | (b17 << 56);
+        Self { w0: w0, w1: w1 }
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u16x8 ! {} {
+        u16x8.swap_bytes(u16x8.load_le(data, n, at, _))
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane little-endian.
+    pub fn push_le(out: Bytes, v: u16x8) -> Bytes ! {alloc, panic} {
+        let mut out = out;
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 56) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 56) & 255));
+        out
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane big-endian.
+    pub fn push_be(out: Bytes, v: u16x8) -> Bytes ! {alloc, panic} {
+        u16x8.push_le(out, u16x8.swap_bytes(v))
     }
 }
 
@@ -209,6 +470,136 @@ impl u32x4 {
         let (w0, w1) = bits;
         Self { w0: w0, w1: w1 }
     }
+
+    /// Lane-wise `&`.
+    pub fn and(a: u32x4, b: u32x4) -> u32x4 ! {} {
+        Self { w0: a.w0 & b.w0, w1: a.w1 & b.w1 }
+    }
+
+    /// Lane-wise `|`.
+    pub fn or(a: u32x4, b: u32x4) -> u32x4 ! {} {
+        Self { w0: a.w0 | b.w0, w1: a.w1 | b.w1 }
+    }
+
+    /// Lane-wise `^`.
+    pub fn xor(a: u32x4, b: u32x4) -> u32x4 ! {} {
+        Self { w0: a.w0 ^ b.w0, w1: a.w1 ^ b.w1 }
+    }
+
+    /// Lane-wise `!`.
+    pub fn not(v: u32x4) -> u32x4 ! {} {
+        Self { w0: !v.w0, w1: !v.w1 }
+    }
+
+    /// Lane-wise addition modulo 2^32.
+    pub fn wrapping_add(a: u32x4, b: u32x4) -> u32x4 ! {} {
+        Self { w0: Int.wrapping_add::<u64>(a.w0 & 9223372034707292159, b.w0 & 9223372034707292159) ^ ((a.w0 ^ b.w0) & 9223372039002259456), w1: Int.wrapping_add::<u64>(a.w1 & 9223372034707292159, b.w1 & 9223372034707292159) ^ ((a.w1 ^ b.w1) & 9223372039002259456) }
+    }
+
+    /// Lane-wise subtraction modulo 2^32.
+    pub fn wrapping_sub(a: u32x4, b: u32x4) -> u32x4 ! {} {
+        Self { w0: Int.wrapping_sub::<u64>(a.w0 | 9223372039002259456, b.w0 & 9223372034707292159) ^ ((a.w0 ^ !b.w0) & 9223372039002259456), w1: Int.wrapping_sub::<u64>(a.w1 | 9223372039002259456, b.w1 & 9223372034707292159) ^ ((a.w1 ^ !b.w1) & 9223372039002259456) }
+    }
+
+    /// Every lane shifted left by `n` (high bits dropped).
+    pub fn shl(v: u32x4, n: i64, erased q: { 0 <= n && n <= 31 }) -> u32x4 ! {} {
+        let lanemax: u64 = 4294967295;
+        let keep: u64 = Int.wrapping_mul::<u64>((lanemax << n) & lanemax, 4294967297);
+        Self { w0: (v.w0 << n) & keep, w1: (v.w1 << n) & keep }
+    }
+
+    /// Every lane shifted right by `n`.
+    pub fn shr(v: u32x4, n: i64, erased q: { 0 <= n && n <= 31 }) -> u32x4 ! {} {
+        let lanemax: u64 = 4294967295;
+        let keep: u64 = Int.wrapping_mul::<u64>(lanemax >> n, 4294967297);
+        Self { w0: (v.w0 >> n) & keep, w1: (v.w1 >> n) & keep }
+    }
+
+    /// All ones in every lane where `a` and `b` are equal, zero elsewhere.
+    pub fn eq_lanes(a: u32x4, b: u32x4) -> u32x4 ! {} {
+        let lanemax: u64 = 4294967295;
+        let x0 = a.w0 ^ b.w0;
+        let x1 = a.w1 ^ b.w1;
+        Self { w0: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x0 & 9223372034707292159, 9223372034707292159) | x0) & 9223372039002259456) & 9223372039002259456) >> 31, lanemax), w1: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x1 & 9223372034707292159, 9223372034707292159) | x1) & 9223372039002259456) & 9223372039002259456) >> 31, lanemax) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `v`.
+    pub fn shuffle(v: u32x4, i0: i64, i1: i64, i2: i64, i3: i64, erased q: { 0 <= i0 && i0 <= 3 && 0 <= i1 && i1 <= 3 && 0 <= i2 && i2 <= 3 && 0 <= i3 && i3 <= 3 }) -> u32x4 ! {} {
+        u32x4.new(u32x4.lane(v, i0, _), u32x4.lane(v, i1, _), u32x4.lane(v, i2, _), u32x4.lane(v, i3, _))
+    }
+
+    /// Lane `i` of `a` for `i < 4`, else lane `i - 4` of `b`.
+    fn pick(a: u32x4, b: u32x4, i: i64, erased q: { 0 <= i && i <= 7 }) -> u32 ! {} {
+        if i < 4 { u32x4.lane(a, i, _) } else { u32x4.lane(b, i - 4, _) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `a` then `b` side by side
+    /// (indices 4 and up name lanes of `b`).
+    pub fn shuffle2(a: u32x4, b: u32x4, i0: i64, i1: i64, i2: i64, i3: i64, erased q: { 0 <= i0 && i0 <= 7 && 0 <= i1 && i1 <= 7 && 0 <= i2 && i2 <= 7 && 0 <= i3 && i3 <= 7 }) -> u32x4 ! {} {
+        u32x4.new(u32x4.pick(a, b, i0, _), u32x4.pick(a, b, i1, _), u32x4.pick(a, b, i2, _), u32x4.pick(a, b, i3, _))
+    }
+
+    /// Every lane with its bytes reversed (big-endian <-> little-endian).
+    pub fn swap_bytes(v: u32x4) -> u32x4 ! {} {
+        let b = u8x16.from_bits(u32x4.to_bits(v));
+        u32x4.from_bits(u8x16.to_bits(u8x16.shuffle(b, 3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12, _)))
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane little-endian. `n` is
+    /// `Bytes.len(data)`, an `i64` local of the caller.
+    pub fn load_le(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u32x4 ! {} {
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = b00 | (b01 << 8) | (b02 << 16) | (b03 << 24) | (b04 << 32) | (b05 << 40) | (b06 << 48) | (b07 << 56);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = b10 | (b11 << 8) | (b12 << 16) | (b13 << 24) | (b14 << 32) | (b15 << 40) | (b16 << 48) | (b17 << 56);
+        Self { w0: w0, w1: w1 }
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u32x4 ! {} {
+        u32x4.swap_bytes(u32x4.load_le(data, n, at, _))
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane little-endian.
+    pub fn push_le(out: Bytes, v: u32x4) -> Bytes ! {alloc, panic} {
+        let mut out = out;
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 56) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 56) & 255));
+        out
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane big-endian.
+    pub fn push_be(out: Bytes, v: u32x4) -> Bytes ! {alloc, panic} {
+        u32x4.push_le(out, u32x4.swap_bytes(v))
+    }
 }
 
 /// 2 lanes of `u64` in 128 bits.
@@ -261,6 +652,131 @@ impl u64x2 {
     pub fn from_bits(bits: (u64, u64)) -> u64x2 ! {} {
         let (w0, w1) = bits;
         Self { w0: w0, w1: w1 }
+    }
+
+    /// Lane-wise `&`.
+    pub fn and(a: u64x2, b: u64x2) -> u64x2 ! {} {
+        Self { w0: a.w0 & b.w0, w1: a.w1 & b.w1 }
+    }
+
+    /// Lane-wise `|`.
+    pub fn or(a: u64x2, b: u64x2) -> u64x2 ! {} {
+        Self { w0: a.w0 | b.w0, w1: a.w1 | b.w1 }
+    }
+
+    /// Lane-wise `^`.
+    pub fn xor(a: u64x2, b: u64x2) -> u64x2 ! {} {
+        Self { w0: a.w0 ^ b.w0, w1: a.w1 ^ b.w1 }
+    }
+
+    /// Lane-wise `!`.
+    pub fn not(v: u64x2) -> u64x2 ! {} {
+        Self { w0: !v.w0, w1: !v.w1 }
+    }
+
+    /// Lane-wise addition modulo 2^64.
+    pub fn wrapping_add(a: u64x2, b: u64x2) -> u64x2 ! {} {
+        Self { w0: Int.wrapping_add::<u64>(a.w0, b.w0), w1: Int.wrapping_add::<u64>(a.w1, b.w1) }
+    }
+
+    /// Lane-wise subtraction modulo 2^64.
+    pub fn wrapping_sub(a: u64x2, b: u64x2) -> u64x2 ! {} {
+        Self { w0: Int.wrapping_sub::<u64>(a.w0, b.w0), w1: Int.wrapping_sub::<u64>(a.w1, b.w1) }
+    }
+
+    /// Every lane shifted left by `n` (high bits dropped).
+    pub fn shl(v: u64x2, n: i64, erased q: { 0 <= n && n <= 63 }) -> u64x2 ! {} {
+        Self { w0: v.w0 << n, w1: v.w1 << n }
+    }
+
+    /// Every lane shifted right by `n`.
+    pub fn shr(v: u64x2, n: i64, erased q: { 0 <= n && n <= 63 }) -> u64x2 ! {} {
+        Self { w0: v.w0 >> n, w1: v.w1 >> n }
+    }
+
+    /// All ones in every lane where `a` and `b` are equal, zero elsewhere.
+    pub fn eq_lanes(a: u64x2, b: u64x2) -> u64x2 ! {} {
+        let m0: u64 = if a.w0 == b.w0 { 18446744073709551615 } else { 0 };
+        let m1: u64 = if a.w1 == b.w1 { 18446744073709551615 } else { 0 };
+        Self { w0: m0, w1: m1 }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `v`.
+    pub fn shuffle(v: u64x2, i0: i64, i1: i64, erased q: { 0 <= i0 && i0 <= 1 && 0 <= i1 && i1 <= 1 }) -> u64x2 ! {} {
+        u64x2.new(u64x2.lane(v, i0, _), u64x2.lane(v, i1, _))
+    }
+
+    /// Lane `i` of `a` for `i < 2`, else lane `i - 2` of `b`.
+    fn pick(a: u64x2, b: u64x2, i: i64, erased q: { 0 <= i && i <= 3 }) -> u64 ! {} {
+        if i < 2 { u64x2.lane(a, i, _) } else { u64x2.lane(b, i - 2, _) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `a` then `b` side by side
+    /// (indices 2 and up name lanes of `b`).
+    pub fn shuffle2(a: u64x2, b: u64x2, i0: i64, i1: i64, erased q: { 0 <= i0 && i0 <= 3 && 0 <= i1 && i1 <= 3 }) -> u64x2 ! {} {
+        u64x2.new(u64x2.pick(a, b, i0, _), u64x2.pick(a, b, i1, _))
+    }
+
+    /// Every lane with its bytes reversed (big-endian <-> little-endian).
+    pub fn swap_bytes(v: u64x2) -> u64x2 ! {} {
+        let b = u8x16.from_bits(u64x2.to_bits(v));
+        u64x2.from_bits(u8x16.to_bits(u8x16.shuffle(b, 7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8, _)))
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane little-endian. `n` is
+    /// `Bytes.len(data)`, an `i64` local of the caller.
+    pub fn load_le(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u64x2 ! {} {
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = b00 | (b01 << 8) | (b02 << 16) | (b03 << 24) | (b04 << 32) | (b05 << 40) | (b06 << 48) | (b07 << 56);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = b10 | (b11 << 8) | (b12 << 16) | (b13 << 24) | (b14 << 32) | (b15 << 40) | (b16 << 48) | (b17 << 56);
+        Self { w0: w0, w1: w1 }
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u64x2 ! {} {
+        u64x2.swap_bytes(u64x2.load_le(data, n, at, _))
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane little-endian.
+    pub fn push_le(out: Bytes, v: u64x2) -> Bytes ! {alloc, panic} {
+        let mut out = out;
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 56) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 56) & 255));
+        out
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane big-endian.
+    pub fn push_be(out: Bytes, v: u64x2) -> Bytes ! {alloc, panic} {
+        u64x2.push_le(out, u64x2.swap_bytes(v))
     }
 }
 
@@ -327,6 +843,136 @@ impl i8x16 {
         let (w0, w1) = bits;
         Self { w0: w0, w1: w1 }
     }
+
+    /// Lane-wise `&`.
+    pub fn and(a: i8x16, b: i8x16) -> i8x16 ! {} {
+        Self { w0: a.w0 & b.w0, w1: a.w1 & b.w1 }
+    }
+
+    /// Lane-wise `|`.
+    pub fn or(a: i8x16, b: i8x16) -> i8x16 ! {} {
+        Self { w0: a.w0 | b.w0, w1: a.w1 | b.w1 }
+    }
+
+    /// Lane-wise `^`.
+    pub fn xor(a: i8x16, b: i8x16) -> i8x16 ! {} {
+        Self { w0: a.w0 ^ b.w0, w1: a.w1 ^ b.w1 }
+    }
+
+    /// Lane-wise `!`.
+    pub fn not(v: i8x16) -> i8x16 ! {} {
+        Self { w0: !v.w0, w1: !v.w1 }
+    }
+
+    /// Lane-wise addition modulo 2^8.
+    pub fn wrapping_add(a: i8x16, b: i8x16) -> i8x16 ! {} {
+        Self { w0: Int.wrapping_add::<u64>(a.w0 & 9187201950435737471, b.w0 & 9187201950435737471) ^ ((a.w0 ^ b.w0) & 9259542123273814144), w1: Int.wrapping_add::<u64>(a.w1 & 9187201950435737471, b.w1 & 9187201950435737471) ^ ((a.w1 ^ b.w1) & 9259542123273814144) }
+    }
+
+    /// Lane-wise subtraction modulo 2^8.
+    pub fn wrapping_sub(a: i8x16, b: i8x16) -> i8x16 ! {} {
+        Self { w0: Int.wrapping_sub::<u64>(a.w0 | 9259542123273814144, b.w0 & 9187201950435737471) ^ ((a.w0 ^ !b.w0) & 9259542123273814144), w1: Int.wrapping_sub::<u64>(a.w1 | 9259542123273814144, b.w1 & 9187201950435737471) ^ ((a.w1 ^ !b.w1) & 9259542123273814144) }
+    }
+
+    /// Every lane shifted left by `n` (high bits dropped).
+    pub fn shl(v: i8x16, n: i64, erased q: { 0 <= n && n <= 7 }) -> i8x16 ! {} {
+        let lanemax: u64 = 255;
+        let keep: u64 = Int.wrapping_mul::<u64>((lanemax << n) & lanemax, 72340172838076673);
+        Self { w0: (v.w0 << n) & keep, w1: (v.w1 << n) & keep }
+    }
+
+    /// Every lane shifted right by `n`, keeping its sign.
+    pub fn shr(v: i8x16, n: i64, erased q: { 0 <= n && n <= 7 }) -> i8x16 ! {} {
+        let lanemax: u64 = 255;
+        let keep: u64 = Int.wrapping_mul::<u64>(lanemax >> n, 72340172838076673);
+        let fill: u64 = Int.wrapping_mul::<u64>(lanemax ^ (lanemax >> n), 72340172838076673);
+        Self { w0: ((v.w0 >> n) & keep) | (Int.wrapping_mul::<u64>((v.w0 & 9259542123273814144) >> 7, lanemax) & fill), w1: ((v.w1 >> n) & keep) | (Int.wrapping_mul::<u64>((v.w1 & 9259542123273814144) >> 7, lanemax) & fill) }
+    }
+
+    /// All ones in every lane where `a` and `b` are equal, zero elsewhere.
+    pub fn eq_lanes(a: i8x16, b: i8x16) -> i8x16 ! {} {
+        let lanemax: u64 = 255;
+        let x0 = a.w0 ^ b.w0;
+        let x1 = a.w1 ^ b.w1;
+        Self { w0: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x0 & 9187201950435737471, 9187201950435737471) | x0) & 9259542123273814144) & 9259542123273814144) >> 7, lanemax), w1: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x1 & 9187201950435737471, 9187201950435737471) | x1) & 9259542123273814144) & 9259542123273814144) >> 7, lanemax) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `v`.
+    pub fn shuffle(v: i8x16, i0: i64, i1: i64, i2: i64, i3: i64, i4: i64, i5: i64, i6: i64, i7: i64, i8: i64, i9: i64, i10: i64, i11: i64, i12: i64, i13: i64, i14: i64, i15: i64, erased q: { 0 <= i0 && i0 <= 15 && 0 <= i1 && i1 <= 15 && 0 <= i2 && i2 <= 15 && 0 <= i3 && i3 <= 15 && 0 <= i4 && i4 <= 15 && 0 <= i5 && i5 <= 15 && 0 <= i6 && i6 <= 15 && 0 <= i7 && i7 <= 15 && 0 <= i8 && i8 <= 15 && 0 <= i9 && i9 <= 15 && 0 <= i10 && i10 <= 15 && 0 <= i11 && i11 <= 15 && 0 <= i12 && i12 <= 15 && 0 <= i13 && i13 <= 15 && 0 <= i14 && i14 <= 15 && 0 <= i15 && i15 <= 15 }) -> i8x16 ! {} {
+        i8x16.new(i8x16.lane(v, i0, _), i8x16.lane(v, i1, _), i8x16.lane(v, i2, _), i8x16.lane(v, i3, _), i8x16.lane(v, i4, _), i8x16.lane(v, i5, _), i8x16.lane(v, i6, _), i8x16.lane(v, i7, _), i8x16.lane(v, i8, _), i8x16.lane(v, i9, _), i8x16.lane(v, i10, _), i8x16.lane(v, i11, _), i8x16.lane(v, i12, _), i8x16.lane(v, i13, _), i8x16.lane(v, i14, _), i8x16.lane(v, i15, _))
+    }
+
+    /// Lane `i` of `a` for `i < 16`, else lane `i - 16` of `b`.
+    fn pick(a: i8x16, b: i8x16, i: i64, erased q: { 0 <= i && i <= 31 }) -> i8 ! {} {
+        if i < 16 { i8x16.lane(a, i, _) } else { i8x16.lane(b, i - 16, _) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `a` then `b` side by side
+    /// (indices 16 and up name lanes of `b`).
+    pub fn shuffle2(a: i8x16, b: i8x16, i0: i64, i1: i64, i2: i64, i3: i64, i4: i64, i5: i64, i6: i64, i7: i64, i8: i64, i9: i64, i10: i64, i11: i64, i12: i64, i13: i64, i14: i64, i15: i64, erased q: { 0 <= i0 && i0 <= 31 && 0 <= i1 && i1 <= 31 && 0 <= i2 && i2 <= 31 && 0 <= i3 && i3 <= 31 && 0 <= i4 && i4 <= 31 && 0 <= i5 && i5 <= 31 && 0 <= i6 && i6 <= 31 && 0 <= i7 && i7 <= 31 && 0 <= i8 && i8 <= 31 && 0 <= i9 && i9 <= 31 && 0 <= i10 && i10 <= 31 && 0 <= i11 && i11 <= 31 && 0 <= i12 && i12 <= 31 && 0 <= i13 && i13 <= 31 && 0 <= i14 && i14 <= 31 && 0 <= i15 && i15 <= 31 }) -> i8x16 ! {} {
+        i8x16.new(i8x16.pick(a, b, i0, _), i8x16.pick(a, b, i1, _), i8x16.pick(a, b, i2, _), i8x16.pick(a, b, i3, _), i8x16.pick(a, b, i4, _), i8x16.pick(a, b, i5, _), i8x16.pick(a, b, i6, _), i8x16.pick(a, b, i7, _), i8x16.pick(a, b, i8, _), i8x16.pick(a, b, i9, _), i8x16.pick(a, b, i10, _), i8x16.pick(a, b, i11, _), i8x16.pick(a, b, i12, _), i8x16.pick(a, b, i13, _), i8x16.pick(a, b, i14, _), i8x16.pick(a, b, i15, _))
+    }
+
+    /// Bytes `k` to `k + 15` of `lo` then `hi` side by side (x86 `palignr hi, lo, k`).
+    pub fn align_right(hi: i8x16, lo: i8x16, k: i64, erased q: { 0 <= k && k <= 16 }) -> i8x16 ! {} {
+        i8x16.shuffle2(lo, hi, k + 0, k + 1, k + 2, k + 3, k + 4, k + 5, k + 6, k + 7, k + 8, k + 9, k + 10, k + 11, k + 12, k + 13, k + 14, k + 15, _)
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane little-endian. `n` is
+    /// `Bytes.len(data)`, an `i64` local of the caller.
+    pub fn load_le(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i8x16 ! {} {
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = b00 | (b01 << 8) | (b02 << 16) | (b03 << 24) | (b04 << 32) | (b05 << 40) | (b06 << 48) | (b07 << 56);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = b10 | (b11 << 8) | (b12 << 16) | (b13 << 24) | (b14 << 32) | (b15 << 40) | (b16 << 48) | (b17 << 56);
+        Self { w0: w0, w1: w1 }
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i8x16 ! {} {
+        i8x16.load_le(data, n, at, _)
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane little-endian.
+    pub fn push_le(out: Bytes, v: i8x16) -> Bytes ! {alloc, panic} {
+        let mut out = out;
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 56) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 56) & 255));
+        out
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane big-endian.
+    pub fn push_be(out: Bytes, v: i8x16) -> Bytes ! {alloc, panic} {
+        i8x16.push_le(out, v)
+    }
 }
 
 /// 8 lanes of `i16` in 128 bits.
@@ -391,6 +1037,137 @@ impl i16x8 {
     pub fn from_bits(bits: (u64, u64)) -> i16x8 ! {} {
         let (w0, w1) = bits;
         Self { w0: w0, w1: w1 }
+    }
+
+    /// Lane-wise `&`.
+    pub fn and(a: i16x8, b: i16x8) -> i16x8 ! {} {
+        Self { w0: a.w0 & b.w0, w1: a.w1 & b.w1 }
+    }
+
+    /// Lane-wise `|`.
+    pub fn or(a: i16x8, b: i16x8) -> i16x8 ! {} {
+        Self { w0: a.w0 | b.w0, w1: a.w1 | b.w1 }
+    }
+
+    /// Lane-wise `^`.
+    pub fn xor(a: i16x8, b: i16x8) -> i16x8 ! {} {
+        Self { w0: a.w0 ^ b.w0, w1: a.w1 ^ b.w1 }
+    }
+
+    /// Lane-wise `!`.
+    pub fn not(v: i16x8) -> i16x8 ! {} {
+        Self { w0: !v.w0, w1: !v.w1 }
+    }
+
+    /// Lane-wise addition modulo 2^16.
+    pub fn wrapping_add(a: i16x8, b: i16x8) -> i16x8 ! {} {
+        Self { w0: Int.wrapping_add::<u64>(a.w0 & 9223231297218904063, b.w0 & 9223231297218904063) ^ ((a.w0 ^ b.w0) & 9223512776490647552), w1: Int.wrapping_add::<u64>(a.w1 & 9223231297218904063, b.w1 & 9223231297218904063) ^ ((a.w1 ^ b.w1) & 9223512776490647552) }
+    }
+
+    /// Lane-wise subtraction modulo 2^16.
+    pub fn wrapping_sub(a: i16x8, b: i16x8) -> i16x8 ! {} {
+        Self { w0: Int.wrapping_sub::<u64>(a.w0 | 9223512776490647552, b.w0 & 9223231297218904063) ^ ((a.w0 ^ !b.w0) & 9223512776490647552), w1: Int.wrapping_sub::<u64>(a.w1 | 9223512776490647552, b.w1 & 9223231297218904063) ^ ((a.w1 ^ !b.w1) & 9223512776490647552) }
+    }
+
+    /// Every lane shifted left by `n` (high bits dropped).
+    pub fn shl(v: i16x8, n: i64, erased q: { 0 <= n && n <= 15 }) -> i16x8 ! {} {
+        let lanemax: u64 = 65535;
+        let keep: u64 = Int.wrapping_mul::<u64>((lanemax << n) & lanemax, 281479271743489);
+        Self { w0: (v.w0 << n) & keep, w1: (v.w1 << n) & keep }
+    }
+
+    /// Every lane shifted right by `n`, keeping its sign.
+    pub fn shr(v: i16x8, n: i64, erased q: { 0 <= n && n <= 15 }) -> i16x8 ! {} {
+        let lanemax: u64 = 65535;
+        let keep: u64 = Int.wrapping_mul::<u64>(lanemax >> n, 281479271743489);
+        let fill: u64 = Int.wrapping_mul::<u64>(lanemax ^ (lanemax >> n), 281479271743489);
+        Self { w0: ((v.w0 >> n) & keep) | (Int.wrapping_mul::<u64>((v.w0 & 9223512776490647552) >> 15, lanemax) & fill), w1: ((v.w1 >> n) & keep) | (Int.wrapping_mul::<u64>((v.w1 & 9223512776490647552) >> 15, lanemax) & fill) }
+    }
+
+    /// All ones in every lane where `a` and `b` are equal, zero elsewhere.
+    pub fn eq_lanes(a: i16x8, b: i16x8) -> i16x8 ! {} {
+        let lanemax: u64 = 65535;
+        let x0 = a.w0 ^ b.w0;
+        let x1 = a.w1 ^ b.w1;
+        Self { w0: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x0 & 9223231297218904063, 9223231297218904063) | x0) & 9223512776490647552) & 9223512776490647552) >> 15, lanemax), w1: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x1 & 9223231297218904063, 9223231297218904063) | x1) & 9223512776490647552) & 9223512776490647552) >> 15, lanemax) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `v`.
+    pub fn shuffle(v: i16x8, i0: i64, i1: i64, i2: i64, i3: i64, i4: i64, i5: i64, i6: i64, i7: i64, erased q: { 0 <= i0 && i0 <= 7 && 0 <= i1 && i1 <= 7 && 0 <= i2 && i2 <= 7 && 0 <= i3 && i3 <= 7 && 0 <= i4 && i4 <= 7 && 0 <= i5 && i5 <= 7 && 0 <= i6 && i6 <= 7 && 0 <= i7 && i7 <= 7 }) -> i16x8 ! {} {
+        i16x8.new(i16x8.lane(v, i0, _), i16x8.lane(v, i1, _), i16x8.lane(v, i2, _), i16x8.lane(v, i3, _), i16x8.lane(v, i4, _), i16x8.lane(v, i5, _), i16x8.lane(v, i6, _), i16x8.lane(v, i7, _))
+    }
+
+    /// Lane `i` of `a` for `i < 8`, else lane `i - 8` of `b`.
+    fn pick(a: i16x8, b: i16x8, i: i64, erased q: { 0 <= i && i <= 15 }) -> i16 ! {} {
+        if i < 8 { i16x8.lane(a, i, _) } else { i16x8.lane(b, i - 8, _) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `a` then `b` side by side
+    /// (indices 8 and up name lanes of `b`).
+    pub fn shuffle2(a: i16x8, b: i16x8, i0: i64, i1: i64, i2: i64, i3: i64, i4: i64, i5: i64, i6: i64, i7: i64, erased q: { 0 <= i0 && i0 <= 15 && 0 <= i1 && i1 <= 15 && 0 <= i2 && i2 <= 15 && 0 <= i3 && i3 <= 15 && 0 <= i4 && i4 <= 15 && 0 <= i5 && i5 <= 15 && 0 <= i6 && i6 <= 15 && 0 <= i7 && i7 <= 15 }) -> i16x8 ! {} {
+        i16x8.new(i16x8.pick(a, b, i0, _), i16x8.pick(a, b, i1, _), i16x8.pick(a, b, i2, _), i16x8.pick(a, b, i3, _), i16x8.pick(a, b, i4, _), i16x8.pick(a, b, i5, _), i16x8.pick(a, b, i6, _), i16x8.pick(a, b, i7, _))
+    }
+
+    /// Every lane with its bytes reversed (big-endian <-> little-endian).
+    pub fn swap_bytes(v: i16x8) -> i16x8 ! {} {
+        let b = u8x16.from_bits(i16x8.to_bits(v));
+        i16x8.from_bits(u8x16.to_bits(u8x16.shuffle(b, 1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14, _)))
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane little-endian. `n` is
+    /// `Bytes.len(data)`, an `i64` local of the caller.
+    pub fn load_le(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i16x8 ! {} {
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = b00 | (b01 << 8) | (b02 << 16) | (b03 << 24) | (b04 << 32) | (b05 << 40) | (b06 << 48) | (b07 << 56);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = b10 | (b11 << 8) | (b12 << 16) | (b13 << 24) | (b14 << 32) | (b15 << 40) | (b16 << 48) | (b17 << 56);
+        Self { w0: w0, w1: w1 }
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i16x8 ! {} {
+        i16x8.swap_bytes(i16x8.load_le(data, n, at, _))
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane little-endian.
+    pub fn push_le(out: Bytes, v: i16x8) -> Bytes ! {alloc, panic} {
+        let mut out = out;
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 56) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 56) & 255));
+        out
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane big-endian.
+    pub fn push_be(out: Bytes, v: i16x8) -> Bytes ! {alloc, panic} {
+        i16x8.push_le(out, i16x8.swap_bytes(v))
     }
 }
 
@@ -457,6 +1234,137 @@ impl i32x4 {
         let (w0, w1) = bits;
         Self { w0: w0, w1: w1 }
     }
+
+    /// Lane-wise `&`.
+    pub fn and(a: i32x4, b: i32x4) -> i32x4 ! {} {
+        Self { w0: a.w0 & b.w0, w1: a.w1 & b.w1 }
+    }
+
+    /// Lane-wise `|`.
+    pub fn or(a: i32x4, b: i32x4) -> i32x4 ! {} {
+        Self { w0: a.w0 | b.w0, w1: a.w1 | b.w1 }
+    }
+
+    /// Lane-wise `^`.
+    pub fn xor(a: i32x4, b: i32x4) -> i32x4 ! {} {
+        Self { w0: a.w0 ^ b.w0, w1: a.w1 ^ b.w1 }
+    }
+
+    /// Lane-wise `!`.
+    pub fn not(v: i32x4) -> i32x4 ! {} {
+        Self { w0: !v.w0, w1: !v.w1 }
+    }
+
+    /// Lane-wise addition modulo 2^32.
+    pub fn wrapping_add(a: i32x4, b: i32x4) -> i32x4 ! {} {
+        Self { w0: Int.wrapping_add::<u64>(a.w0 & 9223372034707292159, b.w0 & 9223372034707292159) ^ ((a.w0 ^ b.w0) & 9223372039002259456), w1: Int.wrapping_add::<u64>(a.w1 & 9223372034707292159, b.w1 & 9223372034707292159) ^ ((a.w1 ^ b.w1) & 9223372039002259456) }
+    }
+
+    /// Lane-wise subtraction modulo 2^32.
+    pub fn wrapping_sub(a: i32x4, b: i32x4) -> i32x4 ! {} {
+        Self { w0: Int.wrapping_sub::<u64>(a.w0 | 9223372039002259456, b.w0 & 9223372034707292159) ^ ((a.w0 ^ !b.w0) & 9223372039002259456), w1: Int.wrapping_sub::<u64>(a.w1 | 9223372039002259456, b.w1 & 9223372034707292159) ^ ((a.w1 ^ !b.w1) & 9223372039002259456) }
+    }
+
+    /// Every lane shifted left by `n` (high bits dropped).
+    pub fn shl(v: i32x4, n: i64, erased q: { 0 <= n && n <= 31 }) -> i32x4 ! {} {
+        let lanemax: u64 = 4294967295;
+        let keep: u64 = Int.wrapping_mul::<u64>((lanemax << n) & lanemax, 4294967297);
+        Self { w0: (v.w0 << n) & keep, w1: (v.w1 << n) & keep }
+    }
+
+    /// Every lane shifted right by `n`, keeping its sign.
+    pub fn shr(v: i32x4, n: i64, erased q: { 0 <= n && n <= 31 }) -> i32x4 ! {} {
+        let lanemax: u64 = 4294967295;
+        let keep: u64 = Int.wrapping_mul::<u64>(lanemax >> n, 4294967297);
+        let fill: u64 = Int.wrapping_mul::<u64>(lanemax ^ (lanemax >> n), 4294967297);
+        Self { w0: ((v.w0 >> n) & keep) | (Int.wrapping_mul::<u64>((v.w0 & 9223372039002259456) >> 31, lanemax) & fill), w1: ((v.w1 >> n) & keep) | (Int.wrapping_mul::<u64>((v.w1 & 9223372039002259456) >> 31, lanemax) & fill) }
+    }
+
+    /// All ones in every lane where `a` and `b` are equal, zero elsewhere.
+    pub fn eq_lanes(a: i32x4, b: i32x4) -> i32x4 ! {} {
+        let lanemax: u64 = 4294967295;
+        let x0 = a.w0 ^ b.w0;
+        let x1 = a.w1 ^ b.w1;
+        Self { w0: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x0 & 9223372034707292159, 9223372034707292159) | x0) & 9223372039002259456) & 9223372039002259456) >> 31, lanemax), w1: Int.wrapping_mul::<u64>((!((Int.wrapping_add::<u64>(x1 & 9223372034707292159, 9223372034707292159) | x1) & 9223372039002259456) & 9223372039002259456) >> 31, lanemax) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `v`.
+    pub fn shuffle(v: i32x4, i0: i64, i1: i64, i2: i64, i3: i64, erased q: { 0 <= i0 && i0 <= 3 && 0 <= i1 && i1 <= 3 && 0 <= i2 && i2 <= 3 && 0 <= i3 && i3 <= 3 }) -> i32x4 ! {} {
+        i32x4.new(i32x4.lane(v, i0, _), i32x4.lane(v, i1, _), i32x4.lane(v, i2, _), i32x4.lane(v, i3, _))
+    }
+
+    /// Lane `i` of `a` for `i < 4`, else lane `i - 4` of `b`.
+    fn pick(a: i32x4, b: i32x4, i: i64, erased q: { 0 <= i && i <= 7 }) -> i32 ! {} {
+        if i < 4 { i32x4.lane(a, i, _) } else { i32x4.lane(b, i - 4, _) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `a` then `b` side by side
+    /// (indices 4 and up name lanes of `b`).
+    pub fn shuffle2(a: i32x4, b: i32x4, i0: i64, i1: i64, i2: i64, i3: i64, erased q: { 0 <= i0 && i0 <= 7 && 0 <= i1 && i1 <= 7 && 0 <= i2 && i2 <= 7 && 0 <= i3 && i3 <= 7 }) -> i32x4 ! {} {
+        i32x4.new(i32x4.pick(a, b, i0, _), i32x4.pick(a, b, i1, _), i32x4.pick(a, b, i2, _), i32x4.pick(a, b, i3, _))
+    }
+
+    /// Every lane with its bytes reversed (big-endian <-> little-endian).
+    pub fn swap_bytes(v: i32x4) -> i32x4 ! {} {
+        let b = u8x16.from_bits(i32x4.to_bits(v));
+        i32x4.from_bits(u8x16.to_bits(u8x16.shuffle(b, 3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12, _)))
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane little-endian. `n` is
+    /// `Bytes.len(data)`, an `i64` local of the caller.
+    pub fn load_le(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i32x4 ! {} {
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = b00 | (b01 << 8) | (b02 << 16) | (b03 << 24) | (b04 << 32) | (b05 << 40) | (b06 << 48) | (b07 << 56);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = b10 | (b11 << 8) | (b12 << 16) | (b13 << 24) | (b14 << 32) | (b15 << 40) | (b16 << 48) | (b17 << 56);
+        Self { w0: w0, w1: w1 }
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i32x4 ! {} {
+        i32x4.swap_bytes(i32x4.load_le(data, n, at, _))
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane little-endian.
+    pub fn push_le(out: Bytes, v: i32x4) -> Bytes ! {alloc, panic} {
+        let mut out = out;
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 56) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 56) & 255));
+        out
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane big-endian.
+    pub fn push_be(out: Bytes, v: i32x4) -> Bytes ! {alloc, panic} {
+        i32x4.push_le(out, i32x4.swap_bytes(v))
+    }
 }
 
 /// 2 lanes of `i64` in 128 bits.
@@ -509,5 +1417,130 @@ impl i64x2 {
     pub fn from_bits(bits: (u64, u64)) -> i64x2 ! {} {
         let (w0, w1) = bits;
         Self { w0: w0, w1: w1 }
+    }
+
+    /// Lane-wise `&`.
+    pub fn and(a: i64x2, b: i64x2) -> i64x2 ! {} {
+        Self { w0: a.w0 & b.w0, w1: a.w1 & b.w1 }
+    }
+
+    /// Lane-wise `|`.
+    pub fn or(a: i64x2, b: i64x2) -> i64x2 ! {} {
+        Self { w0: a.w0 | b.w0, w1: a.w1 | b.w1 }
+    }
+
+    /// Lane-wise `^`.
+    pub fn xor(a: i64x2, b: i64x2) -> i64x2 ! {} {
+        Self { w0: a.w0 ^ b.w0, w1: a.w1 ^ b.w1 }
+    }
+
+    /// Lane-wise `!`.
+    pub fn not(v: i64x2) -> i64x2 ! {} {
+        Self { w0: !v.w0, w1: !v.w1 }
+    }
+
+    /// Lane-wise addition modulo 2^64.
+    pub fn wrapping_add(a: i64x2, b: i64x2) -> i64x2 ! {} {
+        Self { w0: Int.wrapping_add::<u64>(a.w0, b.w0), w1: Int.wrapping_add::<u64>(a.w1, b.w1) }
+    }
+
+    /// Lane-wise subtraction modulo 2^64.
+    pub fn wrapping_sub(a: i64x2, b: i64x2) -> i64x2 ! {} {
+        Self { w0: Int.wrapping_sub::<u64>(a.w0, b.w0), w1: Int.wrapping_sub::<u64>(a.w1, b.w1) }
+    }
+
+    /// Every lane shifted left by `n` (high bits dropped).
+    pub fn shl(v: i64x2, n: i64, erased q: { 0 <= n && n <= 63 }) -> i64x2 ! {} {
+        Self { w0: v.w0 << n, w1: v.w1 << n }
+    }
+
+    /// Every lane shifted right by `n`, keeping its sign.
+    pub fn shr(v: i64x2, n: i64, erased q: { 0 <= n && n <= 63 }) -> i64x2 ! {} {
+        Self { w0: Int.truncate::<u64>(Int.truncate::<i64>(v.w0) >> n), w1: Int.truncate::<u64>(Int.truncate::<i64>(v.w1) >> n) }
+    }
+
+    /// All ones in every lane where `a` and `b` are equal, zero elsewhere.
+    pub fn eq_lanes(a: i64x2, b: i64x2) -> i64x2 ! {} {
+        let m0: u64 = if a.w0 == b.w0 { 18446744073709551615 } else { 0 };
+        let m1: u64 = if a.w1 == b.w1 { 18446744073709551615 } else { 0 };
+        Self { w0: m0, w1: m1 }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `v`.
+    pub fn shuffle(v: i64x2, i0: i64, i1: i64, erased q: { 0 <= i0 && i0 <= 1 && 0 <= i1 && i1 <= 1 }) -> i64x2 ! {} {
+        i64x2.new(i64x2.lane(v, i0, _), i64x2.lane(v, i1, _))
+    }
+
+    /// Lane `i` of `a` for `i < 2`, else lane `i - 2` of `b`.
+    fn pick(a: i64x2, b: i64x2, i: i64, erased q: { 0 <= i && i <= 3 }) -> i64 ! {} {
+        if i < 2 { i64x2.lane(a, i, _) } else { i64x2.lane(b, i - 2, _) }
+    }
+
+    /// Lane `k` of the result is lane `i<k>` of `a` then `b` side by side
+    /// (indices 2 and up name lanes of `b`).
+    pub fn shuffle2(a: i64x2, b: i64x2, i0: i64, i1: i64, erased q: { 0 <= i0 && i0 <= 3 && 0 <= i1 && i1 <= 3 }) -> i64x2 ! {} {
+        i64x2.new(i64x2.pick(a, b, i0, _), i64x2.pick(a, b, i1, _))
+    }
+
+    /// Every lane with its bytes reversed (big-endian <-> little-endian).
+    pub fn swap_bytes(v: i64x2) -> i64x2 ! {} {
+        let b = u8x16.from_bits(i64x2.to_bits(v));
+        i64x2.from_bits(u8x16.to_bits(u8x16.shuffle(b, 7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8, _)))
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane little-endian. `n` is
+    /// `Bytes.len(data)`, an `i64` local of the caller.
+    pub fn load_le(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i64x2 ! {} {
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = b00 | (b01 << 8) | (b02 << 16) | (b03 << 24) | (b04 << 32) | (b05 << 40) | (b06 << 48) | (b07 << 56);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = b10 | (b11 << 8) | (b12 << 16) | (b13 << 24) | (b14 << 32) | (b15 << 40) | (b16 << 48) | (b17 << 56);
+        Self { w0: w0, w1: w1 }
+    }
+
+    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i64x2 ! {} {
+        i64x2.swap_bytes(i64x2.load_le(data, n, at, _))
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane little-endian.
+    pub fn push_le(out: Bytes, v: i64x2) -> Bytes ! {alloc, panic} {
+        let mut out = out;
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 56) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 0) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 8) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 16) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 24) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 32) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 40) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 48) & 255));
+        out = Bytes.push(out, Int.truncate::<i64>((v.w1 >> 56) & 255));
+        out
+    }
+
+    /// `out` with the 16 bytes of `v` appended, each lane big-endian.
+    pub fn push_be(out: Bytes, v: i64x2) -> Bytes ! {alloc, panic} {
+        i64x2.push_le(out, i64x2.swap_bytes(v))
     }
 }

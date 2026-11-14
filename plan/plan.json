@@ -7529,10 +7529,16 @@
       "deps": [
         "SIMD-TYPES"
       ],
-      "status": "todo",
-      "desc": "wrapping add/sub, bitwise ops, proved shifts, constant shuffles, align_right, swap_bytes, and Bytes loads/stores with erased bounds preconditions; evaluator and Cranelift SIMD.",
+      "status": "in_progress",
+      "desc": "Portable lane-wise operations in std.simd as checked Kush (SWAR on the two words): wrapping add/sub, bitwise ops, proved shifts (logical and arithmetic), lane equality masks, shuffles with proved indices, align_right, swap_bytes, Bytes loads with erased bounds and pushes. Native vector instructions are SIMD-NATIVE.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 18:37:49",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "SIMD-LLVM",
@@ -7540,7 +7546,7 @@
       "size": "M",
       "hard": false,
       "deps": [
-        "SIMD-OPS"
+        "SIMD-NATIVE"
       ],
       "status": "todo",
       "desc": "Translate the Cranelift vector values and instructions the generator uses to LLVM vector IR; intrinsic calls to llvm.x86.* instead of runtime calls.",
@@ -7627,6 +7633,19 @@
       ],
       "status": "todo",
       "desc": "u8x32..u64x4 and signed forms with the same operations; Cranelift as two 128-bit halves (no 256-bit vectors there), LLVM as <8 x i32> etc.; AVX2-only intrinsics behind a cpu.Avx2 token. Decided 2026-11-14 (docs/simd.md decision 4).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SIMD-NATIVE",
+      "title": "Native vector instructions for std.simd operations",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "SIMD-OPS"
+      ],
+      "status": "todo",
+      "desc": "Cranelift lowering of recognised std.simd functions to vector instructions (I8X16..I64X2 iadd/isub/band/bor/bxor/ishl/ushr/sshr/icmp/shuffle/x86_pshufb), keeping the Kush bodies as the evaluator's specification; tests compare native vector code with the evaluator on random inputs. Split from SIMD-OPS 2026-11-14.",
       "commit": null,
       "log": []
     }

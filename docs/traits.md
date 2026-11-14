@@ -287,7 +287,9 @@ c.value()                      // c.start(..) is rejected: not a method
 
 - The checker keeps them in their own table per type, so dot-call syntax
   never reaches them, and a method and an associated function of the same
-  type cannot share a name. Visibility follows `pub` like methods.
+  type cannot share a name. Visibility follows `pub` like methods. The rules
+  that reserve builtin method names and forbid a method named like a field
+  protect dot-calls, so they do not apply (`u32x4.wrapping_add(a, b)`).
 - `Type.name(..)` resolves to the associated function when `Type` is a
   declared type and `Type.name` names no value (enum constructors such as
   `Option.Some` keep their meaning). An unknown name is
