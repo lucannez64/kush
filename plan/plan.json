@@ -4978,14 +4978,22 @@
     },
     {
       "id": "SIMD",
-      "title": "SIMD: native CPU features and vector types",
+      "title": "Close: SIMD vector types and CPU intrinsics",
       "size": "L",
       "hard": false,
-      "deps": [],
+      "deps": [
+        "SIMD-REVIEW"
+      ],
       "status": "todo",
       "desc": "Deferred by the user (2026-11-06): let Cranelift use host CPU features behind a flag, then explicit vector types/intrinsics.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 18:10:42",
+          "who": "agent",
+          "text": "Reopened by the user 2026-11-14 (SHA-NI). Now the closing node of the SIMD track; see docs/simd.md."
+        }
+      ]
     },
     {
       "id": "CHANNEL-OWNED",
@@ -7461,6 +7469,150 @@
           "text": "Cause: bump_assigned re-followed every binding's assigned values at every call argument. Memoized per pass; 64 statements 2066 -> 14 ms, SHA-256 round loop >120 s -> 91 ms. Full suite on the second PC: 1969 passed."
         }
       ]
+    },
+    {
+      "id": "SIMD-DESIGN",
+      "title": "SIMD vector types and CPU intrinsics: design doc and approval",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "docs/simd.md: 128-bit vector types, portable lane-wise ops, CPU features as capability tokens, x86 SHA intrinsics, lowering on both backends. Chosen by the user 2026-11-14 to reach SHA-NI; four open questions.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-14 18:18:38",
+          "who": "agent",
+          "text": "done"
+        },
+        {
+          "time": "2026-11-14 18:18:38",
+          "who": "agent",
+          "text": "Approved: concrete names, capability tokens, a call per SHA instruction on Cranelift, 128 and 256 bits."
+        }
+      ]
+    },
+    {
+      "id": "SIMD-TYPES",
+      "title": "Vector value types u8x16..u64x2",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "SIMD-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "Built-in copyable 128-bit types with construction, constant or proved lane access and same-size reinterpretation; layout two words, alignment 16; evaluator, Cranelift vector types.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SIMD-OPS",
+      "title": "Portable lane-wise vector operations",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "SIMD-TYPES"
+      ],
+      "status": "todo",
+      "desc": "wrapping add/sub, bitwise ops, proved shifts, constant shuffles, align_right, swap_bytes, and Bytes loads/stores with erased bounds preconditions; evaluator and Cranelift SIMD.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SIMD-LLVM",
+      "title": "Vector types and operations in the LLVM translator",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "SIMD-OPS"
+      ],
+      "status": "todo",
+      "desc": "Translate the Cranelift vector values and instructions the generator uses to LLVM vector IR; intrinsic calls to llvm.x86.* instead of runtime calls.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SIMD-CPU",
+      "title": "CPU feature detection as capability tokens",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "SIMD-TYPES"
+      ],
+      "status": "todo",
+      "desc": "std.cpu: zero-size copyable tokens (cpu.Sha, ...) only obtainable from cached CPUID detection (Option); KUSH_CPU_DISABLE forces the fallback natively and in the evaluator.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SIMD-X86-SHA",
+      "title": "x86 SHA intrinsics",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "SIMD-OPS",
+        "SIMD-CPU",
+        "SIMD-LLVM"
+      ],
+      "status": "todo",
+      "desc": "sha256rnds2/msg1/msg2 and sha1rnds4/nexte/msg1/msg2 taking a cpu.Sha token: Intel-exact evaluator semantics tested against the instruction, Cranelift via tiny target(sha) runtime routines, LLVM via llvm.x86 intrinsics.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SHA-NI-STD",
+      "title": "std.sha256 and std.sha1 on SHA instructions",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "SIMD-X86-SHA"
+      ],
+      "status": "todo",
+      "desc": "Accelerated compress in Kush (empty effect row, proved loads) when cpu.sha() succeeds, proved portable code otherwise; tests compare both paths; benchmarks/crypto/hash.kush on both backends.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SIMD-CRANELIFT-FEATURES",
+      "title": "Host CPU features on Cranelift",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "SIMD-OPS"
+      ],
+      "status": "todo",
+      "desc": "--target-cpu native for Cranelift (the original SIMD node's first step), so SSE4.1/AVX forms are used when the build machine is the target.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SIMD-REVIEW",
+      "title": "Independent review: SIMD and CPU intrinsics",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "SHA-NI-STD",
+        "SIMD-256",
+        "SIMD-CRANELIFT-FEATURES"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SIMD-256",
+      "title": "256-bit vector types and AVX2",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "SIMD-LLVM",
+        "SIMD-CPU"
+      ],
+      "status": "todo",
+      "desc": "u8x32..u64x4 and signed forms with the same operations; Cranelift as two 128-bit halves (no 256-bit vectors there), LLVM as <8 x i32> etc.; AVX2-only intrinsics behind a cpu.Avx2 token. Decided 2026-11-14 (docs/simd.md decision 4).",
+      "commit": null,
+      "log": []
     }
   ]
 }

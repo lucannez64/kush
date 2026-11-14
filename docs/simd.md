@@ -1,0 +1,154 @@
+# SIMD vector types and CPU intrinsics
+
+Status: design approved by the user 2026-11-14 (SIMD-DESIGN; decisions at
+the end). The user chose this route the same day for the CPU's SHA
+instructions, reopening the `SIMD` node deferred on 2026-11-06. Nothing is
+implemented yet.
+Plan nodes are named in brackets.
+
+Goal: Kush code can use 128-bit vectors and CPU-specific instructions (first
+the x86 SHA extensions), with the same checking as scalar code: proved
+bounds on loads and stores, proved lane and shift constants, and no way to
+execute an instruction the CPU lacks. The motivating result: `std.sha256`
+reaching the speed of OpenSSL (about 30 ms per 64 MiB on the user's Ryzen,
+against 240 ms for the proved portable code with LLVM), while staying Kush
+code rather than trusted C.
+
+## Example: SHA-256 rounds with SHA-NI
+
+```kush
+use std.cpu;
+
+/// Four rounds: two `sha256rnds2`, the message words plus constants in `wk`.
+fn quad(sha: &cpu.Sha, state0: u32x4, state1: u32x4, wk: u32x4) -> (u32x4, u32x4) ! {} {
+    let s1 = x86.sha256rnds2(sha, state1, state0, wk);
+    let s0 = x86.sha256rnds2(sha, state0, s1, u32x4.shuffle(wk, [2, 3, 0, 0]));
+    (s0, s1)
+}
+
+fn compress_ni(sha: &cpu.Sha, state: (u32x4, u32x4), data: &Bytes, n: i64, at: i64,
+               erased q: { 0 <= at && at + 64 <= n && n == Bytes.len(data) }) -> (u32x4, u32x4) ! {} {
+    let m0 = u32x4.load_be(data, n, at, _);          // proved in bounds
+    let m1 = u32x4.load_be(data, n, at + 16, _);
+    ...
+    let m4 = x86.sha256msg2(sha, u32x4.wrapping_add(x86.sha256msg1(sha, m0, m1),
+                                                    u8x16.align_right(m3, m2, 4)), m3);
+    ...
+}
+
+pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc, panic} {
+    match cpu.sha() {                                // Option<cpu.Sha>
+        Option.Some(sha) => /* blocks through compress_ni */,
+        Option.None => /* the proved portable compress */,
+    }
+}
+```
+
+`compress_ni` keeps an empty effect row: loads are proved in bounds, lane
+indices and shift amounts are constants, and the SHA instructions cannot
+fault on a CPU that has them.
+
+## Vector types [SIMD-TYPES]
+
+- Built-in value types of 128 bits: `u8x16`, `u16x8`, `u32x4`, `u64x2` and
+  the signed `i8x16` .. `i64x2`. Copyable, no `Drop`, two words in records
+  and tuples (layout alignment 16 in memory).
+- 256-bit types [SIMD-256]: `u8x32`, `u16x16`, `u32x8`, `u64x4` and signed
+  forms, four words, the same operations. Cranelift has no 256-bit vectors,
+  so there a 256-bit value is two 128-bit halves and each lane-wise
+  operation is two SSE operations; LLVM uses `<8 x i32>` and AVX2 when the
+  target has it. AVX2-only intrinsics take a `cpu.Avx2` token.
+- Construction: `u32x4.new(a, b, c, d)`, `u32x4.splat(x)`, `u32x4.zero()`.
+- Lanes: `u32x4.lane(v, 2)` and `u32x4.with_lane(v, 2, x)`; the index is a
+  constant, or a value the facts prove below the lane count.
+- Reinterpretation between same-size types: `u8x16.from_u32x4(v)` and so on
+  (bit casts, little-endian lane order as on x86).
+- Equality: `==` lane-wise all-equal for `Bool`; lane masks come with
+  comparisons in SIMD-OPS.
+- GPU: `u32x4`, `i32x4` and `f32x4` map to WGSL `vec4<u32>`, `vec4<i32>` and
+  `vec4<f32>` when `#[gpu]` admits them (GPU decision 3 deferred vector types
+  to this design, so CPU and GPU share it).
+
+## Portable operations [SIMD-OPS]
+
+Lane-wise and target-independent; each is one or a few SSE2/SSE4.1
+instructions, Cranelift SIMD instructions, and LLVM vector operations:
+
+- `wrapping_add`, `wrapping_sub`, `&`, `|`, `^`, `!` (as for scalars, the
+  vector `+` would be checked per lane; `wrapping_*` is the common choice).
+- Shifts by a constant or proved amount (`<<`, `>>` lane-wise, SHIFT-ELIDE).
+- `shuffle(v, [lanes])` and `shuffle2(a, b, [lanes])` with constant lane
+  lists; `u8x16.align_right(a, b, k)` with constant `k`; `swap_bytes`
+  (byte reversal per lane, for big-endian loads).
+- Loads and stores against `Bytes`: `u32x4.load_be(data, n, at, _)`,
+  `load_le`, `Bytes` writes through `store`, each with an erased bounds
+  precondition like `Bytes.at`.
+
+## CPU features as capabilities [SIMD-CPU]
+
+Executing an instruction the CPU lacks is `SIGILL`, a crash no check can
+catch. So a target-specific intrinsic takes a capability that only exists
+on a CPU that has the feature:
+
+- `std.cpu` declares zero-size copyable tokens (`cpu.Sha`, `cpu.Sse41`,
+  later `cpu.Avx2`, ...) that no program can construct.
+- `cpu.sha() -> Option<cpu.Sha>` runs CPUID once (cached) and returns the
+  token only when the feature is present. It needs no effect: the answer is
+  fixed for the process.
+- Every x86 intrinsic takes `&cpu.Sha` (or its feature's token) as its first
+  argument, so a call compiles only where detection succeeded.
+- `KUSH_CPU_DISABLE=sha,...` makes detection fail, so tests run the portable
+  path natively too. The reference evaluator reports every feature as
+  present unless the same variable says otherwise.
+
+## x86 intrinsics [SIMD-X86-SHA]
+
+`x86.sha256rnds2`, `x86.sha256msg1`, `x86.sha256msg2`, `x86.sha1rnds4`
+(constant function index), `x86.sha1nexte`, `x86.sha1msg1`, `x86.sha1msg2`,
+with their Intel semantics. The implicit `xmm0` operand of `sha256rnds2`
+becomes an ordinary argument.
+
+## Lowering
+
+All code is lowered once into Cranelift IR; the LLVM backend translates
+that IR to LLVM IR ([llvm-backend.md](llvm-backend.md)). So:
+
+| | Cranelift | LLVM |
+| --- | --- | --- |
+| vector values | Cranelift `I32X4`-style types in XMM registers | `<4 x i32>` |
+| portable ops | Cranelift SIMD instructions (SSE2 baseline; SSE4.1 forms only behind a token) | vector instructions |
+| SHA intrinsics | a call to a tiny runtime routine compiled with `target("sha")` (Cranelift has no SHA instructions) | `llvm.x86.sha256rnds2` and siblings, inline |
+| reference evaluator | Rust implementations of every operation, including the SHA instructions, from the Intel definitions | |
+
+Expected: with LLVM, SHA-256 near the hardware's 1.5–2 GB/s; with
+Cranelift, a call per SHA instruction (about 64 per block) limits it to a few
+hundred MB/s, still faster than the portable code. [SIMD-LLVM] covers the
+translator; [SIMD-CRANELIFT-FEATURES] lets Cranelift use the host's features
+behind `--target-cpu native`, which the original SIMD node asked for.
+
+## Trust and testing
+
+The SHA instructions are trusted the way integer addition is: their
+semantics are the CPU's. Each intrinsic's evaluator implementation follows
+the Intel definition and is tested against the native instruction on random
+inputs (where the CPU has it), and `std.sha256`/`std.sha1` keep the proved
+portable code, tested against the accelerated path on the same inputs.
+
+## Order
+
+```
+SIMD-DESIGN ─ SIMD-TYPES ─ SIMD-OPS ─┬─ SIMD-CPU ─ SIMD-X86-SHA ─ SHA-NI-STD ─ SIMD-REVIEW ─ SIMD
+                                     ├─ SIMD-LLVM ─────────────┘                 │
+                                     ├─ SIMD-256 (after SIMD-LLVM, SIMD-CPU) ────┘
+                                     └─ SIMD-CRANELIFT-FEATURES
+```
+
+## Decisions (2026-11-14)
+
+1. **Concrete type names**: `u32x4`, `u8x16`, ..., and `u32x8`, ... for 256
+   bits.
+2. **Capability tokens** for CPU features: `cpu.sha() -> Option<cpu.Sha>`,
+   and every intrinsic takes its feature's token.
+3. **Cranelift runs each SHA instruction as a call** to a tiny runtime
+   routine; LLVM inlines the instruction. One implementation, both backends.
+4. **128 and 256 bits** in the first version (SIMD-256).
