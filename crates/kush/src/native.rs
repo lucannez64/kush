@@ -1638,6 +1638,27 @@ int64_t kush_sys_read(int64_t fd, uint64_t buffer_handle, int64_t length, int64_
     *out = buffer_handle;
     return 0;
 }
+/* Fill `length` more bytes of the owned buffer's spare capacity from the
+   kernel's random generator (getrandom(2), which blocks only until the pool
+   is first seeded). Short reads and EINTR are retried here, since a failed
+   call frees the buffer; EFBIG when the buffer lacks room (WEB-CRYPTO). */
+#include <sys/random.h>
+int64_t kush_sys_getrandom(uint64_t buffer_handle, int64_t length, uint64_t *out) {
+    KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
+    int64_t code = 0;
+    if (length < 0) code = EINVAL;
+    else if ((uint64_t)length > b->capacity - b->length) code = EFBIG;
+    int64_t filled = 0;
+    while (code == 0 && filled < length) {
+        ssize_t received = getrandom(b->data + b->length + filled, (size_t)(length - filled), 0);
+        if (received >= 0) filled += received;
+        else if (errno != EINTR) code = errno;
+    }
+    if (code != 0) { kush_bytes_free(buffer_handle); return code; }
+    b->length += (uint64_t)length;
+    *out = buffer_handle;
+    return 0;
+}
 /* The standard input descriptor. A separate call (not the constant 0) so the
    reference evaluator can tell which programs read standard input. */
 int64_t kush_sys_stdin(int64_t *out) { *out = 0; return 0; }

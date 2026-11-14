@@ -1,0 +1,160 @@
+module std.sha1;
+
+// SHA-1 (FIPS 180-4) over byte strings (WEB-CRYPTO). SHA-1 is broken for
+// collision resistance: use it only where a protocol requires it, such as the
+// WebSocket handshake (RFC 6455). Use std.sha256 for anything else.
+//
+//     let d = sha1.digest(&data);              // 20 bytes
+//
+// The incremental form is the same as std.sha256: `new`, `update`, `finish`.
+
+/// A hash in progress: the five state words, the bytes of a partial block
+/// (fewer than 64), and the number of bytes hashed so far.
+pub struct Hasher {
+    state: Vec<u32>,
+    block: Bytes,
+    length: u64,
+}
+
+fn rotl(x: u32, n: u64) -> u32 ! {panic} {
+    let w: u64 = Int.convert(x);
+    Int.truncate((w << n) | (w >> (32 - n)))
+}
+
+fn add(a: u32, b: u32) -> u32 ! {} {
+    Int.wrapping_add(a, b)
+}
+
+/// The big-endian word at data[at..at + 4].
+fn word(data: &Bytes, at: i64) -> u32 ! {panic} {
+    let b0: u32 = Int.truncate(Bytes.get(data, at));
+    let b1: u32 = Int.truncate(Bytes.get(data, at + 1));
+    let b2: u32 = Int.truncate(Bytes.get(data, at + 2));
+    let b3: u32 = Int.truncate(Bytes.get(data, at + 3));
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+/// Process the 64-byte block at data[at..at + 64]; the new state words.
+fn compress(state: &Vec<u32>, data: &Bytes, at: i64) -> Vec<u32> ! {alloc, panic} {
+    let mut w: Vec<u32> = Vec.with_capacity(80);
+    let mut t = 0;
+    while t < 16 {
+        w = Vec.push(w, word(data, at + 4 * t));
+        t = t + 1;
+    }
+    while t < 80 {
+        let x = Vec.get(&w, t - 3) ^ Vec.get(&w, t - 8) ^ Vec.get(&w, t - 14) ^ Vec.get(&w, t - 16);
+        w = Vec.push(w, rotl(x, 1));
+        t = t + 1;
+    }
+    let mut a = Vec.get(state, 0);
+    let mut b = Vec.get(state, 1);
+    let mut c = Vec.get(state, 2);
+    let mut d = Vec.get(state, 3);
+    let mut e = Vec.get(state, 4);
+    t = 0;
+    while t < 80 {
+        let f: u32 = if t < 20 {
+            (b & c) | (!b & d)
+        } else if t < 40 {
+            b ^ c ^ d
+        } else if t < 60 {
+            (b & c) | (b & d) | (c & d)
+        } else {
+            b ^ c ^ d
+        };
+        let k: u32 = if t < 20 {
+            0x5a827999
+        } else if t < 40 {
+            0x6ed9eba1
+        } else if t < 60 {
+            0x8f1bbcdc
+        } else {
+            0xca62c1d6
+        };
+        let next = add(add(rotl(a, 5), f), add(add(e, k), Vec.get(&w, t)));
+        e = d;
+        d = c;
+        c = rotl(b, 30);
+        b = a;
+        a = next;
+        t = t + 1;
+    }
+    [add(Vec.get(state, 0), a), add(Vec.get(state, 1), b), add(Vec.get(state, 2), c),
+     add(Vec.get(state, 3), d), add(Vec.get(state, 4), e)]
+}
+
+/// An empty hash.
+pub fn new() -> Hasher ! {alloc, panic} {
+    Hasher {
+        state: [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0],
+        block: Bytes.with_capacity(64),
+        length: 0,
+    }
+}
+
+/// Hash `data` after everything given so far.
+pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc, panic} {
+    let Hasher { state, block, length } = hasher;
+    let mut state = state;
+    let mut block = block;
+    let n = Bytes.len(data);
+    let added: u64 = Int.truncate(n);
+    let length = length + added;
+    let mut i = 0;
+    while i < n {
+        if Bytes.len(&block) == 0 && n - i >= 64 {
+            state = compress(&state, data, i);
+            i = i + 64;
+        } else {
+            block = Bytes.push(block, Bytes.get(data, i));
+            i = i + 1;
+            if Bytes.len(&block) == 64 {
+                state = compress(&state, &block, 0);
+                drop(block);
+                block = Bytes.with_capacity(64);
+            }
+        }
+    }
+    Hasher { state: state, block: block, length: length }
+}
+
+/// The 20-byte digest of everything given.
+pub fn finish(hasher: Hasher) -> Bytes ! {alloc, panic} {
+    let bits = hasher.length * 8;
+    let pending = Bytes.len(&hasher.block);
+    let zeros = if pending < 56 { 55 - pending } else { 119 - pending };
+    let mut pad = Bytes.with_capacity(zeros + 9);
+    pad = Bytes.push(pad, 128);
+    let mut i = 0;
+    while i < zeros {
+        pad = Bytes.push(pad, 0);
+        i = i + 1;
+    }
+    let mut shift: u64 = 56;
+    loop {
+        let byte: i64 = Int.truncate((bits >> shift) & 255);
+        pad = Bytes.push(pad, byte);
+        if shift == 0 { break; }
+        shift = shift - 8;
+    }
+    let hasher = update(hasher, &pad);
+    let Hasher { state, block, length } = hasher;
+    drop(block);
+    let mut out = Bytes.with_capacity(20);
+    let mut j = 0;
+    while j < 5 {
+        let v = Vec.get(&state, j);
+        out = Bytes.push(out, Int.convert(v >> 24));
+        out = Bytes.push(out, Int.convert((v >> 16) & 255));
+        out = Bytes.push(out, Int.convert((v >> 8) & 255));
+        out = Bytes.push(out, Int.convert(v & 255));
+        j = j + 1;
+    }
+    out
+}
+
+/// The 20-byte SHA-1 digest of `data`.
+pub fn digest(data: &Bytes) -> Bytes ! {alloc, panic} {
+    finish(update(new(), data))
+}

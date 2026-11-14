@@ -1,0 +1,20 @@
+module std.random;
+
+// Cryptographically secure random bytes from the operating system
+// (getrandom(2), WEB-CRYPTO), for session IDs, CSRF tokens and keys.
+//
+//     let token = random.bytes(32)?;          // Result<Bytes, i64> (errno)
+//
+// There is no seeded generator here: anything security-related must come
+// from the kernel, and a reproducible generator belongs in tests.
+
+use std.result.Result;
+use std.sys;
+
+/// `count` random bytes; `Err(22)` (EINVAL) when `count` is negative.
+pub fn bytes(count: i64) -> Result<Bytes, i64> ! {io, alloc, panic} {
+    if count < 0 {
+        return Result.Err(22);
+    }
+    sys.getrandom(Bytes.with_capacity(count), count)
+}

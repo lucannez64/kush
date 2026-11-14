@@ -1,0 +1,153 @@
+module std.base64;
+
+// Base64 (RFC 4648) in two alphabets (WEB-CRYPTO):
+//
+//     base64.encode(&data)        // standard: A-Z a-z 0-9 + /, '=' padding
+//     base64.encode_url(&data)    // URL and file safe: - _ , no padding
+//     base64.decode(&text)        // Option<Bytes>
+//     base64.decode_url(&text)    // Option<Bytes>
+//
+// Decoding is strict and canonical: a character outside the alphabet, a
+// missing or misplaced '=' (standard), any '=' (URL form), an impossible
+// length, or nonzero unused bits in the last character is `None`. So each
+// byte string has exactly one accepted encoding, which matters when decoded
+// tokens are compared or used as keys.
+
+use std.option.Option;
+
+/// The character for a 6-bit value.
+fn symbol(value: i64, url: Bool) -> i64 ! {panic} {
+    if value < 26 {
+        65 + value
+    } else if value < 52 {
+        97 + value - 26
+    } else if value < 62 {
+        48 + value - 52
+    } else if value == 62 {
+        if url { 45 } else { 43 }
+    } else {
+        if url { 95 } else { 47 }
+    }
+}
+
+/// The 6-bit value of a character, or -1 if it is not in the alphabet.
+fn value(c: i64, url: Bool) -> i64 ! {panic} {
+    if c >= 65 && c <= 90 {
+        c - 65
+    } else if c >= 97 && c <= 122 {
+        c - 97 + 26
+    } else if c >= 48 && c <= 57 {
+        c - 48 + 52
+    } else if url && c == 45 {
+        62
+    } else if url && c == 95 {
+        63
+    } else if !url && c == 43 {
+        62
+    } else if !url && c == 47 {
+        63
+    } else {
+        -1
+    }
+}
+
+fn encode_with(data: &Bytes, url: Bool) -> Bytes ! {alloc, panic} {
+    let n = Bytes.len(data);
+    let mut out = Bytes.with_capacity((n + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= n {
+        let triple = (Bytes.get(data, i) << 16) | (Bytes.get(data, i + 1) << 8) | Bytes.get(data, i + 2);
+        out = Bytes.push(out, symbol((triple >> 18) & 63, url));
+        out = Bytes.push(out, symbol((triple >> 12) & 63, url));
+        out = Bytes.push(out, symbol((triple >> 6) & 63, url));
+        out = Bytes.push(out, symbol(triple & 63, url));
+        i = i + 3;
+    }
+    let rest = n - i;
+    if rest == 1 {
+        let triple = Bytes.get(data, i) << 16;
+        out = Bytes.push(out, symbol((triple >> 18) & 63, url));
+        out = Bytes.push(out, symbol((triple >> 12) & 63, url));
+        if !url {
+            out = Bytes.push(out, 61);
+            out = Bytes.push(out, 61);
+        }
+    } else if rest == 2 {
+        let triple = (Bytes.get(data, i) << 16) | (Bytes.get(data, i + 1) << 8);
+        out = Bytes.push(out, symbol((triple >> 18) & 63, url));
+        out = Bytes.push(out, symbol((triple >> 12) & 63, url));
+        out = Bytes.push(out, symbol((triple >> 6) & 63, url));
+        if !url {
+            out = Bytes.push(out, 61);
+        }
+    }
+    out
+}
+
+/// Standard Base64 with '=' padding.
+pub fn encode(data: &Bytes) -> Bytes ! {alloc, panic} {
+    encode_with(data, false)
+}
+
+/// Base64url without padding, for URLs, cookies and tokens.
+pub fn encode_url(data: &Bytes) -> Bytes ! {alloc, panic} {
+    encode_with(data, true)
+}
+
+/// Decode `count` characters of `text` (no padding among them); `None` on a
+/// character outside the alphabet or nonzero unused bits.
+fn decode_with(text: &Bytes, count: i64, url: Bool) -> Option<Bytes> ! {alloc, panic} {
+    let rest = count % 4;
+    if rest == 1 {
+        return Option.None;
+    }
+    let mut out = Bytes.with_capacity(count / 4 * 3 + 2);
+    let mut i = 0;
+    let mut bits = 0;
+    let mut held = 0;
+    while i < count {
+        let v = value(Bytes.get(text, i), url);
+        if v < 0 {
+            drop(out);
+            return Option.None;
+        }
+        bits = (bits << 6) | v;
+        held = held + 6;
+        if held >= 8 {
+            held = held - 8;
+            out = Bytes.push(out, (bits >> held) & 255);
+            bits = bits & ((1 << held) - 1);
+        }
+        i = i + 1;
+    }
+    // Leftover bits of the last character must be zero (canonical form).
+    if bits != 0 {
+        drop(out);
+        return Option.None;
+    }
+    Option.Some(out)
+}
+
+/// Decode standard Base64. The length must be a multiple of 4, with one or
+/// two '=' only at the very end.
+pub fn decode(text: &Bytes) -> Option<Bytes> ! {alloc, panic} {
+    let n = Bytes.len(text);
+    if n % 4 != 0 {
+        return Option.None;
+    }
+    let mut padding = 0;
+    if n > 0 && Bytes.get(text, n - 1) == 61 {
+        padding = 1;
+        if Bytes.get(text, n - 2) == 61 {
+            padding = 2;
+        }
+    }
+    let count = n - padding;
+    // A '=' anywhere else is outside the alphabet, so decode_with rejects it.
+    decode_with(text, count, false)
+}
+
+/// Decode Base64url without padding.
+pub fn decode_url(text: &Bytes) -> Option<Bytes> ! {alloc, panic} {
+    decode_with(text, Bytes.len(text), true)
+}

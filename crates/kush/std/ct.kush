@@ -1,0 +1,28 @@
+module std.ct;
+
+// Constant-time comparison (WEB-CRYPTO), for secrets such as MAC tags and
+// session tokens: the time taken does not depend on where the inputs
+// differ, so an attacker cannot find a correct prefix byte by byte.
+//
+//     if ct.equal(&expected_tag, &received_tag) { .. }
+//
+// Lengths are not secret: inputs of different lengths are unequal at once.
+// The loop has no early exit and no branch on the data; the compiler is not
+// told to keep it that way, so this is the usual best effort of portable
+// code, not a guarantee about the machine code.
+
+/// Whether `a` and `b` hold the same bytes, in time that depends only on
+/// their lengths.
+pub fn equal(a: &Bytes, b: &Bytes) -> Bool ! {panic} {
+    let n = Bytes.len(a);
+    if n != Bytes.len(b) {
+        return false;
+    }
+    let mut difference = 0;
+    let mut i = 0;
+    while i < n {
+        difference = difference | (Bytes.get(a, i) ^ Bytes.get(b, i));
+        i = i + 1;
+    }
+    difference == 0
+}

@@ -1,0 +1,180 @@
+module std.sha256;
+
+// SHA-256 (FIPS 180-4) over byte strings (WEB-CRYPTO). One call:
+//
+//     let d = sha256.digest(&data);            // 32 bytes
+//
+// or in pieces, for data that arrives in parts (std.hmac uses this):
+//
+//     let mut h = sha256.new();
+//     h = sha256.update(h, &first);
+//     h = sha256.update(h, &second);
+//     let d = sha256.finish(h);
+//
+// Additions are modulo 2^32 (`Int.wrapping_add`). A rotation shifts a u64
+// copy of the word, so no checked shift ever drops a bit.
+
+/// A hash in progress: the eight state words, the bytes of a partial block
+/// (fewer than 64), and the number of bytes hashed so far.
+pub struct Hasher {
+    state: Vec<u32>,
+    block: Bytes,
+    length: u64,
+}
+
+fn initial() -> Vec<u32> ! {alloc, panic} {
+    [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+}
+
+fn constants() -> Vec<u32> ! {alloc, panic} {
+    [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+     0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+     0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+     0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+     0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+}
+
+fn rotr(x: u32, n: u64) -> u32 ! {panic} {
+    let w: u64 = Int.convert(x);
+    Int.truncate((w >> n) | (w << (32 - n)))
+}
+
+fn add(a: u32, b: u32) -> u32 ! {} {
+    Int.wrapping_add(a, b)
+}
+
+/// The big-endian word at data[at..at + 4].
+fn word(data: &Bytes, at: i64) -> u32 ! {panic} {
+    let b0: u32 = Int.truncate(Bytes.get(data, at));
+    let b1: u32 = Int.truncate(Bytes.get(data, at + 1));
+    let b2: u32 = Int.truncate(Bytes.get(data, at + 2));
+    let b3: u32 = Int.truncate(Bytes.get(data, at + 3));
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+/// Process the 64-byte block at data[at..at + 64]; the new state words.
+fn compress(state: &Vec<u32>, data: &Bytes, at: i64) -> Vec<u32> ! {alloc, panic} {
+    let k = constants();
+    let mut w: Vec<u32> = Vec.with_capacity(64);
+    let mut t = 0;
+    while t < 16 {
+        w = Vec.push(w, word(data, at + 4 * t));
+        t = t + 1;
+    }
+    while t < 64 {
+        let x = Vec.get(&w, t - 15);
+        let y = Vec.get(&w, t - 2);
+        let s0 = rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3);
+        let s1 = rotr(y, 17) ^ rotr(y, 19) ^ (y >> 10);
+        let next = add(add(Vec.get(&w, t - 16), s0), add(Vec.get(&w, t - 7), s1));
+        w = Vec.push(w, next);
+        t = t + 1;
+    }
+    let mut a = Vec.get(state, 0);
+    let mut b = Vec.get(state, 1);
+    let mut c = Vec.get(state, 2);
+    let mut d = Vec.get(state, 3);
+    let mut e = Vec.get(state, 4);
+    let mut f = Vec.get(state, 5);
+    let mut g = Vec.get(state, 6);
+    let mut h = Vec.get(state, 7);
+    t = 0;
+    while t < 64 {
+        let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        let ch = (e & f) ^ (!e & g);
+        let t1 = add(add(add(h, s1), add(ch, Vec.get(&k, t))), Vec.get(&w, t));
+        let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let t2 = add(s0, maj);
+        h = g;
+        g = f;
+        f = e;
+        e = add(d, t1);
+        d = c;
+        c = b;
+        b = a;
+        a = add(t1, t2);
+        t = t + 1;
+    }
+    [add(Vec.get(state, 0), a), add(Vec.get(state, 1), b),
+     add(Vec.get(state, 2), c), add(Vec.get(state, 3), d),
+     add(Vec.get(state, 4), e), add(Vec.get(state, 5), f),
+     add(Vec.get(state, 6), g), add(Vec.get(state, 7), h)]
+}
+
+/// An empty hash.
+pub fn new() -> Hasher ! {alloc, panic} {
+    Hasher { state: initial(), block: Bytes.with_capacity(64), length: 0 }
+}
+
+/// Hash `data` after everything given so far.
+pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc, panic} {
+    let Hasher { state, block, length } = hasher;
+    let mut state = state;
+    let mut block = block;
+    let n = Bytes.len(data);
+    let added: u64 = Int.truncate(n);
+    let length = length + added;
+    let mut i = 0;
+    while i < n {
+        if Bytes.len(&block) == 0 && n - i >= 64 {
+            // Whole blocks straight from the input.
+            state = compress(&state, data, i);
+            i = i + 64;
+        } else {
+            block = Bytes.push(block, Bytes.get(data, i));
+            i = i + 1;
+            if Bytes.len(&block) == 64 {
+                state = compress(&state, &block, 0);
+                drop(block);
+                block = Bytes.with_capacity(64);
+            }
+        }
+    }
+    Hasher { state: state, block: block, length: length }
+}
+
+/// The 32-byte digest of everything given.
+pub fn finish(hasher: Hasher) -> Bytes ! {alloc, panic} {
+    // Padding: 0x80, zeros up to 56 mod 64, then the bit length (big-endian).
+    let bits = hasher.length * 8;
+    let pending = Bytes.len(&hasher.block);
+    let zeros = if pending < 56 { 55 - pending } else { 119 - pending };
+    let mut pad = Bytes.with_capacity(zeros + 9);
+    pad = Bytes.push(pad, 128);
+    let mut i = 0;
+    while i < zeros {
+        pad = Bytes.push(pad, 0);
+        i = i + 1;
+    }
+    let mut shift: u64 = 56;
+    loop {
+        let byte: i64 = Int.truncate((bits >> shift) & 255);
+        pad = Bytes.push(pad, byte);
+        if shift == 0 { break; }
+        shift = shift - 8;
+    }
+    let hasher = update(hasher, &pad);
+    let Hasher { state, block, length } = hasher;
+    drop(block);
+    let mut out = Bytes.with_capacity(32);
+    let mut j = 0;
+    while j < 8 {
+        let v = Vec.get(&state, j);
+        out = Bytes.push(out, Int.convert(v >> 24));
+        out = Bytes.push(out, Int.convert((v >> 16) & 255));
+        out = Bytes.push(out, Int.convert((v >> 8) & 255));
+        out = Bytes.push(out, Int.convert(v & 255));
+        j = j + 1;
+    }
+    out
+}
+
+/// The 32-byte SHA-256 digest of `data`.
+pub fn digest(data: &Bytes) -> Bytes ! {alloc, panic} {
+    finish(update(new(), data))
+}

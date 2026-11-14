@@ -4528,6 +4528,31 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             };
             return Ok(self.host_result(shape, status, Value::Scalar(value)));
         }
+        if symbol == "kush_sys_getrandom" {
+            // Like the stub: fill spare capacity, free the buffer on failure.
+            let length = args[1].scalar();
+            let (id, mut data, capacity) = self.take_buffer(&args[0]).ok_or_else(internal)?;
+            let start = data.len();
+            let status = if length < 0 {
+                22
+            } else if length as u64 > (capacity - start) as u64 {
+                27 // EFBIG
+            } else {
+                data.resize(start + length as usize, 0);
+                match fs::File::open("/dev/urandom")
+                    .and_then(|mut source| io::Read::read_exact(&mut source, &mut data[start..]))
+                {
+                    Ok(()) => 0,
+                    Err(error) => io_error_code(&error),
+                }
+            };
+            if status != 0 {
+                self.stats.deallocation();
+                return Ok(self.host_result(shape, status, Value::Scalar(0)));
+            }
+            self.heap.insert(id, Value::Buffer { data, capacity });
+            return Ok(self.host_result(shape, 0, Value::Owned(id)));
+        }
         let (status, value) = match symbol {
             "kush_sys_stdin" => (0, 0),
             "kush_sys_openat" => {

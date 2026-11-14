@@ -7300,10 +7300,16 @@
       "deps": [
         "WEB-DESIGN"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "SHA-1 (WebSocket handshake only), SHA-256, HMAC-SHA256, constant-time compare, base64/base64url, getrandom stub; known-answer tests.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 16:20:13",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "WEB-SESSIONS",

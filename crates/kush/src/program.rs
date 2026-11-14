@@ -33,6 +33,12 @@ pub const STD: &[(&str, &str)] = &[
     ("std.time", include_str!("../std/time.kush")),
     ("std.os", include_str!("../std/os.kush")),
     ("std.io", include_str!("../std/io.kush")),
+    ("std.base64", include_str!("../std/base64.kush")),
+    ("std.sha1", include_str!("../std/sha1.kush")),
+    ("std.sha256", include_str!("../std/sha256.kush")),
+    ("std.ct", include_str!("../std/ct.kush")),
+    ("std.hmac", include_str!("../std/hmac.kush")),
+    ("std.random", include_str!("../std/random.kush")),
 ];
 const MAX_MODULES: usize = 256;
 const MAX_TOTAL_SOURCE: usize = 16 * 1024 * 1024;

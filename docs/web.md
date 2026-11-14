@@ -174,9 +174,10 @@ decoding is separate [WEB-URL].
 
 ## Security and ecosystem
 
-- **Crypto** [WEB-CRYPTO]: SHA-1 (WebSocket handshake only), SHA-256,
-  HMAC-SHA256, constant-time comparison, base64 and base64url, and a
-  `getrandom` stub, in Kush with known-answer tests.
+- **Crypto** [WEB-CRYPTO, done: [std-crypto.md](std-crypto.md)]: SHA-1
+  (WebSocket handshake only), SHA-256, HMAC-SHA256, constant-time
+  comparison, base64 and base64url, and a `getrandom` stub, in Kush with
+  known-answer tests.
 - **Cookies and sessions** [WEB-SESSIONS]: cookie parsing and
   `Set-Cookie`, signed session cookies, `CurrentUser` handled from them.
 - **TLS** [WEB-TLS]: not written in Kush. Run a reverse proxy (Caddy,
