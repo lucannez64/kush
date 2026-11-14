@@ -614,3 +614,137 @@ fn nested_task_scopes_fit_the_reference_evaluator_task_stack() {
         .unwrap();
     assert_eq!(exit, 14);
 }
+
+#[test]
+fn joined_task_slots_are_reused_past_the_old_255_task_limit() {
+    // 600 spawn/join pairs in one scope: each join frees its slot, so the
+    // program never holds more than two tasks at once.
+    let source = format!(
+        "{TASK_EXIT}
+        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
+                let mut i = 0;
+                let mut sum = 0;
+                while i < 600 {{
+                    let n = i;
+                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{
+                        Task.yield();
+                        n * 2
+                    }});
+                    match Task.join(t) {{
+                        TaskExit.Completed(v) => {{ sum = sum + v; }},
+                        TaskExit.Cancelled => {{ sum = sum - 1; }},
+                    }}
+                    i = i + 1;
+                }}
+                print_i64(sum);
+            }})
+        }}"
+    );
+    let (output, _, _) = compare(&source);
+    assert_eq!(String::from_utf8(output).unwrap(), "359400\n");
+}
+
+#[test]
+fn one_scope_holds_more_than_64_live_children() {
+    // 150 children are alive at once; the scope epilogue joins them all.
+    let source = format!(
+        "{TASK_EXIT}
+        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
+                let mut i = 0;
+                while i < 150 {{
+                    let n = i;
+                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {{io, panic, suspend}} {{
+                        Task.yield();
+                        if n % 50 == 0 {{ print_i64(n); }}
+                        n
+                    }});
+                    let _ = t;
+                    i = i + 1;
+                }}
+                print_i64(-1);
+            }});
+            print_i64(-2);
+        }}"
+    );
+    let (output, _, _) = compare(&source);
+    assert_eq!(String::from_utf8(output).unwrap(), "-1\n0\n50\n100\n-2\n");
+}
+
+#[test]
+fn scope_cancellation_after_slot_reuse_reaches_only_live_children() {
+    // A joined child leaves its scope's list, so cancelling the scope later
+    // cannot reach the unrelated task that reuses the slot.
+    let source = format!(
+        "{TASK_EXIT}
+        {RESULT}
+        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
+            let mut round = 0;
+            while round < 300 {{
+                let r: Result<i64, i64> = Task.scope(fn() -> Result<i64, i64> ! {{io, alloc, panic, suspend}} {{
+                    let first: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{ 1 }});
+                    let a = match Task.join(first) {{
+                        TaskExit.Completed(v) => v,
+                        TaskExit.Cancelled => 100,
+                    }};
+                    let inner: Result<i64, i64> = Task.scope(fn() -> Result<i64, i64> ! {{io, alloc, panic, suspend}} {{
+                        let second: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{
+                            Task.yield();
+                            if Task.check_cancel() {{ 100 }} else {{ 2 }}
+                        }});
+                        match Task.join(second) {{
+                            TaskExit.Completed(v) => Result.Ok(v),
+                            TaskExit.Cancelled => Result.Ok(200),
+                        }}
+                    }});
+                    let b = inner?;
+                    Result.Err(a + b)
+                }});
+                match r {{
+                    Result.Err(v) => {{ if v != 3 {{ print_i64(v); }} }},
+                    Result.Ok(v) => print_i64(v),
+                }}
+                round = round + 1;
+            }}
+            print_i64(round);
+        }}"
+    );
+    let (output, _, _) = compare(&source);
+    assert_eq!(String::from_utf8(output).unwrap(), "300\n");
+}
+
+#[test]
+fn reused_task_slots_start_with_only_inherited_handlers() {
+    let source = format!(
+        "{TASK_EXIT}
+        effect D: i64 -> i64 ! {{panic}};
+        fn d(n: i64) -> i64 ! {{D, panic}} {{ perform D(n) }}
+        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
+            let total = handle D: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{panic}} {{
+                resume(x + 1)
+            }} {{
+                Task.scope(fn() -> i64 ! {{D, alloc, panic, suspend}} {{
+                    let mut i = 0;
+                    let mut sum = 0;
+                    while i < 300 {{
+                        let n = i;
+                        let t: Task<i64> = Task.spawn(fn() -> i64 ! {{D, panic, suspend}} {{
+                            Task.yield();
+                            d(n)
+                        }});
+                        match Task.join(t) {{
+                            TaskExit.Completed(v) => {{ sum = sum + v; }},
+                            TaskExit.Cancelled => {{ sum = sum - 1000000; }},
+                        }}
+                        i = i + 1;
+                    }}
+                    sum
+                }})
+            }};
+            print_i64(total);
+        }}"
+    );
+    let (output, _, _) = compare(&source);
+    assert_eq!(String::from_utf8(output).unwrap(), "45150\n");
+}

@@ -2631,34 +2631,54 @@ uint64_t kush_vec_restride(uint64_t handle, int64_t source_width, int64_t target
 /* Stackful cooperative tasks. One OS thread; strict handoff. */
 #include <ucontext.h>
 #include <sys/mman.h>
-#define KUSH_MAX_TASKS 256
+/* Task slots are reused: a handle is the slot plus one in its low 32 bits and
+   the slot's generation in its high 32 bits, so a handle to a joined task
+   never names the task that later takes its slot. A scope lists only its
+   live children (join removes the child), so a scope cannot reach a task
+   that reuses a joined child's slot. The bound is live tasks, set by memory. */
 #define KUSH_MAX_SCOPES 16
-#define KUSH_MAX_CHILDREN 64
+#define KUSH_MAX_SLOTS (1 << 30)
 #define KUSH_TASK_STACK (256u * 1024u)
 enum { KUSH_READY = 0, KUSH_RUNNING = 1, KUSH_BLOCKED = 2, KUSH_FINISHED = 3 };
 typedef struct KushTask KushTask;
+struct KushHandlerContext;
 struct KushTask {
     ucontext_t context;
-    uint64_t id, wrapper, code, env;
+    uint64_t id, handle, wrapper, code, env;
     void *result;
     size_t result_size;
     void (*drop)(void *);
     int state, cancelled, joined, completed, preserve;
     KushTask *waiter;
-    uint64_t scope_ids[KUSH_MAX_SCOPES][KUSH_MAX_CHILDREN];
-    int scope_counts[KUSH_MAX_SCOPES];
+    /* The parent scope frame that lists this task, and its neighbours in
+       that frame's list of unjoined children (in spawn order). */
+    KushTask *parent, *previous_sibling, *next_sibling;
+    int parent_depth;
+    KushTask *scope_first[KUSH_MAX_SCOPES];
+    KushTask *scope_last[KUSH_MAX_SCOPES];
     int scope_depth;
+    /* Allocated on first use; the root task uses the static root context. */
+    struct KushHandlerContext *handlers;
     void *stack_base;
     size_t stack_total;
 };
-static KushTask *kush_tasks[KUSH_MAX_TASKS];
+/* Slot table: kush_task_count slots have ever been used, freed ones are on
+   kush_free_slots. Runtime bookkeeping uses malloc, not kush_alloc, so the
+   allocation statistics count only task stacks, control blocks and results. */
+static KushTask **kush_tasks = NULL;
+static uint32_t *kush_task_generations = NULL;
+static int *kush_free_slots = NULL;
+static int kush_free_count = 0;
+static int kush_task_capacity = 0;
 static int kush_task_count = 0;
 static KUSH_TLS KushTask *kush_current = NULL;
 static ucontext_t kush_scheduler_context;
 static void *kush_scheduler_stack = NULL;
 static size_t kush_scheduler_stack_total = 0;
 static int kush_initialized = 0;
-static int kush_ready[KUSH_MAX_TASKS];
+/* Ready queue of task handles, a ring that doubles when full. */
+static uint64_t *kush_ready = NULL;
+static int kush_ready_capacity = 0;
 static int kush_ready_head = 0, kush_ready_tail = 0, kush_ready_count = 0;
 /* ---- Dynamic one-shot effect handlers -----------------------------------
    Declared effect operations use a small per-task stack of handler code
@@ -2691,12 +2711,13 @@ typedef struct {
     unsigned char *top;
     KushKChunk *spare;
 } kush_kstack;
-typedef struct {
+typedef struct KushHandlerContext {
     kush_handler_frame frames[KUSH_HANDLER_MAX];
     int64_t depth;
     kush_kstack kstack;
 } kush_handler_context;
-static kush_handler_context kush_handler_contexts[KUSH_MAX_TASKS];
+/* The root task's context, also used before the task runtime starts. */
+static kush_handler_context kush_root_handlers;
 #ifdef KUSH_HAS_THREADS
 /* A child OS thread has its own handler stack (it inherits no frames). */
 static KUSH_TLS kush_handler_context *kush_thread_handlers = NULL;
@@ -2705,9 +2726,13 @@ static kush_handler_context *kush_handlers(void) {
 #ifdef KUSH_HAS_THREADS
     if (kush_thread_handlers != NULL) return kush_thread_handlers;
 #endif
-    int64_t id = kush_current == NULL ? 0 : (int64_t)kush_current->id;
-    if (id < 0 || id >= KUSH_MAX_TASKS) id = 0;
-    return &kush_handler_contexts[id];
+    KushTask *task = kush_current;
+    if (task == NULL || task->id == 0) return &kush_root_handlers;
+    if (task->handlers == NULL) {
+        task->handlers = (kush_handler_context *)calloc(1, sizeof(kush_handler_context));
+        if (task->handlers == NULL) kush_panic();
+    }
+    return task->handlers;
 }
 static int kush_kstack_poison_flag = -1;
 static uint64_t kush_kstack_peak = 0;
@@ -2918,23 +2943,90 @@ static void kush_stack_free(void *base, size_t total) {
     if (munmap(base, total) != 0) kush_panic();
     kush_note_deallocation();
 }
-static void kush_ready_push(int id) {
-    if (kush_ready_count >= KUSH_MAX_TASKS) kush_panic();
-    kush_ready[kush_ready_tail] = id;
-    kush_ready_tail = (kush_ready_tail + 1) % KUSH_MAX_TASKS;
+static void kush_ready_push(KushTask *task) {
+    if (kush_ready_count == kush_ready_capacity) {
+        int capacity = kush_ready_capacity == 0 ? 64 : kush_ready_capacity * 2;
+        if (capacity <= kush_ready_capacity) kush_panic();
+        uint64_t *ready = (uint64_t *)malloc((size_t)capacity * sizeof(uint64_t));
+        if (ready == NULL) kush_panic();
+        for (int i = 0; i < kush_ready_count; ++i)
+            ready[i] = kush_ready[(kush_ready_head + i) % kush_ready_capacity];
+        free(kush_ready);
+        kush_ready = ready;
+        kush_ready_capacity = capacity;
+        kush_ready_head = 0;
+        kush_ready_tail = kush_ready_count;
+    }
+    kush_ready[kush_ready_tail] = task->handle;
+    kush_ready_tail = (kush_ready_tail + 1) % kush_ready_capacity;
     ++kush_ready_count;
 }
-static int kush_ready_pop(void) {
-    int id = kush_ready[kush_ready_head];
-    kush_ready_head = (kush_ready_head + 1) % KUSH_MAX_TASKS;
+static uint64_t kush_ready_pop(void) {
+    uint64_t handle = kush_ready[kush_ready_head];
+    kush_ready_head = (kush_ready_head + 1) % kush_ready_capacity;
     --kush_ready_count;
-    return id;
+    return handle;
+}
+static uint64_t kush_task_handle(int slot) {
+    return ((uint64_t)kush_task_generations[slot] << 32) | (uint64_t)(slot + 1);
+}
+/* The live task a handle names, the root included, or NULL for a stale or
+   malformed handle. */
+static KushTask *kush_task_lookup(uint64_t handle) {
+    uint64_t low = handle & UINT64_C(0xffffffff);
+    if (low == 0 || low > (uint64_t)kush_task_count) return NULL;
+    KushTask *t = kush_tasks[low - 1];
+    if (t == NULL || t->handle != handle) return NULL;
+    return t;
+}
+static void kush_task_grow(void) {
+    int capacity = kush_task_capacity == 0 ? 64 : kush_task_capacity * 2;
+    if (capacity <= kush_task_capacity || capacity > KUSH_MAX_SLOTS) kush_panic();
+    KushTask **tasks = (KushTask **)realloc(kush_tasks, (size_t)capacity * sizeof(KushTask *));
+    if (tasks == NULL) kush_panic();
+    kush_tasks = tasks;
+    uint32_t *generations = (uint32_t *)realloc(kush_task_generations, (size_t)capacity * sizeof(uint32_t));
+    if (generations == NULL) kush_panic();
+    kush_task_generations = generations;
+    int *free_slots = (int *)realloc(kush_free_slots, (size_t)capacity * sizeof(int));
+    if (free_slots == NULL) kush_panic();
+    kush_free_slots = free_slots;
+    for (int i = kush_task_capacity; i < capacity; ++i) {
+        kush_tasks[i] = NULL;
+        kush_task_generations[i] = 0;
+    }
+    kush_task_capacity = capacity;
+}
+static void kush_scope_unlink(KushTask *t) {
+    KushTask *parent = t->parent;
+    if (parent == NULL) return;
+    int depth = t->parent_depth;
+    if (t->previous_sibling != NULL) t->previous_sibling->next_sibling = t->next_sibling;
+    else parent->scope_first[depth] = t->next_sibling;
+    if (t->next_sibling != NULL) t->next_sibling->previous_sibling = t->previous_sibling;
+    else parent->scope_last[depth] = t->previous_sibling;
+    t->parent = t->previous_sibling = t->next_sibling = NULL;
+}
+/* Drop the frames a finished task left and free its handler context. A
+   continuation chunk still in use is left alone, so the live allocation
+   check at exit reports the missing restore. */
+static void kush_kstack_drain(kush_handler_context *context);
+static void kush_handler_drop_frame(kush_handler_frame *frame);
+static void kush_task_release_handlers(KushTask *t) {
+    kush_handler_context *handlers = t->handlers;
+    if (handlers == NULL) return;
+    while (handlers->depth > 0) {
+        handlers->depth -= 1;
+        kush_handler_drop_frame(&handlers->frames[handlers->depth]);
+    }
+    kush_kstack_drain(handlers);
+    free(handlers);
+    t->handlers = NULL;
 }
 static void kush_scheduler(void) {
     for (;;) {
         if (kush_ready_count == 0) kush_panic();
-        int id = kush_ready_pop();
-        KushTask *t = kush_tasks[id];
+        KushTask *t = kush_task_lookup(kush_ready_pop());
         if (t == NULL || t->state == KUSH_FINISHED) continue;
         t->state = KUSH_RUNNING;
         kush_current = t;
@@ -2946,8 +3038,11 @@ static void kush_task_init(void) {
     if (kush_initialized) return;
     KushTask *root = (KushTask *)(uintptr_t)kush_alloc(sizeof(KushTask));
     memset(root, 0, sizeof(*root));
-    root->id = 0; root->state = KUSH_RUNNING; root->completed = 1;
-    kush_tasks[0] = root; kush_task_count = 1; kush_current = root;
+    if (kush_task_capacity == 0) kush_task_grow();
+    root->id = 0; root->handle = kush_task_handle(0);
+    root->state = KUSH_RUNNING; root->completed = 1;
+    kush_tasks[0] = root; kush_task_count = 1; kush_free_count = 0;
+    kush_current = root;
     void *base; size_t total;
     void *stack = kush_stack_alloc(KUSH_TASK_STACK, &base, &total);
     kush_scheduler_stack = base; kush_scheduler_stack_total = total;
@@ -2962,11 +3057,16 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
                          uint64_t result_size, uint64_t drop, uint64_t preserve) {
     kush_task_init();
     if (kush_current->scope_depth == 0) kush_panic();
-    if (kush_task_count >= KUSH_MAX_TASKS) kush_panic();
-    int id = kush_task_count++;
+    int id;
+    if (kush_free_count > 0) {
+        id = kush_free_slots[--kush_free_count];
+    } else {
+        if (kush_task_count == kush_task_capacity) kush_task_grow();
+        id = kush_task_count++;
+    }
     KushTask *t = (KushTask *)(uintptr_t)kush_alloc(sizeof(KushTask));
     memset(t, 0, sizeof(*t));
-    t->id = (uint64_t)id; t->wrapper = wrapper; t->code = code; t->env = env;
+    t->id = (uint64_t)id; t->handle = kush_task_handle(id); t->wrapper = wrapper; t->code = code; t->env = env;
     t->result_size = result_size == 0 ? 8 : (size_t)result_size;
     t->drop = (void (*)(void *))(uintptr_t)drop;
     t->preserve = preserve != 0;
@@ -2983,7 +3083,6 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
                 (unsigned int)(pointer & 0xffffffffu),
                 (unsigned int)(pointer >> 32));
     t->state = KUSH_READY;
-    kush_tasks[id] = t;
     /* Inherit the parent's copyable noncapturing dynamic handler frames.
        A capturing or one-shot frame is a task boundary: its environment is
        owned by the parent's dynamic extent, so only the longest inheritable
@@ -2992,8 +3091,6 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
        be inherited. */
     {
         kush_handler_context *parent = kush_handlers();
-        kush_handler_context *child = &kush_handler_contexts[id];
-        child->depth = 0;
         /* Walk the frames visible to the parent: a redirect frame (pushed by
            a resumed continuation) skips the frames its handler pushed. */
         static int64_t picked[KUSH_HANDLER_MAX];
@@ -3009,16 +3106,26 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
             picked[count++] = index;
             index -= 1;
         }
-        for (int64_t i = count - 1; i >= 0; --i) {
-            child->frames[child->depth] = parent->frames[picked[i]];
-            child->depth += 1;
+        if (count > 0) {
+            kush_handler_context *child =
+                (kush_handler_context *)calloc(1, sizeof(kush_handler_context));
+            if (child == NULL) kush_panic();
+            for (int64_t i = count - 1; i >= 0; --i) {
+                child->frames[child->depth] = parent->frames[picked[i]];
+                child->depth += 1;
+            }
+            t->handlers = child;
         }
     }
-    kush_ready_push(id);
+    kush_ready_push(t);
     int depth = kush_current->scope_depth - 1;
-    if (kush_current->scope_counts[depth] >= KUSH_MAX_CHILDREN) kush_panic();
-    kush_current->scope_ids[depth][kush_current->scope_counts[depth]++] = (uint64_t)id;
-    return (uint64_t)(id + 1);
+    t->parent = kush_current; t->parent_depth = depth;
+    t->previous_sibling = kush_current->scope_last[depth];
+    if (t->previous_sibling != NULL) t->previous_sibling->next_sibling = t;
+    else kush_current->scope_first[depth] = t;
+    kush_current->scope_last[depth] = t;
+    kush_tasks[id] = t;
+    return t->handle;
 }
 static void kush_task_entry(unsigned int low, unsigned int high) {
     uintptr_t pointer = ((uintptr_t)high << 32) | (uintptr_t)low;
@@ -3030,7 +3137,7 @@ static void kush_task_entry(unsigned int low, unsigned int high) {
     t->state = KUSH_FINISHED;
     if (t->waiter != NULL) {
         t->waiter->state = KUSH_READY;
-        kush_ready_push((int)t->waiter->id);
+        kush_ready_push(t->waiter);
         t->waiter = NULL;
     }
     swapcontext(&t->context, &kush_scheduler_context);
@@ -3038,10 +3145,9 @@ static void kush_task_entry(unsigned int low, unsigned int high) {
 }
 uint64_t kush_task_join(uint64_t handle, void *out) {
     if (!kush_initialized || handle == 0) kush_panic();
-    int id = (int)(handle - 1);
-    if (id <= 0 || id >= kush_task_count || kush_tasks[id] == NULL) kush_panic();
-    KushTask *t = kush_tasks[id];
-    if (t->joined || t == kush_current) kush_panic();
+    KushTask *t = kush_task_lookup(handle);
+    if (t == NULL || t->id == 0 || t->joined || t == kush_current) kush_panic();
+    int id = (int)t->id;
     while (t->state != KUSH_FINISHED) {
         kush_current->state = KUSH_BLOCKED;
         t->waiter = kush_current;
@@ -3055,7 +3161,11 @@ uint64_t kush_task_join(uint64_t handle, void *out) {
         t->drop(t->result);
     }
     t->joined = 1;
+    kush_scope_unlink(t);
+    kush_task_release_handlers(t);
     kush_tasks[id] = NULL;
+    kush_task_generations[id] += 1;
+    kush_free_slots[kush_free_count++] = id;
     kush_free((uint64_t)(uintptr_t)t->result);
     kush_stack_free(t->stack_base, t->stack_total);
     kush_free((uint64_t)(uintptr_t)t);
@@ -3065,7 +3175,7 @@ uint64_t kush_task_yield(void) {
     kush_task_init();
     KushTask *t = kush_current;
     t->state = KUSH_READY;
-    kush_ready_push((int)t->id);
+    kush_ready_push(t);
     swapcontext(&t->context, &kush_scheduler_context);
     return (uint64_t)(t->cancelled != 0);
 }
@@ -3077,29 +3187,25 @@ uint64_t kush_task_cancel(uint64_t *handle) {
     if (!kush_initialized || handle == NULL) return 0;
     uint64_t value = *handle;
     if (value == 0) return 0;
-    int id = (int)(value - 1);
-    if (id <= 0 || id >= kush_task_count || kush_tasks[id] == NULL) return 0;
-    KushTask *t = kush_tasks[id];
+    KushTask *t = kush_task_lookup(value);
+    if (t == NULL || t->id == 0) return 0;
     if (!t->joined && t->state != KUSH_FINISHED) t->cancelled = 1;
     return 0;
 }
 uint64_t kush_task_scope_begin(void) {
     kush_task_init();
     if (kush_current->scope_depth >= KUSH_MAX_SCOPES) kush_panic();
-    kush_current->scope_counts[kush_current->scope_depth] = 0;
+    kush_current->scope_first[kush_current->scope_depth] = NULL;
+    kush_current->scope_last[kush_current->scope_depth] = NULL;
     ++kush_current->scope_depth;
     return 0;
 }
 uint64_t kush_task_cancel_scope(void) {
     if (!kush_initialized || kush_current == NULL || kush_current->scope_depth == 0) return 0;
     int depth = kush_current->scope_depth - 1;
-    int count = kush_current->scope_counts[depth];
-    for (int i = 0; i < count; ++i) {
-        int id = (int)kush_current->scope_ids[depth][i];
-        if (id > 0 && id < kush_task_count && kush_tasks[id] != NULL &&
-            !kush_tasks[id]->joined && kush_tasks[id]->state != KUSH_FINISHED) {
-            kush_tasks[id]->cancelled = 1;
-        }
+    for (KushTask *child = kush_current->scope_first[depth]; child != NULL;
+         child = child->next_sibling) {
+        if (!child->joined && child->state != KUSH_FINISHED) child->cancelled = 1;
     }
     return 0;
 }
@@ -3107,13 +3213,10 @@ uint64_t kush_task_scope_end(void) {
     if (!kush_initialized || kush_current->scope_depth == 0) kush_panic();
     --kush_current->scope_depth;
     int depth = kush_current->scope_depth;
-    int count = kush_current->scope_counts[depth];
-    for (int i = 0; i < count; ++i) {
-        int id = (int)kush_current->scope_ids[depth][i];
-        if (id > 0 && id < kush_task_count && kush_tasks[id] != NULL &&
-            !kush_tasks[id]->joined) {
-            (void)kush_task_join((uint64_t)(id + 1), NULL);
-        }
+    /* Every listed child is unjoined and joining unlinks it, so join the
+       first child until none is left: spawn order, as before. */
+    while (kush_current->scope_first[depth] != NULL) {
+        (void)kush_task_join(kush_current->scope_first[depth]->handle, NULL);
     }
     return 0;
 }
@@ -3125,6 +3228,12 @@ static void kush_task_finish(void) {
     KushTask *root = kush_tasks[0];
     kush_tasks[0] = NULL;
     kush_free((uint64_t)(uintptr_t)root);
+    free(kush_tasks); kush_tasks = NULL;
+    free(kush_task_generations); kush_task_generations = NULL;
+    free(kush_free_slots); kush_free_slots = NULL;
+    kush_free_count = 0; kush_task_capacity = 0;
+    free(kush_ready); kush_ready = NULL;
+    kush_ready_capacity = 0; kush_ready_head = kush_ready_tail = kush_ready_count = 0;
     kush_stack_free(kush_scheduler_stack, kush_scheduler_stack_total);
     kush_scheduler_stack = NULL;
     kush_initialized = 0;
@@ -3326,8 +3435,7 @@ int main(int argc, char **argv) {
     /* Retained pool storage is physical only; release it before the live
        allocation check so a normal exit owns nothing either way. */
     kush_pool_drain();
-    for (int64_t task = 0; task < KUSH_MAX_TASKS; ++task)
-        kush_kstack_drain(&kush_handler_contexts[task]);
+    kush_kstack_drain(&kush_root_handlers);
 #ifdef KUSH_STATS
     {
         char line[256];

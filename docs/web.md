@@ -36,9 +36,9 @@ and is not planned here.
    stalls the task scheduler, and tasks run on one OS thread. A server that
    holds thousands of connections needs a reactor that suspends a task on a
    read that would block.
-3. **Task limits.** The native task runtime allows 255 spawned tasks per
-   program run (joined task IDs are not reused). A server spawns one per
-   connection, forever.
+3. **Task limits** (done, TASK-ID-REUSE). The native runtime allowed 255
+   spawned tasks per run and 64 children per scope; it now reuses joined
+   task slots, so the bound is live tasks.
 4. **An HTTP server parser** with limits, chunked bodies and keep-alive.
 5. **Automatic codecs** (below).
 6. **TLS, cookies, crypto, a database driver, WebSockets.**

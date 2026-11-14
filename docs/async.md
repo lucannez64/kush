@@ -226,8 +226,12 @@ behavior and ordinary finite-input tests.
   through explicit `@[1]` (or intrinsically linear) contracts; those handles are
   linear and must be joined. A cancelled completion still delivers the payload
   as `Completed`. Handles still cannot escape their scope through data.
-- Fixed native limits: 255 spawned tasks per program execution (joined task IDs
-  are not reused), 16 nested scopes per task, 64 children per
-  scope frame, 256 KiB task stacks. Exceeding a limit panics rather than
-  corrupting memory.
+- Native limits: 16 nested scopes per task and 256 KiB task stacks; exceeding
+  one panics rather than corrupting memory. The number of tasks and of
+  children per scope frame is bounded only by memory (TASK-ID-REUSE): a
+  joined task's slot is reused, its handle carries the slot's generation so a
+  stale handle never names the new task, and a joined child leaves its scope
+  frame's list, so cancelling or ending the scope never reaches it. The
+  reference evaluator keeps one record per spawned task for the whole run; it
+  is a test oracle, not meant for long-running servers.
 - The ABI and the exact scheduling implementation are private and unstable.
