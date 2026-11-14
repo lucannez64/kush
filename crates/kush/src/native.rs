@@ -100,9 +100,119 @@ static void kush_best_effort_write(int fd, const void *data, size_t length) {
     ssize_t result = write(fd, data, length);
     (void)result;
 }
+/* PROOF-FUZZ (docs/proof-fuzz.md): a fuzz build (-DKUSH_FUZZ=1) counts how
+   often each run-time check the prover left in place (an obligation site)
+   runs, keeps the smallest distance from failing it saw, and remembers the
+   site being checked. Generated code calls kush_fuzz_enter or
+   kush_fuzz_arith just before the checked operation and kush_fuzz_leave
+   after it, so a panic inside it names its site. The table is written to
+   $KUSH_FUZZ_OUT at exit and on every panic. Ordinary builds contain none of
+   this. Attribution assumes one thread runs Kush code at a time. */
+#ifdef KUSH_FUZZ
+typedef struct { uint64_t hits; int64_t margin; } KushFuzzSite;
+static KushFuzzSite kush_fuzz_sites[KUSH_FUZZ_SITES > 0 ? KUSH_FUZZ_SITES : 1];
+static int64_t kush_fuzz_current = -1;
+static int kush_fuzz_written = 0;
+static const char *kush_fuzz_path = NULL;
+#include <sys/resource.h>
+static void kush_fuzz_init(void) {
+    /* A fuzz run that panics aborts; a core dump of every such run (with a
+       large main stack, hundreds of milliseconds each) is never wanted. */
+    struct rlimit no_core = { 0, 0 };
+    (void)setrlimit(RLIMIT_CORE, &no_core);
+    for (int64_t i = 0; i < KUSH_FUZZ_SITES; ++i) kush_fuzz_sites[i].margin = INT64_MAX;
+    kush_fuzz_path = getenv("KUSH_FUZZ_OUT");
+}
+/* failed: a site id, -1 for a normal exit, -2 for a panic outside every
+   site, -3 for stack exhaustion. Only async-signal-safe calls. */
+static void kush_fuzz_write(int64_t failed) {
+    if (kush_fuzz_written || kush_fuzz_path == NULL) return;
+    kush_fuzz_written = 1;
+    int fd = open(kush_fuzz_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return;
+    int64_t header[3];
+    memcpy(&header[0], "KUSHFUZ1", 8);
+    header[1] = failed;
+    header[2] = (int64_t)KUSH_FUZZ_SITES;
+    kush_best_effort_write(fd, header, sizeof(header));
+    kush_best_effort_write(fd, kush_fuzz_sites, sizeof(KushFuzzSite) * (size_t)KUSH_FUZZ_SITES);
+    close(fd);
+}
+static void kush_fuzz_margin(int64_t margin) {
+    if (kush_fuzz_current >= 0 && margin < kush_fuzz_sites[kush_fuzz_current].margin)
+        kush_fuzz_sites[kush_fuzz_current].margin = margin;
+}
+void kush_fuzz_enter(int64_t site) {
+    if (site < 0 || site >= KUSH_FUZZ_SITES) return;
+    kush_fuzz_current = site;
+    kush_fuzz_sites[site].hits += 1;
+}
+void kush_fuzz_leave(void) { kush_fuzz_current = -1; }
+static int64_t kush_fuzz_clamp(__int128 value) {
+    return value > INT64_MAX ? INT64_MAX : value < INT64_MIN ? INT64_MIN : (int64_t)value;
+}
+/* code: operation in bits 0..7 (0 +, 1 -, 2 *, 3 /, 4 %, 5 <<, 6 >>,
+   7 unary -), the left type's width in bits 8..15, its signedness in bit
+   16, the right operand's signedness in bit 17. The margin is how far the
+   exact result is from the type's range (or the divisor from zero, or the
+   shift amount from 0..width); negative means this operation fails. */
+void kush_fuzz_arith(int64_t site, int64_t code, int64_t a, int64_t b) {
+    kush_fuzz_enter(site);
+    int op = (int)(code & 255), bits = (int)((code >> 8) & 255);
+    int is_signed = (int)((code >> 16) & 1), right_signed = (int)((code >> 17) & 1);
+    __int128 lo = is_signed ? -((__int128)1 << (bits - 1)) : 0;
+    __int128 hi = is_signed ? ((__int128)1 << (bits - 1)) - 1 : ((__int128)1 << bits) - 1;
+    __int128 x = is_signed ? (__int128)a : (__int128)(uint64_t)a;
+    __int128 y = is_signed ? (__int128)b : (__int128)(uint64_t)b;
+    __int128 r = 0;
+    int64_t margin;
+    switch (op) {
+    case 0: r = x + y; break;
+    case 1: r = x - y; break;
+    case 7: r = -x; break;
+    case 2:
+        if (!is_signed && bits == 64) {
+            unsigned __int128 p = (unsigned __int128)(uint64_t)a * (uint64_t)b;
+            kush_fuzz_margin(p > (unsigned __int128)hi ? -1 : kush_fuzz_clamp((__int128)((unsigned __int128)hi - p)));
+            return;
+        }
+        r = x * y;
+        break;
+    case 3: case 4:
+        if (y == 0 || (is_signed && x == lo && y == -1)) margin = -1;
+        else margin = kush_fuzz_clamp((y < 0 ? -y : y) - 1);
+        kush_fuzz_margin(margin);
+        return;
+    default: {
+        __int128 amount = right_signed ? (__int128)b : (__int128)(uint64_t)b;
+        if (amount < 0 || amount >= bits) margin = -1;
+        else margin = kush_fuzz_clamp(amount < bits - 1 - amount ? amount : bits - 1 - amount);
+        kush_fuzz_margin(margin);
+        return;
+    }
+    }
+    margin = (r < lo || r > hi) ? -1 : kush_fuzz_clamp(r - lo < hi - r ? r - lo : hi - r);
+    kush_fuzz_margin(margin);
+}
+/* An element access: record how far `index` is from leaving 0..length. */
+#define KUSH_FUZZ_INDEX(index, length) \
+    kush_fuzz_margin((index) < 0 || (uint64_t)(index) >= (uint64_t)(length) ? -1 \
+        : kush_fuzz_clamp((__int128)(index) < (__int128)(length) - 1 - (index) \
+            ? (__int128)(index) : (__int128)(length) - 1 - (index)))
+#else
+#define KUSH_FUZZ_INDEX(index, length) ((void)0)
+#endif
 _Noreturn void kush_panic(void) {
+#ifdef KUSH_FUZZ
+    kush_fuzz_write(kush_fuzz_current >= 0 ? kush_fuzz_current : -2);
+#endif
     static const char message[] = "panic: checked arithmetic, memory, or I/O failure\n";
     kush_best_effort_write(2, message, sizeof(message) - 1);
+#ifdef KUSH_FUZZ
+    /* No abort(): a system core handler would run for every panicking
+       input. The status is the one abort() gives a shell. */
+    _exit(134);
+#endif
     abort();
 }
 /* Stack exhaustion is a panic, not a bare SIGSEGV. Every stack (the process
@@ -133,8 +243,14 @@ static void kush_fault(int number, siginfo_t *info, void *raw) {
     uintptr_t below = UINT64_C(1) << 16, above = UINT64_C(2) << 12;
     if (info->si_code > 0 && address + below >= sp && address < sp + above
         && address < kush_stack_ceiling) {
+#ifdef KUSH_FUZZ
+        kush_fuzz_write(-3);
+#endif
         static const char message[] = "panic: stack exhausted\n";
         kush_best_effort_write(2, message, sizeof(message) - 1);
+#ifdef KUSH_FUZZ
+        _exit(134);
+#endif
         abort();
     }
     /* Not ours: give the signal its default action. A fault repeats when
@@ -1172,6 +1288,7 @@ int64_t kush_alloc_vec_len(uint64_t handle) {
 }
 void kush_alloc_vec_get(uint64_t handle, int64_t index, uint64_t *out) {
     KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
+    KUSH_FUZZ_INDEX(index, v->length);
     if (index < 0 || (uint64_t)index >= v->length) kush_panic();
     memcpy(out, kush_alloc_block_data(v->block) + (uint64_t)index * v->width * 8,
            (size_t)(v->width * 8));
@@ -1190,6 +1307,7 @@ uint64_t kush_alloc_vec_push(uint64_t handle, const uint64_t *item) {
 }
 uint64_t kush_alloc_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint64_t *old) {
     KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
+    KUSH_FUZZ_INDEX(index, v->length);
     if (index < 0 || (uint64_t)index >= v->length) kush_panic();
     unsigned char *slot = kush_alloc_block_data(v->block) + (uint64_t)index * v->width * 8;
     memcpy(old, slot, (size_t)(v->width * 8));
@@ -1212,6 +1330,7 @@ int64_t kush_bytes_len(uint64_t handle) { return (int64_t)((KushBytes *)(uintptr
 int64_t kush_bytes_capacity(uint64_t handle) { return (int64_t)((const KushBytes *)(uintptr_t)handle)->capacity; }
 int64_t kush_bytes_get(uint64_t handle, int64_t index) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
+    KUSH_FUZZ_INDEX(index, b->length);
     if (index < 0 || (uint64_t)index >= b->length) kush_panic();
     return (int64_t)b->data[(uint64_t)index];
 }
@@ -2411,6 +2530,7 @@ uint64_t kush_vec_with_capacity(int64_t capacity, int64_t width) {
 int64_t kush_vec_len(uint64_t handle) { return (int64_t)((KushVec *)(uintptr_t)handle)->length; }
 void kush_vec_get(uint64_t handle, int64_t index, uint64_t *out, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
+    KUSH_FUZZ_INDEX(index, v->length);
     if (index < 0 || (uint64_t)index >= v->length) kush_panic();
     memcpy(out, v->data + (uint64_t)index * width, (size_t)(width * 8));
 }
@@ -2429,6 +2549,7 @@ uint64_t kush_vec_push(uint64_t handle, const uint64_t *item, uint64_t width) {
 }
 uint64_t kush_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint64_t *old, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
+    KUSH_FUZZ_INDEX(index, v->length);
     if (index < 0 || (uint64_t)index >= v->length) kush_panic();
     uint64_t *slot = v->data + (uint64_t)index * width;
     memcpy(old, slot, (size_t)(width * 8));
@@ -2440,6 +2561,7 @@ uint64_t kush_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint
    owner is loaned, so no growth can move this storage. */
 uint64_t kush_vec_element(uint64_t handle, int64_t index, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
+    KUSH_FUZZ_INDEX(index, v->length);
     if (index < 0 || (uint64_t)index >= v->length) kush_panic();
     return (uint64_t)(uintptr_t)(v->data + (uint64_t)index * width);
 }
@@ -3174,6 +3296,9 @@ static void *kush_main_thread(void *unused) {
 }
 #endif
 int main(int argc, char **argv) {
+#ifdef KUSH_FUZZ
+    kush_fuzz_init();
+#endif
     kush_host_init(argc, argv);
     /* Broken pipes become recoverable EPIPE results instead of process signals. */
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) kush_panic();
@@ -3237,6 +3362,9 @@ int main(int argc, char **argv) {
         static const char message[] = "panic: live owning allocations after normal exit\n";
         kush_best_effort_write(2, message, sizeof(message)-1); abort();
     }
+#ifdef KUSH_FUZZ
+    kush_fuzz_write(-1);
+#endif
     return (int)((uint64_t)result & UINT64_C(255));
 }
 #endif
@@ -3570,6 +3698,11 @@ pub struct CodegenOptions {
     pub deferred_overflow: Option<bool>,
     /// Tune LLVM code for the build machine's CPU (`-march=native`).
     pub native_cpu: bool,
+    /// PROOF-FUZZ: instrument every obligation site (a run-time check the
+    /// prover left in place) for `kush fuzz`; see docs/proof-fuzz.md.
+    /// Cranelift only. Turns deferred overflow off, so a check fails where
+    /// it is written.
+    pub fuzz: bool,
 }
 impl CodegenOptions {
     /// Cranelift with explicit, independent controls.
@@ -3581,6 +3714,7 @@ impl CodegenOptions {
             deferred_overflow: None,
             native_cpu: false,
             inline_calls: false,
+            fuzz: false,
         }
     }
     pub const fn release() -> Self {
@@ -3591,6 +3725,7 @@ impl CodegenOptions {
             deferred_overflow: None,
             native_cpu: false,
             inline_calls: true,
+            fuzz: false,
         }
     }
     /// `KUSH_BACKEND=llvm|cranelift` overrides the backend of every native
@@ -3617,8 +3752,10 @@ impl CodegenOptions {
     }
     /// Whether loops are lowered with deferred overflow checks.
     fn defers_overflow(self) -> bool {
-        self.deferred_overflow
-            .unwrap_or(self.backend == Backend::Llvm)
+        !self.fuzz
+            && self
+                .deferred_overflow
+                .unwrap_or(self.backend == Backend::Llvm)
     }
     /// The backend a build with these options uses, for messages. Honours
     /// the `KUSH_BACKEND` override.
@@ -3650,6 +3787,7 @@ impl CodegenOptions {
             native_cpu: false,
             // NATIVE-INLINE is a Cranelift pass; clang inlines for LLVM.
             inline_calls: false,
+            fuzz: false,
         }
     }
 }
@@ -3848,6 +3986,13 @@ pub fn build_with_codegen(
     if stats {
         defines.push("-DKUSH_STATS=1".to_owned());
         defines.push(format!("-DKUSH_FUSION_COUNT={}", program.fusion_count()));
+    }
+    if codegen.fuzz {
+        if codegen.backend != Backend::Cranelift {
+            return Err(error("fuzz builds use the Cranelift backend"));
+        }
+        defines.push("-DKUSH_FUZZ=1".to_owned());
+        defines.push(format!("-DKUSH_FUZZ_SITES={}", program.obligation_sites().len()));
     }
     let objects = match codegen.backend {
         Backend::Cranelift => {
@@ -4423,6 +4568,32 @@ fn lower(
     let panic = module
         .declare_function("kush_panic", Linkage::Import, &panic_sig)
         .map_err(error)?;
+    let fuzz = if codegen.fuzz {
+        let mut enter_sig = module.make_signature();
+        enter_sig.params.push(AbiParam::new(I64));
+        let mut arith_sig = module.make_signature();
+        arith_sig.params.extend([AbiParam::new(I64); 4]);
+        let sites = program
+            .obligation_sites()
+            .iter()
+            .enumerate()
+            .map(|(id, o)| ((o.span.start, o.span.end, fuzz_kind(o.kind)), id as i64))
+            .collect();
+        Some(FuzzHooks {
+            enter: module
+                .declare_function("kush_fuzz_enter", Linkage::Import, &enter_sig)
+                .map_err(error)?,
+            leave: module
+                .declare_function("kush_fuzz_leave", Linkage::Import, &panic_sig)
+                .map_err(error)?,
+            arith: module
+                .declare_function("kush_fuzz_arith", Linkage::Import, &arith_sig)
+                .map_err(error)?,
+            sites: std::rc::Rc::new(sites),
+        })
+    } else {
+        None
+    };
     let mut alloc_sig = module.make_signature();
     alloc_sig.params.push(AbiParam::new(I64));
     alloc_sig.returns.push(AbiParam::new(I64));
@@ -5141,6 +5312,8 @@ fn lower(
             float_int_present,
             float_rem,
             panic,
+            fuzz: fuzz.clone(),
+            fuzz_depth: 0,
             variables: Vec::new(),
             locations: Vec::new(),
             result: f.result,
@@ -7078,6 +7251,11 @@ struct Generator<'a, 'b> {
     float_int_present: FuncId,
     float_rem: FuncId,
     panic: FuncId,
+    /// PROOF-FUZZ hooks, in fuzz builds only.
+    fuzz: Option<FuzzHooks>,
+    /// Obligation sites entered by the expression being lowered; `expr`
+    /// leaves them once the checked operation is done.
+    fuzz_depth: usize,
     variables: Vec<Vec<Variable>>,
     /// Stack storage for inline-array locals so slice views can alias the real
     /// local storage (needed for `&mut [T]` write-back).
@@ -8036,6 +8214,58 @@ impl Generator<'_, '_> {
         let invalid = self.builder.ins().bor(negative, beyond);
         self.guard(invalid);
     }
+    /// PROOF-FUZZ: mark the start of the checked operation of an obligation
+    /// site (`kind` as in [`fuzz_kind`]), if this build is instrumented and
+    /// the site exists.
+    fn fuzz_site(&self, span: crate::Span, kind: u8) -> Option<(FuncId, FuncId, i64)> {
+        let hooks = self.fuzz.as_ref()?;
+        let id = *hooks.sites.get(&(span.start, span.end, kind))?;
+        Some((hooks.enter, hooks.arith, id))
+    }
+    fn fuzz_enter(&mut self, span: crate::Span, kind: u8) {
+        if let Some((enter, _, id)) = self.fuzz_site(span, kind) {
+            let id = self.constant(id);
+            self.runtime_void(enter, &[id]);
+            self.fuzz_depth += 1;
+        }
+    }
+    /// An integer operation of an obligation site: enter it and record how
+    /// close these operands come to failing it. `Kind::Bang` stands for
+    /// unary minus (`left` is the operand).
+    fn fuzz_arith(
+        &mut self,
+        expr: &Expr,
+        op: &Kind,
+        left: Option<IntKind>,
+        right: Option<IntKind>,
+        a: Value,
+        b: Value,
+    ) {
+        let (code, kind) = match op {
+            Kind::Plus => (0, 1),
+            Kind::Minus => (1, 1),
+            Kind::Star => (2, 1),
+            Kind::Slash => (3, 2),
+            Kind::Percent => (4, 2),
+            Kind::Shl => (5, 3),
+            Kind::Shr => (6, 3),
+            Kind::Bang => (7, 1),
+            _ => return,
+        };
+        let Some((_, arith, id)) = self.fuzz_site(expr.span, kind) else {
+            return;
+        };
+        let left = left.unwrap_or(IntKind::I64);
+        let right_signed = right.is_none_or(IntKind::signed);
+        let code = code
+            | (i64::from(left.bits()) << 8)
+            | (i64::from(left.signed()) << 16)
+            | (i64::from(right_signed) << 17);
+        let id = self.constant(id);
+        let code = self.constant(code);
+        self.runtime_void(arith, &[id, code, a, b]);
+        self.fuzz_depth += 1;
+    }
     fn guard(&mut self, fail: Value) {
         let bad = self.builder.create_block();
         let good = self.builder.create_block();
@@ -8086,7 +8316,17 @@ impl Generator<'_, '_> {
         Some(value)
     }
     fn expr(&mut self, expr: &Expr) -> Option<Words> {
-        let values = self.expression(expr)?;
+        let depth = self.fuzz_depth;
+        let values = self.expression(expr);
+        if self.fuzz_depth > depth {
+            self.fuzz_depth = depth;
+            if values.is_some()
+                && let Some(leave) = self.fuzz.as_ref().map(|f| f.leave)
+            {
+                self.runtime_void(leave, &[]);
+            }
+        }
+        let values = values?;
         self.track(expr.resource, &values);
         Some(values)
     }
@@ -10134,6 +10374,10 @@ impl Generator<'_, '_> {
             }
             ExprKind::Unary(op, operand) => {
                 let value = lower!(self.scalar(operand));
+                if *op == Kind::Minus && operand.ty.float_kind().is_none() {
+                    let zero = self.constant(0);
+                    self.fuzz_arith(expr, &Kind::Bang, operand.ty.int_kind(), None, value, zero);
+                }
                 if let Some(kind) = operand.ty.float_kind() {
                     if *op != Kind::Minus {
                         self.abort();
@@ -10249,6 +10493,7 @@ impl Generator<'_, '_> {
                 }
                 let right_kind = right_expr.ty.int_kind();
                 let right = lower!(self.scalar(right_expr));
+                self.fuzz_arith(expr, op, left_kind, right_kind, left, right);
                 if let Some(kind) = left_ty.float_kind() {
                     let left = self.float_value(kind, left);
                     let right = self.float_value(kind, right);
@@ -10610,6 +10855,16 @@ impl Generator<'_, '_> {
                 }
                 for arg in args {
                     self.consume(arg);
+                }
+                if matches!(
+                    target,
+                    Target::Vec(..)
+                        | Target::AllocVec(..)
+                        | Target::Slice(..)
+                        | Target::DynArray(..)
+                        | Target::Bytes(..)
+                ) {
+                    self.fuzz_enter(expr.span, 0);
                 }
                 match target {
                     Target::Io(op, shape) => match op {
@@ -14249,5 +14504,26 @@ int main(int argc, char **argv) {
             assert!(!output.status.success());
             assert!(String::from_utf8_lossy(&output.stderr).contains("panic:"));
         }
+    }
+}
+
+/// PROOF-FUZZ: the runtime hooks of an instrumented build and the site id of
+/// each obligation, keyed by span and [`fuzz_kind`].
+#[derive(Clone)]
+struct FuzzHooks {
+    enter: FuncId,
+    leave: FuncId,
+    arith: FuncId,
+    sites: std::rc::Rc<BTreeMap<(usize, usize, u8), i64>>,
+}
+/// The kind of an obligation as one byte: 0 bounds, 1 overflow, 2 division,
+/// 3 shift.
+fn fuzz_kind(kind: crate::executable::ObligationKind) -> u8 {
+    use crate::executable::ObligationKind;
+    match kind {
+        ObligationKind::Bounds { .. } => 0,
+        ObligationKind::Overflow => 1,
+        ObligationKind::Division => 2,
+        ObligationKind::Shift => 3,
     }
 }

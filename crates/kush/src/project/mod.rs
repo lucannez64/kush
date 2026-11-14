@@ -366,7 +366,7 @@ impl Project {
         })
     }
 
-    fn native_links(&self) -> Result<crate::native::LinkSpec, Failure> {
+    pub(crate) fn native_links(&self) -> Result<crate::native::LinkSpec, Failure> {
         let mut links = crate::native::LinkSpec::default();
         for package in self.all_packages() {
             let spec = crate::native::LinkSpec::from_project_native(

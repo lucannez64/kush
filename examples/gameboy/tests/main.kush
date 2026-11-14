@@ -16,7 +16,8 @@ use gameboy.machine.Machine;
 fn rom(code: &Vec<u8>) -> Vec<u8> ! {alloc, panic} {
     let mut image = cartridge.zeroed(0x8000);
     let mut i = 0;
-    while i < code.len() {
+    // A program longer than the ROM after 0x0100 is cut (a fuzz input may be).
+    while i < code.len() && 0x100 + i < image.len() {
         image[0x100 + i] = code[i];
         i = i + 1;
     }
@@ -245,4 +246,46 @@ fn battery_ram_survives_a_save_and_a_restore() -> Unit ! {io, alloc, panic} {
     let plain = cartridge.mbc1(&image);
     let nothing = plain.saved();
     test.equal_i64(nothing.len(), 0);
+}
+
+// Found by `kush fuzz` (docs/proof-fuzz.md): a file too short to hold a
+// header crashed in `cartridge.title`, which runs before `kind` rejects it.
+#[test]
+fn a_file_without_a_header_is_rejected_not_a_crash() -> Unit ! {io, alloc, panic} {
+    let mut short: Vec<u8> = Vec.new();
+    short = short.push(7);
+    test.equal_i64(Bytes.len(&cartridge.title(&short)), 0);
+    test.equal_i64(cartridge.ram_size(&short), 0x2000);
+    test.is_true(match cartridge.kind(&short) { cartridge.Kind.Unsupported(_) => true, _ => false });
+}
+
+// `kush fuzz` entries (docs/proof-fuzz.md). The machine holds state no
+// generator can build, so these reach the CPU, video, sound and bank
+// controllers' checks from raw bytes.
+
+/// Up to 4 KiB of arbitrary code at 0x0100 of a blank ROM, for two frames.
+#[fuzz]
+fn random_program(input: &Bytes) -> Unit ! {alloc, panic} {
+    let mut m = machine_for(&assemble(input));
+    emulator.run_frame(&mut m);
+    emulator.run_frame(&mut m);
+}
+
+fn frames<M: Mapper>(board: M) -> Unit ! {alloc, panic} {
+    let mut m = machine.new(board);
+    emulator.run_frame(&mut m);
+}
+
+/// The input is the start of a cartridge, header included; the controller
+/// is chosen from it as `main` does.
+#[fuzz]
+fn random_cartridge(input: &Bytes) -> Unit ! {alloc, panic} {
+    let image = assemble(input);
+    match cartridge.kind(&image) {
+        cartridge.Kind.Plain => frames(cartridge.plain(&image)),
+        cartridge.Kind.Mbc1 => frames(cartridge.mbc1(&image)),
+        cartridge.Kind.Mbc3 => frames(cartridge.mbc3(&image)),
+        cartridge.Kind.Mbc5 => frames(cartridge.mbc5(&image)),
+        cartridge.Kind.Unsupported(_) => {},
+    }
 }

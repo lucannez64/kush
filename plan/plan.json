@@ -5790,11 +5790,24 @@
       "title": "Fuzz the obligations the prover leaves unproved",
       "size": "M",
       "hard": false,
-      "deps": [],
-      "status": "todo",
+      "deps": [
+        "PF-DEMO"
+      ],
+      "status": "done",
       "desc": "Turn KUSH_PROOF_REPORT's unproved bounds/overflow checks into fuzz targets; counterexamples become bugs or lemmas. See docs/showcase-roadmap.md.",
-      "commit": null,
-      "log": []
+      "commit": "5ee95eb",
+      "log": [
+        {
+          "time": "2026-11-13 17:06:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 19:04:22",
+          "who": "agent",
+          "text": "done 5ee95eb"
+        }
+      ]
     },
     {
       "id": "DP-GRADES",
@@ -6688,6 +6701,340 @@
           "time": "2026-11-13 14:54:15",
           "who": "agent",
           "text": "done 9506122"
+        }
+      ]
+    },
+    {
+      "id": "PF-OBLIGATIONS",
+      "title": "Proof fuzz: record every unproved check; report lists all kinds",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Obligation table (bounds incl. unrefined, overflow, division, shift) with kind/span/function/goal/terms; KUSH_PROOF_REPORT=verbose lists them. docs/proof-fuzz.md step 1.",
+      "commit": "cfb1562",
+      "log": [
+        {
+          "time": "2026-11-13 17:06:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 17:14:03",
+          "who": "agent",
+          "text": "done cfb1562"
+        }
+      ]
+    },
+    {
+      "id": "PF-INSTRUMENT",
+      "title": "Proof fuzz: Cranelift fuzz build mode with attributed checks",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PF-OBLIGATIONS"
+      ],
+      "status": "done",
+      "desc": "Obligation ids in IR, inline margins, kush_fuzz_check, runtime table to KUSH_FUZZ_OUT, deferred overflow off. docs/proof-fuzz.md 2.3.",
+      "commit": "ba83927",
+      "log": [
+        {
+          "time": "2026-11-13 17:14:03",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 17:25:00",
+          "who": "agent",
+          "text": "done ba83927"
+        }
+      ]
+    },
+    {
+      "id": "PF-HARNESS",
+      "title": "Proof fuzz: std.fuzz tape and harness synthesis",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PF-OBLIGATIONS"
+      ],
+      "status": "done",
+      "desc": "Tape decoder in Kush; generated harnesses per function from parameter types, dictionary, precondition guards; argv dispatch.",
+      "commit": "9efdb46",
+      "log": [
+        {
+          "time": "2026-11-13 17:25:00",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 17:31:27",
+          "who": "agent",
+          "text": "done 9efdb46"
+        }
+      ]
+    },
+    {
+      "id": "PF-ENGINE",
+      "title": "Proof fuzz: kush fuzz command, mutation and corpus",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PF-INSTRUMENT",
+        "PF-HARNESS"
+      ],
+      "status": "done",
+      "desc": "Driver: seeds, mutators, margin-guided corpus, budgets, timeouts, --list, exit codes.",
+      "commit": "62a286a",
+      "log": [
+        {
+          "time": "2026-11-13 17:31:27",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 18:09:28",
+          "who": "agent",
+          "text": "done 62a286a"
+        }
+      ]
+    },
+    {
+      "id": "PF-SHRINK",
+      "title": "Proof fuzz: minimize, classify, suggest, reproduce",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PF-ENGINE"
+      ],
+      "status": "done",
+      "desc": "Tape shrinking, bug vs local, suggestions (erased precondition/ensures/invariant/refinement), kush test repro, --save, regression replay.",
+      "commit": "3cc7de8",
+      "log": [
+        {
+          "time": "2026-11-13 18:09:28",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 18:19:01",
+          "who": "agent",
+          "text": "done 3cc7de8"
+        }
+      ]
+    },
+    {
+      "id": "PF-ENTRIES",
+      "title": "Proof fuzz: #[fuzz] byte entries",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PF-ENGINE"
+      ],
+      "status": "done",
+      "desc": "User-declared fuzz entries in the test target for deep state.",
+      "commit": "2aca7eb",
+      "log": [
+        {
+          "time": "2026-11-13 18:19:01",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 18:30:15",
+          "who": "agent",
+          "text": "done 2aca7eb"
+        }
+      ]
+    },
+    {
+      "id": "PF-COVERAGE",
+      "title": "Proof fuzz: proved-or-attacked coverage report",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PF-ENGINE"
+      ],
+      "status": "done",
+      "desc": "Per-function/package table, --report, --json.",
+      "commit": "46d0597",
+      "log": [
+        {
+          "time": "2026-11-13 18:30:15",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 18:38:56",
+          "who": "agent",
+          "text": "done 46d0597"
+        }
+      ]
+    },
+    {
+      "id": "PF-DEMO",
+      "title": "Proof fuzz: kernel and Game Boy showcase runs",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PF-SHRINK",
+        "PF-ENTRIES",
+        "PF-COVERAGE"
+      ],
+      "status": "done",
+      "desc": "Run on examples/kernel and examples/gameboy; README before/after numbers.",
+      "commit": "5ee95eb",
+      "log": [
+        {
+          "time": "2026-11-13 18:38:56",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 19:04:22",
+          "who": "agent",
+          "text": "Game Boy: found and fixed the short-file crash in cartridge.title (193dfd7); 82% proved or attacked with entries, 4 local finds. Kernel: 63%, 4 local finds in reader helpers, no bug. Checker quirk seen while writing the kernel entry: matching on items[i] with several arms each passing &mut k to check.* was rejected ('cannot borrow an owner while an exclusive &mut [T] view of it is live'); moving the match into a helper taking &mut Kernel works."
+        },
+        {
+          "time": "2026-11-13 19:04:22",
+          "who": "agent",
+          "text": "done 5ee95eb"
+        }
+      ]
+    },
+    {
+      "id": "PF-SEED",
+      "title": "Proof fuzz: seed from the integer fallback's feasible point",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PF-ENGINE"
+      ],
+      "status": "todo",
+      "desc": "Optional: return a candidate point from the bounded integer search and seed the corpus.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PF-READER-LEMMAS",
+      "title": "Kernel reader: prove the offsets kush fuzz attacks",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PF-DEMO"
+      ],
+      "status": "todo",
+      "desc": "kush fuzz finds local counterexamples in reader.skip/atom_end/word (negative offsets). Add ensures { result >= 0 } to the parsers and erased 0 <= at preconditions, read with Bytes.at, so the checks are proved. docs/proof-fuzz.md section 5.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "MATCH-ARM-BORROW",
+      "title": "Investigate &mut borrows across match arms over a Vec element",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Seen in PF-DEMO: match items[i] { A(..) => f(&mut k, ..), B(..) => g(&mut k, ..) } rejected with 'exclusive &mut [T] view of it is live'; the same match inside a helper taking &mut Kernel is accepted.",
+      "commit": "11d2329",
+      "log": [
+        {
+          "time": "2026-11-13 23:34:12",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 23:34:12",
+          "who": "agent",
+          "text": "done 11d2329"
+        }
+      ]
+    },
+    {
+      "id": "PF-SPEED",
+      "title": "",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "kush fuzz: parallel batches per harness (--jobs), an adaptive run timeout, and a branch-local tape offset in the generated root (the prover case-split on it). Game Boy 5.5 min -> 80 s, kernel 30 s -> 11 s.",
+      "commit": "108c354",
+      "log": [
+        {
+          "time": "2026-11-13 23:59:23",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 23:59:23",
+          "who": "agent",
+          "text": "done 108c354"
+        }
+      ]
+    },
+    {
+      "id": "PF-STD-SCORE",
+      "title": "",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Leave standard-library checks out of the proved-or-attacked score unless one failed.",
+      "commit": "733df23",
+      "log": [
+        {
+          "time": "2026-11-14 00:37:26",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-14 00:37:27",
+          "who": "agent",
+          "text": "done 733df23"
+        }
+      ]
+    },
+    {
+      "id": "PF-KERNEL-SEEDS",
+      "title": "",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Kernel corpus seeds that reach universe levels, indexed families and table growth.",
+      "commit": "74c69ae",
+      "log": [
+        {
+          "time": "2026-11-14 00:42:38",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-14 00:42:38",
+          "who": "agent",
+          "text": "done 74c69ae"
+        }
+      ]
+    },
+    {
+      "id": "PF-RECORDS",
+      "title": "",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Generators for records (all-pub fields: field by field; private: a constructor function), fieldless/tuple enums, and generic functions (type parameters instantiated by an implementing type). Findings through generated records are local.",
+      "commit": "dc19177",
+      "log": [
+        {
+          "time": "2026-11-14 01:49:55",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-14 01:49:55",
+          "who": "agent",
+          "text": "done dc19177"
         }
       ]
     }

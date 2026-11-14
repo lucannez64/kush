@@ -484,3 +484,50 @@ fn checking_a_definition_leaves_only_its_entry_behind() -> Unit ! {io, alloc, pa
     test.is_false(match checked { Result.Ok(_) => true, Result.Err(_) => false });
     api.rewind(&mut k, start);
 }
+
+// `kush fuzz` entries (docs/proof-fuzz.md). The store and the kernel are
+// state no generator can build; these reach their checks from raw text,
+// seeded by `fuzz/corpus/` (exchange files written by `kush core`).
+
+/// Read arbitrary bytes as an exchange file and print what was read.
+#[fuzz]
+fn read_any(input: &Bytes) -> Unit ! {alloc, panic} {
+    let mut k = engine.new();
+    match reader.read(&mut k.store, input) {
+        Result.Ok(items) => {
+            let mut out = Bytes.with_capacity(64);
+            let mut i = 0;
+            while i < items.len() {
+                out = printer.item_into(&k.store, out, items[i]);
+                i = i + 1;
+            }
+        },
+        Result.Err(_) => {},
+    }
+}
+
+/// Read arbitrary bytes as an exchange file, then admit and answer every
+/// item, as `kernel check` does.
+#[fuzz]
+fn check_any(input: &Bytes) -> Unit ! {alloc, panic} {
+    let mut k = engine.new();
+    let items = match reader.read(&mut k.store, input) {
+        Result.Ok(items) => items,
+        Result.Err(_) => { return; },
+    };
+    let mut i = 0;
+    while i < items.len() {
+        match items[i] {
+            reader.Item.Def(name, levels, ty, value, _) => {
+                match check.define(&mut k, name, levels, ty, value) { Result.Ok(_) => {}, Result.Err(_) => {} }
+            },
+            reader.Item.Data(name, levels, prop, params, constructors, _) => {
+                match check.define_data(&mut k, name, levels, prop, params, constructors) { Result.Ok(_) => {}, Result.Err(_) => {} }
+            },
+            reader.Item.Check(t, ty) => { match check.check_closed(&mut k, t, ty) { Result.Ok(_) => {}, Result.Err(_) => {} } },
+            reader.Item.Infer(t) => { match check.infer_closed(&mut k, t) { Result.Ok(_) => {}, Result.Err(_) => {} } },
+            reader.Item.Normalize(t) => { match check.normalize_closed(&mut k, t) { Result.Ok(_) => {}, Result.Err(_) => {} } },
+        }
+        i = i + 1;
+    }
+}

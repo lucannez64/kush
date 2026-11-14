@@ -314,6 +314,10 @@ pub struct Executable {
     /// to a run-time check: the `KUSH_PROOF_REPORT` numbers.
     pub(crate) bounds_proved: usize,
     pub(crate) bounds_checked: usize,
+    /// PROOF-FUZZ: every run-time check left in place, in source order.
+    pub(crate) obligations: Vec<Obligation>,
+    /// PROOF-FUZZ: every check the prover discharged (no run-time check).
+    pub(crate) discharged: Vec<Obligation>,
     /// Whether any checked body contains a structured-task operation. Task
     /// programs use the cooperative reference scheduler and buffered host I/O.
     pub(crate) uses_tasks: bool,
@@ -332,6 +336,54 @@ pub struct Executable {
     /// Own grade tables for every copyable identity above. Keep this last so
     /// tables remain available while all other program metadata is dropped.
     pub(crate) _grade_algebras: Vec<std::sync::Arc<crate::grades::Algebra>>,
+}
+/// PROOF-FUZZ: what a run-time check the prover could not discharge guards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ObligationKind {
+    /// An element access. `refined_length` is the `where len >= N` bound of a
+    /// length-refined field, when the container has one.
+    Bounds {
+        container: Container,
+        refined_length: Option<i64>,
+    },
+    /// Integer `+`, `-`, `*` or unary `-` whose result may leave its type.
+    Overflow,
+    /// Integer `/` or `%`: a zero divisor, or `MIN / -1`.
+    Division,
+    /// `<<` or `>>`: a shift amount outside the type's width.
+    Shift,
+}
+/// The kind of container an access reads or writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Container {
+    Vec,
+    Slice,
+    Array,
+    Bytes,
+}
+/// PROOF-FUZZ: one run-time check the prover left in the program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Obligation {
+    pub kind: ObligationKind,
+    /// The span of the checked expression: the span the reference evaluator
+    /// reports when this check panics.
+    pub span: Span,
+    /// The function instance the check is in (index into the executable's
+    /// functions) and its name.
+    pub function: usize,
+    pub function_name: String,
+    /// The condition the check tests, as the prover saw it.
+    pub goal: String,
+}
+impl ObligationKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Bounds { .. } => "bounds",
+            Self::Overflow => "overflow",
+            Self::Division => "division",
+            Self::Shift => "shift",
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub(crate) struct Function {
@@ -4970,8 +5022,13 @@ struct Functions<'a> {
     /// time (reported with KUSH_PROOF_REPORT=1).
     bounds_proved: usize,
     bounds_checked: usize,
-    /// Accesses into length-refined fields the prover could not discharge.
-    bounds_unproved: Vec<Span>,
+    /// PROOF-FUZZ: run-time checks the prover could not discharge, keyed so a
+    /// body checked twice records each check once.
+    obligations: BTreeMap<(usize, usize, usize, ObligationKind), Obligation>,
+    /// Checks the prover discharged, keyed the same way.
+    discharged: BTreeMap<(usize, usize, usize, ObligationKind), Obligation>,
+    /// The function instance whose body is being checked.
+    checking: usize,
     /// Frozen recursive result-origin summaries, solved once before any body
     /// is checked. Provisional summaries never reach signature construction.
     summaries: recursive_lifetimes::Summaries,
@@ -5482,7 +5539,9 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         field_lengths,
         bounds_proved: 0,
         bounds_checked: 0,
-        bounds_unproved: Vec::new(),
+        obligations: BTreeMap::new(),
+        discharged: BTreeMap::new(),
+        checking: 0,
         summaries: recursive_lifetimes::Summaries::default(),
         signatures: Vec::new(),
         bodies: Vec::new(),
@@ -5678,7 +5737,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             let valid = if function {
                 matches!(
                     attribute.kind.as_str(),
-                    "noalloc" | "nosuspend" | "test" | "gpu"
+                    "noalloc" | "nosuspend" | "test" | "fuzz" | "gpu"
                 ) && attribute.argument.is_none()
             } else if data {
                 (attribute.kind == "linear" && attribute.argument.is_none())
@@ -5690,7 +5749,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 return Err(Diagnostic::new(
                     attribute.span,
                     if function {
-                        "functions support the #[noalloc], #[nosuspend], #[test], and #[gpu] attributes"
+                        "functions support the #[noalloc], #[nosuspend], #[test], #[fuzz], and #[gpu] attributes"
                     } else if data {
                         "data declarations support #[linear] or #[foreign(\"release_symbol\")]"
                     } else {
@@ -5947,6 +6006,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             }
             entry = Some(index);
         }
+        functions.checking = index;
         let mut checker = Checker {
             lambda_holes: BTreeMap::new(),
             lambda_hint: None,
@@ -6203,17 +6263,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             functions.bounds_proved, functions.bounds_checked
         );
         if std::env::var("KUSH_PROOF_REPORT").as_deref() == Ok("verbose") {
-            for span in &functions.bounds_unproved {
-                if let Some(file) = program.sources.file(*span) {
-                    let offset = span.start - file.base;
-                    let before = &file.text[..offset.min(file.text.len())];
-                    let line = before.matches('\n').count() + 1;
-                    let column = before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1;
-                    eprintln!(
-                        "  not proved: {}:{line}:{column} (length-refined field, checked at run time)",
-                        file.name
-                    );
-                }
+            for line in obligation_report(&program.sources, functions.obligations.values()) {
+                eprintln!("  {line}");
             }
         }
     }
@@ -6239,6 +6290,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         fusions: functions.fusions,
         bounds_proved: functions.bounds_proved,
         bounds_checked: functions.bounds_checked,
+        obligations: sorted_obligations(&functions.obligations),
+        discharged: sorted_obligations(&functions.discharged),
         uses_tasks: functions.uses_tasks,
         main_stack,
         // A channel type anywhere needs the threaded runtime (its drop glue).
@@ -17081,6 +17134,9 @@ impl Checker<'_, '_> {
             _ => ALLOC | PANIC,
         };
         self.require(effects, span)?;
+        if op == BytesOp::Get {
+            self.record_bounds(Container::Bytes, None, span);
+        }
         let mut values = vec![first];
         if matches!(op, BytesOp::Get | BytesOp::Push | BytesOp::PushReserved) {
             let value = self.expr_expected(&rest[0], Some(Type::I64))?;
@@ -18621,6 +18677,40 @@ impl Checker<'_, '_> {
                 format!("cannot prove {what} from what is known here"),
             )),
         }
+    }
+    /// PROOF-FUZZ: remember a run-time check the prover left in place.
+    fn record_obligation(&mut self, kind: ObligationKind, span: Span, goal: String) {
+        self.record_check(kind, span, goal, false);
+    }
+    /// PROOF-FUZZ: remember a check, discharged (`proved`) or left in place.
+    fn record_check(&mut self, kind: ObligationKind, span: Span, goal: String, proved: bool) {
+        let function = self.functions.checking;
+        let function_name = self.functions.signatures[function].name.clone();
+        let table = if proved {
+            &mut self.functions.discharged
+        } else {
+            &mut self.functions.obligations
+        };
+        table
+            .entry((function, span.start, span.end, kind))
+            .or_insert(Obligation {
+                kind,
+                span,
+                function,
+                function_name,
+                goal,
+            });
+    }
+    fn record_bounds(&mut self, container: Container, length: Option<i64>, span: Span) {
+        let goal = match length {
+            Some(length) => format!("0 <= index && index < {length}"),
+            None => "0 <= index && index < len".to_owned(),
+        };
+        let kind = ObligationKind::Bounds {
+            container,
+            refined_length: length,
+        };
+        self.record_obligation(kind, span, goal);
     }
     fn try_prove(
         &mut self,
@@ -23063,6 +23153,7 @@ impl Checker<'_, '_> {
                             ));
                         }
                         c.require(PANIC, span)?;
+                        c.record_bounds(Container::Slice, None, span);
                         let index = c.expr_expected(index, Some(Type::I64))?;
                         c.expect(index.ty, Type::I64, index.span)?;
                         let ty = if index.ty == Type::Never {
@@ -23140,6 +23231,7 @@ impl Checker<'_, '_> {
                         ));
                     }
                     c.require(PANIC, span)?;
+                    c.record_bounds(Container::Array, None, span);
                     let view =
                         c.slice_from_expr(base, None, None, element, false, false, span, None, None)?;
                     let index = c.expr_expected(index, Some(Type::I64))?;
@@ -23520,6 +23612,8 @@ impl Checker<'_, '_> {
                                 None => c.expect(operand.ty, Type::I64, span)?,
                             }
                             c.require(PANIC, span)?;
+                            let goal = format!("the negation stays in {}", c.types.name(operand.ty));
+                            c.record_obligation(ObligationKind::Overflow, span, goal);
                             if operand.ty == Type::Never { Type::I64 } else { operand.ty }
                         }
                         Kind::Bang if operand.ty.int_kind().is_some() => operand.ty,
@@ -23919,8 +24013,18 @@ impl Checker<'_, '_> {
                                         Some(certificates) => {
                                             c.functions.certificates.extend(certificates);
                                             unchecked = true;
+                                            let goal = format!("the result of {} stays in {}", op_text(op), c.types.name(ty));
+                                            c.record_check(ObligationKind::Overflow, span, goal, true);
                                         }
-                                        None => c.require(PANIC, span)?,
+                                        None => {
+                                            c.require(PANIC, span)?;
+                                            let (kind, goal) = if matches!(op, Kind::Slash | Kind::Percent) {
+                                                (ObligationKind::Division, "the divisor is not zero and the quotient fits".to_owned())
+                                            } else {
+                                                (ObligationKind::Overflow, format!("the result of {} stays in {}", op_text(op), c.types.name(ty)))
+                                            };
+                                            c.record_obligation(kind, span, goal);
+                                        }
                                     }
                                 }
                                 ty
@@ -23936,6 +24040,8 @@ impl Checker<'_, '_> {
                             let ty = c.same_int(left.ty, left.ty, span)?;
                             c.same_int(right.ty, right.ty, right_ast.span)?;
                             c.require(PANIC, span)?;
+                            let goal = format!("the shift amount is below the width of {}", c.types.name(ty));
+                            c.record_obligation(ObligationKind::Shift, span, goal);
                             ty
                         }
                         Kind::Lt | Kind::Le | Kind::Gt | Kind::Ge => {
@@ -28923,11 +29029,14 @@ impl Checker<'_, '_> {
         };
         if proved {
             self.functions.bounds_proved += 1;
+            let kind = ObligationKind::Bounds {
+                container: Container::Vec,
+                refined_length: length,
+            };
+            self.record_check(kind, span, "0 <= index && index < len".to_owned(), true);
         } else {
             self.functions.bounds_checked += 1;
-            if length.is_some() {
-                self.functions.bounds_unproved.push(span);
-            }
+            self.record_bounds(Container::Vec, length, span);
         }
         proved
     }
@@ -29019,6 +29128,7 @@ impl Checker<'_, '_> {
                 let length = self.place_min_length(base);
                 if length.is_none() {
                     self.functions.bounds_checked += 1;
+                    self.record_bounds(Container::Vec, None, span);
                     return self
                         .vec_call_with(
                             "Vec.get",
@@ -29175,6 +29285,7 @@ impl Checker<'_, '_> {
             } else {
                 if length.is_none() {
                     self.functions.bounds_checked += 1;
+                    self.record_bounds(Container::Vec, None, span);
                 }
                 VecOp::SetBorrowed
             };
@@ -39309,6 +39420,26 @@ impl Executable {
     pub fn bounds_report(&self) -> (usize, usize) {
         (self.bounds_proved, self.bounds_checked)
     }
+    /// PROOF-FUZZ: every run-time check the prover could not discharge, in
+    /// source order.
+    pub fn obligations(&self) -> &[Obligation] {
+        &self.obligations
+    }
+    /// PROOF-FUZZ: checks the prover discharged (bounds and overflow), one
+    /// per function instance, in source order.
+    pub fn discharged(&self) -> &[Obligation] {
+        &self.discharged
+    }
+    /// PROOF-FUZZ: obligation sites, one per source location and kind (the
+    /// instances of a generic function share a site), in source order. A
+    /// site's position in this list is its id in fuzz builds.
+    pub fn obligation_sites(&self) -> Vec<&Obligation> {
+        let mut seen = BTreeSet::new();
+        self.obligations
+            .iter()
+            .filter(|o| seen.insert((o.span.start, o.span.end, o.kind.label())))
+            .collect()
+    }
     pub fn function_count(&self) -> usize {
         self.functions.len()
     }
@@ -40817,6 +40948,64 @@ impl Executable {
     }
 }
 
+/// PROOF-FUZZ: obligations in source order (then by function instance).
+fn sorted_obligations(
+    obligations: &BTreeMap<(usize, usize, usize, ObligationKind), Obligation>,
+) -> Vec<Obligation> {
+    let mut out: Vec<Obligation> = obligations.values().cloned().collect();
+    out.sort_by_key(|o| (o.span.start, o.span.end, o.kind, o.function));
+    out
+}
+fn op_text(op: &Kind) -> &'static str {
+    match op {
+        Kind::Plus => "+",
+        Kind::Minus => "-",
+        Kind::Star => "*",
+        Kind::Slash => "/",
+        Kind::Percent => "%",
+        _ => "an operator",
+    }
+}
+/// PROOF-FUZZ: one line per obligation, `file:line:column  kind  function:
+/// goal`, in source order. A check in a generic function is listed once per
+/// location, however many instances it has.
+pub(crate) fn obligation_report<'o>(
+    sources: &crate::program::SourceMap,
+    obligations: impl Iterator<Item = &'o Obligation>,
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut sorted: Vec<&Obligation> = obligations.collect();
+    sorted.sort_by_key(|o| (o.span.start, o.span.end, o.kind));
+    let mut lines = Vec::new();
+    for obligation in sorted {
+        if !seen.insert((obligation.span.start, obligation.span.end, obligation.kind)) {
+            continue;
+        }
+        let Some(file) = sources.file(obligation.span) else {
+            continue;
+        };
+        let offset = obligation.span.start - file.base;
+        let before = &file.text[..offset.min(file.text.len())];
+        let line = before.matches('\n').count() + 1;
+        let column = before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1;
+        let refined = match obligation.kind {
+            ObligationKind::Bounds {
+                refined_length: Some(_),
+                ..
+            } => " (length-refined field)",
+            _ => "",
+        };
+        lines.push(format!(
+            "not proved: {}:{line}:{column} {} in {}: {}{refined}",
+            file.name,
+            obligation.kind.label(),
+            obligation.function_name,
+            obligation.goal,
+        ));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod recursive_summary_mapping_tests {
     use super::*;
@@ -40855,3 +41044,4 @@ mod recursive_summary_mapping_tests {
         assert!(error.contains("no inferred borrow lifetime"), "{error}");
     }
 }
+

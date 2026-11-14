@@ -1,0 +1,3 @@
+; normalizing a 9000-step recursion builds more objects than the store table holds before it is rewound.
+(normalize (natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 9000)))
+(check (natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 9000)) nat)

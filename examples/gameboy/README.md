@@ -155,6 +155,35 @@ Some choices that show the language:
 - **Two-phase borrows.** `push(m, m.pc)` and `machine.write(m, hl(m), value)`
   read `m` in an argument while passing `m` exclusively.
 
+## Proved or attacked
+
+`kush fuzz` ([proof fuzzing](../../docs/proof-fuzz.md)) attacks every check
+the prover leaves in place. Each function with such a check is called
+directly with generated arguments (a `Machine`, `Apu` or `Voice` field by
+field with arbitrary register values, a generic `M: Mapper` as `Plain`),
+except functions that do I/O, and two `#[fuzz]` entries in
+`tests/main.kush` reach the rest from raw bytes: `random_program` runs
+arbitrary code for two frames, and `random_cartridge` treats its input as a
+cartridge, seeded with four minimal headers in `fuzz/corpus/`.
+
+```sh
+kush fuzz --runs 1000 --report     # about 2 minutes 40 seconds
+```
+
+Of 509 checks (standard-library checks are not counted), 262 are proved and
+193 attacked: 89% proved or attacked (60% without the entries or the record
+generators). It found one real bug: a file too short to hold
+a header crashed in `cartridge.title`, which `main` calls before
+`cartridge.kind` rejects the file. Both header readers now check the length
+first and read with `Vec.at`, so their checks are proved instead, and
+`a_file_without_a_header_is_rejected_not_a_crash` keeps it fixed. The other
+23 counterexamples are local: private helpers called with values no caller
+passes (`shade` with a palette index above 3, `mask` with a shift of 8), or
+sound, video and timer code given a state the hardware never reaches (an
+`advance_square` timer near `i64::MIN`). 34 checks stay unreached (mostly
+MBC3 clock and MBC5 paths no seed selects) and 20 are in functions that do
+I/O: the front ends, `main` and the file loaders.
+
 ## What it needed from the compiler
 
 Writing it this way needed additions to Kush, made alongside it and

@@ -54,6 +54,36 @@ kush test --manifest-path Kush.toml
   typed so that they preserve scope, and their equational lemmas (up to
   `subst0(shift t, u) = t`). Both the Rust kernel and this kernel check it.
 
+## Proved or attacked
+
+`kush fuzz` ([proof fuzzing](../../docs/proof-fuzz.md)) attacks every check
+the prover leaves in place. Each function with such a check is called
+directly, the store and the kernel built by `store.new()` and `engine.new()`
+(their fields are private, so only their constructors make them). Two
+`#[fuzz]` entries in `tests/main.kush` read arbitrary bytes as an exchange
+file, which reaches the checks a fresh kernel and random ids cannot:
+`read_any`
+prints what it read, `check_any` admits and answers every item. Random
+bytes alone never get through the reader, so they are seeded from
+`fuzz/corpus/`: `kush core` dumps of six examples (among them `universes`
+for universe levels, `finite-proofs` and `logical-data` for inductive
+families), 700 definitions (enough to grow the name table) and a
+9000-step recursion (enough objects to rebuild the store's table).
+
+```sh
+kush fuzz --runs 1000 --report     # about 1 minute 30 seconds
+```
+
+Of 316 checks (standard-library checks are not counted), 78 are proved and
+222 attacked: 95% proved or attacked (29% without the entries or the record
+generators). Nothing reached through the entries failed. The 43
+counterexamples are local: reader helpers (`skip`, `atom_end`, `word`)
+called directly with a negative offset or with `start = i64::MIN`, and
+store, term and normalizer functions given object ids a fresh store does
+not hold. Turning the reader's into proofs needs `0 <= at` facts across the
+reader (an `ensures { result >= 0 }` on each parser), which is left for
+later.
+
 The Rust test `crates/kush/tests/kernel_in_kush.rs` runs the package tests
 and checks that every exchange file dumped from the example corpus prints back
 byte for byte.

@@ -9,6 +9,7 @@ pub use eval::DEFAULT_EVAL_FUEL;
 pub use eval::Host;
 pub mod exchange;
 pub mod executable;
+pub mod fuzz;
 mod facts;
 mod float;
 mod gpu;

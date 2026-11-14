@@ -189,8 +189,11 @@ first. The Game Boy core uses it to lend its finished screen and sound to the
 front end without copying them.
 
 `KUSH_PROOF_REPORT=1 kush check` prints how many element accesses were proved
-and how many keep a check; `KUSH_PROOF_REPORT=verbose` also lists every access
-into a length-refined field that was not proved, with its file and line.
+and how many keep a check; `KUSH_PROOF_REPORT=verbose` also lists every
+run-time check the prover could not discharge (element accesses into any
+container, overflow, division and shifts), one line per location with its
+kind, function and goal; length-refined fields are marked. This list is what
+`kush fuzz` attacks ([proof-fuzz.md](proof-fuzz.md)).
 
 In the Game Boy example, refining video RAM, work RAM, OAM, high RAM, the
 screen, the sprite list and wave RAM proves 118 accesses (all memory-bus reads

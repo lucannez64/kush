@@ -93,9 +93,11 @@ pub fn kind(rom: &Vec<u8>) -> Kind ! {panic} {
     }
 }
 
-/// Cartridge RAM size from the header byte at 0x0149.
-pub fn ram_size(rom: &Vec<u8>) -> i64 ! {panic} {
-    match rom[0x149] {
+/// Cartridge RAM size from the header byte at 0x0149 (8 KiB when the
+/// header is missing).
+pub fn ram_size(rom: &Vec<u8>) -> i64 ! {} {
+    if Vec.len(rom) <= 0x149 { return 0x2000; }
+    match Vec.at(rom, 0x149, _) {
         0x02 => 0x2000,
         0x03 => 0x8000,
         0x04 => 0x20000,
@@ -104,12 +106,15 @@ pub fn ram_size(rom: &Vec<u8>) -> i64 ! {panic} {
     }
 }
 
-/// The game's title, from the header at 0x0134.
+/// The game's title, from the header at 0x0134 (empty when the file is too
+/// short to have a header: `kush fuzz` found that a short file crashed
+/// here, before `kind` could reject it).
 pub fn title(rom: &Vec<u8>) -> Bytes ! {alloc, panic} {
     let mut out = Bytes.with_capacity(16);
+    if Vec.len(rom) < 0x144 { return out; }
     let mut i = 0x134;
-    while i < 0x144 {
-        let c = rom[i];
+    while i < 0x144 invariant { 0x134 <= i } {
+        let c = Vec.at(rom, i, _);
         if c == 0 { return out; }
         if c >= 0x20 && c < 0x7F { out = out.push(Int.convert(c)); }
         i = i + 1;
