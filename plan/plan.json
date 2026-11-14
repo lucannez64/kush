@@ -7500,10 +7500,16 @@
       "deps": [
         "SIMD-DESIGN"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Built-in copyable 128-bit types with construction, constant or proved lane access and same-size reinterpretation; layout two words, alignment 16; evaluator, Cranelift vector types.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 18:20:40",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "SIMD-OPS",

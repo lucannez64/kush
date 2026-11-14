@@ -457,6 +457,9 @@ struct Resolver {
     unit: usize,
     scopes: Vec<BTreeMap<String, BindingId>>,
     owner: Option<BindingId>,
+    /// The type of the enclosing `impl` when it names a plain (non-generic)
+    /// declaration, so `Self { .. }` in its methods builds that record.
+    self_record: Option<BindingId>,
     depth: usize,
     /// Names of declared associated constants. `Type.NAME` is treated as a
     /// projection only when `NAME` is one of these, so qualified constructors
@@ -476,6 +479,7 @@ impl Resolver {
             unit: 0,
             scopes: Vec::new(),
             owner: None,
+            self_record: None,
             depth: 0,
             associated_const_names: BTreeSet::new(),
             associated_type_names: BTreeSet::new(),
@@ -959,12 +963,26 @@ impl Resolver {
                         for item in associated {
                             r.associated(item)?;
                         }
+                        let saved_self = r.self_record;
+                        r.self_record = match &self_ty.kind {
+                            TypeKind::Named { path, arguments }
+                                if arguments.is_empty() && generics.is_empty() =>
+                            {
+                                r.lookup(path, self_ty.span).ok()
+                            }
+                            _ => None,
+                        };
                         for method in methods {
                             let saved = r.owner;
                             r.owner = r.result.method_bindings.get(&method.span.start).copied();
-                            r.scoped(|r| r.function(&method.function))?;
+                            let result = r.scoped(|r| r.function(&method.function));
                             r.owner = saved;
+                            if let Err(error) = result {
+                                r.self_record = saved_self;
+                                return Err(error);
+                            }
                         }
+                        r.self_record = saved_self;
                         Ok(())
                     }
                     ItemKind::Struct {
@@ -1458,7 +1476,18 @@ impl Resolver {
                     r.reference(std::slice::from_ref(name), expr.span)?;
                 }
                 ExprKind::Record { ty, fields, base } => {
-                    r.expr(ty)?;
+                    if matches!(&ty.kind, ExprKind::Name(name) if name == "Self") {
+                        // `Self { .. }` builds the enclosing impl's record.
+                        let Some(id) = r.self_record else {
+                            return Err(Diagnostic::new(
+                                ty.span,
+                                "'Self { .. }' builds a record only inside an impl of a non-generic struct",
+                            ));
+                        };
+                        r.record(id, ty.span);
+                    } else {
+                        r.expr(ty)?;
+                    }
                     let mut seen = BTreeSet::new();
                     for (name, value) in fields {
                         if !seen.insert(name) {
@@ -1576,7 +1605,40 @@ impl Resolver {
                     r.expr(right)?;
                 }
                 ExprKind::Call { callee, arguments } => {
-                    r.expr(callee)?;
+                    let target = match &callee.kind {
+                        ExprKind::Specialize { callee, .. } => callee.as_ref(),
+                        _ => callee.as_ref(),
+                    };
+                    // `Type.name(..)` that names no value: an associated
+                    // function, found by the checker in the type's impls.
+                    // Record the type on the `Type` node.
+                    let associated = match &target.kind {
+                        ExprKind::Field { value, .. } => match &value.kind {
+                            ExprKind::Name(type_name)
+                                if !r.scopes.iter().rev().any(|scope| scope.contains_key(type_name))
+                                    && Self::expression_path(target)
+                                        .is_some_and(|path| r.lookup(&path, target.span).is_err()) =>
+                            {
+                                r.lookup(std::slice::from_ref(type_name), value.span)
+                                    .ok()
+                                    .filter(|id| r.result.bindings[*id].kind == BindingKind::Data)
+                                    .map(|id| (id, value.span))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    match associated {
+                        Some((id, span)) => {
+                            r.record(id, span);
+                            if let ExprKind::Specialize { arguments, .. } = &callee.kind {
+                                for argument in arguments {
+                                    r.ty(argument)?;
+                                }
+                            }
+                        }
+                        None => r.expr(callee)?,
+                    }
                     let target = match &callee.kind {
                         ExprKind::Specialize { callee, .. } => callee.as_ref(),
                         _ => callee.as_ref(),

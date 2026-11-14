@@ -5071,6 +5071,10 @@ struct Functions<'a> {
     traits: BTreeMap<BindingId, TraitDefinition<'a>>,
     /// Inherent methods keyed by concrete receiver type and method name.
     inherent: BTreeMap<Type, BTreeMap<String, MethodDefinition>>,
+    /// Associated functions of a non-generic inherent impl: no receiver,
+    /// called as `Type.name(..)` and never by dot-call on a value. Keyed by
+    /// the type declaration's binding.
+    associated_fns: BTreeMap<BindingId, BTreeMap<String, MethodDefinition>>,
     /// Trait methods keyed by trait binding, canonical trait arguments, and
     /// concrete receiver type, then method name.
     trait_impls: BTreeMap<(BindingId, TraitArguments, Type), BTreeMap<String, MethodDefinition>>,
@@ -5560,6 +5564,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         elided_lifetimes: 0,
         traits: BTreeMap::new(),
         inherent: BTreeMap::new(),
+        associated_fns: BTreeMap::new(),
         trait_impls: BTreeMap::new(),
         methods_by_type: BTreeMap::new(),
         default_specializations: Vec::new(),
@@ -8064,19 +8069,27 @@ fn collect_methods<'a>(
                     "impl methods are executable declarations and cannot be 'total'",
                 ));
             }
-            let Some(receiver) = f.parameters.first() else {
-                return Err(Diagnostic::new(
-                    method.span,
-                    "a method must declare a receiver as its first parameter: 'self: Self'/'self: &Self'/'self: &mut Self' or the concrete target type",
-                ));
-            };
-            if receiver.erased || receiver.name != "self" {
-                return Err(Diagnostic::new(
-                    receiver.span,
-                    "the first method parameter must be the receiver, written 'self: Self', 'self: &Self', 'self: &mut Self', or the concrete target type",
-                ));
+            // A function of an inherent impl without a `self` receiver is an
+            // associated function, called as `Type.name(..)`.
+            let associated_fn = trait_id.is_none()
+                && f.parameters
+                    .first()
+                    .is_none_or(|first| first.erased || first.name != "self");
+            if !associated_fn {
+                let Some(receiver) = f.parameters.first() else {
+                    return Err(Diagnostic::new(
+                        method.span,
+                        "a method must declare a receiver as its first parameter: 'self: Self'/'self: &Self'/'self: &mut Self' or the concrete target type",
+                    ));
+                };
+                if receiver.erased || receiver.name != "self" {
+                    return Err(Diagnostic::new(
+                        receiver.span,
+                        "the first method parameter must be the receiver, written 'self: Self', 'self: &Self', 'self: &mut Self', or the concrete target type",
+                    ));
+                }
+                checked_method_receiver(types, &receiver.ty, self_key)?;
             }
-            checked_method_receiver(types, &receiver.ty, self_key)?;
             if Checker::builtin_method(&f.name) {
                 return Err(Diagnostic::new(
                     method.span,
@@ -8153,10 +8166,29 @@ fn collect_methods<'a>(
                 unit: resolution.unit_of.get(&binding).copied().unwrap_or(0),
                 impl_arguments: None,
             };
-            if definitions.insert(f.name.clone(), definition).is_some() {
+            if associated_fn {
+                let owner = self_key
+                    .layout()
+                    .map(|layout| types.enums[layout].definition)
+                    .ok_or_else(|| {
+                        Diagnostic::new(method.span, "associated functions need a nominal record or enum type")
+                    })?;
+                let table = functions.associated_fns.entry(owner).or_default();
+                if definitions.contains_key(&f.name) || table.insert(f.name.clone(), definition).is_some() {
+                    return Err(Diagnostic::new(
+                        method.span,
+                        format!("duplicate method or associated function '{}'", f.name),
+                    ));
+                }
+            } else if definitions.insert(f.name.clone(), definition).is_some()
+                || self_key
+                    .layout()
+                    .and_then(|layout| functions.associated_fns.get(&types.enums[layout].definition))
+                    .is_some_and(|table| table.contains_key(&f.name))
+            {
                 return Err(Diagnostic::new(
                     method.span,
-                    format!("duplicate method '{}' in one impl", f.name),
+                    format!("duplicate method or associated function '{}'", f.name),
                 ));
             }
             functions.declared.insert(
@@ -24190,6 +24222,27 @@ impl Checker<'_, '_> {
                     };
                     let Some(id) = c.resolution.reference(target_expr.span) else {
                         if let ast::ExprKind::Field { value, name } = &target_expr.kind {
+                            // `Type.name(..)`: an associated function.
+                            if matches!(value.kind, ast::ExprKind::Name(_))
+                                && let Some(type_id) = c.resolution.reference(value.span)
+                                && c.resolution.bindings[type_id].kind == BindingKind::Data
+                            {
+                                let Some(definition) = c
+                                    .functions
+                                    .associated_fns
+                                    .get(&type_id)
+                                    .and_then(|table| table.get(name))
+                                    .copied()
+                                else {
+                                    let type_name = &c.resolution.bindings[type_id].name;
+                                    return Err(Diagnostic::new(
+                                        target_expr.span,
+                                        format!("unknown qualified name '{type_name}.{name}'"),
+                                    ));
+                                };
+                                c.check_method_visibility(definition, name, span)?;
+                                return c.user_call(definition.binding, explicit, arguments, expected, span);
+                            }
                             if let Some((receiver, method, trait_id, trait_arguments)) =
                                 c.qualified_method(target_expr)
                             {

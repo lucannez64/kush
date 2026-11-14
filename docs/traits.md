@@ -269,6 +269,38 @@ silently unreachable user method and keeps both dispatch paths deterministic.
 Callable record fields with non-reserved names keep working; field projection
 takes precedence as described above.
 
+## Associated functions and `Self` literals
+
+An inherent `impl` of a non-generic record or enum may declare functions
+without a `self` receiver. They are called through the type, never on a
+value:
+
+```kush
+struct Counter { n: i64 }
+impl Counter {
+    pub fn start(n: i64) -> Counter ! {} { Self { n: n } }   // associated function
+    pub fn value(self: Self) -> i64 ! {} { self.n }          // method
+}
+let c = Counter.start(41);     // Type.name(..)
+c.value()                      // c.start(..) is rejected: not a method
+```
+
+- The checker keeps them in their own table per type, so dot-call syntax
+  never reaches them, and a method and an associated function of the same
+  type cannot share a name. Visibility follows `pub` like methods.
+- `Type.name(..)` resolves to the associated function when `Type` is a
+  declared type and `Type.name` names no value (enum constructors such as
+  `Option.Some` keep their meaning). An unknown name is
+  `unknown qualified name 'Type.name'`.
+- Inside any method or associated function of such an impl, `Self { .. }`
+  builds the impl's record; outside an impl it is an error. This is how
+  `std.simd` builds its lowercase-named vector types, whose names are not
+  record-literal heads.
+- Trait impls and generic inherent impls still require a receiver on every
+  method.
+
+Tests: `crates/kush/tests/simd_types.rs`.
+
 ## Bounded generics
 
 A generic type parameter may declare a declared trait as its bound:
