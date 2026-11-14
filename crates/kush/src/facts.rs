@@ -1165,6 +1165,50 @@ impl Facts {
         }
         with_ranges.certify(&goal, span, "the result stays in range")
     }
+    /// SHIFT-ELIDE: prove `0 <= amount <= bits - 1` for a shift of a
+    /// `bits`-wide value, with the same implicit ranges as `in_range`.
+    pub(crate) fn shift_amount(
+        &self,
+        amount: &Expr,
+        bits: u32,
+        span: Span,
+    ) -> Option<Vec<Certificate>> {
+        let value = self.linear(amount)?;
+        if value.is_constant() {
+            // A constant amount needs no facts: prove it against none, so a
+            // block of unrolled rotations does not search the whole context
+            // once per shift.
+            let goal = dnf_and(
+                &compare_dnf(Linear::constant(0), &Kind::Le, value.clone())?,
+                &compare_dnf(value, &Kind::Le, Linear::constant(i128::from(bits) - 1))?,
+            )?;
+            return Facts::default().certify(&goal, span, "the shift amount is below the width");
+        }
+        let mut terms = value.coefficients.keys().copied().collect::<Vec<_>>();
+        for constraint in self
+            .known
+            .iter()
+            .chain(self.clauses.iter().flatten().flatten())
+        {
+            terms.extend(constraint.coefficients.keys().copied());
+        }
+        let goal = compare_dnf(Linear::constant(0), &Kind::Le, value.clone())?;
+        let upper = compare_dnf(value, &Kind::Le, Linear::constant(i128::from(bits) - 1))?;
+        let goal = dnf_and(&goal, &upper)?;
+        let with_ranges = self.clone();
+        for term in &terms {
+            if let Term::Var(slot, _) = term
+                && !with_ranges.ranges.borrow().contains_key(slot)
+                && self.wide.borrow().contains(slot)
+            {
+                with_ranges
+                    .ranges
+                    .borrow_mut()
+                    .insert(*slot, (i128::from(i64::MIN), i128::from(i64::MAX)));
+            }
+        }
+        with_ranges.certify(&goal, span, "the shift amount is below the width")
+    }
     /// `slot = value`: the right side is read at the old version, then the
     /// slot moves to a new version equal to it.
     pub fn assign(&mut self, slot: usize, value: &Expr) {

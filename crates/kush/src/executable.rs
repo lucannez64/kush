@@ -24039,9 +24039,27 @@ impl Checker<'_, '_> {
                             }
                             let ty = c.same_int(left.ty, left.ty, span)?;
                             c.same_int(right.ty, right.ty, right_ast.span)?;
-                            c.require(PANIC, span)?;
                             let goal = format!("the shift amount is below the width of {}", c.types.name(ty));
-                            c.record_obligation(ObligationKind::Shift, span, goal);
+                            // SHIFT-ELIDE: an amount the facts keep in
+                            // 0..bits needs no runtime check.
+                            let bits = ty.int_kind().map(|kind| kind.bits());
+                            let proved = match bits {
+                                Some(bits) if ty != Type::Never && right.ty != Type::Never => {
+                                    c.facts.shift_amount(&right, bits, span)
+                                }
+                                _ => None,
+                            };
+                            match proved {
+                                Some(certificates) => {
+                                    c.functions.certificates.extend(certificates);
+                                    unchecked = true;
+                                    c.record_check(ObligationKind::Shift, span, goal, true);
+                                }
+                                None => {
+                                    c.require(PANIC, span)?;
+                                    c.record_obligation(ObligationKind::Shift, span, goal);
+                                }
+                            }
                             ty
                         }
                         Kind::Lt | Kind::Le | Kind::Gt | Kind::Ge => {
@@ -24144,16 +24162,15 @@ impl Checker<'_, '_> {
                     };
                     if unchecked && ty != Type::Never {
                         let kind = ty.int_kind().unwrap_or(crate::int::IntKind::I64);
-                        let arith = match op {
-                            Kind::Plus => crate::int::ArithOp::Add,
-                            Kind::Minus => crate::int::ArithOp::Sub,
-                            _ => crate::int::ArithOp::Mul,
+                        let int_op = match op {
+                            Kind::Plus => crate::int::IntOp::Unchecked(crate::int::ArithOp::Add),
+                            Kind::Minus => crate::int::IntOp::Unchecked(crate::int::ArithOp::Sub),
+                            Kind::Shl => crate::int::IntOp::UncheckedShift(crate::int::Shift::Left),
+                            Kind::Shr => crate::int::IntOp::UncheckedShift(crate::int::Shift::Right),
+                            _ => crate::int::IntOp::Unchecked(crate::int::ArithOp::Mul),
                         };
                         (
-                            ExprKind::Call(
-                                Target::Int(crate::int::IntOp::Unchecked(arith), kind, kind),
-                                vec![left, right],
-                            ),
+                            ExprKind::Call(Target::Int(int_op, kind, kind), vec![left, right]),
                             ty,
                         )
                     } else {

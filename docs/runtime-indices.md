@@ -251,8 +251,20 @@ facts at that point prove the exact result lies in the type's range. Then
 the checker records the certificate, the operation needs no `panic`, and
 both backends emit a plain machine add/sub/mul (`IntOp::Unchecked`); its
 value stays a linear term for later proofs. Literal arithmetic such as
-`0 - 1` is covered too. `/`, `%`, shifts and unary minus keep their checks.
+`0 - 1` is covered too. `/`, `%` and unary minus keep their checks.
 Tests: `crates/kush/tests/overflow_elision.rs`.
+
+**Shift checks (SHIFT-ELIDE).** `<<` and `>>` check only their amount
+(`0 <= amount < bits`; a left shift drops high bits, a right shift of a
+signed value is arithmetic). When the facts prove the amount in range, the
+checker records the certificate, the shift needs no `panic`, and both
+backends emit a plain machine shift (`IntOp::UncheckedShift`). A constant
+amount is proved against no facts at all, so unrolled code with thousands of
+rotations checks quickly; another amount needs facts, such as an erased
+precondition (`fn rotr(x: u32, n: u64, erased q: { 1 <= n && n <= 31 })`) or
+a loop condition. The amount may have its own integer type; a narrowing
+`Int.truncate` hides its value from the prover. Tests:
+`crates/kush/tests/shift_elision.rs`.
 
 **Disjunctions (PROVE-DISJ).** Propositions may use `||`, `!=` and `!( .. )`
 (negation is pushed to the comparisons). Branch conditions with `||` or `!=`

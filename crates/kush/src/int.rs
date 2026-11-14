@@ -191,12 +191,20 @@ pub(crate) enum IntOp {
     /// `+`, `-` or `*` whose result the checker proved in range
     /// (OVERFLOW-ELIDE): a plain machine operation, no runtime check.
     Unchecked(ArithOp),
+    /// `<<` or `>>` whose amount the checker proved in `0..bits`
+    /// (SHIFT-ELIDE): a plain machine shift, no runtime check.
+    UncheckedShift(Shift),
     Checked(ArithOp, usize, usize),
     /// `Char.from_code`: a `u32` code point to `Option<Char>`.
     CharFromCode {
         some_tag: usize,
         none_tag: usize,
     },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Shift {
+    Left,
+    Right,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ArithOp {
@@ -236,6 +244,19 @@ pub(crate) fn builtin(op: IntOp, source: IntKind, target: IntKind, args: &[i64])
             (
                 true,
                 exact.map_or_else(|| target.wrap(a.wrapping_mul(b)), |v| target.wrap(v)),
+            )
+        }
+        IntOp::UncheckedShift(shift) => {
+            // The amount was proved in 0..bits, so its raw word is its value
+            // whatever its own kind. Should a proof ever be wrong, mask it
+            // like x86 does for 64-bit shifts, rather than panic.
+            let amount = (args[1] as u64 % u64::from(source.bits())) as u32;
+            (
+                true,
+                match shift {
+                    Shift::Left => target.wrap(a << amount),
+                    Shift::Right => target.wrap(a >> amount),
+                },
             )
         }
         IntOp::Wrapping(arith) | IntOp::Saturating(arith) | IntOp::Checked(arith, _, _) => {

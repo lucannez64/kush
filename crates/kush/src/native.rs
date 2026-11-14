@@ -13752,6 +13752,16 @@ impl Generator<'_, '_> {
                     value
                 }]
             }
+            // Amount proved in 0..bits (SHIFT-ELIDE).
+            IntOp::UncheckedShift(shift) => {
+                let b = values[1];
+                let value = match shift {
+                    crate::int::Shift::Left => self.builder.ins().ishl(a, b),
+                    crate::int::Shift::Right if source.signed() => self.builder.ins().sshr(a, b),
+                    crate::int::Shift::Right => self.builder.ins().ushr(a, b),
+                };
+                vec![self.canonical(source, value)]
+            }
             IntOp::Wrapping(arith) | IntOp::Saturating(arith) | IntOp::Checked(arith, _, _) => {
                 let b = values[1];
                 let kind = source;
