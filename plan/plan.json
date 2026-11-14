@@ -7300,14 +7300,24 @@
       "deps": [
         "WEB-DESIGN"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "SHA-1 (WebSocket handshake only), SHA-256, HMAC-SHA256, constant-time compare, base64/base64url, getrandom stub; known-answer tests.",
-      "commit": null,
+      "commit": "1179a5a",
       "log": [
         {
           "time": "2026-11-14 16:20:13",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 17:02:26",
+          "who": "agent",
+          "text": "done 1179a5a"
+        },
+        {
+          "time": "2026-11-14 17:02:26",
+          "who": "agent",
+          "text": "Full suite on the second PC: 1964 passed, 3 skipped (214 s)."
         }
       ]
     },
