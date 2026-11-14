@@ -7044,14 +7044,19 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/web.md: server framework in Kush. Decisions 2026-11-14: codecs through staging, Untrusted is a type, handlers take a linear Responder, no blocking v1 server (reactor first).",
-      "commit": null,
+      "commit": "3fa07e2",
       "log": [
         {
           "time": "2026-11-14 15:16:45",
           "who": "agent",
           "text": "User decisions: staging codecs, Untrusted as a type, linear Responder handlers, reactor first (no v1 server)."
+        },
+        {
+          "time": "2026-11-14 15:17:00",
+          "who": "agent",
+          "text": "done 3fa07e2"
         }
       ]
     },
