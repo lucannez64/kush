@@ -7558,14 +7558,24 @@
       "deps": [
         "SIMD-NATIVE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Translate the Cranelift vector values and instructions the generator uses to LLVM vector IR; intrinsic calls to llvm.x86.* instead of runtime calls.",
-      "commit": null,
+      "commit": "7a2d001",
       "log": [
         {
           "time": "2026-11-14 18:56:19",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 19:02:22",
+          "who": "agent",
+          "text": "done 7a2d001"
+        },
+        {
+          "time": "2026-11-14 19:02:22",
+          "who": "agent",
+          "text": "Full suite on the second PC: 1984 passed; SIMD tests also pass with KUSH_BACKEND=llvm-release."
         }
       ]
     },
