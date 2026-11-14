@@ -39,6 +39,7 @@ fn shrinking_shortens_collections_and_moves_numbers_to_the_boundary() {
             },
         ],
         fixed: 10,
+        ..Layout::default()
     };
     let start = shrink::encode(
         &layout,

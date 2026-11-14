@@ -25,7 +25,7 @@ pub struct Options {
     pub seed: u64,
     /// Wall-clock limit of one run; a run that exceeds it is not a find.
     /// Once a harness has finished a run, its limit tightens to ten times
-    /// its slowest finished run (at least 100 ms).
+    /// the 90th percentile of its finished runs (at least 100 ms).
     pub timeout: Duration,
     /// Harnesses fuzzed (and findings minimized) at once.
     pub jobs: usize,
@@ -437,7 +437,8 @@ impl Session {
             inputs: decode(layout, tape),
             run,
             shrink_runs: 0,
-            public: self.targets[target].public,
+            // A generated record may be a state the program never creates.
+            public: self.targets[target].public && !layout.generated_state,
             suggestion: String::new(),
             reproduction: None,
         }
@@ -474,9 +475,17 @@ impl Session {
             timeout: options.timeout,
         };
         let shrunk = parallel(&jobs, options.jobs, &self.directory, |(report, number, layout, tape), record| {
+            // A candidate that runs ten times longer than the finding itself
+            // (a loop it made unbounded) is not one that fails the same way.
+            let began = Instant::now();
+            let _ = worker.run(*number, layout, tape, record);
+            let timeout = (began.elapsed() * 10).clamp(QUICK_TIMEOUT, worker.timeout.max(QUICK_TIMEOUT));
+            // A finding whose runs are slow is minimized as far as
+            // `SHRINK_TIME` allows; past it, no candidate counts.
             super::shrink::shrink(layout, tape, SHRINK_BUDGET, |tape| {
-                matches!(
-                    worker.run(*number, layout, tape, record).map(|r| r.outcome),
+                began.elapsed() < SHRINK_TIME
+                    && matches!(
+                    worker.run_within(*number, layout, tape, record, timeout).map(|r| r.outcome),
                     Some(Outcome::Failed(site)) if worker.sites.get(site).copied().flatten() == Some(*report)
                 )
             })
@@ -716,10 +725,12 @@ impl Worker<'_> {
         let mut failed = vec![false; self.sites.len()];
         let mut queue = job.queue.clone();
         let mut corpus: Vec<Vec<u8>> = Vec::new();
-        // The slowest run that finished: until one has, a run gets the whole
-        // timeout; then ten times that (at least `QUICK_TIMEOUT`), so an
-        // input that makes a quick harness loop costs little.
-        let mut slowest: Option<Duration> = None;
+        // How long finished runs took: until one has, a run gets the whole
+        // timeout; then ten times the 90th percentile (at least
+        // `QUICK_TIMEOUT`), so an input that makes a quick harness loop or
+        // allocate without end costs little, and such rare runs do not raise
+        // the limit for the others.
+        let mut finished: Vec<Duration> = Vec::new();
         let mut run = 0;
         while run < options.runs {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -742,9 +753,13 @@ impl Worker<'_> {
                     })
                     .collect()
             };
-            let timeout = slowest.map_or(self.timeout, |slowest| {
-                (slowest * 10).clamp(QUICK_TIMEOUT, self.timeout.max(QUICK_TIMEOUT))
-            });
+            let timeout = if finished.is_empty() {
+                self.timeout
+            } else {
+                let mut sorted = finished.clone();
+                sorted.sort_unstable();
+                (sorted[sorted.len() * 9 / 10] * 10).clamp(QUICK_TIMEOUT, self.timeout.max(QUICK_TIMEOUT))
+            };
             let records = parallel(&batch, options.jobs, directory, |(tape, _), record| {
                 let began = Instant::now();
                 let result = self.run_within(job.number, &job.layout, tape, record, timeout);
@@ -757,7 +772,7 @@ impl Worker<'_> {
                     out.stats.lost += 1;
                     continue;
                 };
-                slowest = Some(slowest.map_or(took, |slowest| slowest.max(took)));
+                finished.push(took);
                 match record.outcome {
                     Outcome::Exited => out.stats.exited += 1,
                     Outcome::Failed(_) => out.stats.failed += 1,
@@ -1043,6 +1058,8 @@ impl Session {
                 "       kind     {}\n       suggest  {}\n",
                 if finding.public {
                     "bug: reached through a public function"
+                } else if self.targets[finding.target].public {
+                    "local: reached with a generated record; the program may never build that state"
                 } else {
                     "local: reached through a private function; no caller may pass this input"
                 },
@@ -1105,6 +1122,9 @@ fn abbreviated(value: &str) -> String {
     let head: String = value.chars().take(SHOWN).collect();
     format!("{head}... ({} characters)", value.chars().count())
 }
+
+/// Wall-clock time spent minimizing one counterexample, at most.
+const SHRINK_TIME: Duration = Duration::from_secs(10);
 
 /// Runs spent minimizing one counterexample.
 const SHRINK_BUDGET: usize = 300;
@@ -1418,7 +1438,15 @@ pub fn decode(layout: &Layout, tape: &[u8]) -> Vec<(String, String)> {
             Slot::Scalar { name, .. } | Slot::Collection { name, .. } => name.clone(),
         };
         let value = match slot {
-            Slot::Scalar { offset, scalar, .. } => show_scalar(get(tape, *offset, scalar.width()), *scalar),
+            Slot::Scalar { offset, scalar, .. } => {
+                let raw = get(tape, *offset, scalar.width());
+                match layout.labels.get(&index) {
+                    Some(variants) if !variants.is_empty() => {
+                        format!("{} ({})", show_scalar(raw, *scalar), variants[(raw % variants.len() as u128) as usize])
+                    }
+                    _ => show_scalar(raw, *scalar),
+                }
+            }
             Slot::Collection { collection, .. } => {
                 let &(_, start, length) = ranges
                     .iter()

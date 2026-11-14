@@ -24,6 +24,8 @@ pub fn flag(b: Bool, x: i8) -> i8 ! {panic} { if b { x - 1 } else { x } }
 pub fn first(s: &[i64], i: i64) -> i64 ! {panic} { s[i] }
 pub fn bytes(b: &Bytes, i: i64) -> i64 ! {panic} { Bytes.len(b) * 0x10 + i * 3 }
 pub fn sum(p: Pair) -> i64 ! {panic} { p.a + p.b }
+pub struct Secret { n: i64 }
+pub fn reveal(s: Secret) -> i64 ! {panic} { s.n + 1 }
 pub fn twice<T>(x: i64, t: T) -> i64 ! {panic} { x + x }
 pub fn calls(x: i64) -> i64 ! {panic} { add8(1, 2); x * 7 }
 #[linear]
@@ -167,11 +169,15 @@ fn targets_are_the_functions_with_unproved_checks() {
     }
     // `main` has overflow checks too, and is a target with no parameters.
     assert!(names.contains(&"app.main"), "{names:?}");
-    assert!(f.target("app.lib.sum").1.harness.as_ref().unwrap_err().contains("no generator"));
-    assert_eq!(
-        f.target("app.lib.twice").1.harness.as_ref().unwrap_err(),
-        "generic function"
-    );
+    // A record of public fields is built field by field; a type parameter
+    // without a bound is fixed to i64.
+    let sum = f.layout("app.lib.sum");
+    assert_eq!(sum.slots.len(), 2);
+    assert!(sum.generated_state);
+    assert!(f.target("app.lib.twice").1.harness.is_ok());
+    // Private fields and no function returning the record: no generator.
+    let reveal = f.target("app.lib.reveal").1.harness.as_ref().unwrap_err();
+    assert!(reveal.contains("private fields and no constructor"), "{reveal}");
     assert!(f.target("app.lib.calls").1.constants.contains(&7));
     // A result the harness cannot discard: its harness is left out, with
     // the checker's reason.

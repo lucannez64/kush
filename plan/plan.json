@@ -7022,10 +7022,16 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Generators for records (all-pub fields: field by field; private: a constructor function), fieldless/tuple enums, and generic functions (type parameters instantiated by an implementing type). Findings through generated records are local.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 01:49:55",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     }
   ]
 }

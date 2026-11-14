@@ -219,9 +219,11 @@ does have, and the obligation is a lemma candidate (section 3).
   dispatches on `argv[1]`, the harness number. The driver runs the binary once
   per input with the tape on standard input and a wall-clock timeout
   (a timeout counts as "survived, too slow", not a find). The timeout is 2 s
-  until a harness finishes a run, then ten times its slowest finished run
-  (at least 100 ms): an input that makes a quick function loop, such as a
-  huge size, costs little. Process start-up is about a millisecond, so a few
+  until a harness finishes a run, then ten times the 90th percentile of its
+  finished runs (at least 100 ms): an input that makes a quick function loop
+  or allocate without end, such as a huge size, costs little, and those rare
+  runs do not raise the limit for the rest. Minimizing a finding allows ten
+  times the finding's own run, and at most 10 seconds in all. Process start-up is about a millisecond, so a few
   thousand runs per function take seconds
   (the whole kernel example: 6 s to build, 5 s for 300 runs of each of its
   12 harnesses). A fork server can come later if start-up dominates.
@@ -240,11 +242,15 @@ does have, and the obligation is a lemma candidate (section 3).
   test may replay a found input under `kush eval` and check that it panics at
   the same span.
 - Harness per targeted function `f` (`fuzz/harness.rs`), appended in
-  memory to `f`'s own module so private functions are reachable. It takes
-  the decoded values, applies `f`'s preconditions as guards and calls it:
+  memory to `f`'s own module so private functions are reachable. It
+  decodes its arguments from the tape, applies `f`'s preconditions as guards
+  and calls it:
 
   ```text
-  pub fn __kush_fuzz_3(src: Bytes, at: i64) -> Unit ! {panic} {
+  pub fn __kush_fuzz_3(fz_tape: &Bytes) -> Unit ! {alloc, panic} {
+      let at: i64 = __kush_fuzz_word(fz_tape, 2, 8);
+      let src_n = 0 + __kush_fuzz_word(fz_tape, 0, 2) % 65;
+      ...                                                   // src's bytes
       if !(0 <= at && at <= Bytes.len(&src)) { return; }   // f's erased precondition
       let _ = skip(&src, at, _);
   }
@@ -252,18 +258,23 @@ does have, and the obligation is a lemma candidate (section 3).
 
   A synthetic root module (`<package>.kush_fuzz_entry`) replaces the entry
   file, which it can still import as an ordinary module. Its `main` reads
-  the tape from standard input and decodes the arguments of harness
-  `argv[1]`. The layout is fixed per harness: each scalar has its own
+  the tape from standard input and passes it to harness `argv[1]` (decoding
+  in the harness keeps the root small and lets a record have more leaves
+  than a function may have parameters). The layout is fixed per harness: each scalar has its own
   little-endian bytes at a fixed offset, each collection a two-byte length
   there (`minimum + n % 65`, where `minimum` comes from a `where len >= N`
   refinement); the elements of the collections follow. Bytes past the end
   of the tape read as zero, so every byte string is a valid input, and the
   driver can place a dictionary value at a known offset.
   Supported parameters: integers of every width and `Bool` by value,
-  `Bytes` and `Vec<scalar>` by value, `&` or `&mut`, and `&[scalar]`.
-  Anything else (records, enums, generics, effects other than `io`,
-  `alloc` and `panic`) is reported as `no generator` with the parameter
-  that blocks it. A harness that does not check, for example because the
+  `Bytes` and `Vec<scalar>` by value, `&` or `&mut`, `&[scalar]`, and
+  records, enums and type parameters (section 2.4). A function with the `io`
+  effect gets no harness: random arguments to code that opens windows or
+  writes files would do that a thousand times, so I/O is attacked only
+  through `#[fuzz]` entries, which say what they do. Anything else (effects
+  other than `alloc` and `panic`, borrowed records, standard-library types,
+  a record with private fields and no constructor) is reported as `no
+  generator` with the parameter that blocks it. A harness that does not check, for example because the
   result is linear and cannot be discarded, is dropped with the checker's
   message as its reason, and the rest are rebuilt.
 - Mutations: byte flips, insert or overwrite with a dictionary value, integer
@@ -311,6 +322,44 @@ obligation, and only in fuzz builds. The work is in the Cranelift backend
 (the checked-operation and `Vec` access lowerings) and in the C runtime
 (`kush_fuzz_check`, the table, the panic hook). The LLVM backend does not need
 the mode.
+
+### 2.4 Records, enums and generic functions
+
+Implemented (PF-RECORDS, `fuzz/build.rs`). A parameter of any other type is
+*built* from several slots of the same flat tape, by *makers*: generated
+functions appended to the module that declares the type, where its field
+types are written in that module's own terms. The harness calls them through
+that module's alias, adding a `use` to its own module when the alias is free.
+
+- A **record whose fields are all `pub`** is open data, and any field values
+  make one: its maker takes each field (`__kush_fuzz_make_Grid(cells, mode,
+  scale)`). A length-refined field (`where len >= SIDE * SIDE`, constants
+  evaluated) is generated at least that long, and the record literal checks
+  it. The Game Boy's `Machine`, `Apu` and `Voice` are built this way, so the
+  CPU, sound and timer helpers are attacked with arbitrary register states.
+- A **record with private fields** belongs to its module: it is built only by
+  a function of that module returning it (`new` first, else the one with
+  fewest parameters that can be generated), never field by field. The
+  kernel's `Kernel` and `Store` come from `engine.new()` and `store.new()`.
+- An **enum** that is not generic is a tag byte, taken modulo the number of
+  variants, plus each variant's payload; reports show the variant
+  (`op = 6 (Shift.Swap)`).
+- A **generic function**'s type parameters are fixed once: an unbounded one
+  to `i64`, a bounded one to the first type with an `impl` of its trait that
+  can be built (the Game Boy's `M: Mapper` becomes `Plain`). Only the
+  instances the program uses exist, so a generic function the program never
+  calls has no checks to attack.
+
+A value built from a generated record may be a state the program never
+creates (a timer the hardware never loads, a store with object ids that do
+not exist), so a finding through one is **local**, like one through a private
+function: `local: reached with a generated record`. It has no `kush test`
+reproduction; `--save` keeps its input under `fuzz/regressions/`. An enum
+alone does not make a finding local: every variant is a value callers can
+pass.
+
+A maker or an added `use` that does not check drops every harness that needs
+it, with the checker's message, like a harness that does not check.
 
 ## 3. What a counterexample produces
 
@@ -436,6 +485,25 @@ existed (PF-DEMO, 2026-11-13, `--runs 1000 --report`, seed 0):
 (Totals grow with entries because the checks of `impl` methods and test
 helpers they reach are counted.)
 
+Then (2026-11-14), standard-library checks left out of the score
+(PF-STD-SCORE), kernel seeds for levels, families and table growth
+(PF-KERNEL-SEEDS), and generators for records, enums and generic functions
+(PF-RECORDS), with entries:
+
+| | checks | proved | found | survived | unreached | no generator | proved or attacked |
+|---|---|---|---|---|---|---|---|
+| Game Boy | 509 | 262 | 23 | 170 | 34 | 20 | 89% |
+| kernel | 316 | 78 | 43 | 179 | 7 | 9 | 95% |
+
+Every new finding is local: a CPU, sound or timer helper given a register
+state the hardware never reaches (an `apu.advance_square` timer near
+`i64::MIN`), or a kernel function given a fresh store and object ids that do
+not exist. What has no generator now is mostly I/O: the desktop and terminal
+front ends, `main`, the file loaders (functions with `io` get no harness),
+and in the kernel `check_items` over a `Vec` of records and the private-field
+`Op`. Raising entry inputs to 65535 bytes also found a bug in the Game Boy's
+test helper `rom()`, which wrote programs longer than the ROM past its end.
+
 1. **Game Boy: one real bug, found and proved away.** `cartridge.title`
    read the header at `0x134..0x144` with no length check, and `main` calls
    it before `cartridge.kind` rejects short files: a 9-byte file crashed the
@@ -460,7 +528,8 @@ helpers they reach are counted.)
 
 Run time on this machine (12 cores, so 6 jobs, with a development build of
 `kush`): 80 seconds for the Game Boy (68 harnesses), 11 seconds for the
-kernel. One harness at a time with a 2 s timeout, it was about 5 minutes and
+kernel; with record generators, 2 min 40 s for the Game Boy (66 harnesses,
+many over a whole `Machine`) and 1 min 30 s for the kernel (79 harnesses). One harness at a time with a 2 s timeout, it was about 5 minutes and
 30 seconds; most of the difference is `cartridge.mbc5`, whose every run
 mirrors the image to 8 MiB (100 ms), now spread over the jobs, and
 `cartridge.mirrored`, whose huge sizes now time out at ten times its
@@ -470,6 +539,10 @@ slowest finished run instead of after 2 s.
 
 New suites in `crates/kush/tests/`:
 
+- `proof_fuzz_records.rs`: records of public fields (with a length-refined
+  field), records with private fields through their constructor, enums with
+  payloads, a generic function at its bound's implementor; findings through
+  a record are local; functions with I/O get no harness.
 - `proof_obligations.rs`: each obligation kind is recorded with the right
   kind, span, function and goal; proved checks are not recorded; bounds
   obligations equal `bounds_checked`; overflow obligations disappear exactly
@@ -516,12 +589,13 @@ New suites in `crates/kush/tests/`:
 8. **PF-DEMO**: kernel and Game Boy runs, README numbers.
 9. **PF-SEED** (optional): candidate points from the integer fallback as
    seeds.
+10. **PF-RECORDS**: records, enums and generic functions (section 2.4).
 
 ## Non-goals
 
 - Fuzz instrumentation in the LLVM backend, and a fork server.
-- Fuzzing floats, function values, linear resources or effect handlers as
-  parameters; they show as `no generator` and are reached through `#[fuzz]`
-  entries.
+- Fuzzing floats, function values, linear resources, borrowed records or
+  effect handlers as parameters; they show as `no generator` and are reached
+  through `#[fuzz]` entries.
 - Treating a survived check as proved. Only the checker proves; the fuzzer
   only attacks.

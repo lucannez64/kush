@@ -32,6 +32,9 @@ pub fn never(x: i64, y: i64) -> i64 ! {panic} {
     0
 }
 pub fn sum(p: Pair) -> i64 ! {panic} { p.a + p.b }
+// Private fields and no constructor: nothing can build it.
+pub struct Secret { n: i64 }
+pub fn reveal(s: Secret) -> i64 ! {panic} { s.n + 1 }
 ";
 
 // `main` calls nothing: a harness of `main` would reach every function.
@@ -133,10 +136,21 @@ fn true_unreached_and_ungenerated_checks_are_told_apart() {
         never.contains(&(State::Unreached, "the result of + stays in i64".into(), String::new())),
         "{never:?}"
     );
-    let sum = states(&session, "app.lib.sum");
-    assert!(sum.iter().all(|(state, ..)| *state == State::NoGenerator), "{sum:?}");
+    let reveal = states(&session, "app.lib.reveal");
+    assert!(reveal.iter().all(|(state, ..)| *state == State::NoGenerator), "{reveal:?}");
     let report = session.render(&options(None));
-    assert!(report.contains("no generator  app.lib.sum: no generator for `p: Pair`"), "{report}");
+    assert!(
+        report.contains("no generator  app.lib.reveal: no generator for `Secret` (private fields and no constructor)"),
+        "{report}"
+    );
+    // A record of public fields is built field by field; what it finds is
+    // local, since the program may never build that state.
+    let sum = states(&session, "app.lib.sum");
+    assert!(
+        sum.iter().any(|(state, _, inputs)| *state == State::Found && inputs.starts_with("p.a = ")),
+        "{sum:?}"
+    );
+    assert!(report.contains("local: reached with a generated record"), "{report}");
 }
 
 #[test]
@@ -173,7 +187,7 @@ fn the_filter_selects_functions() {
     assert!(report.contains("FOUND  overflow app.lib.next"), "{report}");
     assert!(!report.contains("app.lib.bump"), "{report}");
     let list = session.render_list(&options(Some("lib.")));
-    assert!(list.contains("app.lib.sum  (no generator"), "{list}");
+    assert!(list.contains("app.lib.reveal  (no generator"), "{list}");
     assert!(list.contains("app.lib.last\n  bounds"), "{list}");
 }
 

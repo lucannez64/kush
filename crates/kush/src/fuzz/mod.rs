@@ -6,6 +6,7 @@ use crate::executable::Executable;
 use crate::native::{self, CodegenOptions, LinkSpec, Optimization};
 use crate::Diagnostic;
 
+pub mod build;
 pub mod engine;
 pub mod harness;
 pub mod shrink;

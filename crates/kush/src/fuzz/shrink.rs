@@ -428,7 +428,8 @@ pub fn reproduction(
     what: &str,
     line: usize,
 ) -> Option<String> {
-    if !target.public || target.entry {
+    // A built argument (a record, an enum) has no literal to write here.
+    if !target.public || target.entry || !layout.built.is_empty() {
         return None;
     }
     let mut body = String::new();
