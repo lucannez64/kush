@@ -284,9 +284,23 @@ def gen_ops(name, lane, bits, signed):
     out.append("        Self { w0: w0, w1: w1 }")
     out.append("    }")
     out.append("")
-    out.append("    /// The 16 bytes at data[at..at + 16], each lane big-endian.")
+    out.append("    /// The 16 bytes at data[at..at + 16], each lane big-endian. Built")
+    out.append("    /// with shifts, not a byte shuffle, which the x86-64 baseline lacks.")
     out.append(f"    pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: {{ {pre_load} }}) -> {name} ! {{}} {{")
-    out.append(f"        {name}.load_le(data, n, at, _)" if bits == 8 else f"        {name}.swap_bytes({name}.load_le(data, n, at, _))")
+    if bits == 8:
+        out.append(f"        {name}.load_le(data, n, at, _)")
+    else:
+        size = bits // 8
+        for w in range(2):
+            terms = []
+            for j in range(8):
+                b = 8 * w + j
+                lane_in_word, pos = (b % 8) // size, b % size
+                shift = lane_in_word * bits + 8 * (size - 1 - pos)
+                out.append(f"        let b{w}{j}: u64 = Int.truncate(Bytes.at(data, at + {b}, _));")
+                terms.append(f"b{w}{j}" if shift == 0 else f"(b{w}{j} << {shift})")
+            out.append(f"        let w{w}: u64 = {' | '.join(terms)};")
+        out.append("        Self { w0: w0, w1: w1 }")
     out.append("    }")
     out.append("")
     out.append("    /// `out` with the 16 bytes of `v` appended, each lane little-endian.")

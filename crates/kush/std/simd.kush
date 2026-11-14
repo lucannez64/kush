@@ -179,7 +179,8 @@ impl u8x16 {
         Self { w0: w0, w1: w1 }
     }
 
-    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    /// The 16 bytes at data[at..at + 16], each lane big-endian. Built
+    /// with shifts, not a byte shuffle, which the x86-64 baseline lacks.
     pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u8x16 ! {} {
         u8x16.load_le(data, n, at, _)
     }
@@ -374,9 +375,28 @@ impl u16x8 {
         Self { w0: w0, w1: w1 }
     }
 
-    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    /// The 16 bytes at data[at..at + 16], each lane big-endian. Built
+    /// with shifts, not a byte shuffle, which the x86-64 baseline lacks.
     pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u16x8 ! {} {
-        u16x8.swap_bytes(u16x8.load_le(data, n, at, _))
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = (b00 << 8) | b01 | (b02 << 24) | (b03 << 16) | (b04 << 40) | (b05 << 32) | (b06 << 56) | (b07 << 48);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = (b10 << 8) | b11 | (b12 << 24) | (b13 << 16) | (b14 << 40) | (b15 << 32) | (b16 << 56) | (b17 << 48);
+        Self { w0: w0, w1: w1 }
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
@@ -569,9 +589,28 @@ impl u32x4 {
         Self { w0: w0, w1: w1 }
     }
 
-    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    /// The 16 bytes at data[at..at + 16], each lane big-endian. Built
+    /// with shifts, not a byte shuffle, which the x86-64 baseline lacks.
     pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u32x4 ! {} {
-        u32x4.swap_bytes(u32x4.load_le(data, n, at, _))
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = (b00 << 24) | (b01 << 16) | (b02 << 8) | b03 | (b04 << 56) | (b05 << 48) | (b06 << 40) | (b07 << 32);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = (b10 << 24) | (b11 << 16) | (b12 << 8) | b13 | (b14 << 56) | (b15 << 48) | (b16 << 40) | (b17 << 32);
+        Self { w0: w0, w1: w1 }
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
@@ -747,9 +786,28 @@ impl u64x2 {
         Self { w0: w0, w1: w1 }
     }
 
-    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    /// The 16 bytes at data[at..at + 16], each lane big-endian. Built
+    /// with shifts, not a byte shuffle, which the x86-64 baseline lacks.
     pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> u64x2 ! {} {
-        u64x2.swap_bytes(u64x2.load_le(data, n, at, _))
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = (b00 << 56) | (b01 << 48) | (b02 << 40) | (b03 << 32) | (b04 << 24) | (b05 << 16) | (b06 << 8) | b07;
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = (b10 << 56) | (b11 << 48) | (b12 << 40) | (b13 << 32) | (b14 << 24) | (b15 << 16) | (b16 << 8) | b17;
+        Self { w0: w0, w1: w1 }
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
@@ -942,7 +1000,8 @@ impl i8x16 {
         Self { w0: w0, w1: w1 }
     }
 
-    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    /// The 16 bytes at data[at..at + 16], each lane big-endian. Built
+    /// with shifts, not a byte shuffle, which the x86-64 baseline lacks.
     pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i8x16 ! {} {
         i8x16.load_le(data, n, at, _)
     }
@@ -1138,9 +1197,28 @@ impl i16x8 {
         Self { w0: w0, w1: w1 }
     }
 
-    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    /// The 16 bytes at data[at..at + 16], each lane big-endian. Built
+    /// with shifts, not a byte shuffle, which the x86-64 baseline lacks.
     pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i16x8 ! {} {
-        i16x8.swap_bytes(i16x8.load_le(data, n, at, _))
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = (b00 << 8) | b01 | (b02 << 24) | (b03 << 16) | (b04 << 40) | (b05 << 32) | (b06 << 56) | (b07 << 48);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = (b10 << 8) | b11 | (b12 << 24) | (b13 << 16) | (b14 << 40) | (b15 << 32) | (b16 << 56) | (b17 << 48);
+        Self { w0: w0, w1: w1 }
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
@@ -1334,9 +1412,28 @@ impl i32x4 {
         Self { w0: w0, w1: w1 }
     }
 
-    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    /// The 16 bytes at data[at..at + 16], each lane big-endian. Built
+    /// with shifts, not a byte shuffle, which the x86-64 baseline lacks.
     pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i32x4 ! {} {
-        i32x4.swap_bytes(i32x4.load_le(data, n, at, _))
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = (b00 << 24) | (b01 << 16) | (b02 << 8) | b03 | (b04 << 56) | (b05 << 48) | (b06 << 40) | (b07 << 32);
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = (b10 << 24) | (b11 << 16) | (b12 << 8) | b13 | (b14 << 56) | (b15 << 48) | (b16 << 40) | (b17 << 32);
+        Self { w0: w0, w1: w1 }
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
@@ -1512,9 +1609,28 @@ impl i64x2 {
         Self { w0: w0, w1: w1 }
     }
 
-    /// The 16 bytes at data[at..at + 16], each lane big-endian.
+    /// The 16 bytes at data[at..at + 16], each lane big-endian. Built
+    /// with shifts, not a byte shuffle, which the x86-64 baseline lacks.
     pub fn load_be(data: &Bytes, n: i64, at: i64, erased q: { 0 <= at && at + 16 <= n && n == Bytes.len(data) }) -> i64x2 ! {} {
-        i64x2.swap_bytes(i64x2.load_le(data, n, at, _))
+        let b00: u64 = Int.truncate(Bytes.at(data, at + 0, _));
+        let b01: u64 = Int.truncate(Bytes.at(data, at + 1, _));
+        let b02: u64 = Int.truncate(Bytes.at(data, at + 2, _));
+        let b03: u64 = Int.truncate(Bytes.at(data, at + 3, _));
+        let b04: u64 = Int.truncate(Bytes.at(data, at + 4, _));
+        let b05: u64 = Int.truncate(Bytes.at(data, at + 5, _));
+        let b06: u64 = Int.truncate(Bytes.at(data, at + 6, _));
+        let b07: u64 = Int.truncate(Bytes.at(data, at + 7, _));
+        let w0: u64 = (b00 << 56) | (b01 << 48) | (b02 << 40) | (b03 << 32) | (b04 << 24) | (b05 << 16) | (b06 << 8) | b07;
+        let b10: u64 = Int.truncate(Bytes.at(data, at + 8, _));
+        let b11: u64 = Int.truncate(Bytes.at(data, at + 9, _));
+        let b12: u64 = Int.truncate(Bytes.at(data, at + 10, _));
+        let b13: u64 = Int.truncate(Bytes.at(data, at + 11, _));
+        let b14: u64 = Int.truncate(Bytes.at(data, at + 12, _));
+        let b15: u64 = Int.truncate(Bytes.at(data, at + 13, _));
+        let b16: u64 = Int.truncate(Bytes.at(data, at + 14, _));
+        let b17: u64 = Int.truncate(Bytes.at(data, at + 15, _));
+        let w1: u64 = (b10 << 56) | (b11 << 48) | (b12 << 40) | (b13 << 32) | (b14 << 24) | (b15 << 16) | (b16 << 8) | b17;
+        Self { w0: w0, w1: w1 }
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.

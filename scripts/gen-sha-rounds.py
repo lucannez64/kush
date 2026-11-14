@@ -84,6 +84,56 @@ def sha1_rounds(indent="    "):
         out.append(f"{indent}{b} = {rotl(b, 30)};")
     return "\n".join(out)
 
+def vec(words):
+    return "u32x4.new(" + ", ".join(f"0x{w:08x}" for w in words) + ")"
+
+def u8(v):
+    return f"u8x16.from_bits(u32x4.to_bits({v}))"
+
+def sha256_ni(indent="    "):
+    """Intel's SHA-NI sequence: 16 groups of four rounds on ABEF/CDGH."""
+    out = []
+    for k in range(4):
+        out.append(f"{indent}let mut m{k} = u32x4.load_be(data, n, at + {16 * k}, _);")
+    out.append(f"{indent}let mut s0 = abef;")
+    out.append(f"{indent}let mut s1 = cdgh;")
+    for g in range(16):
+        cur, prev, nxt = g % 4, (g - 1) % 4, (g + 1) % 4
+        out.append(f"{indent}let wk{g} = u32x4.wrapping_add(m{cur}, {vec(K256[4 * g:4 * g + 4])});")
+        out.append(f"{indent}s1 = x86.sha256rnds2(sha, s1, s0, wk{g});")
+        out.append(f"{indent}s0 = x86.sha256rnds2(sha, s0, s1, swap_halves(wk{g}));")
+        if 3 <= g <= 14:
+            out.append(f"{indent}let t{g} = align4(m{cur}, m{prev});")
+            out.append(f"{indent}m{nxt} = x86.sha256msg2(sha, u32x4.wrapping_add(m{nxt}, t{g}), m{cur});")
+        if 1 <= g <= 12:
+            out.append(f"{indent}m{prev} = x86.sha256msg1(sha, m{prev}, m{cur});")
+    return "\n".join(out)
+
+def sha1_ni(indent="    "):
+    """Intel's SHA-NI sequence: 20 groups of four rounds."""
+    out = []
+    for k in range(4):
+        out.append(f"{indent}let mut m{k} = reverse(u32x4.load_be(data, n, at + {16 * k}, _));")
+    for g in range(20):
+        cur, nxt = g % 4, (g + 1) % 4
+        func = g // 5
+        if g == 0:
+            out.append(f"{indent}e0 = u32x4.wrapping_add(e0, m0);")
+            out.append(f"{indent}e1 = abcd;")
+            out.append(f"{indent}abcd = x86.sha1rnds4(sha, abcd, e0, 0, _);")
+        else:
+            (use, keep) = ("e1", "e0") if g % 2 == 1 else ("e0", "e1")
+            out.append(f"{indent}{use} = x86.sha1nexte(sha, {use}, m{cur});")
+            out.append(f"{indent}{keep} = abcd;")
+            if 3 <= g <= 18:
+                out.append(f"{indent}m{nxt} = x86.sha1msg2(sha, m{nxt}, m{cur});")
+            out.append(f"{indent}abcd = x86.sha1rnds4(sha, abcd, {use}, {func}, _);")
+        if 1 <= g <= 16:
+            out.append(f"{indent}m{(g - 1) % 4} = x86.sha1msg1(sha, m{(g - 1) % 4}, m{cur});")
+        if 2 <= g <= 17:
+            out.append(f"{indent}m{(g - 2) % 4} = u32x4.xor(m{(g - 2) % 4}, m{cur});")
+    return "\n".join(out)
+
 def replace(path, marker, body):
     text = path.read_text()
     start, end = f"// BEGIN GENERATED {marker}", f"// END GENERATED {marker}"
@@ -94,5 +144,7 @@ def replace(path, marker, body):
     path.write_text(text)
 
 replace(STD / "sha256.kush", "rounds", sha256_rounds())
+replace(STD / "sha256.kush", "ni-rounds", sha256_ni())
+replace(STD / "sha1.kush", "ni-rounds", sha1_ni())
 replace(STD / "sha1.kush", "rounds", sha1_rounds())
 print("generated")

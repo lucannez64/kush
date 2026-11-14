@@ -195,6 +195,17 @@ intrinsics directly is a possible follow-up if SHA-NI-STD needs it. Tests:
 `crates/kush/tests/simd_x86_sha.rs` compares the specification (evaluator)
 with the instructions (native) on random inputs, on both backends.
 
+### Implementation (SHA-NI-STD, 2026-11-14)
+
+`std.sha256` and `std.sha1` run Intel's SHA-NI sequences (`compress_ni`)
+when `cpu.sha()` returns a token and their proved portable code otherwise;
+see [std-crypto.md](std-crypto.md) for the measurements (SHA-256: 251 to
+76 ms per 64 MiB on LLVM, 538 to 394 ms on Cranelift). Lesson for SIMD code
+on the x86-64 baseline: a general byte shuffle (`load_be` through
+`swap_bytes`, `align_right`) becomes a software `pshufb` call on Cranelift,
+so the accelerated path uses word shifts instead; `load_be` now assembles
+big-endian lanes with shifts for every type.
+
 ## Lowering
 
 All code is lowered once into Cranelift IR; the LLVM backend translates

@@ -11,6 +11,11 @@ module std.sha1;
 // shift and index sum is proved, and a block allocates nothing. The eighty
 // rounds are unrolled by scripts/gen-sha-rounds.py.
 
+use std.cpu;
+use std.x86;
+use std.option.Option;
+use std.simd.u32x4;
+
 /// Five state words.
 type Words = (u32, u32, u32, u32, u32);
 
@@ -368,6 +373,165 @@ fn compress(
     (add(s0, a), add(s1, b), add(s2, c), add(s3, d), add(s4, e))
 }
 
+/// The four lanes in reverse order, with word rotations instead of a
+/// shuffle (the x86-64 baseline has no SSSE3).
+fn reverse(v: u32x4) -> u32x4 ! {} {
+    let (w0, w1) = u32x4.to_bits(v);
+    u32x4.from_bits(((w1 >> 32) | (w1 << 32), (w0 >> 32) | (w0 << 32)))
+}
+
+/// The same block on the CPU's SHA instructions (SHA-NI-STD): Intel's
+/// sequence of `sha1rnds4`, `sha1nexte`, `sha1msg1` and `sha1msg2`. Same
+/// precondition and result as `compress`.
+fn compress_ni(
+    sha: &cpu.Sha,
+    state: Words,
+    data: &Bytes,
+    n: i64,
+    at: i64,
+    erased q: { 0 <= at && at + 64 <= n && n == Bytes.len(data) },
+) -> Words ! {} {
+    let (a, b, c, d, e) = state;
+    let abcd_save = u32x4.new(d, c, b, a);
+    let e_save = u32x4.new(0, 0, 0, e);
+    let mut abcd = abcd_save;
+    let mut e0 = e_save;
+    let mut e1 = u32x4.zero();
+    // BEGIN GENERATED ni-rounds (scripts/gen-sha-rounds.py)
+    let mut m0 = reverse(u32x4.load_be(data, n, at + 0, _));
+    let mut m1 = reverse(u32x4.load_be(data, n, at + 16, _));
+    let mut m2 = reverse(u32x4.load_be(data, n, at + 32, _));
+    let mut m3 = reverse(u32x4.load_be(data, n, at + 48, _));
+    e0 = u32x4.wrapping_add(e0, m0);
+    e1 = abcd;
+    abcd = x86.sha1rnds4(sha, abcd, e0, 0, _);
+    e1 = x86.sha1nexte(sha, e1, m1);
+    e0 = abcd;
+    abcd = x86.sha1rnds4(sha, abcd, e1, 0, _);
+    m0 = x86.sha1msg1(sha, m0, m1);
+    e0 = x86.sha1nexte(sha, e0, m2);
+    e1 = abcd;
+    abcd = x86.sha1rnds4(sha, abcd, e0, 0, _);
+    m1 = x86.sha1msg1(sha, m1, m2);
+    m0 = u32x4.xor(m0, m2);
+    e1 = x86.sha1nexte(sha, e1, m3);
+    e0 = abcd;
+    m0 = x86.sha1msg2(sha, m0, m3);
+    abcd = x86.sha1rnds4(sha, abcd, e1, 0, _);
+    m2 = x86.sha1msg1(sha, m2, m3);
+    m1 = u32x4.xor(m1, m3);
+    e0 = x86.sha1nexte(sha, e0, m0);
+    e1 = abcd;
+    m1 = x86.sha1msg2(sha, m1, m0);
+    abcd = x86.sha1rnds4(sha, abcd, e0, 0, _);
+    m3 = x86.sha1msg1(sha, m3, m0);
+    m2 = u32x4.xor(m2, m0);
+    e1 = x86.sha1nexte(sha, e1, m1);
+    e0 = abcd;
+    m2 = x86.sha1msg2(sha, m2, m1);
+    abcd = x86.sha1rnds4(sha, abcd, e1, 1, _);
+    m0 = x86.sha1msg1(sha, m0, m1);
+    m3 = u32x4.xor(m3, m1);
+    e0 = x86.sha1nexte(sha, e0, m2);
+    e1 = abcd;
+    m3 = x86.sha1msg2(sha, m3, m2);
+    abcd = x86.sha1rnds4(sha, abcd, e0, 1, _);
+    m1 = x86.sha1msg1(sha, m1, m2);
+    m0 = u32x4.xor(m0, m2);
+    e1 = x86.sha1nexte(sha, e1, m3);
+    e0 = abcd;
+    m0 = x86.sha1msg2(sha, m0, m3);
+    abcd = x86.sha1rnds4(sha, abcd, e1, 1, _);
+    m2 = x86.sha1msg1(sha, m2, m3);
+    m1 = u32x4.xor(m1, m3);
+    e0 = x86.sha1nexte(sha, e0, m0);
+    e1 = abcd;
+    m1 = x86.sha1msg2(sha, m1, m0);
+    abcd = x86.sha1rnds4(sha, abcd, e0, 1, _);
+    m3 = x86.sha1msg1(sha, m3, m0);
+    m2 = u32x4.xor(m2, m0);
+    e1 = x86.sha1nexte(sha, e1, m1);
+    e0 = abcd;
+    m2 = x86.sha1msg2(sha, m2, m1);
+    abcd = x86.sha1rnds4(sha, abcd, e1, 1, _);
+    m0 = x86.sha1msg1(sha, m0, m1);
+    m3 = u32x4.xor(m3, m1);
+    e0 = x86.sha1nexte(sha, e0, m2);
+    e1 = abcd;
+    m3 = x86.sha1msg2(sha, m3, m2);
+    abcd = x86.sha1rnds4(sha, abcd, e0, 2, _);
+    m1 = x86.sha1msg1(sha, m1, m2);
+    m0 = u32x4.xor(m0, m2);
+    e1 = x86.sha1nexte(sha, e1, m3);
+    e0 = abcd;
+    m0 = x86.sha1msg2(sha, m0, m3);
+    abcd = x86.sha1rnds4(sha, abcd, e1, 2, _);
+    m2 = x86.sha1msg1(sha, m2, m3);
+    m1 = u32x4.xor(m1, m3);
+    e0 = x86.sha1nexte(sha, e0, m0);
+    e1 = abcd;
+    m1 = x86.sha1msg2(sha, m1, m0);
+    abcd = x86.sha1rnds4(sha, abcd, e0, 2, _);
+    m3 = x86.sha1msg1(sha, m3, m0);
+    m2 = u32x4.xor(m2, m0);
+    e1 = x86.sha1nexte(sha, e1, m1);
+    e0 = abcd;
+    m2 = x86.sha1msg2(sha, m2, m1);
+    abcd = x86.sha1rnds4(sha, abcd, e1, 2, _);
+    m0 = x86.sha1msg1(sha, m0, m1);
+    m3 = u32x4.xor(m3, m1);
+    e0 = x86.sha1nexte(sha, e0, m2);
+    e1 = abcd;
+    m3 = x86.sha1msg2(sha, m3, m2);
+    abcd = x86.sha1rnds4(sha, abcd, e0, 2, _);
+    m1 = x86.sha1msg1(sha, m1, m2);
+    m0 = u32x4.xor(m0, m2);
+    e1 = x86.sha1nexte(sha, e1, m3);
+    e0 = abcd;
+    m0 = x86.sha1msg2(sha, m0, m3);
+    abcd = x86.sha1rnds4(sha, abcd, e1, 3, _);
+    m2 = x86.sha1msg1(sha, m2, m3);
+    m1 = u32x4.xor(m1, m3);
+    e0 = x86.sha1nexte(sha, e0, m0);
+    e1 = abcd;
+    m1 = x86.sha1msg2(sha, m1, m0);
+    abcd = x86.sha1rnds4(sha, abcd, e0, 3, _);
+    m3 = x86.sha1msg1(sha, m3, m0);
+    m2 = u32x4.xor(m2, m0);
+    e1 = x86.sha1nexte(sha, e1, m1);
+    e0 = abcd;
+    m2 = x86.sha1msg2(sha, m2, m1);
+    abcd = x86.sha1rnds4(sha, abcd, e1, 3, _);
+    m3 = u32x4.xor(m3, m1);
+    e0 = x86.sha1nexte(sha, e0, m2);
+    e1 = abcd;
+    m3 = x86.sha1msg2(sha, m3, m2);
+    abcd = x86.sha1rnds4(sha, abcd, e0, 3, _);
+    e1 = x86.sha1nexte(sha, e1, m3);
+    e0 = abcd;
+    abcd = x86.sha1rnds4(sha, abcd, e1, 3, _);
+    // END GENERATED ni-rounds
+    let e0 = x86.sha1nexte(sha, e0, e_save);
+    let abcd = u32x4.wrapping_add(abcd, abcd_save);
+    (u32x4.lane(abcd, 3, _), u32x4.lane(abcd, 2, _), u32x4.lane(abcd, 1, _), u32x4.lane(abcd, 0, _),
+     u32x4.lane(e0, 3, _))
+}
+
+/// One block with the SHA instructions when the CPU has them.
+fn compress_any(
+    fast: Option<cpu.Sha>,
+    state: Words,
+    data: &Bytes,
+    n: i64,
+    at: i64,
+    erased q: { 0 <= at && at + 64 <= n && n == Bytes.len(data) },
+) -> Words ! {} {
+    match fast {
+        Option.Some(sha) => compress_ni(&sha, state, data, n, at, _),
+        Option.None => compress(state, data, n, at, _),
+    }
+}
+
 /// An empty hash.
 pub fn new() -> Hasher ! {alloc, panic} {
     Hasher {
@@ -380,6 +544,7 @@ pub fn new() -> Hasher ! {alloc, panic} {
 /// Hash `data` after everything given so far.
 pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc, panic} {
     let Hasher { state, block, length } = hasher;
+    let fast = cpu.sha();
     let mut state = state;
     let mut block = block;
     let n = Bytes.len(data);
@@ -392,12 +557,12 @@ pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc, panic} {
         i = i + 1;
     }
     if Bytes.len(&block) == 64 {
-        state = compress(state, &block, 64, 0, _);
+        state = compress_any(fast, state, &block, 64, 0, _);
         drop(block);
         block = Bytes.with_capacity(64);
     }
     while n - i >= 64 invariant { 0 <= i && i <= n } {
-        state = compress(state, data, n, i, _);
+        state = compress_any(fast, state, data, n, i, _);
         i = i + 64;
     }
     while i < n invariant { 0 <= i } {

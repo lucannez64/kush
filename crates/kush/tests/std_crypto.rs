@@ -377,3 +377,48 @@ fn random_bytes_come_from_the_kernel() {
     );
     assert_eq!(output, lines(&["32", "32", "0", "0", "22"]));
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn sha_instructions_and_portable_code_give_the_same_digests() {
+    // SHA-NI-STD: native builds use the CPU's SHA instructions when it has
+    // them; KUSH_CPU_DISABLE=sha forces the proved portable code. Both, and
+    // the evaluator, must agree on inputs crossing every padding boundary.
+    let source = format!(
+        "{PRELUDE}\n{}",
+        r#"
+        fn main() -> i64 ! {io, alloc, panic} {
+            let sizes: Vec<i64> = [0, 1, 55, 56, 63, 64, 65, 119, 128, 1000, 4096];
+            let mut i = 0;
+            while i < Vec.len(&sizes) {
+                let data = repeat(97, Vec.get(&sizes, i));
+                line(hex(&sha256.digest(&data)));
+                line(hex(&sha1.digest(&data)));
+                drop(data);
+                i = i + 1;
+            }
+            0
+        }"#
+    );
+    let program = check(&source).unwrap_or_else(|error| panic!("{error:?}"));
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let binary = scratch.path().join("both");
+    kush::native::build(&program, &binary).unwrap();
+    let run = |disable: Option<&str>| {
+        let mut command = std::process::Command::new(&binary);
+        command.env_remove("KUSH_CPU_DISABLE");
+        if let Some(disable) = disable {
+            command.env("KUSH_CPU_DISABLE", disable);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let fast = run(None);
+    let portable = run(Some("sha"));
+    assert_eq!(fast, portable);
+    assert_eq!(reference(&source), portable);
+    // 1000 'a': known digests.
+    assert!(portable.contains("41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"));
+    assert!(portable.contains("291e9a6c66994949b57ba5e650361e98fc36b1ba"));
+}
