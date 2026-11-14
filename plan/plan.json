@@ -7318,6 +7318,11 @@
           "time": "2026-11-14 17:02:26",
           "who": "agent",
           "text": "Full suite on the second PC: 1964 passed, 3 skipped (214 s)."
+        },
+        {
+          "time": "2026-11-14 17:51:27",
+          "who": "agent",
+          "text": "Speed and proofs: hashes fully unrolled with no allocation per block (SHA-256 6.5x, SHA-1 12x on Cranelift; LLVM 280 / 790 MB/s); every bounds, shift and overflow check in the crypto modules proved (needed SHIFT-ELIDE). See docs/std-crypto.md."
         }
       ]
     },
@@ -7415,6 +7420,34 @@
       ],
       "status": "todo",
       "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SHIFT-ELIDE",
+      "title": "Prove shift amounts and drop their run-time checks",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Prove shift amounts in 0..bits like OVERFLOW-ELIDE (constants against no facts, others from preconditions and loop conditions); proved shifts need no panic and become IntOp::UncheckedShift in both backends. Tests: crates/kush/tests/shift_elision.rs. Needed for proof-complete std crypto.",
+      "commit": "150f2ac",
+      "log": [
+        {
+          "time": "2026-11-14 17:54:38",
+          "who": "agent",
+          "text": "done 150f2ac"
+        }
+      ]
+    },
+    {
+      "id": "CHECK-LOOP-PERF",
+      "title": "Checker time superlinear in while-body length",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Checking time grows much faster than linearly with the number of statements in a while body. Measured 2026-11-14 on a SHA-256 compress loop body: 16 constant reads 65 ms, +4 unrolled rounds (12 statements) 1.3 s, +8 rounds over 60 s, 16 schedule statements alone 27 s; the same rounds as straight-line code check in about 0.1 s. Find the superlinear step (fact versions, loop fixpoint, branch-join bookkeeping) and make it linear.",
       "commit": null,
       "log": []
     }
