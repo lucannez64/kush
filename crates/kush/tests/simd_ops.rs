@@ -292,3 +292,36 @@ fn the_native_backend_emits_vector_instructions() {
         assert!(clif.contains(instruction), "no {instruction:?} in:\n{clif}");
     }
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn the_llvm_backend_emits_vector_operations() {
+    // SIMD-LLVM: the translator turns the vector instructions into LLVM
+    // vector IR (when `clang` is available, as for the other LLVM tests).
+    if std::process::Command::new(std::env::var("KUSH_CLANG").unwrap_or_else(|_| "clang".into()))
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let program = check(
+        "use std.simd.u32x4;
+         use std.simd.u8x16;
+         fn main() -> i64 ! {} {
+             let a = u32x4.new(1, 2, 3, 4);
+             let b = u32x4.wrapping_add(a, u32x4.xor(a, u32x4.splat(9)));
+             let c = u32x4.shuffle(u32x4.shl(b, 3, _), 3, 2, 1, 0, _);
+             let d = u8x16.align_right(u8x16.from_bits(u32x4.to_bits(c)), u8x16.zero(), 4, _);
+             let e = u32x4.eq_lanes(u32x4.from_bits(u8x16.to_bits(d)), c);
+             Int.convert(u32x4.lane(e, 0, _) & 7)
+         }",
+    )
+    .unwrap();
+    let ir = kush::native::emit_llvm_ir(&program, kush::native::CodegenOptions::release_llvm()).unwrap();
+    for operation in [
+        "add <4 x i32>", "xor <4 x i32>", "shl <4 x i32>", "icmp eq <4 x i32>", "shufflevector <16 x i8>",
+    ] {
+        assert!(ir.contains(operation), "no {operation:?} in the LLVM IR");
+    }
+}

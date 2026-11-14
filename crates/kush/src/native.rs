@@ -8291,10 +8291,9 @@ impl Generator<'_, '_> {
         }])
     }
     fn function_call(&mut self, index: usize, mut values: Words) -> Words {
-        // SIMD-NATIVE: vector instructions for recognised std.simd functions
-        // (Cranelift only until the LLVM translator knows vector types).
-        if self.codegen.backend == Backend::Cranelift
-            && let Some(Some((ty, op))) = self.program.simd_functions.get(index).cloned()
+        // SIMD-NATIVE: vector instructions for recognised std.simd functions,
+        // on both backends (the LLVM translator knows vector types, SIMD-LLVM).
+        if let Some(Some((ty, op))) = self.program.simd_functions.get(index).cloned()
             && let Some(words) = self.simd_lowering(&ty, &op, &values)
         {
             return words;

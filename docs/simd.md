@@ -129,11 +129,18 @@ shuffle with a run-time index, stays a call to the Kush body. Cranelift's
 inliner then removes the call boundary. On the x86-64 baseline (no SSSE3)
 Cranelift lowers a general byte shuffle to the libcall
 `__cranelift_x86_pshufb`, which the runtime implements in software;
-SIMD-CRANELIFT-FEATURES will let it use the instruction. The LLVM backend
-keeps the Kush bodies until its translator knows vector types (SIMD-LLVM).
+SIMD-CRANELIFT-FEATURES will let it use the instruction. The same lowering
+runs on the LLVM backend (SIMD-LLVM): the translator prints the 128-bit
+types as `<16 x i8>` .. `<2 x i64>` and maps `scalar_to_vector`,
+`insertlane`, `extractlane`, vector `bitcast`, lane-wise arithmetic and
+logic, shifts by a splatted amount (reduced modulo the lane width, as in
+Cranelift), `icmp` (sign-extended to a lane mask) and `shuffle`
+(`shufflevector`). LLVM then removes the packing between consecutive vector
+operations, so values stay in vector registers.
 `native::build_with_clif` returns the Cranelift IR of a build, for tests.
 Tests: `crates/kush/tests/simd_ops.rs` (every lane against the evaluator,
-and the vector instructions in the IR).
+the vector instructions in the Cranelift IR and in the LLVM IR); run them
+with `KUSH_BACKEND=llvm-release` to check every lane on LLVM too.
 
 ## CPU features as capabilities [SIMD-CPU]
 

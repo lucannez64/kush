@@ -7558,10 +7558,16 @@
       "deps": [
         "SIMD-NATIVE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Translate the Cranelift vector values and instructions the generator uses to LLVM vector IR; intrinsic calls to llvm.x86.* instead of runtime calls.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-14 18:56:19",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "SIMD-CPU",

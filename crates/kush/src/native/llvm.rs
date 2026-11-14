@@ -781,7 +781,32 @@ fn partition(functions: &[(String, String)], wanted: usize) -> Partitioning {
 
 type Tx<T> = std::result::Result<T, String>;
 
+/// Lane count and LLVM lane type of a 128-bit vector type.
+fn lanes(ty: ir::Type) -> Option<(u32, &'static str)> {
+    match ty {
+        types::I8X16 => Some((16, "i8")),
+        types::I16X8 => Some((8, "i16")),
+        types::I32X4 => Some((4, "i32")),
+        types::I64X2 => Some((2, "i64")),
+        _ => None,
+    }
+}
+/// A vector constant with `value` in every lane.
+fn splat_constant(ty: ir::Type, value: &str) -> Option<String> {
+    let (count, lane) = lanes(ty)?;
+    let items = (0..count).map(|_| format!("{lane} {value}")).collect::<Vec<_>>();
+    Some(format!("<{}>", items.join(", ")))
+}
+
 fn ty_name(ty: ir::Type) -> Tx<&'static str> {
+    // SIMD-LLVM: the 128-bit vectors of std.simd's native lowering.
+    match ty {
+        types::I8X16 => return Ok("<16 x i8>"),
+        types::I16X8 => return Ok("<8 x i16>"),
+        types::I32X4 => return Ok("<4 x i32>"),
+        types::I64X2 => return Ok("<2 x i64>"),
+        _ => {}
+    }
     Ty::of(ty)
         .map(Ty::name)
         .ok_or_else(|| format!("unsupported value type {ty}"))
@@ -1503,6 +1528,36 @@ impl<'a> Translator<'a> {
                 Opcode::Udiv | Opcode::Sdiv | Opcode::Urem | Opcode::Srem => {
                     self.division(inst, opcode, args)?;
                 }
+                Opcode::Ishl | Opcode::Ushr | Opcode::Sshr if lanes(self.ty(args[0])).is_some() => {
+                    // A vector shifted by a scalar: Cranelift reduces the
+                    // amount modulo the lane width, then every lane shifts.
+                    let result = dfg.first_result(inst);
+                    let (name, ty) = (self.name(result), self.tyn(result)?);
+                    let (count, lane) = lanes(self.ty(args[0])).ok_or("vector shift")?;
+                    let bits = lane.trim_start_matches('i').parse::<u32>().map_err(|e| e.to_string())?;
+                    let from = self.tyn(args[1])?;
+                    let mut amount = self.op(args[1]);
+                    if from != lane {
+                        let temp = self.temp();
+                        self.line(format!("{temp} = trunc {from} {amount} to {lane}"));
+                        amount = temp;
+                    }
+                    let masked = self.temp();
+                    self.line(format!("{masked} = and {lane} {amount}, {}", bits - 1));
+                    let single = self.temp();
+                    self.line(format!("{single} = insertelement {ty} poison, {lane} {masked}, i32 0"));
+                    let splat = self.temp();
+                    self.line(format!(
+                        "{splat} = shufflevector {ty} {single}, {ty} poison, <{count} x i32> zeroinitializer"
+                    ));
+                    let left = self.op(args[0]);
+                    let operation = match opcode {
+                        Opcode::Ishl => "shl",
+                        Opcode::Ushr => "lshr",
+                        _ => "ashr",
+                    };
+                    self.line(format!("{name} = {operation} {ty} {left}, {splat}"));
+                }
                 Opcode::Ishl | Opcode::Ushr | Opcode::Sshr => {
                     let result = dfg.first_result(inst);
                     let (name, ty) = (self.name(result), self.tyn(result)?);
@@ -1563,7 +1618,14 @@ impl<'a> Translator<'a> {
                     Opcode::Ireduce => {
                         self.line(format!("{name} = trunc {from} {operand} to {ty}"));
                     }
-                    Opcode::Bnot => self.line(format!("{name} = xor {ty} {operand}, -1")),
+                    Opcode::Bnot => match splat_constant(self.ty(arg), "-1") {
+                        Some(ones) => self.line(format!("{name} = xor {ty} {operand}, {ones}")),
+                        None => self.line(format!("{name} = xor {ty} {operand}, -1")),
+                    },
+                    // The scalar in lane 0, the other lanes zero.
+                    Opcode::ScalarToVector => self.line(format!(
+                        "{name} = insertelement {ty} zeroinitializer, {from} {operand}, i32 0"
+                    )),
                     Opcode::Ineg => self.line(format!("{name} = sub {ty} 0, {operand}")),
                     Opcode::Bmask => {
                         let flag = self.truth(arg)?;
@@ -1610,6 +1672,37 @@ impl<'a> Translator<'a> {
                     _ => return Err(format!("unsupported instruction {opcode}")),
                 }
             }
+            InstructionData::BinaryImm8 { arg, imm, .. } if opcode == Opcode::Extractlane => {
+                let result = dfg.first_result(inst);
+                let (name, from) = (self.name(result), self.tyn(arg)?);
+                let operand = self.op(arg);
+                self.line(format!("{name} = extractelement {from} {operand}, i32 {}", imm));
+            }
+            InstructionData::TernaryImm8 { args, imm, .. } if opcode == Opcode::Insertlane => {
+                let result = dfg.first_result(inst);
+                let (name, ty) = (self.name(result), self.tyn(result)?);
+                let (vector, lane) = (self.op(args[0]), self.op(args[1]));
+                let lane_ty = self.tyn(args[1])?;
+                self.line(format!("{name} = insertelement {ty} {vector}, {lane_ty} {lane}, i32 {}", imm));
+            }
+            InstructionData::Shuffle { args, imm, .. } => {
+                let result = dfg.first_result(inst);
+                let (name, ty) = (self.name(result), self.tyn(result)?);
+                let mask = dfg
+                    .immediates
+                    .get(imm)
+                    .ok_or("shuffle mask")?
+                    .as_slice()
+                    .iter()
+                    .map(|byte| format!("i32 {byte}"))
+                    .collect::<Vec<_>>();
+                let (a, b) = (self.op(args[0]), self.op(args[1]));
+                self.line(format!(
+                    "{name} = shufflevector {ty} {a}, {ty} {b}, <{} x i32> <{}>",
+                    mask.len(),
+                    mask.join(", ")
+                ));
+            }
             InstructionData::LoadNoOffset { arg, .. } if opcode == Opcode::Bitcast => {
                 let result = dfg.first_result(inst);
                 let (name, ty) = (self.name(result), self.tyn(result)?);
@@ -1633,7 +1726,13 @@ impl<'a> Translator<'a> {
                 let (left, right) = (self.op(args[0]), self.op(args[1]));
                 let flag = self.temp();
                 self.line(format!("{flag} = icmp {predicate} {ty} {left}, {right}"));
-                self.define_flag(dfg.first_result(inst), flag)?;
+                if let Some((count, _)) = lanes(self.ty(args[0])) {
+                    // A vector comparison is a lane mask: all ones or zero.
+                    let name = self.name(dfg.first_result(inst));
+                    self.line(format!("{name} = sext <{count} x i1> {flag} to {ty}"));
+                } else {
+                    self.define_flag(dfg.first_result(inst), flag)?;
+                }
             }
             InstructionData::FloatCompare { args, cond, .. } => {
                 let predicate = match cond {
