@@ -7446,10 +7446,21 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "Checking time grows much faster than linearly with the number of statements in a while body. Measured 2026-11-14 on a SHA-256 compress loop body: 16 constant reads 65 ms, +4 unrolled rounds (12 statements) 1.3 s, +8 rounds over 60 s, 16 schedule statements alone 27 s; the same rounds as straight-line code check in about 0.1 s. Find the superlinear step (fact versions, loop fixpoint, branch-join bookkeeping) and make it linear.",
-      "commit": null,
-      "log": []
+      "commit": "4ee1394",
+      "log": [
+        {
+          "time": "2026-11-14 18:07:22",
+          "who": "agent",
+          "text": "done 4ee1394"
+        },
+        {
+          "time": "2026-11-14 18:07:22",
+          "who": "agent",
+          "text": "Cause: bump_assigned re-followed every binding's assigned values at every call argument. Memoized per pass; 64 statements 2066 -> 14 ms, SHA-256 round loop >120 s -> 91 ms. Full suite on the second PC: 1969 passed."
+        }
+      ]
     }
   ]
 }
