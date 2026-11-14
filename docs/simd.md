@@ -217,6 +217,22 @@ byte shuffles already and measure the same either way. Tests:
 `crates/kush/tests/simd_ops.rs` builds every lane-model program a second
 time with host features, and checks for the instruction with `objdump`.
 
+### Implementation (SIMD-256, 2026-11-14)
+
+`std.simd` also declares `u8x32`, `u16x16`, `u32x8`, `u64x4` and the signed
+forms: four private words, the same construction, lane access, equality,
+reinterpretation, lane-wise arithmetic, logic, shifts, `eq_lanes`,
+`swap_bytes` and loads/pushes (32 bytes), plus `low`, `high` and
+`from_halves` to move between a 256-bit vector and its 128-bit halves.
+They have no lane permutations of their own: AVX2 shuffles also work
+within 128-bit halves, so permutations go through the halves and the
+128-bit `shuffle`/`shuffle2`. Native lowering runs each lane-wise operation
+once per 128-bit half on both backends (Cranelift has no 256-bit vectors);
+LLVM may merge the halves into AVX2 instructions with `--target-cpu native`.
+No AVX2-only intrinsic exists yet, so `cpu.Avx2` has no consumer: the token
+is ready for one. Tests: the lane model of `crates/kush/tests/simd_ops.rs`
+covers the eight wide types too.
+
 ## Lowering
 
 All code is lowered once into Cranelift IR; the LLVM backend translates

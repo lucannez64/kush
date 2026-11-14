@@ -12729,15 +12729,61 @@ impl Generator<'_, '_> {
         if ty == "x86" {
             return self.x86_intrinsic(op, values);
         }
-        let (lanes, size) = match ty {
-            "u8x16" | "i8x16" => (I8X16, 1usize),
-            "u16x8" | "i16x8" => (I16X8, 2),
-            "u32x4" | "i32x4" => (I32X4, 4),
-            "u64x2" | "i64x2" => (I64X2, 8),
+        // 256-bit types (SIMD-256) are two 128-bit halves: each lane-wise
+        // operation runs once per half.
+        let (lanes, size, halves) = match ty {
+            "u8x16" | "i8x16" => (I8X16, 1usize, 1usize),
+            "u16x8" | "i16x8" => (I16X8, 2, 1),
+            "u32x4" | "i32x4" => (I32X4, 4, 1),
+            "u64x2" | "i64x2" => (I64X2, 8, 1),
+            "u8x32" | "i8x32" => (I8X16, 1, 2),
+            "u16x16" | "i16x16" => (I16X8, 2, 2),
+            "u32x8" | "i32x8" => (I32X4, 4, 2),
+            "u64x4" | "i64x4" => (I64X2, 8, 2),
             _ => return None,
         };
         let count = 16 / size;
         let signed = ty.starts_with('i');
+        let words = 2 * halves;
+        // Lane-wise operations, per 128-bit half.
+        let lane_wise = match op {
+            "and" | "or" | "xor" | "wrapping_add" | "wrapping_sub" | "eq_lanes" => {
+                (values.len() == 2 * words).then_some(2)
+            }
+            "not" => (values.len() == words).then_some(1),
+            "shl" | "shr" => (values.len() == words + 1).then_some(1),
+            _ => None,
+        };
+        if let Some(operands) = lane_wise {
+            let mut result = Vec::with_capacity(words);
+            for half in 0..halves {
+                let a = self.simd_pack(values[2 * half], values[2 * half + 1], lanes);
+                let vector = if operands == 2 {
+                    let b = self.simd_pack(values[words + 2 * half], values[words + 2 * half + 1], lanes);
+                    match op {
+                        "and" => self.builder.ins().band(a, b),
+                        "or" => self.builder.ins().bor(a, b),
+                        "xor" => self.builder.ins().bxor(a, b),
+                        "wrapping_add" => self.builder.ins().iadd(a, b),
+                        "wrapping_sub" => self.builder.ins().isub(a, b),
+                        _ => self.builder.ins().icmp(IntCC::Equal, a, b),
+                    }
+                } else {
+                    // The amount was proved below the lane width.
+                    match (op, signed) {
+                        ("not", _) => self.builder.ins().bnot(a),
+                        ("shl", _) => self.builder.ins().ishl(a, values[words]),
+                        (_, true) => self.builder.ins().sshr(a, values[words]),
+                        _ => self.builder.ins().ushr(a, values[words]),
+                    }
+                };
+                result.extend(self.simd_unpack(vector));
+            }
+            return Some(result);
+        }
+        if halves != 1 {
+            return None;
+        }
         // Byte mask for a lane permutation: output lane k is input lane index[k].
         let lane_bytes = |index: &[i64]| -> Option<Vec<u8>> {
             let mut bytes = Vec::with_capacity(16);
@@ -12753,31 +12799,6 @@ impl Generator<'_, '_> {
             Some(bytes)
         };
         let result = match op {
-            "and" | "or" | "xor" | "wrapping_add" | "wrapping_sub" | "eq_lanes" if values.len() == 4 => {
-                let a = self.simd_pack(values[0], values[1], lanes);
-                let b = self.simd_pack(values[2], values[3], lanes);
-                match op {
-                    "and" => self.builder.ins().band(a, b),
-                    "or" => self.builder.ins().bor(a, b),
-                    "xor" => self.builder.ins().bxor(a, b),
-                    "wrapping_add" => self.builder.ins().iadd(a, b),
-                    "wrapping_sub" => self.builder.ins().isub(a, b),
-                    _ => self.builder.ins().icmp(IntCC::Equal, a, b),
-                }
-            }
-            "not" if values.len() == 2 => {
-                let a = self.simd_pack(values[0], values[1], lanes);
-                self.builder.ins().bnot(a)
-            }
-            // The amount was proved below the lane width.
-            "shl" | "shr" if values.len() == 3 => {
-                let a = self.simd_pack(values[0], values[1], lanes);
-                match (op, signed) {
-                    ("shl", _) => self.builder.ins().ishl(a, values[2]),
-                    (_, true) => self.builder.ins().sshr(a, values[2]),
-                    _ => self.builder.ins().ushr(a, values[2]),
-                }
-            }
             "shuffle" if values.len() == 2 + count => {
                 let index = values[2..]
                     .iter()

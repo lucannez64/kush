@@ -9,22 +9,39 @@ struct Kind {
     name: &'static str,
     bits: u32,
     signed: bool,
+    width: u32,
 }
 
-const KINDS: [Kind; 8] = [
-    Kind { name: "u8x16", bits: 8, signed: false },
-    Kind { name: "u16x8", bits: 16, signed: false },
-    Kind { name: "u32x4", bits: 32, signed: false },
-    Kind { name: "u64x2", bits: 64, signed: false },
-    Kind { name: "i8x16", bits: 8, signed: true },
-    Kind { name: "i16x8", bits: 16, signed: true },
-    Kind { name: "i32x4", bits: 32, signed: true },
-    Kind { name: "i64x2", bits: 64, signed: true },
+const fn kind(name: &'static str, bits: u32, signed: bool, width: u32) -> Kind {
+    Kind { name, bits, signed, width }
+}
+
+const KINDS: [Kind; 16] = [
+    kind("u8x16", 8, false, 128),
+    kind("u16x8", 16, false, 128),
+    kind("u32x4", 32, false, 128),
+    kind("u64x2", 64, false, 128),
+    kind("i8x16", 8, true, 128),
+    kind("i16x8", 16, true, 128),
+    kind("i32x4", 32, true, 128),
+    kind("i64x2", 64, true, 128),
+    // SIMD-256: four words, lane-wise operations per 128-bit half.
+    kind("u8x32", 8, false, 256),
+    kind("u16x16", 16, false, 256),
+    kind("u32x8", 32, false, 256),
+    kind("u64x4", 64, false, 256),
+    kind("i8x32", 8, true, 256),
+    kind("i16x16", 16, true, 256),
+    kind("i32x8", 32, true, 256),
+    kind("i64x4", 64, true, 256),
 ];
 
 impl Kind {
     fn count(self) -> usize {
-        (128 / self.bits) as usize
+        (self.width / self.bits) as usize
+    }
+    fn bytes(self) -> usize {
+        (self.width / 8) as usize
     }
     fn mask(self) -> u128 {
         if self.bits == 64 { u64::MAX as u128 } else { (1u128 << self.bits) - 1 }
@@ -156,7 +173,9 @@ fn check_kind(kind: Kind, seed: u64) {
     let all_ones = kind.value(kind.mask());
     let eq = (0..n).map(|i| if a[i] == c[i] { all_ones } else { 0 }).collect();
     show(format!("{t}.eq_lanes(a, c)"), eq, &mut body);
+    let wide = kind.width == 256;
     let reversed: Vec<usize> = (0..n).rev().collect();
+    if !wide {
     show(
         format!("{t}.shuffle(a, {}, _)", reversed.iter().map(usize::to_string).collect::<Vec<_>>().join(", ")),
         reversed.iter().map(|&i| a[i]).collect(),
@@ -169,10 +188,11 @@ fn check_kind(kind: Kind, seed: u64) {
         interleave.iter().map(|&i| both[i]).collect(),
         &mut body,
     );
+    }
     let a_le = kind.bytes_of_lanes(&a, false);
     if kind.bits > 8 {
         show(format!("{t}.swap_bytes(a)"), kind.lanes_of_bytes(&a_le, true), &mut body);
-    } else {
+    } else if !wide {
         let b_le = kind.bytes_of_lanes(&b, false);
         for k in [0usize, 5, 16] {
             let joined: Vec<u8> = b_le.iter().chain(a_le.iter()).copied().collect();
@@ -183,9 +203,10 @@ fn check_kind(kind: Kind, seed: u64) {
     let mut bytes = a_le.clone();
     bytes.extend([7, 8, 9]);
     bytes.extend(kind.bytes_of_lanes(&b, true));
+    let size = kind.bytes();
     show(format!("{t}.load_le(&data, len, 0, _)"), a.clone(), &mut body);
-    show(format!("{t}.load_le(&data, len, 3, _)"), kind.lanes_of_bytes(&bytes[3..19], false), &mut body);
-    show(format!("{t}.load_be(&data, len, 19, _)"), b.clone(), &mut body);
+    show(format!("{t}.load_le(&data, len, 3, _)"), kind.lanes_of_bytes(&bytes[3..3 + size], false), &mut body);
+    show(format!("{t}.load_be(&data, len, {}, _)", size + 3), b.clone(), &mut body);
     let source = format!(
         "use std.simd.{t};
          fn show(v: {t}) -> Unit ! {{io, panic}} {{
@@ -195,13 +216,13 @@ fn check_kind(kind: Kind, seed: u64) {
              let a = {t}.new({});
              let b = {t}.new({});
              let c = {t}.new({});
-             let mut data = {t}.push_le(Bytes.with_capacity(35), a);
+             let mut data = {t}.push_le(Bytes.with_capacity({total}), a);
              data = Bytes.push(data, 7);
              data = Bytes.push(data, 8);
              data = Bytes.push(data, 9);
              data = {t}.push_be(data, b);
              let len = Bytes.len(&data);
-             if len < 35 {{ drop(data); return 1; }}
+             if len < {total} {{ drop(data); return 1; }}
              {body}
              drop(data);
              0
@@ -210,6 +231,7 @@ fn check_kind(kind: Kind, seed: u64) {
         list(&a),
         list(&b),
         list(&c),
+        total = 2 * kind.bytes() + 3,
     );
     let want: String = expected.iter().flatten().map(|v| format!("{v}\n")).collect();
     let got = run(&source);
@@ -229,7 +251,7 @@ fn check_kind(kind: Kind, seed: u64) {
 
 #[test]
 fn unsigned_operations_match_the_lane_model() {
-    for kind in KINDS.iter().filter(|kind| !kind.signed) {
+    for kind in KINDS.iter().filter(|kind| !kind.signed && kind.width == 128) {
         for seed in [1, 2] {
             check_kind(*kind, seed);
         }
@@ -238,7 +260,7 @@ fn unsigned_operations_match_the_lane_model() {
 
 #[test]
 fn signed_operations_match_the_lane_model() {
-    for kind in KINDS.iter().filter(|kind| kind.signed) {
+    for kind in KINDS.iter().filter(|kind| kind.signed && kind.width == 128) {
         for seed in [3, 4] {
             check_kind(*kind, seed);
         }
@@ -342,7 +364,9 @@ fn host_features_turn_byte_shuffles_into_instructions() {
     // instruction. Checked with objdump when it is installed.
     let ssse3 = std::fs::read_to_string("/proc/cpuinfo").unwrap().contains(" ssse3");
     let objdump = std::process::Command::new("objdump").arg("--version").output().is_ok();
-    if !ssse3 || !objdump {
+    // A Cranelift property: KUSH_BACKEND=llvm would build with LLVM instead.
+    let cranelift = std::env::var("KUSH_BACKEND").is_err();
+    if !ssse3 || !objdump || !cranelift {
         return;
     }
     let program = check(
@@ -371,4 +395,47 @@ fn host_features_turn_byte_shuffles_into_instructions() {
             .count()
     };
     assert!(count(true) > count(false), "no pshufb instruction with host features");
+}
+
+#[test]
+fn wide_operations_match_the_lane_model() {
+    for kind in KINDS.iter().filter(|kind| kind.width == 256) {
+        check_kind(*kind, 5);
+    }
+}
+
+#[test]
+fn wide_vectors_split_into_halves() {
+    let output = run(
+        "use std.simd.u32x8;
+         use std.simd.u32x4;
+         fn main() -> i64 ! {io, panic} {
+             let v = u32x8.new(1, 2, 3, 4, 5, 6, 7, 8);
+             print_int(u32x4.lane(u32x8.low(v), 3, _));
+             print_int(u32x4.lane(u32x8.high(v), 0, _));
+             let w = u32x8.from_halves(u32x8.high(v), u32x8.low(v));
+             print_int(u32x8.lane(w, 0, _));
+             print_int(u32x8.lane(w, 7, _));
+             0
+         }",
+    );
+    assert_eq!(output, "4\n5\n5\n4\n");
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn wide_lane_wise_operations_become_two_vector_instructions() {
+    let program = check(
+        "use std.simd.u32x8;
+         fn main() -> i64 ! {} {
+             let a = u32x8.splat(3);
+             let b = u32x8.wrapping_add(a, u32x8.new(1, 2, 3, 4, 5, 6, 7, 8));
+             Int.convert(u32x8.lane(b, 7, _) & 15)
+         }",
+    )
+    .unwrap();
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let clif = kush::native::build_with_clif(&program, &scratch.path().join("wide")).unwrap();
+    assert!(clif.matches("= iadd v").filter(|_| true).count() >= 2, "{clif}");
+    assert!(clif.contains("bitcast.i32x4"), "{clif}");
 }
