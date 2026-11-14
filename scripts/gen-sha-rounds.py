@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Generate the unrolled round bodies of std.sha256 and std.sha1.
 
-Both are fully unrolled, with no loop: the checker's time grows quickly with
-the length of a loop body, and straight-line code is also the fastest form.
+Both are fully unrolled, with no loop: straight-line code is the fastest form.
 The rounds are written in the classic unrolled form: each round updates two
 working variables in place and the next round uses the variables in rotated
 roles, and the 16-word message schedule is a ring updated in place. No
@@ -43,8 +42,7 @@ K256 = [
 ]
 
 def sha256_rounds(indent="    "):
-    # Fully unrolled, with the round constants as literals: no loop (the
-    # checker's time grows fast with the length of a loop body), no table.
+    # Fully unrolled, with the round constants as literals: no loop, no table.
     out = []
     names = list("abcdefgh")
     for t in range(64):

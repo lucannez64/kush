@@ -38596,6 +38596,13 @@ impl Checker<'_, '_> {
             resolution: &'r Resolution,
             values: BTreeMap<BindingId, Vec<&'e ast::Expr>>,
             active: BTreeSet<BindingId>,
+            /// Bindings whose possible values were already followed in this
+            /// pass (CHECK-LOOP-PERF). Every write reached through `invoke`
+            /// is recorded with an unknown direction, so following a binding
+            /// again only adds duplicates; without this, a body that passes
+            /// reassigned locals to calls re-walked all their assignments at
+            /// every call, cubic in the body's length.
+            expanded: BTreeSet<BindingId>,
             invoked: BTreeSet<BindingId>,
             handlers: Vec<&'e ast::Expr>,
             may_execute: bool,
@@ -38613,15 +38620,7 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Name(_) => {
                     if let Some(id) = calls.resolution.reference(value.span) {
-                        calls.invoked.insert(id);
-                        if calls.active.insert(id) {
-                            if let Some(values) = calls.values.get(&id).cloned() {
-                                for value in values {
-                                    invoke(value, out, calls);
-                                }
-                            }
-                            calls.active.remove(&id);
-                        }
+                        follow(id, out, calls);
                     }
                 }
                 ast::ExprKind::Block(body) => {
@@ -38673,18 +38672,25 @@ impl Checker<'_, '_> {
                     let mut references = BTreeSet::new();
                     collect_expr_refs(calls.resolution, value, &mut references);
                     for id in references {
-                        calls.invoked.insert(id);
-                        if calls.active.insert(id) {
-                            if let Some(values) = calls.values.get(&id).cloned() {
-                                for value in values {
-                                    invoke(value, out, calls);
-                                }
-                            }
-                            calls.active.remove(&id);
-                        }
+                        follow(id, out, calls);
                     }
                 }
             }
+        }
+        /// Invoke every value `id` may hold, once per pass. A binding that is
+        /// active (being followed further up) is completed by that frame.
+        fn follow<'e>(id: BindingId, out: &mut Out<'e>, calls: &mut Calls<'e, '_>) {
+            calls.invoked.insert(id);
+            if calls.expanded.contains(&id) || !calls.active.insert(id) {
+                return;
+            }
+            if let Some(values) = calls.values.get(&id).cloned() {
+                for value in values {
+                    invoke(value, out, calls);
+                }
+            }
+            calls.active.remove(&id);
+            calls.expanded.insert(id);
         }
         fn effects<'e>(out: &mut Out<'e>, calls: &mut Calls<'e, '_>) {
             if calls.collecting {
@@ -38844,6 +38850,7 @@ impl Checker<'_, '_> {
             resolution: self.resolution,
             values: BTreeMap::new(),
             active: BTreeSet::new(),
+            expanded: BTreeSet::new(),
             invoked: BTreeSet::new(),
             handlers: Vec::new(),
             may_execute: false,

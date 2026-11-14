@@ -319,6 +319,44 @@ fn closure_writes_invalidate_while_loop_and_continue_headers() {
 }
 
 #[test]
+fn closure_writes_reached_twice_still_invalidate_loop_headers() {
+    // CHECK-LOOP-PERF: the loop pre-pass follows each binding's possible
+    // values once. A writer reached again (a second call, an alias, a
+    // callback argument) must still count, wherever it is first followed.
+    for loop_body in [
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; w(); w(); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; let v = w; v(); w(); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; Task.scope(fn() -> Unit ! {panic} { j = j; }); w(); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; let u = fn() -> Unit ! {panic} { w(); }; u(); u(); w(); j = j + 1; }",
+    ] {
+        rejects_stale_fact(&format!("let mut j = 0; let mut result = 0; {loop_body}"));
+    }
+}
+
+#[test]
+fn long_loop_bodies_check_in_linear_time() {
+    // CHECK-LOOP-PERF: passing reassigned locals to calls made the loop
+    // pre-pass re-walk every assignment at every call, cubic in the body's
+    // length (64 statements took 2 s, the unrolled SHA-256 rounds never
+    // finished). 400 such statements must check at once.
+    let statements = "a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, b), c); \
+                      b = Int.wrapping_add::<u32>(b, a); c = Int.wrapping_add::<u32>(c ^ a, b); "
+        .repeat(130);
+    let source = format!(
+        "fn f(x: u32) -> u32 ! {{}} {{
+            let mut a = x; let mut b = x ^ 1; let mut c = x ^ 2; let mut r = 0;
+            while r < 4 {{ {statements} r = r + 1; }}
+            a ^ b ^ c
+        }}
+        fn main() -> i64 ! {{}} {{ let v: u32 = f(7); Int.convert(v) }}"
+    );
+    let start = std::time::Instant::now();
+    check(&source).unwrap_or_else(|error| panic!("{error:?}"));
+    let elapsed = start.elapsed();
+    assert!(elapsed.as_secs() < 20, "checking took {elapsed:?}");
+}
+
+#[test]
 fn scope_callback_writes_invalidate_the_caller_and_enclosing_lambda() {
     rejects_stale_fact("Task.scope(fn() -> Unit ! {panic} { i = 20; });");
     rejects_stale_fact(
