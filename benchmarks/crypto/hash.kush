@@ -1,0 +1,74 @@
+// SHA-256, SHA-1 and HMAC-SHA256 throughput (WEB-CRYPTO speed work).
+// Prints one line per algorithm: name, MiB hashed, milliseconds, first byte
+// of the digest (so the work cannot be optimised away).
+use std.result.Result;
+use std.sha256;
+use std.sha1;
+use std.hmac;
+use std.base64;
+use std.ct;
+use std.option.Option;
+
+fn now() -> i64 ! {io} {
+    match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => 0 }
+}
+
+fn report(name: i64, mib: i64, start: i64, digest: &Bytes) -> Unit ! {io, panic} {
+    let elapsed = (now() - start) / 1000000;
+    print_i64(name);
+    print_i64(mib);
+    print_i64(elapsed);
+    print_i64(Bytes.get(digest, 0));
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let mib = 64;
+    let n = mib * 1048576;
+    let mut data = Bytes.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        data = Bytes.push(data, (i * 7 + 3) & 255);
+        i = i + 1;
+    }
+    let start = now();
+    let a = sha256.digest(&data);
+    report(256, mib, start, &a);
+    let start = now();
+    let b = sha1.digest(&data);
+    report(1, mib, start, &b);
+    // Many short messages: the per-call cost (HMAC of a 64-byte cookie).
+    let key = Bytes.from("0123456789abcdef0123456789abcdef");
+    let mut cookie = Bytes.with_capacity(64);
+    let mut j = 0;
+    while j < 64 {
+        cookie = Bytes.push(cookie, j);
+        j = j + 1;
+    }
+    let start = now();
+    let mut k = 0;
+    let mut acc = 0;
+    while k < 100000 {
+        let tag = hmac.sign(&key, &cookie);
+        acc = acc ^ Bytes.get(&tag, 0);
+        k = k + 1;
+    }
+    let elapsed = (now() - start) / 1000000;
+    print_i64(100000);
+    print_i64(elapsed);
+    print_i64(acc);
+    // Base64 of the 64 MiB buffer and back, compared in constant time.
+    let start = now();
+    let text = base64.encode(&data);
+    let encoded = (now() - start) / 1000000;
+    let start = now();
+    let same = match base64.decode(&text) {
+        Option.Some(back) => ct.equal(&back, &data),
+        Option.None => false,
+    };
+    let decoded = (now() - start) / 1000000;
+    print_i64(Bytes.len(&text));
+    print_i64(encoded);
+    print_i64(decoded);
+    print_i64(if same { 1 } else { 0 });
+    0
+}

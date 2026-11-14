@@ -19,8 +19,8 @@ fn padded(key: &Bytes, fill: i64) -> Bytes ! {alloc, panic} {
     let hashed = if Bytes.len(key) > 64 { sha256.digest(key) } else { Bytes.copy(key) };
     let mut out = Bytes.with_capacity(64);
     let mut i = 0;
-    while i < 64 {
-        let byte = if i < Bytes.len(&hashed) { Bytes.get(&hashed, i) } else { 0 };
+    while i < 64 invariant { 0 <= i } {
+        let byte = if i < Bytes.len(&hashed) { Bytes.at(&hashed, i, _) } else { 0 };
         out = Bytes.push(out, byte ^ fill);
         i = i + 1;
     }

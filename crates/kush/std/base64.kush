@@ -12,11 +12,14 @@ module std.base64;
 // length, or nonzero unused bits in the last character is `None`. So each
 // byte string has exactly one accepted encoding, which matters when decoded
 // tokens are compared or used as keys.
+//
+// Proofs: every byte read is `Bytes.at`, proved in bounds; every shift amount
+// and index sum is proved; `symbol` and `value` have empty effect rows.
 
 use std.option.Option;
 
 /// The character for a 6-bit value.
-fn symbol(value: i64, url: Bool) -> i64 ! {panic} {
+fn symbol(value: i64, url: Bool, erased q: { 0 <= value && value <= 63 }) -> i64 ! {} {
     if value < 26 {
         65 + value
     } else if value < 52 {
@@ -31,7 +34,7 @@ fn symbol(value: i64, url: Bool) -> i64 ! {panic} {
 }
 
 /// The 6-bit value of a character, or -1 if it is not in the alphabet.
-fn value(c: i64, url: Bool) -> i64 ! {panic} {
+fn value(c: i64, url: Bool) -> i64 ! {} {
     if c >= 65 && c <= 90 {
         c - 65
     } else if c >= 97 && c <= 122 {
@@ -53,30 +56,33 @@ fn value(c: i64, url: Bool) -> i64 ! {panic} {
 
 fn encode_with(data: &Bytes, url: Bool) -> Bytes ! {alloc, panic} {
     let n = Bytes.len(data);
-    let mut out = Bytes.with_capacity((n + 2) / 3 * 4);
+    // 4/3 of the input rounded up fits in 2n + 4; an absurdly large input
+    // starts smaller and the buffer grows.
+    let capacity = if n < 1152921504606846976 { 2 * n + 4 } else { n };
+    let mut out = Bytes.with_capacity(capacity);
     let mut i = 0;
-    while i + 3 <= n {
-        let triple = (Bytes.get(data, i) << 16) | (Bytes.get(data, i + 1) << 8) | Bytes.get(data, i + 2);
-        out = Bytes.push(out, symbol((triple >> 18) & 63, url));
-        out = Bytes.push(out, symbol((triple >> 12) & 63, url));
-        out = Bytes.push(out, symbol((triple >> 6) & 63, url));
-        out = Bytes.push(out, symbol(triple & 63, url));
+    while n - i >= 3 invariant { 0 <= i && i <= n } {
+        let triple = (Bytes.at(data, i, _) << 16) | (Bytes.at(data, i + 1, _) << 8) | Bytes.at(data, i + 2, _);
+        out = Bytes.push(out, symbol((triple >> 18) & 63, url, _));
+        out = Bytes.push(out, symbol((triple >> 12) & 63, url, _));
+        out = Bytes.push(out, symbol((triple >> 6) & 63, url, _));
+        out = Bytes.push(out, symbol(triple & 63, url, _));
         i = i + 3;
     }
     let rest = n - i;
     if rest == 1 {
-        let triple = Bytes.get(data, i) << 16;
-        out = Bytes.push(out, symbol((triple >> 18) & 63, url));
-        out = Bytes.push(out, symbol((triple >> 12) & 63, url));
+        let triple = Bytes.at(data, i, _) << 16;
+        out = Bytes.push(out, symbol((triple >> 18) & 63, url, _));
+        out = Bytes.push(out, symbol((triple >> 12) & 63, url, _));
         if !url {
             out = Bytes.push(out, 61);
             out = Bytes.push(out, 61);
         }
     } else if rest == 2 {
-        let triple = (Bytes.get(data, i) << 16) | (Bytes.get(data, i + 1) << 8);
-        out = Bytes.push(out, symbol((triple >> 18) & 63, url));
-        out = Bytes.push(out, symbol((triple >> 12) & 63, url));
-        out = Bytes.push(out, symbol((triple >> 6) & 63, url));
+        let triple = (Bytes.at(data, i, _) << 16) | (Bytes.at(data, i + 1, _) << 8);
+        out = Bytes.push(out, symbol((triple >> 18) & 63, url, _));
+        out = Bytes.push(out, symbol((triple >> 12) & 63, url, _));
+        out = Bytes.push(out, symbol((triple >> 6) & 63, url, _));
         if !url {
             out = Bytes.push(out, 61);
         }
@@ -94,36 +100,61 @@ pub fn encode_url(data: &Bytes) -> Bytes ! {alloc, panic} {
     encode_with(data, true)
 }
 
-/// Decode `count` characters of `text` (no padding among them); `None` on a
-/// character outside the alphabet or nonzero unused bits.
-fn decode_with(text: &Bytes, count: i64, url: Bool) -> Option<Bytes> ! {alloc, panic} {
-    let rest = count % 4;
-    if rest == 1 {
-        return Option.None;
-    }
-    let mut out = Bytes.with_capacity(count / 4 * 3 + 2);
+/// Decode the first `count` characters of `text` (no padding among them);
+/// `None` on a character outside the alphabet, a length of 1 mod 4, or
+/// nonzero unused bits.
+fn decode_with(
+    text: &Bytes,
+    count: i64,
+    url: Bool,
+    erased q: { 0 <= count && count <= Bytes.len(text) },
+) -> Option<Bytes> ! {alloc, panic} {
+    // 3/4 of the characters fit in `count` bytes.
+    let mut out = Bytes.with_capacity(count);
     let mut i = 0;
-    let mut bits = 0;
-    let mut held = 0;
-    while i < count {
-        let v = value(Bytes.get(text, i), url);
-        if v < 0 {
+    // Whole groups: four characters, three bytes. `value` is -1 outside the
+    // alphabet and 0..63 inside, so one sign test covers all four.
+    while count - i >= 4 invariant { 0 <= i && i <= count } {
+        let a = value(Bytes.at(text, i, _), url);
+        let b = value(Bytes.at(text, i + 1, _), url);
+        let c = value(Bytes.at(text, i + 2, _), url);
+        let d = value(Bytes.at(text, i + 3, _), url);
+        if (a | b | c | d) < 0 {
             drop(out);
             return Option.None;
         }
-        bits = (bits << 6) | v;
-        held = held + 6;
-        if held >= 8 {
-            held = held - 8;
-            out = Bytes.push(out, (bits >> held) & 255);
-            bits = bits & ((1 << held) - 1);
-        }
-        i = i + 1;
+        let group = (a << 18) | (b << 12) | (c << 6) | d;
+        out = Bytes.push(out, (group >> 16) & 255);
+        out = Bytes.push(out, (group >> 8) & 255);
+        out = Bytes.push(out, group & 255);
+        i = i + 4;
     }
-    // Leftover bits of the last character must be zero (canonical form).
-    if bits != 0 {
+    // The tail: two characters are one byte, three are two; one character
+    // carries only 6 bits and is never valid. The unused low bits of the last
+    // character must be zero (canonical form).
+    let rest = count - i;
+    if rest == 1 {
         drop(out);
         return Option.None;
+    }
+    if rest == 2 {
+        let a = value(Bytes.at(text, i, _), url);
+        let b = value(Bytes.at(text, i + 1, _), url);
+        if (a | b) < 0 || (b & 15) != 0 {
+            drop(out);
+            return Option.None;
+        }
+        out = Bytes.push(out, ((a << 2) | (b >> 4)) & 255);
+    } else if rest == 3 {
+        let a = value(Bytes.at(text, i, _), url);
+        let b = value(Bytes.at(text, i + 1, _), url);
+        let c = value(Bytes.at(text, i + 2, _), url);
+        if (a | b | c) < 0 || (c & 3) != 0 {
+            drop(out);
+            return Option.None;
+        }
+        out = Bytes.push(out, ((a << 2) | (b >> 4)) & 255);
+        out = Bytes.push(out, (((b & 15) << 4) | (c >> 2)) & 255);
     }
     Option.Some(out)
 }
@@ -132,22 +163,23 @@ fn decode_with(text: &Bytes, count: i64, url: Bool) -> Option<Bytes> ! {alloc, p
 /// two '=' only at the very end.
 pub fn decode(text: &Bytes) -> Option<Bytes> ! {alloc, panic} {
     let n = Bytes.len(text);
-    if n % 4 != 0 {
+    if (n & 3) != 0 {
         return Option.None;
     }
-    let mut padding = 0;
-    if n > 0 && Bytes.get(text, n - 1) == 61 {
-        padding = 1;
-        if Bytes.get(text, n - 2) == 61 {
-            padding = 2;
+    // Strip one or two final '='. A '=' anywhere else is outside the
+    // alphabet, so decode_with rejects it.
+    if n > 1 && Bytes.at(text, n - 1, _) == 61 {
+        if Bytes.at(text, n - 2, _) == 61 {
+            decode_with(text, n - 2, false, _)
+        } else {
+            decode_with(text, n - 1, false, _)
         }
+    } else {
+        decode_with(text, n, false, _)
     }
-    let count = n - padding;
-    // A '=' anywhere else is outside the alphabet, so decode_with rejects it.
-    decode_with(text, count, false)
 }
 
 /// Decode Base64url without padding.
 pub fn decode_url(text: &Bytes) -> Option<Bytes> ! {alloc, panic} {
-    decode_with(text, Bytes.len(text), true)
+    decode_with(text, Bytes.len(text), true, _)
 }

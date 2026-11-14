@@ -9,19 +9,20 @@ module std.ct;
 // Lengths are not secret: inputs of different lengths are unequal at once.
 // The loop has no early exit and no branch on the data; the compiler is not
 // told to keep it that way, so this is the usual best effort of portable
-// code, not a guarantee about the machine code.
+// code, not a guarantee about the machine code. The effect row is empty:
+// both reads are proved in bounds, so `equal` cannot panic.
 
 /// Whether `a` and `b` hold the same bytes, in time that depends only on
 /// their lengths.
-pub fn equal(a: &Bytes, b: &Bytes) -> Bool ! {panic} {
+pub fn equal(a: &Bytes, b: &Bytes) -> Bool ! {} {
     let n = Bytes.len(a);
     if n != Bytes.len(b) {
         return false;
     }
     let mut difference = 0;
     let mut i = 0;
-    while i < n {
-        difference = difference | (Bytes.get(a, i) ^ Bytes.get(b, i));
+    while i < n invariant { 0 <= i } {
+        difference = difference | (Bytes.at(a, i, _) ^ Bytes.at(b, i, _));
         i = i + 1;
     }
     difference == 0

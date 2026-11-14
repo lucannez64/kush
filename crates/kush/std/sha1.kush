@@ -7,18 +7,19 @@ module std.sha1;
 //     let d = sha1.digest(&data);              // 20 bytes
 //
 // The incremental form is the same as std.sha256: `new`, `update`, `finish`.
+// Proofs are the same too: `compress` has an empty effect row, every read,
+// shift and index sum is proved, and a block allocates nothing. The eighty
+// rounds are unrolled by scripts/gen-sha-rounds.py.
 
-/// A hash in progress: the five state words, the bytes of a partial block
-/// (fewer than 64), and the number of bytes hashed so far.
+/// Five state words.
+type Words = (u32, u32, u32, u32, u32);
+
+/// A hash in progress: the state, the bytes of a partial block (fewer than
+/// 64), and the number of bytes hashed so far (modulo 2^64).
 pub struct Hasher {
-    state: Vec<u32>,
+    state: Words,
     block: Bytes,
     length: u64,
-}
-
-fn rotl(x: u32, n: u64) -> u32 ! {panic} {
-    let w: u64 = Int.convert(x);
-    Int.truncate((w << n) | (w >> (32 - n)))
 }
 
 fn add(a: u32, b: u32) -> u32 ! {} {
@@ -26,68 +27,351 @@ fn add(a: u32, b: u32) -> u32 ! {} {
 }
 
 /// The big-endian word at data[at..at + 4].
-fn word(data: &Bytes, at: i64) -> u32 ! {panic} {
-    let b0: u32 = Int.truncate(Bytes.get(data, at));
-    let b1: u32 = Int.truncate(Bytes.get(data, at + 1));
-    let b2: u32 = Int.truncate(Bytes.get(data, at + 2));
-    let b3: u32 = Int.truncate(Bytes.get(data, at + 3));
+/// `n` is `Bytes.len(data)`: an `i64` local of the caller carries the range
+/// that keeps `at + 3` from overflowing, which a length term alone does not.
+fn word(
+    data: &Bytes,
+    n: i64,
+    at: i64,
+    erased q: { 0 <= at && at + 4 <= n && n == Bytes.len(data) },
+) -> u32 ! {} {
+    let b0: u32 = Int.truncate(Bytes.at(data, at, _));
+    let b1: u32 = Int.truncate(Bytes.at(data, at + 1, _));
+    let b2: u32 = Int.truncate(Bytes.at(data, at + 2, _));
+    let b3: u32 = Int.truncate(Bytes.at(data, at + 3, _));
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 }
 
-/// Process the 64-byte block at data[at..at + 64]; the new state words.
-fn compress(state: &Vec<u32>, data: &Bytes, at: i64) -> Vec<u32> ! {alloc, panic} {
-    let mut w: Vec<u32> = Vec.with_capacity(80);
-    let mut t = 0;
-    while t < 16 {
-        w = Vec.push(w, word(data, at + 4 * t));
-        t = t + 1;
-    }
-    while t < 80 {
-        let x = Vec.get(&w, t - 3) ^ Vec.get(&w, t - 8) ^ Vec.get(&w, t - 14) ^ Vec.get(&w, t - 16);
-        w = Vec.push(w, rotl(x, 1));
-        t = t + 1;
-    }
-    let mut a = Vec.get(state, 0);
-    let mut b = Vec.get(state, 1);
-    let mut c = Vec.get(state, 2);
-    let mut d = Vec.get(state, 3);
-    let mut e = Vec.get(state, 4);
-    t = 0;
-    while t < 80 {
-        let f: u32 = if t < 20 {
-            (b & c) | (!b & d)
-        } else if t < 40 {
-            b ^ c ^ d
-        } else if t < 60 {
-            (b & c) | (b & d) | (c & d)
-        } else {
-            b ^ c ^ d
-        };
-        let k: u32 = if t < 20 {
-            0x5a827999
-        } else if t < 40 {
-            0x6ed9eba1
-        } else if t < 60 {
-            0x8f1bbcdc
-        } else {
-            0xca62c1d6
-        };
-        let next = add(add(rotl(a, 5), f), add(add(e, k), Vec.get(&w, t)));
-        e = d;
-        d = c;
-        c = rotl(b, 30);
-        b = a;
-        a = next;
-        t = t + 1;
-    }
-    [add(Vec.get(state, 0), a), add(Vec.get(state, 1), b), add(Vec.get(state, 2), c),
-     add(Vec.get(state, 3), d), add(Vec.get(state, 4), e)]
+/// Process the 64-byte block at data[at..at + 64]: the new state.
+fn compress(
+    state: Words,
+    data: &Bytes,
+    n: i64,
+    at: i64,
+    erased q: { 0 <= at && at + 64 <= n && n == Bytes.len(data) },
+) -> Words ! {} {
+    let mut w0 = word(data, n, at, _);
+    let mut w1 = word(data, n, at + 4, _);
+    let mut w2 = word(data, n, at + 8, _);
+    let mut w3 = word(data, n, at + 12, _);
+    let mut w4 = word(data, n, at + 16, _);
+    let mut w5 = word(data, n, at + 20, _);
+    let mut w6 = word(data, n, at + 24, _);
+    let mut w7 = word(data, n, at + 28, _);
+    let mut w8 = word(data, n, at + 32, _);
+    let mut w9 = word(data, n, at + 36, _);
+    let mut w10 = word(data, n, at + 40, _);
+    let mut w11 = word(data, n, at + 44, _);
+    let mut w12 = word(data, n, at + 48, _);
+    let mut w13 = word(data, n, at + 52, _);
+    let mut w14 = word(data, n, at + 56, _);
+    let mut w15 = word(data, n, at + 60, _);
+    let (s0, s1, s2, s3, s4) = state;
+    let mut a = s0;
+    let mut b = s1;
+    let mut c = s2;
+    let mut d = s3;
+    let mut e = s4;
+    // Eighty unrolled rounds: each updates two working variables in place and
+    // the next uses them in rotated roles; the schedule is a ring of sixteen
+    // words, W[t] = rotl1(W[t - 3] ^ W[t - 8] ^ W[t - 14] ^ W[t - 16]).
+    // BEGIN GENERATED rounds (scripts/gen-sha-rounds.py)
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), ((b & c) | (!b & d))), 0x5a827999), w0);
+    b = ((b << 30) | (b >> 2));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), ((a & b) | (!a & c))), 0x5a827999), w1);
+    a = ((a << 30) | (a >> 2));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), ((e & a) | (!e & b))), 0x5a827999), w2);
+    e = ((e << 30) | (e >> 2));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), ((d & e) | (!d & a))), 0x5a827999), w3);
+    d = ((d << 30) | (d >> 2));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), ((c & d) | (!c & e))), 0x5a827999), w4);
+    c = ((c << 30) | (c >> 2));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), ((b & c) | (!b & d))), 0x5a827999), w5);
+    b = ((b << 30) | (b >> 2));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), ((a & b) | (!a & c))), 0x5a827999), w6);
+    a = ((a << 30) | (a >> 2));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), ((e & a) | (!e & b))), 0x5a827999), w7);
+    e = ((e << 30) | (e >> 2));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), ((d & e) | (!d & a))), 0x5a827999), w8);
+    d = ((d << 30) | (d >> 2));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), ((c & d) | (!c & e))), 0x5a827999), w9);
+    c = ((c << 30) | (c >> 2));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), ((b & c) | (!b & d))), 0x5a827999), w10);
+    b = ((b << 30) | (b >> 2));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), ((a & b) | (!a & c))), 0x5a827999), w11);
+    a = ((a << 30) | (a >> 2));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), ((e & a) | (!e & b))), 0x5a827999), w12);
+    e = ((e << 30) | (e >> 2));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), ((d & e) | (!d & a))), 0x5a827999), w13);
+    d = ((d << 30) | (d >> 2));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), ((c & d) | (!c & e))), 0x5a827999), w14);
+    c = ((c << 30) | (c >> 2));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), ((b & c) | (!b & d))), 0x5a827999), w15);
+    b = ((b << 30) | (b >> 2));
+    let m16: u32 = w13 ^ w8 ^ w2 ^ w0;
+    w0 = ((m16 << 1) | (m16 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), ((a & b) | (!a & c))), 0x5a827999), w0);
+    a = ((a << 30) | (a >> 2));
+    let m17: u32 = w14 ^ w9 ^ w3 ^ w1;
+    w1 = ((m17 << 1) | (m17 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), ((e & a) | (!e & b))), 0x5a827999), w1);
+    e = ((e << 30) | (e >> 2));
+    let m18: u32 = w15 ^ w10 ^ w4 ^ w2;
+    w2 = ((m18 << 1) | (m18 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), ((d & e) | (!d & a))), 0x5a827999), w2);
+    d = ((d << 30) | (d >> 2));
+    let m19: u32 = w0 ^ w11 ^ w5 ^ w3;
+    w3 = ((m19 << 1) | (m19 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), ((c & d) | (!c & e))), 0x5a827999), w3);
+    c = ((c << 30) | (c >> 2));
+    let m20: u32 = w1 ^ w12 ^ w6 ^ w4;
+    w4 = ((m20 << 1) | (m20 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), (b ^ c ^ d)), 0x6ed9eba1), w4);
+    b = ((b << 30) | (b >> 2));
+    let m21: u32 = w2 ^ w13 ^ w7 ^ w5;
+    w5 = ((m21 << 1) | (m21 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), (a ^ b ^ c)), 0x6ed9eba1), w5);
+    a = ((a << 30) | (a >> 2));
+    let m22: u32 = w3 ^ w14 ^ w8 ^ w6;
+    w6 = ((m22 << 1) | (m22 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), (e ^ a ^ b)), 0x6ed9eba1), w6);
+    e = ((e << 30) | (e >> 2));
+    let m23: u32 = w4 ^ w15 ^ w9 ^ w7;
+    w7 = ((m23 << 1) | (m23 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), (d ^ e ^ a)), 0x6ed9eba1), w7);
+    d = ((d << 30) | (d >> 2));
+    let m24: u32 = w5 ^ w0 ^ w10 ^ w8;
+    w8 = ((m24 << 1) | (m24 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), (c ^ d ^ e)), 0x6ed9eba1), w8);
+    c = ((c << 30) | (c >> 2));
+    let m25: u32 = w6 ^ w1 ^ w11 ^ w9;
+    w9 = ((m25 << 1) | (m25 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), (b ^ c ^ d)), 0x6ed9eba1), w9);
+    b = ((b << 30) | (b >> 2));
+    let m26: u32 = w7 ^ w2 ^ w12 ^ w10;
+    w10 = ((m26 << 1) | (m26 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), (a ^ b ^ c)), 0x6ed9eba1), w10);
+    a = ((a << 30) | (a >> 2));
+    let m27: u32 = w8 ^ w3 ^ w13 ^ w11;
+    w11 = ((m27 << 1) | (m27 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), (e ^ a ^ b)), 0x6ed9eba1), w11);
+    e = ((e << 30) | (e >> 2));
+    let m28: u32 = w9 ^ w4 ^ w14 ^ w12;
+    w12 = ((m28 << 1) | (m28 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), (d ^ e ^ a)), 0x6ed9eba1), w12);
+    d = ((d << 30) | (d >> 2));
+    let m29: u32 = w10 ^ w5 ^ w15 ^ w13;
+    w13 = ((m29 << 1) | (m29 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), (c ^ d ^ e)), 0x6ed9eba1), w13);
+    c = ((c << 30) | (c >> 2));
+    let m30: u32 = w11 ^ w6 ^ w0 ^ w14;
+    w14 = ((m30 << 1) | (m30 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), (b ^ c ^ d)), 0x6ed9eba1), w14);
+    b = ((b << 30) | (b >> 2));
+    let m31: u32 = w12 ^ w7 ^ w1 ^ w15;
+    w15 = ((m31 << 1) | (m31 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), (a ^ b ^ c)), 0x6ed9eba1), w15);
+    a = ((a << 30) | (a >> 2));
+    let m32: u32 = w13 ^ w8 ^ w2 ^ w0;
+    w0 = ((m32 << 1) | (m32 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), (e ^ a ^ b)), 0x6ed9eba1), w0);
+    e = ((e << 30) | (e >> 2));
+    let m33: u32 = w14 ^ w9 ^ w3 ^ w1;
+    w1 = ((m33 << 1) | (m33 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), (d ^ e ^ a)), 0x6ed9eba1), w1);
+    d = ((d << 30) | (d >> 2));
+    let m34: u32 = w15 ^ w10 ^ w4 ^ w2;
+    w2 = ((m34 << 1) | (m34 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), (c ^ d ^ e)), 0x6ed9eba1), w2);
+    c = ((c << 30) | (c >> 2));
+    let m35: u32 = w0 ^ w11 ^ w5 ^ w3;
+    w3 = ((m35 << 1) | (m35 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), (b ^ c ^ d)), 0x6ed9eba1), w3);
+    b = ((b << 30) | (b >> 2));
+    let m36: u32 = w1 ^ w12 ^ w6 ^ w4;
+    w4 = ((m36 << 1) | (m36 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), (a ^ b ^ c)), 0x6ed9eba1), w4);
+    a = ((a << 30) | (a >> 2));
+    let m37: u32 = w2 ^ w13 ^ w7 ^ w5;
+    w5 = ((m37 << 1) | (m37 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), (e ^ a ^ b)), 0x6ed9eba1), w5);
+    e = ((e << 30) | (e >> 2));
+    let m38: u32 = w3 ^ w14 ^ w8 ^ w6;
+    w6 = ((m38 << 1) | (m38 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), (d ^ e ^ a)), 0x6ed9eba1), w6);
+    d = ((d << 30) | (d >> 2));
+    let m39: u32 = w4 ^ w15 ^ w9 ^ w7;
+    w7 = ((m39 << 1) | (m39 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), (c ^ d ^ e)), 0x6ed9eba1), w7);
+    c = ((c << 30) | (c >> 2));
+    let m40: u32 = w5 ^ w0 ^ w10 ^ w8;
+    w8 = ((m40 << 1) | (m40 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), ((b & c) | (b & d) | (c & d))), 0x8f1bbcdc), w8);
+    b = ((b << 30) | (b >> 2));
+    let m41: u32 = w6 ^ w1 ^ w11 ^ w9;
+    w9 = ((m41 << 1) | (m41 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), ((a & b) | (a & c) | (b & c))), 0x8f1bbcdc), w9);
+    a = ((a << 30) | (a >> 2));
+    let m42: u32 = w7 ^ w2 ^ w12 ^ w10;
+    w10 = ((m42 << 1) | (m42 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), ((e & a) | (e & b) | (a & b))), 0x8f1bbcdc), w10);
+    e = ((e << 30) | (e >> 2));
+    let m43: u32 = w8 ^ w3 ^ w13 ^ w11;
+    w11 = ((m43 << 1) | (m43 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), ((d & e) | (d & a) | (e & a))), 0x8f1bbcdc), w11);
+    d = ((d << 30) | (d >> 2));
+    let m44: u32 = w9 ^ w4 ^ w14 ^ w12;
+    w12 = ((m44 << 1) | (m44 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), ((c & d) | (c & e) | (d & e))), 0x8f1bbcdc), w12);
+    c = ((c << 30) | (c >> 2));
+    let m45: u32 = w10 ^ w5 ^ w15 ^ w13;
+    w13 = ((m45 << 1) | (m45 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), ((b & c) | (b & d) | (c & d))), 0x8f1bbcdc), w13);
+    b = ((b << 30) | (b >> 2));
+    let m46: u32 = w11 ^ w6 ^ w0 ^ w14;
+    w14 = ((m46 << 1) | (m46 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), ((a & b) | (a & c) | (b & c))), 0x8f1bbcdc), w14);
+    a = ((a << 30) | (a >> 2));
+    let m47: u32 = w12 ^ w7 ^ w1 ^ w15;
+    w15 = ((m47 << 1) | (m47 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), ((e & a) | (e & b) | (a & b))), 0x8f1bbcdc), w15);
+    e = ((e << 30) | (e >> 2));
+    let m48: u32 = w13 ^ w8 ^ w2 ^ w0;
+    w0 = ((m48 << 1) | (m48 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), ((d & e) | (d & a) | (e & a))), 0x8f1bbcdc), w0);
+    d = ((d << 30) | (d >> 2));
+    let m49: u32 = w14 ^ w9 ^ w3 ^ w1;
+    w1 = ((m49 << 1) | (m49 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), ((c & d) | (c & e) | (d & e))), 0x8f1bbcdc), w1);
+    c = ((c << 30) | (c >> 2));
+    let m50: u32 = w15 ^ w10 ^ w4 ^ w2;
+    w2 = ((m50 << 1) | (m50 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), ((b & c) | (b & d) | (c & d))), 0x8f1bbcdc), w2);
+    b = ((b << 30) | (b >> 2));
+    let m51: u32 = w0 ^ w11 ^ w5 ^ w3;
+    w3 = ((m51 << 1) | (m51 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), ((a & b) | (a & c) | (b & c))), 0x8f1bbcdc), w3);
+    a = ((a << 30) | (a >> 2));
+    let m52: u32 = w1 ^ w12 ^ w6 ^ w4;
+    w4 = ((m52 << 1) | (m52 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), ((e & a) | (e & b) | (a & b))), 0x8f1bbcdc), w4);
+    e = ((e << 30) | (e >> 2));
+    let m53: u32 = w2 ^ w13 ^ w7 ^ w5;
+    w5 = ((m53 << 1) | (m53 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), ((d & e) | (d & a) | (e & a))), 0x8f1bbcdc), w5);
+    d = ((d << 30) | (d >> 2));
+    let m54: u32 = w3 ^ w14 ^ w8 ^ w6;
+    w6 = ((m54 << 1) | (m54 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), ((c & d) | (c & e) | (d & e))), 0x8f1bbcdc), w6);
+    c = ((c << 30) | (c >> 2));
+    let m55: u32 = w4 ^ w15 ^ w9 ^ w7;
+    w7 = ((m55 << 1) | (m55 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), ((b & c) | (b & d) | (c & d))), 0x8f1bbcdc), w7);
+    b = ((b << 30) | (b >> 2));
+    let m56: u32 = w5 ^ w0 ^ w10 ^ w8;
+    w8 = ((m56 << 1) | (m56 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), ((a & b) | (a & c) | (b & c))), 0x8f1bbcdc), w8);
+    a = ((a << 30) | (a >> 2));
+    let m57: u32 = w6 ^ w1 ^ w11 ^ w9;
+    w9 = ((m57 << 1) | (m57 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), ((e & a) | (e & b) | (a & b))), 0x8f1bbcdc), w9);
+    e = ((e << 30) | (e >> 2));
+    let m58: u32 = w7 ^ w2 ^ w12 ^ w10;
+    w10 = ((m58 << 1) | (m58 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), ((d & e) | (d & a) | (e & a))), 0x8f1bbcdc), w10);
+    d = ((d << 30) | (d >> 2));
+    let m59: u32 = w8 ^ w3 ^ w13 ^ w11;
+    w11 = ((m59 << 1) | (m59 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), ((c & d) | (c & e) | (d & e))), 0x8f1bbcdc), w11);
+    c = ((c << 30) | (c >> 2));
+    let m60: u32 = w9 ^ w4 ^ w14 ^ w12;
+    w12 = ((m60 << 1) | (m60 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), (b ^ c ^ d)), 0xca62c1d6), w12);
+    b = ((b << 30) | (b >> 2));
+    let m61: u32 = w10 ^ w5 ^ w15 ^ w13;
+    w13 = ((m61 << 1) | (m61 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), (a ^ b ^ c)), 0xca62c1d6), w13);
+    a = ((a << 30) | (a >> 2));
+    let m62: u32 = w11 ^ w6 ^ w0 ^ w14;
+    w14 = ((m62 << 1) | (m62 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), (e ^ a ^ b)), 0xca62c1d6), w14);
+    e = ((e << 30) | (e >> 2));
+    let m63: u32 = w12 ^ w7 ^ w1 ^ w15;
+    w15 = ((m63 << 1) | (m63 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), (d ^ e ^ a)), 0xca62c1d6), w15);
+    d = ((d << 30) | (d >> 2));
+    let m64: u32 = w13 ^ w8 ^ w2 ^ w0;
+    w0 = ((m64 << 1) | (m64 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), (c ^ d ^ e)), 0xca62c1d6), w0);
+    c = ((c << 30) | (c >> 2));
+    let m65: u32 = w14 ^ w9 ^ w3 ^ w1;
+    w1 = ((m65 << 1) | (m65 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), (b ^ c ^ d)), 0xca62c1d6), w1);
+    b = ((b << 30) | (b >> 2));
+    let m66: u32 = w15 ^ w10 ^ w4 ^ w2;
+    w2 = ((m66 << 1) | (m66 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), (a ^ b ^ c)), 0xca62c1d6), w2);
+    a = ((a << 30) | (a >> 2));
+    let m67: u32 = w0 ^ w11 ^ w5 ^ w3;
+    w3 = ((m67 << 1) | (m67 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), (e ^ a ^ b)), 0xca62c1d6), w3);
+    e = ((e << 30) | (e >> 2));
+    let m68: u32 = w1 ^ w12 ^ w6 ^ w4;
+    w4 = ((m68 << 1) | (m68 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), (d ^ e ^ a)), 0xca62c1d6), w4);
+    d = ((d << 30) | (d >> 2));
+    let m69: u32 = w2 ^ w13 ^ w7 ^ w5;
+    w5 = ((m69 << 1) | (m69 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), (c ^ d ^ e)), 0xca62c1d6), w5);
+    c = ((c << 30) | (c >> 2));
+    let m70: u32 = w3 ^ w14 ^ w8 ^ w6;
+    w6 = ((m70 << 1) | (m70 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), (b ^ c ^ d)), 0xca62c1d6), w6);
+    b = ((b << 30) | (b >> 2));
+    let m71: u32 = w4 ^ w15 ^ w9 ^ w7;
+    w7 = ((m71 << 1) | (m71 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), (a ^ b ^ c)), 0xca62c1d6), w7);
+    a = ((a << 30) | (a >> 2));
+    let m72: u32 = w5 ^ w0 ^ w10 ^ w8;
+    w8 = ((m72 << 1) | (m72 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), (e ^ a ^ b)), 0xca62c1d6), w8);
+    e = ((e << 30) | (e >> 2));
+    let m73: u32 = w6 ^ w1 ^ w11 ^ w9;
+    w9 = ((m73 << 1) | (m73 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), (d ^ e ^ a)), 0xca62c1d6), w9);
+    d = ((d << 30) | (d >> 2));
+    let m74: u32 = w7 ^ w2 ^ w12 ^ w10;
+    w10 = ((m74 << 1) | (m74 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), (c ^ d ^ e)), 0xca62c1d6), w10);
+    c = ((c << 30) | (c >> 2));
+    let m75: u32 = w8 ^ w3 ^ w13 ^ w11;
+    w11 = ((m75 << 1) | (m75 >> 31));
+    e = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(e, ((a << 5) | (a >> 27))), (b ^ c ^ d)), 0xca62c1d6), w11);
+    b = ((b << 30) | (b >> 2));
+    let m76: u32 = w9 ^ w4 ^ w14 ^ w12;
+    w12 = ((m76 << 1) | (m76 >> 31));
+    d = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(d, ((e << 5) | (e >> 27))), (a ^ b ^ c)), 0xca62c1d6), w12);
+    a = ((a << 30) | (a >> 2));
+    let m77: u32 = w10 ^ w5 ^ w15 ^ w13;
+    w13 = ((m77 << 1) | (m77 >> 31));
+    c = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(c, ((d << 5) | (d >> 27))), (e ^ a ^ b)), 0xca62c1d6), w13);
+    e = ((e << 30) | (e >> 2));
+    let m78: u32 = w11 ^ w6 ^ w0 ^ w14;
+    w14 = ((m78 << 1) | (m78 >> 31));
+    b = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(b, ((c << 5) | (c >> 27))), (d ^ e ^ a)), 0xca62c1d6), w14);
+    d = ((d << 30) | (d >> 2));
+    let m79: u32 = w12 ^ w7 ^ w1 ^ w15;
+    w15 = ((m79 << 1) | (m79 >> 31));
+    a = Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(Int.wrapping_add::<u32>(a, ((b << 5) | (b >> 27))), (c ^ d ^ e)), 0xca62c1d6), w15);
+    c = ((c << 30) | (c >> 2));
+    // END GENERATED rounds
+    (add(s0, a), add(s1, b), add(s2, c), add(s3, d), add(s4, e))
 }
 
 /// An empty hash.
 pub fn new() -> Hasher ! {alloc, panic} {
     Hasher {
-        state: [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0],
+        state: (0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0),
         block: Bytes.with_capacity(64),
         length: 0,
     }
@@ -100,57 +384,73 @@ pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc, panic} {
     let mut block = block;
     let n = Bytes.len(data);
     let added: u64 = Int.truncate(n);
-    let length = length + added;
+    let length: u64 = Int.wrapping_add(length, added);
     let mut i = 0;
-    while i < n {
-        if Bytes.len(&block) == 0 && n - i >= 64 {
-            state = compress(&state, data, i);
-            i = i + 64;
-        } else {
-            block = Bytes.push(block, Bytes.get(data, i));
-            i = i + 1;
-            if Bytes.len(&block) == 64 {
-                state = compress(&state, &block, 0);
-                drop(block);
-                block = Bytes.with_capacity(64);
-            }
-        }
+    // Top up a partial block first (no loop when there is none).
+    while i < n && Bytes.len(&block) > 0 && Bytes.len(&block) < 64 invariant { 0 <= i && i <= n } {
+        block = Bytes.push(block, Bytes.at(data, i, _));
+        i = i + 1;
+    }
+    if Bytes.len(&block) == 64 {
+        state = compress(state, &block, 64, 0, _);
+        drop(block);
+        block = Bytes.with_capacity(64);
+    }
+    while n - i >= 64 invariant { 0 <= i && i <= n } {
+        state = compress(state, data, n, i, _);
+        i = i + 64;
+    }
+    while i < n invariant { 0 <= i } {
+        block = Bytes.push(block, Bytes.at(data, i, _));
+        i = i + 1;
     }
     Hasher { state: state, block: block, length: length }
 }
 
+fn push_word(out: Bytes, v: u32) -> Bytes ! {alloc, panic} {
+    let out = Bytes.push(out, Int.convert(v >> 24));
+    let out = Bytes.push(out, Int.convert((v >> 16) & 255));
+    let out = Bytes.push(out, Int.convert((v >> 8) & 255));
+    Bytes.push(out, Int.convert(v & 255))
+}
+
 /// The 20-byte digest of everything given.
 pub fn finish(hasher: Hasher) -> Bytes ! {alloc, panic} {
-    let bits = hasher.length * 8;
+    let bits: u64 = Int.wrapping_mul(hasher.length, 8);
     let pending = Bytes.len(&hasher.block);
-    let zeros = if pending < 56 { 55 - pending } else { 119 - pending };
-    let mut pad = Bytes.with_capacity(zeros + 9);
+    // A partial block holds 0 to 63 bytes; the bounds are spelled out so the
+    // subtractions are proved (the last case cannot happen).
+    let zeros = if pending >= 0 && pending < 56 {
+        55 - pending
+    } else if pending >= 56 && pending < 120 {
+        119 - pending
+    } else {
+        0
+    };
+    let mut pad = Bytes.with_capacity(72);
     pad = Bytes.push(pad, 128);
     let mut i = 0;
     while i < zeros {
         pad = Bytes.push(pad, 0);
         i = i + 1;
     }
-    let mut shift: u64 = 56;
-    loop {
-        let byte: i64 = Int.truncate((bits >> shift) & 255);
-        pad = Bytes.push(pad, byte);
-        if shift == 0 { break; }
-        shift = shift - 8;
-    }
-    let hasher = update(hasher, &pad);
-    let Hasher { state, block, length } = hasher;
-    drop(block);
-    let mut out = Bytes.with_capacity(20);
     let mut j = 0;
-    while j < 5 {
-        let v = Vec.get(&state, j);
-        out = Bytes.push(out, Int.convert(v >> 24));
-        out = Bytes.push(out, Int.convert((v >> 16) & 255));
-        out = Bytes.push(out, Int.convert((v >> 8) & 255));
-        out = Bytes.push(out, Int.convert(v & 255));
+    while j < 8 invariant { 0 <= j } {
+        let byte: i64 = Int.truncate((bits >> (56 - 8 * j)) & 255);
+        pad = Bytes.push(pad, byte);
         j = j + 1;
     }
+    let hasher = update(hasher, &pad);
+    drop(pad);
+    let Hasher { state, block, length } = hasher;
+    drop(block);
+    let (s0, s1, s2, s3, s4) = state;
+    let mut out = Bytes.with_capacity(20);
+    out = push_word(out, s0);
+    out = push_word(out, s1);
+    out = push_word(out, s2);
+    out = push_word(out, s3);
+    out = push_word(out, s4);
     out
 }
 
