@@ -7647,14 +7647,24 @@
       "deps": [
         "SIMD-X86-SHA"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Accelerated compress in Kush (empty effect row, proved loads) when cpu.sha() succeeds, proved portable code otherwise; tests compare both paths; benchmarks/crypto/hash.kush on both backends.",
-      "commit": null,
+      "commit": "7f82a71",
       "log": [
         {
           "time": "2026-11-14 19:10:54",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 19:19:14",
+          "who": "agent",
+          "text": "done 7f82a71"
+        },
+        {
+          "time": "2026-11-14 19:19:14",
+          "who": "agent",
+          "text": "SHA-256 251->76 ms (LLVM), 538->394 ms (Cranelift) per 64 MiB. Full suite on the second PC: 1986 passed."
         }
       ]
     },
