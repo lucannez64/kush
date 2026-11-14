@@ -7571,14 +7571,24 @@
       "deps": [
         "SIMD-TYPES"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "std.cpu: zero-size copyable tokens (cpu.Sha, ...) only obtainable from cached CPUID detection (Option); KUSH_CPU_DISABLE forces the fallback natively and in the evaluator.",
-      "commit": null,
+      "commit": "759fff3",
       "log": [
         {
           "time": "2026-11-14 18:43:52",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 18:47:59",
+          "who": "agent",
+          "text": "done 759fff3"
+        },
+        {
+          "time": "2026-11-14 18:47:59",
+          "who": "agent",
+          "text": "Full suite on the second PC: 1982 passed (LLVM runtime builds with cpuid.h too)."
         }
       ]
     },
