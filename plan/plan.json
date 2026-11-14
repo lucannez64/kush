@@ -7037,6 +7037,349 @@
           "text": "done dc19177"
         }
       ]
+    },
+    {
+      "id": "WEB-DESIGN",
+      "title": "Web framework: design doc and user approval",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "docs/web.md: server framework in Kush. Decisions 2026-11-14: codecs through staging, Untrusted is a type, handlers take a linear Responder, no blocking v1 server (reactor first).",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-14 15:16:45",
+          "who": "agent",
+          "text": "User decisions: staging codecs, Untrusted as a type, linear Responder handlers, reactor first (no v1 server)."
+        }
+      ]
+    },
+    {
+      "id": "WEB-NET",
+      "title": "Server sockets in std.net: linear Listener and Conn",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-DESIGN",
+        "STD-PROC-NET-IN-KUSH"
+      ],
+      "status": "todo",
+      "desc": "std.net: kush_sys stubs for socket, setsockopt (SO_REUSEADDR, SO_REUSEPORT, SO_RCVTIMEO, SO_SNDTIMEO, TCP_NODELAY), bind, listen, accept4, recv, send, shutdown; linear Listener and Conn; evaluator shims. Reuses the getaddrinfo/send/recv stubs STD-PROC-NET-IN-KUSH adds. See docs/web.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-HTTP-PARSE",
+      "title": "HTTP/1.1 request parser and response writer",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "Pure HTTP/1.1 request parser and response writer over borrowed bytes: request line, headers, Content-Length, chunked, keep-alive; hard limits as 4xx; reject conflicting Content-Length/Transfer-Encoding. Bounds proved or sent to kush fuzz. See docs/web.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-URL",
+      "title": "URL, path and query decoding",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "WEB-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "Percent decoding, path segments, query strings and application/x-www-form-urlencoded, rejecting invalid UTF-8 and overlong input.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-JSON-FIELDS",
+      "title": "std.json typed field accessors for hand-written codecs",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "WEB-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "Typed field accessors on std.json values (required/optional, i64/text/bool/array) with errors that name the field, so hand-written decoders stay short until WEB-CODECS.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-CORE",
+      "title": "Request, Response and the linear Responder",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-HTTP-PARSE"
+      ],
+      "status": "todo",
+      "desc": "Request and Response types; handlers are fn(&Request, Responder) -> Unit (decided 2026-11-14); #[linear] Responder consumed by exactly one of text/json/html/status/stream on every path, streamed responses included; fn(&Request) -> Response offered as a wrapper.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-ROUTER",
+      "title": "Router with typed path parameters",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-CORE",
+        "WEB-URL"
+      ],
+      "status": "todo",
+      "desc": "Method plus path patterns with typed, range-checked path parameters (malformed is 400), 404, 405 with Allow; handlers stored at the app's effect row, accepted by arrow subtyping.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-EFFECTS",
+      "title": "Effect rows as permissions; middleware as handlers",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-ROUTER"
+      ],
+      "status": "todo",
+      "desc": "Services as declared operations (Db, CurrentUser, Log, Clock); middleware as handlers around a request: logging, timing, transaction commit after resume and rollback on abort. Check that a handler's row bounds what it can perform.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-TEST-CLIENT",
+      "title": "In-process test client with fake effect handlers",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "WEB-EFFECTS"
+      ],
+      "status": "todo",
+      "desc": "Run an app in-process without sockets: build a Request, install fake handlers (in-memory Db, fixed Clock, chosen CurrentUser), inspect the Response; works in the reference evaluator.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-HTML",
+      "title": "Html type with escaping enforced by the types",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-CORE"
+      ],
+      "status": "todo",
+      "desc": "Untrusted is a distinct type (decided 2026-11-14, not a grade): request text arrives as Untrusted; Html has no public constructor from text (html.escape, literals, builders, greppable Untrusted.trust).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-TODO-DEMO",
+      "title": "Todo web API demo on kush-kv",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-SERVER",
+        "WEB-TEST-CLIENT",
+        "WEB-JSON-FIELDS"
+      ],
+      "status": "todo",
+      "desc": "examples/todo-web: todo JSON API on kush-kv (KV-STORE), v1 server, hand-written codecs, Db effect, logging middleware, in-process tests and a curl script. First runnable web demo.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "TASK-ID-REUSE",
+      "title": "Reuse task IDs: no per-run spawn limit",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Long-running programs: reuse joined task IDs and control blocks, so the 255-tasks-per-run limit (docs/async.md) becomes a bound on live tasks, not on tasks ever spawned. Needed by any server.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-REACTOR",
+      "title": "Nonblocking sockets: epoll reactor in the task scheduler",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "WEB-NET",
+        "TASK-ID-REUSE"
+      ],
+      "status": "todo",
+      "desc": "epoll reactor in the native scheduler: nonblocking sockets, EAGAIN registers the fd and suspends the task, epoll_wait when nothing is runnable, timers for sleep and deadlines. Deterministic polling model in the reference evaluator.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-SERVER",
+      "title": "Task-per-connection server on the epoll reactor",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-REACTOR",
+        "WEB-CORE"
+      ],
+      "status": "todo",
+      "desc": "The only server (no blocking v1, decided 2026-11-14): one task per connection on the reactor; accept, parse, route, answer, keep-alive with an idle deadline, handler panic answered as 500, graceful stop.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-MULTICORE",
+      "title": "One reactor per thread",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "WEB-SERVER",
+        "THREAD-TASKS"
+      ],
+      "status": "todo",
+      "desc": "One scheduler and reactor per thread, each with its own SO_REUSEPORT listener (threads cannot share a &Listener); a connection stays on one thread (tasks cannot cross threads, no work stealing).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-CODECS",
+      "title": "Automatic JSON codecs for records and enums",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "STAGING",
+        "FORMATS-ROUNDTRIP",
+        "WEB-JSON-FIELDS"
+      ],
+      "status": "todo",
+      "desc": "Today every JSON encoder and decoder for a record would be written by hand. A framework needs automatic codecs, which means either a derive mechanism or the planned staging plus write-once formats (FORMATS-ROUNDTRIP). This is the biggest gap in the language itself. Decided 2026-11-14: staging, no derive. JSON encode/decode for records and enums generated from the same format descriptions as FORMATS-ROUNDTRIP, errors naming the field, tested against hand-written codecs.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-EXTRACT",
+      "title": "Typed body and query extractors",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-CODECS",
+        "WEB-ROUTER"
+      ],
+      "status": "todo",
+      "desc": "Typed request extractors (Json<T>, Query<T>, Form<T>) decoded before the handler runs; a decode failure is a 400 with the field named.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-CRYPTO",
+      "title": "Crypto building blocks: SHA, HMAC, base64, random",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "SHA-1 (WebSocket handshake only), SHA-256, HMAC-SHA256, constant-time compare, base64/base64url, getrandom stub; known-answer tests.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-SESSIONS",
+      "title": "Cookies and signed sessions",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-CRYPTO",
+        "WEB-EFFECTS"
+      ],
+      "status": "todo",
+      "desc": "Cookie parsing and Set-Cookie, signed session cookies, CurrentUser handled from the session.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-TLS",
+      "title": "TLS through rustls's sans-I/O API",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "WEB-SERVER"
+      ],
+      "status": "todo",
+      "desc": "rustls through kush bindgen using its sans-I/O API (bytes in, bytes out), so bridge ABI v1 suffices; until then, a reverse proxy.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-DB",
+      "title": "SQLite as a Db handler",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-EFFECTS"
+      ],
+      "status": "todo",
+      "desc": "SQLite through a bindgen adapter, handling the Db operation; parameters only, no string-built SQL.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-WEBSOCKET",
+      "title": "WebSocket upgrade and framing",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-SERVER",
+        "WEB-CRYPTO"
+      ],
+      "status": "todo",
+      "desc": "Upgrade handshake (SHA-1 + base64), framing, masking, ping/pong, close, as long-lived tasks on the reactor.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-WS-SESSION",
+      "title": "Session-typed WebSocket protocols",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "WEB-WEBSOCKET",
+        "SESSION-NET"
+      ],
+      "status": "todo",
+      "desc": "Session-typed WebSocket protocols: breaking the protocol does not compile.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB-REVIEW",
+      "title": "Independent review: web framework",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "WEB-TODO-DEMO",
+        "WEB-EXTRACT",
+        "WEB-SESSIONS",
+        "WEB-HTML"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "WEB",
+      "title": "Close: web framework written in Kush",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "WEB-REVIEW"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
     }
   ]
 }
