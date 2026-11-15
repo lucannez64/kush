@@ -225,8 +225,11 @@ pub(super) const INLINABLE: [&str; 23] = [
 
 /// Rewrite the linkage of each top-level definition of the runtime module.
 /// Returns `None` for constructs the scheme does not cover (aliases, special
-/// `@llvm.` variables, thread-local or common storage), so the caller can
-/// report it instead of producing a module that links but misbehaves.
+/// `@llvm.` variables, common storage), so the caller can report it instead
+/// of producing a module that links but misbehaves. Thread-local variables
+/// (the per-thread abort word and catch depth under `KUSH_HAS_THREADS`) split
+/// like any other: the object defines each one, and program code that
+/// inlined a runtime body reaches it through the ordinary TLS sequence.
 pub(super) fn split_runtime(ir: &str) -> Option<RuntimeSplit> {
     let mut split = RuntimeSplit {
         exported: String::with_capacity(ir.len()),
@@ -268,7 +271,6 @@ pub(super) fn split_runtime(ir: &str) -> Option<RuntimeSplit> {
         {
             let first = rest.split_whitespace().next()?;
             if name.starts_with("@llvm.")
-                || rest.contains("thread_local")
                 || matches!(
                     first,
                     "alias"
@@ -1781,11 +1783,67 @@ impl<'a> Translator<'a> {
             InstructionData::Load { arg, offset, .. } => {
                 self.load(inst, opcode, arg, i64::from(offset))?;
             }
-            InstructionData::LoadNoOffset { arg, .. } => self.load(inst, Opcode::Load, arg, 0)?,
+            // Cranelift's atomics are sequentially consistent and need the
+            // natural alignment LLVM requires of an atomic access.
+            InstructionData::LoadNoOffset { arg, .. } if opcode == Opcode::AtomicLoad => {
+                let result = dfg.first_result(inst);
+                let (name, ty) = (self.name(result), self.tyn(result)?);
+                let align = self.ty(result).bytes();
+                let address = self.address(arg, 0)?;
+                self.line(format!(
+                    "{name} = load atomic {ty}, ptr {address} seq_cst, align {align}"
+                ));
+            }
+            InstructionData::StoreNoOffset { args, .. } if opcode == Opcode::AtomicStore => {
+                let (ty, operand) = (self.tyn(args[0])?, self.op(args[0]));
+                let align = self.ty(args[0]).bytes();
+                let address = self.address(args[1], 0)?;
+                self.line(format!(
+                    "store atomic {ty} {operand}, ptr {address} seq_cst, align {align}"
+                ));
+            }
+            InstructionData::AtomicRmw { args, op, .. } => {
+                let operation = match op {
+                    ir::AtomicRmwOp::Add => "add",
+                    ir::AtomicRmwOp::Sub => "sub",
+                    ir::AtomicRmwOp::And => "and",
+                    ir::AtomicRmwOp::Nand => "nand",
+                    ir::AtomicRmwOp::Or => "or",
+                    ir::AtomicRmwOp::Xor => "xor",
+                    ir::AtomicRmwOp::Xchg => "xchg",
+                    ir::AtomicRmwOp::Umin => "umin",
+                    ir::AtomicRmwOp::Umax => "umax",
+                    ir::AtomicRmwOp::Smin => "min",
+                    ir::AtomicRmwOp::Smax => "max",
+                };
+                let result = dfg.first_result(inst);
+                let (name, ty) = (self.name(result), self.tyn(result)?);
+                let align = self.ty(result).bytes();
+                let address = self.address(args[0], 0)?;
+                let operand = self.op(args[1]);
+                self.line(format!(
+                    "{name} = atomicrmw {operation} ptr {address}, {ty} {operand} seq_cst, align {align}"
+                ));
+            }
+            InstructionData::AtomicCas { args, .. } => {
+                let result = dfg.first_result(inst);
+                let (name, ty) = (self.name(result), self.tyn(result)?);
+                let align = self.ty(result).bytes();
+                let address = self.address(args[0], 0)?;
+                let (expected, replacement) = (self.op(args[1]), self.op(args[2]));
+                let pair = self.temp();
+                self.line(format!(
+                    "{pair} = cmpxchg ptr {address}, {ty} {expected}, {ty} {replacement} seq_cst seq_cst, align {align}"
+                ));
+                self.line(format!("{name} = extractvalue {{ {ty}, i1 }} {pair}, 0"));
+            }
+            InstructionData::LoadNoOffset { arg, .. } if opcode == Opcode::Load => {
+                self.load(inst, Opcode::Load, arg, 0)?
+            }
             InstructionData::Store { args, offset, .. } => {
                 self.store(inst, opcode, args[0], args[1], i64::from(offset))?;
             }
-            InstructionData::StoreNoOffset { args, .. } => {
+            InstructionData::StoreNoOffset { args, .. } if opcode == Opcode::Store => {
                 self.store(inst, Opcode::Store, args[0], args[1], 0)?;
             }
             InstructionData::StackAddr {
@@ -2312,7 +2370,12 @@ mod tests {
         assert!(!interface.signatures.contains_key("kush_claim"));
         // Constructs the scheme does not cover are refused, not guessed.
         assert!(split_runtime("@a = alias i64, ptr @b\n").is_none());
-        assert!(split_runtime("@t = thread_local global i64 0\n").is_none());
+        let tls = split_runtime("@t = internal thread_local global i64 0, align 8\n").unwrap();
+        assert!(tls.exported.contains("@t = hidden thread_local global i64 0"));
+        assert!(
+            tls.inlinable
+                .contains("@t = available_externally hidden thread_local global i64 0")
+        );
         assert!(split_runtime("@llvm.used = appending global [1 x ptr] [ptr @a]\n").is_none());
     }
 }
