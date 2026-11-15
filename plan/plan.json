@@ -8035,6 +8035,11 @@
           "time": "2026-11-15 23:07:24",
           "who": "agent",
           "text": "Thread programs still do not build on the LLVM backend (runtime thread_local globals are refused by split_runtime); pre-existing, threads.rs fails the same way under KUSH_BACKEND=llvm."
+        },
+        {
+          "time": "2026-11-16 00:21:41",
+          "who": "agent",
+          "text": "LLVM thread limit fixed in 90d9d67: thread_local globals split, atomics translated; threads/panic_catch/web_server/ffi/host_api/project/bindgen/todo_app/std_file pass under KUSH_BACKEND=llvm."
         }
       ]
     },
