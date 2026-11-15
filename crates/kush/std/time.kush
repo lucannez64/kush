@@ -44,3 +44,25 @@ pub fn remaining_ms(deadline: i64) -> i64 ! {io} {
     let left = deadline - now;
     if left > 60000 { 60000 } else { left }
 }
+
+/// Suspend the calling task for at least `milliseconds` (>= 0; negative is
+/// EINVAL): the other tasks run meanwhile, and the scheduler sleeps when
+/// none can.
+/// ECANCELED (125) when the task is cancelled before the time is up. Outside
+/// `Task.scope`, `main` is the only task and simply sleeps.
+pub fn wait_ms(milliseconds: i64) -> Result<Unit, i64> ! {io, suspend} {
+    if milliseconds < 0 { return Result.Err(22); }
+    // The clock is read in whole milliseconds, so one more keeps the wait
+    // from ending early.
+    let deadline = deadline_ms(Int.saturating_add::<i64>(milliseconds, 1));
+    loop {
+        let left = remaining_ms(deadline);
+        if left == 0 { return Result.Ok(()); }
+        match sys.wait_ready(-1, 0, left) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(_) => {},
+        }
+    }
+}

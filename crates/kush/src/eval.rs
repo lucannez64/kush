@@ -625,6 +625,103 @@ struct FileTable {
     accepted: BTreeMap<i64, VecDeque<TcpStream>>,
     next: i64,
 }
+/// The evaluator's poll(2) on one descriptor (STD-PROC-NET-IN-KUSH,
+/// WEB-NET): `(errno, events)`, events 0 on timeout. There is no poll
+/// without FFI, so each kind of descriptor is waited on its own way.
+fn eval_poll(files: &Mutex<FileTable>, fd: i64, events: i64, timeout: i64) -> (i64, i64) {
+    let code = |result: io::Result<i64>| match result {
+        Ok(value) => (0, value),
+        Err(error) => (io_error_code(&error), 0),
+    };
+    let wait = (timeout >= 0).then(|| Duration::from_millis(timeout as u64));
+    let table = files.lock().unwrap();
+    if timeout < -1 {
+        (22, 0)
+    } else if table.accepted.get(&fd).is_some_and(|queue| !queue.is_empty()) {
+        (0, events & 1)
+    } else if let Some(listener) = table.listeners.get(&fd).map(std::net::TcpListener::try_clone) {
+        drop(table);
+        // No poll without FFI: try a nonblocking accept every
+        // 2 ms until the timeout, keeping what it accepts.
+        let deadline = wait.map(|wait| Instant::now() + wait);
+        match listener.and_then(|listener| listener.set_nonblocking(true).map(|()| listener)) {
+            Err(error) => code(Err(error)),
+            Ok(_) if events & 1 == 0 => (0, 0),
+            Ok(listener) => loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = listener.set_nonblocking(false);
+                        files.lock().unwrap().accepted.entry(fd).or_default().push_back(stream);
+                        break (0, 1);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        let now = Instant::now();
+                        if deadline.is_some_and(|deadline| now >= deadline) {
+                            let _ = listener.set_nonblocking(false);
+                            break (0, 0);
+                        }
+                        let step = Duration::from_millis(2);
+                        thread::sleep(deadline.map_or(step, |deadline| step.min(deadline - now)));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        let _ = listener.set_nonblocking(false);
+                        break code(Err(error));
+                    }
+                }
+            },
+        }
+    } else if let Some(pipe) = table.pipes.get(&fd).cloned() {
+        drop(table);
+        if events & 1 == 0 || !pipe.wait(wait) {
+            (0, 0)
+        } else {
+            let state = pipe.state.lock().unwrap();
+            let ended = state.data.is_empty() && state.error.is_none();
+            (0, if ended { 1 | 16 } else { 1 })
+        }
+    } else if let Some(socket) = table.sockets.get(&fd).map(TcpStream::try_clone) {
+        drop(table);
+        // Writes block in the evaluator, so a socket is always
+        // writable; readability is a peek with a read timeout.
+        match socket {
+            Err(error) => code(Err(error)),
+            Ok(_) if events & 4 != 0 => (0, 4),
+            Ok(_) if events & 1 == 0 => (0, 0),
+            Ok(socket) => {
+                let armed = match wait {
+                    Some(wait) if wait.is_zero() => socket.set_nonblocking(true),
+                    wait => socket.set_read_timeout(wait),
+                };
+                let peeked = armed.and_then(|()| socket.peek(&mut [0u8; 1]));
+                let _ = socket.set_nonblocking(false);
+                let _ = socket.set_read_timeout(None);
+                match peeked {
+                    Ok(0) => (0, 1 | 16),
+                    Ok(_) => (0, 1),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        (0, 0)
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => (4, 0),
+                    // The read that follows reports the error.
+                    Err(_) => (0, 1 | 8),
+                }
+            }
+        }
+    } else if table.open.contains_key(&fd) || (0..=2).contains(&fd) {
+        (0, events & 5)
+    } else if table.unbound.contains_key(&fd) {
+        (0, 4 & events)
+    } else {
+        (9, 0)
+    }
+}
 impl FileTable {
     fn handle(&mut self) -> i64 {
         self.next = self.next.max(2) + 1;
@@ -5041,91 +5138,74 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
             "kush_sys_poll" => {
                 let (fd, events, timeout) = (args[0].scalar(), args[1].scalar(), args[2].scalar());
-                let wait = (timeout >= 0).then(|| Duration::from_millis(timeout as u64));
-                let table = self.host.files.lock().unwrap();
-                if timeout < -1 {
+                eval_poll(&self.host.files, fd, events, timeout)
+            }
+            "kush_sys_wait_ready" => {
+                // WEB-REACTOR's deterministic model: a waiting task checks
+                // its descriptor for up to 1 ms, then yields, so waiting
+                // tasks are polled in ready-queue order. Without tasks it
+                // is a plain poll.
+                let (fd, events, timeout) = (args[0].scalar(), args[1].scalar(), args[2].scalar());
+                let step = |left: Option<Duration>| left.map_or(1, |left| left.as_millis().min(1) as i64);
+                if !(-1..=i64::from(i32::MAX)).contains(&timeout) {
                     (22, 0)
-                } else if table.accepted.get(&fd).is_some_and(|queue| !queue.is_empty()) {
-                    (0, events & 1)
-                } else if let Some(listener) = table.listeners.get(&fd).map(std::net::TcpListener::try_clone) {
-                    drop(table);
-                    // No poll without FFI: try a nonblocking accept every
-                    // 2 ms until the timeout, keeping what it accepts.
-                    let deadline = wait.map(|wait| Instant::now() + wait);
-                    match listener.and_then(|listener| listener.set_nonblocking(true).map(|()| listener)) {
-                        Err(error) => code(Err(error)),
-                        Ok(_) if events & 1 == 0 => (0, 0),
-                        Ok(listener) => loop {
-                            match listener.accept() {
-                                Ok((stream, _)) => {
-                                    let _ = stream.set_nonblocking(false);
-                                    let _ = listener.set_nonblocking(false);
-                                    self.host.files.lock().unwrap().accepted.entry(fd).or_default().push_back(stream);
-                                    break (0, 1);
-                                }
-                                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                                    let now = Instant::now();
-                                    if deadline.is_some_and(|deadline| now >= deadline) {
-                                        let _ = listener.set_nonblocking(false);
-                                        break (0, 0);
-                                    }
-                                    let step = Duration::from_millis(2);
-                                    thread::sleep(deadline.map_or(step, |deadline| step.min(deadline - now)));
-                                }
-                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                                Err(error) => {
-                                    let _ = listener.set_nonblocking(false);
-                                    break code(Err(error));
-                                }
-                            }
-                        },
-                    }
-                } else if let Some(pipe) = table.pipes.get(&fd).cloned() {
-                    drop(table);
-                    if events & 1 == 0 || !pipe.wait(wait) {
-                        (0, 0)
+                } else if self.task.is_none() {
+                    if fd >= 0 {
+                        eval_poll(&self.host.files, fd, events, timeout)
                     } else {
-                        let state = pipe.state.lock().unwrap();
-                        let ended = state.data.is_empty() && state.error.is_none();
-                        (0, if ended { 1 | 16 } else { 1 })
-                    }
-                } else if let Some(socket) = table.sockets.get(&fd).map(TcpStream::try_clone) {
-                    drop(table);
-                    // Writes block in the evaluator, so a socket is always
-                    // writable; readability is a peek with a read timeout.
-                    match socket {
-                        Err(error) => code(Err(error)),
-                        Ok(_) if events & 4 != 0 => (0, 4),
-                        Ok(_) if events & 1 == 0 => (0, 0),
-                        Ok(socket) => {
-                            let armed = match wait {
-                                Some(wait) if wait.is_zero() => socket.set_nonblocking(true),
-                                wait => socket.set_read_timeout(wait),
-                            };
-                            let peeked = armed.and_then(|()| socket.peek(&mut [0u8; 1]));
-                            let _ = socket.set_nonblocking(false);
-                            let _ = socket.set_read_timeout(None);
-                            match peeked {
-                                Ok(0) => (0, 1 | 16),
-                                Ok(_) => (0, 1),
-                                Err(error)
-                                    if matches!(
-                                        error.kind(),
-                                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                                    ) =>
-                                {
-                                    (0, 0)
-                                }
-                                Err(error) if error.kind() == io::ErrorKind::Interrupted => (4, 0),
-                                // The read that follows reports the error.
-                                Err(_) => (0, 1 | 8),
-                            }
+                        loop {
+                            thread::sleep(Duration::from_millis(if timeout < 0 { 1000 } else { timeout as u64 }));
+                            if timeout >= 0 { break (0, 0); }
                         }
                     }
-                } else if table.open.contains_key(&fd) || (0..=2).contains(&fd) {
-                    (0, events & 5)
-                } else if table.unbound.contains_key(&fd) {
-                    (0, 4 & events)
+                } else {
+                    let deadline = (timeout >= 0).then(|| Instant::now() + Duration::from_millis(timeout as u64));
+                    loop {
+                        if self.task_comm()?.check_cancel() {
+                            break (125, 0); // ECANCELED
+                        }
+                        let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                        let slice = step(left);
+                        let result = if fd >= 0 {
+                            eval_poll(&self.host.files, fd, events, slice)
+                        } else {
+                            thread::sleep(Duration::from_millis(slice as u64));
+                            (0, 0)
+                        };
+                        if result != (0, 0) {
+                            break result;
+                        }
+                        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                            break (0, 0);
+                        }
+                        self.task_comm()?.yield_now()?;
+                    }
+                }
+            }
+            "kush_sys_connect_start" => {
+                let (list, index) = (args[0].scalar(), args[1].scalar());
+                let address = self.host.files.lock().unwrap().addresses.get(&list).map(|addresses| {
+                    usize::try_from(index).ok().and_then(|i| addresses.get(i).copied())
+                });
+                match address {
+                    None => (9, 0),
+                    Some(None) => (2, 0),
+                    // The evaluator connects at once; connect_finish only
+                    // reports success.
+                    Some(Some(address)) => match TcpStream::connect(address) {
+                        Ok(socket) => {
+                            let mut table = self.host.files.lock().unwrap();
+                            let handle = table.handle();
+                            table.sockets.insert(handle, socket);
+                            (0, handle)
+                        }
+                        Err(error) => code(Err(error)),
+                    },
+                }
+            }
+            "kush_sys_connect_finish" => {
+                if self.host.files.lock().unwrap().sockets.contains_key(&args[0].scalar()) {
+                    (0, 0)
                 } else {
                     (9, 0)
                 }
@@ -5279,18 +5359,26 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 drop(table);
                 let accepted = match queued {
                     Some(stream) => Some(Ok(stream)),
+                    // The listener is nonblocking, as natively: EAGAIN when
+                    // nothing is queued.
                     None => listener.map(|listener| {
-                        listener.and_then(|listener| loop {
-                            match listener.accept() {
-                                Ok((stream, _)) => break Ok(stream),
-                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                                Err(error) => break Err(error),
-                            }
+                        listener.and_then(|listener| {
+                            listener.set_nonblocking(true)?;
+                            let accepted = loop {
+                                match listener.accept() {
+                                    Ok((stream, _)) => break stream.set_nonblocking(false).map(|()| stream),
+                                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                                    Err(error) => break Err(error),
+                                }
+                            };
+                            let _ = listener.set_nonblocking(false);
+                            accepted
                         })
                     }),
                 };
                 match accepted {
                     None => (9, 0),
+                    Some(Err(error)) if error.kind() == io::ErrorKind::WouldBlock => (11, 0),
                     Some(Err(error)) => code(Err(error)),
                     Some(Ok(stream)) => {
                         let mut table = self.host.files.lock().unwrap();

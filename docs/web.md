@@ -35,10 +35,9 @@ and is not planned here.
    socket that is leaked, closed twice or used after close is a compile
    error. They still block the thread, with timeouts; WEB-REACTOR makes them
    suspend a task. See [std-sys.md](std-sys.md).
-2. **Nonblocking I/O.** [async.md](async.md) says it plainly: blocking I/O
-   stalls the task scheduler, and tasks run on one OS thread. A server that
-   holds thousands of connections needs a reactor that suspends a task on a
-   read that would block.
+2. **Nonblocking I/O** (done, WEB-REACTOR). Waiting for a socket or a
+   timer suspends only the task: natively the scheduler sleeps in
+   `epoll_wait` when no task is ready. See [async.md](async.md).
 3. **Task limits** (done, TASK-ID-REUSE). The native runtime allowed 255
    spawned tasks per run and 64 children per scope; it now reuses joined
    task slots, so the bound is live tasks.
@@ -206,7 +205,7 @@ stranger can run.
 ```
 WEB-DESIGN (done)
 ├─ WEB-NET (done) ───────────────────────┐
-│                     TASK-ID-REUSE ─────┴─ WEB-REACTOR ─┐
+│                     TASK-ID-REUSE ─────┴─ WEB-REACTOR ─┐ (done)
 ├─ WEB-HTTP-PARSE ── WEB-CORE ───────────────────────────┴─ WEB-SERVER ─┬─ WEB-MULTICORE (after THREAD-TASKS)
 ├─ WEB-URL ─────────────┴─ WEB-ROUTER ─ WEB-EFFECTS ─ WEB-TEST-CLIENT  ├─ WEB-TLS
 ├─ WEB-JSON-FIELDS                                                       ├─ WEB-WEBSOCKET (after WEB-CRYPTO)

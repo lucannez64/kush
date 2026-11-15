@@ -123,12 +123,14 @@ and its writes block.
 port, backlog, reuse_port)` (SO_REUSEADDR always, SO_REUSEPORT on request;
 port 0 picks one, `local_port` tells which), `accept` with a timeout, and a
 linear `Conn` from `accept` or `connect`, with `read` (one read of what is
-there, after a poll with the timeout), `write` (all of it, polling on
-EAGAIN), `shutdown`, `set_nodelay` and `close`. The new stubs are
+there, after a wait with the timeout), `write` (all of it, waiting on
+EAGAIN), `shutdown`, `set_nodelay` and `close`. Their waits go through the
+task reactor (WEB-REACTOR, [async.md](async.md)): `wait_ready`,
+`connect_start`/`connect_finish`, and a nonblocking listener. The new stubs are
 `socket` (for one address of a resolved list), `setsockopt` (int values),
 `bind`, `listen`, `accept` (accept4, close-on-exec) and `local_port`
-(getsockname). Timeouts use `poll`, not SO_RCVTIMEO/SO_SNDTIMEO. The calls
-block the thread until WEB-REACTOR.
+(getsockname). Timeouts are waits with deadlines, not
+SO_RCVTIMEO/SO_SNDTIMEO.
 
 In the evaluator, Rust's std has no unbound socket, so `socket` and `bind`
 only record the address and `listen` binds and listens at once; SO_REUSEPORT

@@ -2822,9 +2822,42 @@ int64_t kush_sys_bind(int64_t fd, int64_t list, int64_t index) {
     if (address == NULL) return ENOENT;
     return bind((int)fd, address->ai_addr, address->ai_addrlen) != 0 ? errno : 0;
 }
+/* listen(2), and make the listener nonblocking: `accept` is EAGAIN when
+   another waiter took the connection or it was reset in the queue. */
 int64_t kush_sys_listen(int64_t fd, int64_t backlog) {
     if (backlog < 0 || backlog > INT32_MAX) return EINVAL;
-    return listen((int)fd, (int)backlog) != 0 ? errno : 0;
+    if (listen((int)fd, (int)backlog) != 0) return errno;
+    int flags = fcntl((int)fd, F_GETFL, 0);
+    if (flags < 0 || fcntl((int)fd, F_SETFL, flags | O_NONBLOCK) != 0) return errno;
+    return 0;
+}
+/* Start connecting a new nonblocking socket to address `index` of a
+   resolved list (ENOENT past its end). Wait until it is writable, then call
+   kush_sys_connect_finish. */
+int64_t kush_sys_connect_start(int64_t list, int64_t index, int64_t *out) {
+    struct addrinfo *address = kush_sys_address(list, index);
+    if (address == NULL) return ENOENT;
+    int fd = socket(address->ai_family, address->ai_socktype | SOCK_CLOEXEC | SOCK_NONBLOCK,
+                    address->ai_protocol);
+    if (fd < 0) return errno;
+    if (connect(fd, address->ai_addr, address->ai_addrlen) != 0 && errno != EINPROGRESS) {
+        int code = errno;
+        (void)close(fd);
+        return code;
+    }
+    *out = fd;
+    return 0;
+}
+/* The connection's outcome (SO_ERROR); on success the socket goes back to
+   blocking mode, like kush_sys_connect's. */
+int64_t kush_sys_connect_finish(int64_t fd) {
+    int error = 0;
+    socklen_t length = sizeof(error);
+    if (getsockopt((int)fd, SOL_SOCKET, SO_ERROR, &error, &length) != 0) return errno;
+    if (error != 0) return error;
+    int flags = fcntl((int)fd, F_GETFL, 0);
+    if (flags < 0 || fcntl((int)fd, F_SETFL, flags & ~O_NONBLOCK) != 0) return errno;
+    return 0;
 }
 /* accept4(2) with SOCK_CLOEXEC: a blocking connected socket. */
 int64_t kush_sys_accept(int64_t fd, int64_t *out) {
@@ -2989,6 +3022,13 @@ struct KushTask {
     struct KushHandlerContext *handlers;
     void *stack_base;
     size_t stack_total;
+    /* WEB-REACTOR: a task parked in kush_sys_wait_ready. wait_fd is its own
+       duplicate of the descriptor, registered one-shot with epoll (-1 for a
+       pure timer); wait_deadline is in monotonic ms (-1 for none);
+       wait_result is the events, 0 on timeout, -1 when cancelled. */
+    int waiting_io, wait_fd;
+    int64_t wait_deadline, wait_result;
+    KushTask *wait_previous, *wait_next;
 };
 /* Slot table: kush_task_count slots have ever been used, freed ones are on
    kush_free_slots. Runtime bookkeeping uses malloc, not kush_alloc, so the
@@ -3351,9 +3391,68 @@ static void kush_task_release_handlers(KushTask *t) {
     free(handlers);
     t->handlers = NULL;
 }
+/* ---- WEB-REACTOR: descriptor and timer waits ---------------------------
+   A task waiting for a descriptor or a deadline is BLOCKED on the waiting
+   list. When no task is ready the scheduler sleeps in epoll_wait until a
+   registered descriptor is ready or the nearest deadline; while tasks are
+   ready it still checks every 64 switches so none waits forever. */
+#include <sys/epoll.h>
+static int kush_epoll = -1;
+static KushTask *kush_waiting = NULL;
+static unsigned kush_reactor_turns = 0;
+static void kush_reactor_wake(KushTask *t, int64_t result) {
+    if (t->wait_previous != NULL) t->wait_previous->wait_next = t->wait_next;
+    else kush_waiting = t->wait_next;
+    if (t->wait_next != NULL) t->wait_next->wait_previous = t->wait_previous;
+    t->wait_previous = t->wait_next = NULL;
+    if (t->wait_fd >= 0) {
+        (void)epoll_ctl(kush_epoll, EPOLL_CTL_DEL, t->wait_fd, NULL);
+        (void)close(t->wait_fd);
+        t->wait_fd = -1;
+    }
+    t->waiting_io = 0;
+    t->wait_result = result;
+    t->state = KUSH_READY;
+    kush_ready_push(t);
+}
+static void kush_reactor_poll(int block) {
+    int timeout = 0;
+    int64_t now = kush_host_now_ms();
+    if (block) {
+        int64_t nearest = -1;
+        for (KushTask *t = kush_waiting; t != NULL; t = t->wait_next)
+            if (t->wait_deadline >= 0 && (nearest < 0 || t->wait_deadline < nearest))
+                nearest = t->wait_deadline;
+        if (nearest < 0) timeout = -1;
+        else if (nearest > now) timeout = nearest - now > 60000 ? 60000 : (int)(nearest - now);
+    }
+    struct epoll_event events[64];
+    int count = 0;
+    if (kush_epoll >= 0) count = epoll_wait(kush_epoll, events, 64, timeout);
+    else if (timeout != 0) (void)poll(NULL, 0, timeout);
+    for (int i = 0; i < count; ++i) {
+        KushTask *t = kush_task_lookup(events[i].data.u64);
+        /* EPOLLIN, EPOLLOUT, EPOLLERR and EPOLLHUP have poll(2)'s values. */
+        if (t != NULL && t->waiting_io) kush_reactor_wake(t, (int64_t)(events[i].events & 0x1f));
+    }
+    now = kush_host_now_ms();
+    for (KushTask *t = kush_waiting, *next; t != NULL; t = next) {
+        next = t->wait_next;
+        if (t->wait_deadline >= 0 && now >= t->wait_deadline) kush_reactor_wake(t, 0);
+    }
+}
+static void kush_task_request_cancel(KushTask *t) {
+    t->cancelled = 1;
+    if (t->waiting_io) kush_reactor_wake(t, -1);
+}
 static void kush_scheduler(void) {
     for (;;) {
-        if (kush_ready_count == 0) kush_panic();
+        if (kush_waiting != NULL && (kush_ready_count == 0 || ++kush_reactor_turns % 64 == 0))
+            kush_reactor_poll(kush_ready_count == 0);
+        if (kush_ready_count == 0) {
+            if (kush_waiting != NULL) continue;
+            kush_panic();
+        }
         KushTask *t = kush_task_lookup(kush_ready_pop());
         if (t == NULL || t->state == KUSH_FINISHED) continue;
         t->state = KUSH_RUNNING;
@@ -3517,7 +3616,7 @@ uint64_t kush_task_cancel(uint64_t *handle) {
     if (value == 0) return 0;
     KushTask *t = kush_task_lookup(value);
     if (t == NULL || t->id == 0) return 0;
-    if (!t->joined && t->state != KUSH_FINISHED) t->cancelled = 1;
+    if (!t->joined && t->state != KUSH_FINISHED) kush_task_request_cancel(t);
     return 0;
 }
 uint64_t kush_task_scope_begin(void) {
@@ -3533,7 +3632,7 @@ uint64_t kush_task_cancel_scope(void) {
     int depth = kush_current->scope_depth - 1;
     for (KushTask *child = kush_current->scope_first[depth]; child != NULL;
          child = child->next_sibling) {
-        if (!child->joined && child->state != KUSH_FINISHED) child->cancelled = 1;
+        if (!child->joined && child->state != KUSH_FINISHED) kush_task_request_cancel(child);
     }
     return 0;
 }
@@ -3564,9 +3663,54 @@ static void kush_task_finish(void) {
     kush_ready_capacity = 0; kush_ready_head = kush_ready_tail = kush_ready_count = 0;
     kush_stack_free(kush_scheduler_stack, kush_scheduler_stack_total);
     kush_scheduler_stack = NULL;
+    if (kush_epoll >= 0) { (void)close(kush_epoll); kush_epoll = -1; }
+    kush_waiting = NULL;
     kush_initialized = 0;
     kush_current = NULL;
     kush_task_count = 0;
+}
+/* Wait until `fd` has one of `events` (poll(2) bits) or `timeout_ms` passes
+   (-1 forever; fd -1 waits for the timeout alone), letting the other tasks
+   run meanwhile: the events, 0 on timeout. ECANCELED (125) when the task is
+   or becomes cancelled. Thread bodies cannot suspend, so this always runs on
+   the main thread's scheduler; `main` itself may wait too. */
+int64_t kush_sys_wait_ready(int64_t fd, int64_t events, int64_t timeout_ms, int64_t *out) {
+    if (timeout_ms < -1 || timeout_ms > INT32_MAX) return EINVAL;
+    kush_task_init();
+    KushTask *t = kush_current;
+    if (t->cancelled) return ECANCELED;
+    t->wait_fd = -1;
+    if (fd >= 0) {
+        if (kush_epoll < 0) {
+            kush_epoll = epoll_create1(EPOLL_CLOEXEC);
+            if (kush_epoll < 0) return errno;
+        }
+        /* A private duplicate, so several tasks can wait on one socket. */
+        int copy = fcntl((int)fd, F_DUPFD_CLOEXEC, 0);
+        if (copy < 0) return errno;
+        struct epoll_event wanted;
+        memset(&wanted, 0, sizeof(wanted));
+        wanted.events = ((uint32_t)events & (EPOLLIN | EPOLLOUT)) | EPOLLONESHOT;
+        wanted.data.u64 = t->handle;
+        if (epoll_ctl(kush_epoll, EPOLL_CTL_ADD, copy, &wanted) != 0) {
+            int code = errno;
+            (void)close(copy);
+            return code;
+        }
+        t->wait_fd = copy;
+    }
+    int64_t now = kush_host_now_ms();
+    t->wait_deadline = timeout_ms < 0 ? -1 : (now < 0 ? 0 : now + timeout_ms);
+    t->waiting_io = 1;
+    t->wait_previous = NULL;
+    t->wait_next = kush_waiting;
+    if (kush_waiting != NULL) kush_waiting->wait_previous = t;
+    kush_waiting = t;
+    t->state = KUSH_BLOCKED;
+    swapcontext(&t->context, &kush_scheduler_context);
+    if (t->wait_result < 0) return ECANCELED;
+    *out = t->wait_result;
+    return 0;
 }
 #ifdef KUSH_HAS_THREADS
 /* ---- THREAD-SCOPE: structured OS threads ---------------------------------

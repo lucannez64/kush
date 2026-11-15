@@ -181,9 +181,37 @@ per-frame unwind metadata or masking; this document does not claim that feature.
 
 ## Task I/O
 
-The initial task system does not add nonblocking standard-stream operations.
-`IO.read_all`/`IO.write` remain synchronous and may block the whole OS thread, so
-the native scheduler does not claim nonblocking I/O. Task bodies may use the
+### The reactor (WEB-REACTOR)
+
+`std.sys.wait_ready(fd, events, timeout_ms)` waits for a descriptor or a
+timeout by suspending only the calling task (`! {io, suspend}`). Natively
+the task is parked on a waiting list with its own duplicate of the
+descriptor registered one-shot with epoll, and its deadline; when no task is
+ready the scheduler sleeps in `epoll_wait` until a descriptor is ready or
+the nearest deadline, and while tasks are ready it still checks every 64
+switches, so a task that keeps yielding cannot starve the waiting ones.
+`main` may wait too, without a `Task.scope`. `Task.cancel` on a waiting
+task wakes it, and the wait returns `ECANCELED` (125), as it does when the
+task was already cancelled; this is the cooperative cancellation above,
+delivered at the wait. Thread bodies cannot suspend, so the reactor only
+runs on the main thread (one reactor per thread is WEB-MULTICORE).
+
+On it are `std.net`'s `Listener` and `Conn` (`accept`, `connect`, `read`,
+`write`; the listener is nonblocking and a connection is started
+nonblocking, then waited for) and `std.time.wait_ms`, a sleep that suspends
+only the task. `std.net.exchange`, `std.http` and the `IO.*`/`FS.*`
+operations still block the thread.
+
+The reference evaluator keeps a deterministic polling model: a waiting task
+checks its descriptor for up to 1 ms and then yields, so waiting tasks are
+polled in ready-queue order; a program without tasks just polls. Tests:
+`crates/kush/tests/web_reactor.rs`.
+
+### Blocking calls
+
+Apart from the reactor's waits, the task system has no nonblocking
+standard-stream operations. `IO.read_all`/`IO.write` remain synchronous and
+may block the whole OS thread. Task bodies may use the
 existing `io` effect (for example `print_i64`) because the runtime is a single
 OS thread and interleaving is still cooperative and deterministic. A blocking
 read stalls every task; this is documented, not hidden.
@@ -218,10 +246,10 @@ behavior and ordinary finite-input tests.
 
 ## Current limits
 
-- Single OS thread, no parallelism, no cross-thread handles, no atomics or
-  networking.
+- Tasks run on a single OS thread, with no cross-thread handles; sockets
+  and timers wait on the reactor, other I/O blocks the thread.
 - Cancellation is cooperative; no masking regions or cancellation handlers yet.
-- No nonblocking stream API; blocking I/O may stall the scheduler.
+- Standard streams, files and `std.net.exchange` block the scheduler.
 - Task bodies may return owning/linear results or copyable must-use observations
   through explicit `@[1]` (or intrinsically linear) contracts; those handles are
   linear and must be joined. A cancelled completion still delivers the payload

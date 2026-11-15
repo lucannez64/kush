@@ -136,9 +136,29 @@ pub foreign "kush_sys_socket" fn socket(list: i64, index: i64) -> Result<i64, i6
 pub foreign "kush_sys_setsockopt" fn setsockopt(fd: i64, level: i64, name: i64, value: i64) -> Result<Unit, i64> ! {io};
 /// bind(2) to address `index` of a resolved list.
 pub foreign "kush_sys_bind" fn bind(fd: i64, list: i64, index: i64) -> Result<Unit, i64> ! {io};
+/// listen(2), leaving the listener nonblocking.
 pub foreign "kush_sys_listen" fn listen(fd: i64, backlog: i64) -> Result<Unit, i64> ! {io};
-/// accept4(2), close-on-exec: a blocking connected socket. It blocks until a
-/// connection arrives, so `poll` the listener first.
+/// accept4(2), close-on-exec: a blocking connected socket. The listener is
+/// nonblocking (`listen` makes it so): EAGAIN when no connection is queued.
 pub foreign "kush_sys_accept" fn accept(fd: i64) -> Result<i64, i64> ! {io};
 /// The local port of a bound socket (getsockname).
 pub foreign "kush_sys_local_port" fn local_port(fd: i64) -> Result<i64, i64> ! {io};
+
+// The task reactor (WEB-REACTOR).
+
+pub fn ECANCELED() -> i64 ! {} { 125 }
+
+/// Wait until `fd` has one of `events` (POLLIN, POLLOUT) or `timeout_ms`
+/// passes (-1 forever; with fd -1 only the timeout counts): the events that
+/// happened, 0 on timeout. Unlike `poll` it suspends only the calling task:
+/// the scheduler runs the others and sleeps in epoll_wait when none is
+/// ready. ECANCELED (125) when the task is, or while waiting becomes,
+/// cancelled.
+pub foreign "kush_sys_wait_ready" fn wait_ready(fd: i64, events: i64, timeout_ms: i64) -> Result<i64, i64> ! {io, suspend};
+/// Start connecting a new nonblocking socket to address `index` of a
+/// resolved list (ENOENT past its end); wait for POLLOUT, then call
+/// `connect_finish`.
+pub foreign "kush_sys_connect_start" fn connect_start(list: i64, index: i64) -> Result<i64, i64> ! {io};
+/// The outcome of a started connection; on success the socket is in
+/// blocking mode, like `connect`'s.
+pub foreign "kush_sys_connect_finish" fn connect_finish(fd: i64) -> Result<Unit, i64> ! {io};
