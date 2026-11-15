@@ -1,0 +1,606 @@
+module std.http1;
+
+// HTTP/1.1 messages without I/O (WEB-HTTP-PARSE, docs/web.md): a request
+// head parser over borrowed bytes, a chunked body reader, and a response
+// writer. The parser is strict where leniency enables request smuggling:
+// lines end in CRLF only, no obsolete line folding, no whitespace before a
+// field's colon, one Content-Length value, no Content-Length together with
+// Transfer-Encoding, and only `chunked` as a transfer coding. Every limit
+// is an HTTP status, never a panic: bytes are read through `byte`, which
+// answers -1 outside the buffer.
+
+use std.result.Result;
+use std.text;
+
+/// Hard limits on a request. Exceeding one is a 4xx status.
+pub struct Limits {
+    /// Bytes in the request line or in one field line (414 / 431).
+    pub line: i64,
+    /// Number of header fields (431).
+    pub fields: i64,
+    /// Bytes in the whole head, request line and fields (431).
+    pub head: i64,
+    /// Bytes in the body, declared or chunked (413).
+    pub body: i64,
+}
+
+/// 8 KiB lines, 100 fields, a 64 KiB head and a 1 MiB body.
+pub fn limits() -> Limits ! {} {
+    Limits { line: 8192, fields: 100, head: 65536, body: 1048576 }
+}
+
+pub enum Method { Get, Head, Post, Put, Delete, Patch, Options, Connect, Trace, Other }
+
+/// A header field, as byte ranges of the parsed buffer: the name is
+/// `name..name_end`, the value `value..value_end` without surrounding
+/// whitespace.
+pub struct Field {
+    pub name: i64,
+    pub name_end: i64,
+    pub value: i64,
+    pub value_end: i64,
+}
+
+/// How the body is delimited.
+pub enum Framing {
+    /// No body.
+    Empty,
+    /// Exactly this many bytes (Content-Length).
+    Length(i64),
+    /// Transfer-Encoding: chunked; see `chunked_size`.
+    Chunked,
+}
+
+/// A parsed request head. Offsets are into the buffer given to
+/// `parse_head`.
+pub struct Head {
+    pub method: Method,
+    /// The request target, `target..target_end`.
+    pub target: i64,
+    pub target_end: i64,
+    /// 0 for HTTP/1.0, 1 for HTTP/1.1 (and later 1.x).
+    pub minor: i64,
+    pub fields: Vec<Field>,
+    pub framing: Framing,
+    /// Whether the connection may carry another request afterwards.
+    pub keep_alive: Bool,
+    /// Bytes of the head, including any leading empty lines and the final
+    /// empty line: the body starts there.
+    pub size: i64,
+}
+
+pub enum Parse {
+    /// The head is not complete yet: read more and parse again.
+    Incomplete,
+    Complete(Head),
+    /// Answer with this status and close the connection.
+    Reject(i64),
+}
+
+/// The byte at `i`, or -1 outside `b`.
+fn byte(b: &Bytes, i: i64) -> i64 ! {} {
+    if i >= 0 && i < Bytes.len(b) { Bytes.at(b, i, _) } else { -1 }
+}
+
+fn add(a: i64, b: i64) -> i64 ! {} { Int.wrapping_add::<i64>(a, b) }
+fn sub(a: i64, b: i64) -> i64 ! {} { Int.wrapping_sub::<i64>(a, b) }
+
+/// A token character (RFC 9110 tchar).
+fn is_tchar(c: i64) -> Bool ! {} {
+    (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+        || c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42
+        || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124
+        || c == 126
+}
+
+/// A field value character: visible ASCII, space, tab, or obs-text.
+fn is_value_char(c: i64) -> Bool ! {} {
+    c == 9 || (c >= 32 && c <= 126) || (c >= 128 && c <= 255)
+}
+
+fn lower(c: i64) -> i64 ! {} {
+    if c >= 65 && c <= 90 { c + 32 } else { c }
+}
+
+/// Whether `b[start..end]` is `text`, ignoring ASCII case when `fold`
+/// (`text` is lowercase then).
+fn same(b: &Bytes, start: i64, end: i64, text: &Bytes, fold: Bool) -> Bool ! {} {
+    let n = Bytes.len(text);
+    if sub(end, start) != n { return false; }
+    let mut i = 0;
+    while i < n {
+        let c = byte(b, add(start, i));
+        let c = if fold { lower(c) } else { c };
+        if c != byte(text, i) { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+/// The index of the CR of the first CRLF at or after `from`; -1 when the
+/// buffer ends first; -2 for a bare LF or a CR not followed by LF.
+fn line_end(b: &Bytes, from: i64) -> i64 ! {} {
+    let n = Bytes.len(b);
+    let mut i = 0;
+    if from > 0 { i = from; }
+    while i < n invariant { 0 <= i } {
+        let c = Bytes.at(b, i, _);
+        if c == 10 { return -2; }
+        if c == 13 {
+            let next = byte(b, add(i, 1));
+            if next == 10 { return i; }
+            if next < 0 { return -1; }
+            return -2;
+        }
+        i = i + 1;
+    }
+    -1
+}
+
+/// The first index in `start..end` holding `c`, or `end`.
+fn find(b: &Bytes, start: i64, end: i64, c: i64) -> i64 ! {} {
+    let mut i = start;
+    while i < end {
+        if byte(b, i) == c { return i; }
+        i = add(i, 1);
+    }
+    end
+}
+
+/// The words the parser compares against, allocated once per parse.
+struct Words {
+    get: Bytes, head: Bytes, post: Bytes, put: Bytes, delete: Bytes, patch: Bytes,
+    options: Bytes, connect: Bytes, trace: Bytes,
+    content_length: Bytes, transfer_encoding: Bytes, host: Bytes, connection: Bytes,
+    expect: Bytes, chunked: Bytes, close: Bytes, keep_alive: Bytes,
+}
+
+fn words() -> Words ! {alloc, panic} {
+    Words {
+        get: Bytes.from("GET"), head: Bytes.from("HEAD"), post: Bytes.from("POST"),
+        put: Bytes.from("PUT"), delete: Bytes.from("DELETE"), patch: Bytes.from("PATCH"),
+        options: Bytes.from("OPTIONS"), connect: Bytes.from("CONNECT"),
+        trace: Bytes.from("TRACE"),
+        content_length: Bytes.from("content-length"),
+        transfer_encoding: Bytes.from("transfer-encoding"), host: Bytes.from("host"),
+        connection: Bytes.from("connection"), expect: Bytes.from("expect"),
+        chunked: Bytes.from("chunked"), close: Bytes.from("close"),
+        keep_alive: Bytes.from("keep-alive"),
+    }
+}
+
+fn method_of(b: &Bytes, start: i64, end: i64, w: &Words) -> Method ! {} {
+    if same(b, start, end, &w.get, false) { Method.Get }
+    else if same(b, start, end, &w.head, false) { Method.Head }
+    else if same(b, start, end, &w.post, false) { Method.Post }
+    else if same(b, start, end, &w.put, false) { Method.Put }
+    else if same(b, start, end, &w.delete, false) { Method.Delete }
+    else if same(b, start, end, &w.patch, false) { Method.Patch }
+    else if same(b, start, end, &w.options, false) { Method.Options }
+    else if same(b, start, end, &w.connect, false) { Method.Connect }
+    else if same(b, start, end, &w.trace, false) { Method.Trace }
+    else { Method.Other }
+}
+
+/// A decimal Content-Length value, or -1 when it is not one. Values above
+/// 10^15 count as 10^15 (over any sane body limit).
+fn decimal(b: &Bytes, start: i64, end: i64) -> i64 ! {} {
+    if start >= end { return -1; }
+    let mut value = 0;
+    let mut i = start;
+    while i < end {
+        let c = byte(b, i);
+        if c < 48 || c > 57 { return -1; }
+        if value < 1000000000000000 {
+            value = Int.wrapping_add::<i64>(Int.wrapping_mul::<i64>(value, 10), c - 48);
+        }
+        i = add(i, 1);
+    }
+    if value > 1000000000000000 { 1000000000000000 } else { value }
+}
+
+/// Whether the comma-separated list `b[start..end]` holds `token`
+/// (ASCII case-insensitive).
+fn list_has(b: &Bytes, start: i64, end: i64, token: &Bytes) -> Bool ! {} {
+    let mut at = start;
+    while at < end {
+        let comma = find(b, at, end, 44);
+        let mut s = at;
+        while s < comma && (byte(b, s) == 32 || byte(b, s) == 9) { s = add(s, 1); }
+        let mut e = comma;
+        while e > s && (byte(b, sub(e, 1)) == 32 || byte(b, sub(e, 1)) == 9) { e = sub(e, 1); }
+        if same(b, s, e, token, true) { return true; }
+        at = add(comma, 1);
+    }
+    false
+}
+
+/// Parse a request head at the start of `buffer`.
+pub fn parse_head(buffer: &Bytes, limits: &Limits) -> Parse ! {alloc, panic} {
+    let n = Bytes.len(buffer);
+    // Empty lines before the request line are ignored (RFC 9112 2.2).
+    let mut at = 0;
+    while byte(buffer, at) == 13 && byte(buffer, add(at, 1)) == 10 { at = add(at, 2); }
+    let line = line_end(buffer, at);
+    if line == -2 { return Parse.Reject(400); }
+    if line == -1 {
+        return if sub(n, at) > limits.line { Parse.Reject(414) } else { Parse.Incomplete };
+    }
+    if sub(line, at) > limits.line { return Parse.Reject(414); }
+    // method SP request-target SP HTTP-version
+    let space = find(buffer, at, line, 32);
+    let method_start = at;
+    if space == at || space == line { return Parse.Reject(400); }
+    let mut i = at;
+    while i < space {
+        if !is_tchar(byte(buffer, i)) { return Parse.Reject(400); }
+        i = add(i, 1);
+    }
+    let target = add(space, 1);
+    let target_end = find(buffer, target, line, 32);
+    if target_end == target || target_end == line { return Parse.Reject(400); }
+    i = target;
+    while i < target_end {
+        let c = byte(buffer, i);
+        if c <= 32 || c >= 127 { return Parse.Reject(400); }
+        i = add(i, 1);
+    }
+    let version = add(target_end, 1);
+    if sub(line, version) != 8
+        || byte(buffer, version) != 72 || byte(buffer, add(version, 1)) != 84
+        || byte(buffer, add(version, 2)) != 84 || byte(buffer, add(version, 3)) != 80
+        || byte(buffer, add(version, 4)) != 47 || byte(buffer, add(version, 6)) != 46
+    {
+        return Parse.Reject(400);
+    }
+    let major = byte(buffer, add(version, 5));
+    let minor_digit = byte(buffer, add(version, 7));
+    if major < 48 || major > 57 || minor_digit < 48 || minor_digit > 57 {
+        return Parse.Reject(400);
+    }
+    if major != 49 { return Parse.Reject(505); }
+    let minor = if minor_digit == 48 { 0 } else { 1 };
+    let w = words();
+    let method = method_of(buffer, method_start, space, &w);
+    // Header fields.
+    let mut fields: Vec<Field> = Vec.new();
+    let mut count = 0;
+    let mut length = -1;
+    let mut transfer = 0;
+    let mut chunked = false;
+    let mut other_coding = false;
+    let mut hosts = 0;
+    let mut close = false;
+    let mut keep = false;
+    let mut expect = false;
+    let mut pos = add(line, 2);
+    loop {
+        let end = line_end(buffer, pos);
+        if end == -2 { return Parse.Reject(400); }
+        if end == -1 {
+            return if sub(n, at) > limits.head { Parse.Reject(431) } else { Parse.Incomplete };
+        }
+        if sub(add(end, 2), at) > limits.head { return Parse.Reject(431); }
+        if end == pos { break; }
+        if sub(end, pos) > limits.line { return Parse.Reject(431); }
+        // name ":" OWS value OWS; a leading space is obsolete folding.
+        let colon = find(buffer, pos, end, 58);
+        if colon == pos || colon == end { return Parse.Reject(400); }
+        i = pos;
+        while i < colon {
+            if !is_tchar(byte(buffer, i)) { return Parse.Reject(400); }
+            i = add(i, 1);
+        }
+        let mut value = add(colon, 1);
+        while value < end && (byte(buffer, value) == 32 || byte(buffer, value) == 9) {
+            value = add(value, 1);
+        }
+        let mut value_end = end;
+        while value_end > value
+            && (byte(buffer, sub(value_end, 1)) == 32 || byte(buffer, sub(value_end, 1)) == 9)
+        {
+            value_end = sub(value_end, 1);
+        }
+        i = value;
+        while i < value_end {
+            if !is_value_char(byte(buffer, i)) { return Parse.Reject(400); }
+            i = add(i, 1);
+        }
+        count = add(count, 1);
+        if count > limits.fields { return Parse.Reject(431); }
+        if same(buffer, pos, colon, &w.content_length, true) {
+            let declared = decimal(buffer, value, value_end);
+            if declared < 0 || (length >= 0 && declared != length) { return Parse.Reject(400); }
+            length = declared;
+        } else if same(buffer, pos, colon, &w.transfer_encoding, true) {
+            transfer = add(transfer, 1);
+            if same(buffer, value, value_end, &w.chunked, true) {
+                chunked = true;
+            } else {
+                other_coding = true;
+            }
+        } else if same(buffer, pos, colon, &w.host, true) {
+            hosts = add(hosts, 1);
+        } else if same(buffer, pos, colon, &w.connection, true) {
+            if list_has(buffer, value, value_end, &w.close) { close = true; }
+            if list_has(buffer, value, value_end, &w.keep_alive) { keep = true; }
+        } else if same(buffer, pos, colon, &w.expect, true) {
+            expect = true;
+        }
+        fields = Vec.push(fields, Field { name: pos, name_end: colon, value: value, value_end: value_end });
+        pos = add(end, 2);
+    }
+    let size = add(pos, 2);
+    // Framing (RFC 9112 6.3): reject what proxies could read differently.
+    if transfer > 1 || (transfer > 0 && length >= 0) || (transfer > 0 && minor == 0) {
+        return Parse.Reject(400);
+    }
+    if other_coding { return Parse.Reject(501); }
+    if hosts > 1 || (minor == 1 && hosts == 0) { return Parse.Reject(400); }
+    // 100-continue is not supported yet.
+    if expect { return Parse.Reject(417); }
+    let framing = if chunked {
+        Framing.Chunked
+    } else if length > limits.body {
+        return Parse.Reject(413);
+    } else if length > 0 {
+        Framing.Length(length)
+    } else {
+        Framing.Empty
+    };
+    let keep_alive = if minor == 1 { !close } else { keep && !close };
+    Parse.Complete(Head {
+        method: method,
+        target: target,
+        target_end: target_end,
+        minor: minor,
+        fields: fields,
+        framing: framing,
+        keep_alive: keep_alive,
+        size: size,
+    })
+}
+
+/// The result of checking a chunked body.
+pub enum Body {
+    Incomplete,
+    /// The whole body is in the buffer: its decoded length, and the offset
+    /// just after it (after the trailer section).
+    Complete(i64, i64),
+    Reject(i64),
+}
+
+fn hex_digit(c: i64) -> i64 ! {} {
+    if c >= 48 && c <= 57 { c - 48 }
+    else if c >= 97 && c <= 102 { c - 87 }
+    else if c >= 65 && c <= 70 { c - 55 }
+    else { -1 }
+}
+
+/// Check the chunked body that starts at `at`: complete once the last chunk
+/// and the trailer section are in the buffer. Chunk extensions are skipped
+/// and trailer fields ignored. More than `limits.body` decoded bytes is 413.
+pub fn chunked_size(buffer: &Bytes, at: i64, limits: &Limits) -> Body ! {} {
+    let n = Bytes.len(buffer);
+    let mut pos = at;
+    let mut total = 0;
+    loop {
+        let end = line_end(buffer, pos);
+        if end == -2 { return Body.Reject(400); }
+        if end == -1 {
+            return if sub(n, pos) > limits.line { Body.Reject(400) } else { Body.Incomplete };
+        }
+        let mut size = 0;
+        let mut digits = 0;
+        let mut i = pos;
+        while i < end && hex_digit(byte(buffer, i)) >= 0 {
+            if digits == 15 { return Body.Reject(413); }
+            size = Int.wrapping_add::<i64>(Int.wrapping_mul::<i64>(size, 16), hex_digit(byte(buffer, i)));
+            digits = add(digits, 1);
+            i = add(i, 1);
+        }
+        if digits == 0 { return Body.Reject(400); }
+        if i < end {
+            // chunk-ext: ";" ... up to the line end.
+            if byte(buffer, i) != 59 { return Body.Reject(400); }
+            while i < end {
+                if !is_value_char(byte(buffer, i)) { return Body.Reject(400); }
+                i = add(i, 1);
+            }
+        }
+        let data = add(end, 2);
+        if size == 0 {
+            // The trailer section ends with an empty line.
+            let mut line = data;
+            loop {
+                let e = line_end(buffer, line);
+                if e == -2 { return Body.Reject(400); }
+                if e == -1 {
+                    return if sub(n, data) > limits.head { Body.Reject(431) } else { Body.Incomplete };
+                }
+                if e == line { return Body.Complete(total, add(e, 2)); }
+                if sub(add(e, 2), data) > limits.head { return Body.Reject(431); }
+                line = add(e, 2);
+            }
+        }
+        total = add(total, size);
+        if total > limits.body || size > limits.body { return Body.Reject(413); }
+        let data_end = add(data, size);
+        if add(data_end, 2) > n { return Body.Incomplete; }
+        if byte(buffer, data_end) != 13 || byte(buffer, add(data_end, 1)) != 10 {
+            return Body.Reject(400);
+        }
+        pos = add(data_end, 2);
+    }
+}
+
+/// Append the decoded data of the chunked body at `at` to `out`. Call it
+/// after `chunked_size` answered `Complete`.
+pub fn chunked_copy(buffer: &Bytes, at: i64, out: Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut pos = at;
+    loop {
+        let end = line_end(buffer, pos);
+        if end < 0 { return out; }
+        let mut size = 0;
+        let mut i = pos;
+        let mut digits = 0;
+        while i < end && hex_digit(byte(buffer, i)) >= 0 && digits < 15 {
+            size = Int.wrapping_add::<i64>(Int.wrapping_mul::<i64>(size, 16), hex_digit(byte(buffer, i)));
+            digits = add(digits, 1);
+            i = add(i, 1);
+        }
+        if size == 0 { return out; }
+        let data = add(end, 2);
+        let data_end = add(data, size);
+        i = data;
+        while i < data_end {
+            let c = byte(buffer, i);
+            if c < 0 { return out; }
+            out = Bytes.push(out, c);
+            i = add(i, 1);
+        }
+        pos = add(data_end, 2);
+    }
+}
+
+// The response writer. Each function appends to `out` and returns it.
+
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let n = Bytes.len(text);
+    let mut i = 0;
+    while i < n {
+        out = Bytes.push(out, Bytes.at(text, i, _));
+        i = i + 1;
+    }
+    out
+}
+
+/// The reason phrase for `status` (empty for an unknown one, which HTTP
+/// allows).
+pub fn reason(status: i64) -> Bytes ! {alloc, panic} {
+    if status == 100 { Bytes.from("Continue") }
+    else if status == 101 { Bytes.from("Switching Protocols") }
+    else if status == 200 { Bytes.from("OK") }
+    else if status == 201 { Bytes.from("Created") }
+    else if status == 202 { Bytes.from("Accepted") }
+    else if status == 204 { Bytes.from("No Content") }
+    else if status == 206 { Bytes.from("Partial Content") }
+    else if status == 301 { Bytes.from("Moved Permanently") }
+    else if status == 302 { Bytes.from("Found") }
+    else if status == 303 { Bytes.from("See Other") }
+    else if status == 304 { Bytes.from("Not Modified") }
+    else if status == 307 { Bytes.from("Temporary Redirect") }
+    else if status == 308 { Bytes.from("Permanent Redirect") }
+    else if status == 400 { Bytes.from("Bad Request") }
+    else if status == 401 { Bytes.from("Unauthorized") }
+    else if status == 403 { Bytes.from("Forbidden") }
+    else if status == 404 { Bytes.from("Not Found") }
+    else if status == 405 { Bytes.from("Method Not Allowed") }
+    else if status == 408 { Bytes.from("Request Timeout") }
+    else if status == 409 { Bytes.from("Conflict") }
+    else if status == 410 { Bytes.from("Gone") }
+    else if status == 411 { Bytes.from("Length Required") }
+    else if status == 413 { Bytes.from("Content Too Large") }
+    else if status == 414 { Bytes.from("URI Too Long") }
+    else if status == 415 { Bytes.from("Unsupported Media Type") }
+    else if status == 417 { Bytes.from("Expectation Failed") }
+    else if status == 422 { Bytes.from("Unprocessable Content") }
+    else if status == 429 { Bytes.from("Too Many Requests") }
+    else if status == 431 { Bytes.from("Request Header Fields Too Large") }
+    else if status == 500 { Bytes.from("Internal Server Error") }
+    else if status == 501 { Bytes.from("Not Implemented") }
+    else if status == 502 { Bytes.from("Bad Gateway") }
+    else if status == 503 { Bytes.from("Service Unavailable") }
+    else if status == 504 { Bytes.from("Gateway Timeout") }
+    else if status == 505 { Bytes.from("HTTP Version Not Supported") }
+    else { Bytes.with_capacity(0) }
+}
+
+/// "HTTP/1.1 <status> <reason>\r\n". A status outside 100..=999 is written
+/// as 500.
+pub fn status_line(out: Bytes, status: i64) -> Bytes ! {alloc, panic} {
+    let status = if status >= 100 && status <= 999 { status } else { 500 };
+    let prefix = Bytes.from("HTTP/1.1 ");
+    let mut out = append(out, &prefix);
+    out = text.format_i64_into(out, status);
+    out = Bytes.push(out, 32);
+    let phrase = reason(status);
+    out = append(out, &phrase);
+    out = Bytes.push(out, 13);
+    Bytes.push(out, 10)
+}
+
+/// Whether `name` is a token and `value` holds no CR, LF, NUL or other
+/// control character but tab: what `field` accepts.
+pub fn valid_field(name: &Bytes, value: &Bytes) -> Bool ! {} {
+    let n = Bytes.len(name);
+    if n == 0 { return false; }
+    let mut i = 0;
+    while i < n {
+        if !is_tchar(Bytes.at(name, i, _)) { return false; }
+        i = i + 1;
+    }
+    let m = Bytes.len(value);
+    i = 0;
+    while i < m {
+        if !is_value_char(Bytes.at(value, i, _)) { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+/// "name: value\r\n". EINVAL (22) when `valid_field` refuses them, so a
+/// value from a request cannot inject another header (the buffer is freed).
+pub fn field(out: Bytes, name: &Bytes, value: &Bytes) -> Result<Bytes, i64> ! {alloc, panic} {
+    if !valid_field(name, value) { return Result.Err(22); }
+    let mut out = append(out, name);
+    out = Bytes.push(out, 58);
+    out = Bytes.push(out, 32);
+    out = append(out, value);
+    out = Bytes.push(out, 13);
+    Result.Ok(Bytes.push(out, 10))
+}
+
+/// "Content-Length: n\r\n".
+pub fn content_length(out: Bytes, length: i64) -> Bytes ! {alloc, panic} {
+    let name = Bytes.from("Content-Length: ");
+    let mut out = append(out, &name);
+    out = text.format_i64_into(out, length);
+    out = Bytes.push(out, 13);
+    Bytes.push(out, 10)
+}
+
+/// The empty line that ends a head.
+pub fn end_head(out: Bytes) -> Bytes ! {alloc, panic} {
+    Bytes.push(Bytes.push(out, 13), 10)
+}
+
+/// One chunk of a chunked body: hex length, CRLF, data, CRLF. Empty data
+/// writes nothing (an empty chunk would end the body).
+pub fn chunk(out: Bytes, data: &Bytes) -> Bytes ! {alloc, panic} {
+    let n = Bytes.len(data);
+    if n == 0 { return out; }
+    let mut out = out;
+    // Hex digits, most significant first.
+    let mut shift = 60;
+    let mut started = false;
+    while shift >= 0 {
+        let digit = (n >> shift) & 15;
+        if digit != 0 || started || shift == 0 {
+            started = true;
+            out = Bytes.push(out, if digit < 10 { digit + 48 } else { digit + 87 });
+        }
+        shift = shift - 4;
+    }
+    out = Bytes.push(Bytes.push(out, 13), 10);
+    out = append(out, data);
+    Bytes.push(Bytes.push(out, 13), 10)
+}
+
+/// The last chunk and an empty trailer section: "0\r\n\r\n".
+pub fn last_chunk(out: Bytes) -> Bytes ! {alloc, panic} {
+    let end = Bytes.from("0\r\n\r\n");
+    append(out, &end)
+}
