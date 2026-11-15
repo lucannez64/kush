@@ -163,6 +163,9 @@ milliseconds; `0` means no timeout. A timed-out operation returns `ETIMEDOUT`
 
 ## Subprocesses
 
+`std.proc.run` is the same operation written in Kush over `std.sys`, with
+the buffer passed by value; see [std-sys.md](std-sys.md).
+
 `PROC.run` starts `program` directly through `execvp` without a shell.
 `arguments` is a NUL-separated byte string; empty segments and a trailing NUL
 are ignored, so `/bin/echo` with `hello\0world` receives two arguments.
@@ -181,6 +184,10 @@ Callers that need a shell must invoke one explicitly and accept its quoting
 rules.
 
 ## Plain TCP and HTTP
+
+`std.net.exchange` is the same operation written in Kush over `std.sys`,
+with the buffer passed by value; `std.http` uses it. See
+[std-sys.md](std-sys.md).
 
 `NET.tcp_exchange` resolves `host` with `getaddrinfo`, connects to `port`
 (1-65535), sends the complete request, performs `shutdown(SHUT_WR)`, and reads

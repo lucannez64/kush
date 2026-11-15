@@ -31,6 +31,8 @@ pub const STD: &[(&str, &str)] = &[
     ("std.fs", include_str!("../std/fs.kush")),
     ("std.env", include_str!("../std/env.kush")),
     ("std.time", include_str!("../std/time.kush")),
+    ("std.proc", include_str!("../std/proc.kush")),
+    ("std.net", include_str!("../std/net.kush")),
     ("std.os", include_str!("../std/os.kush")),
     ("std.io", include_str!("../std/io.kush")),
     ("std.base64", include_str!("../std/base64.kush")),

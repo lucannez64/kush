@@ -5186,10 +5186,21 @@
         "FOREIGN-BYTES-FILL",
         "EVAL-FOREIGN-SHIMS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Subprocess (fork/exec, pipe, poll with timeout, wait) and TCP exchange (getaddrinfo, connect, send, poll/recv with timeout) as Kush loops over one-call stubs; the timeout and partial-read logic moves into std.",
-      "commit": null,
-      "log": []
+      "commit": "1753ade",
+      "log": [
+        {
+          "time": "2026-11-15 17:01:48",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 17:01:49",
+          "who": "agent",
+          "text": "done 1753ade"
+        }
+      ]
     },
     {
       "id": "GPU-DESIGN",

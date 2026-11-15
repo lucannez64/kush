@@ -1,9 +1,10 @@
 module std.http;
 
+use std.net;
 use std.result.Result;
 use std.text;
 
-/// A minimal HTTP/1.1 client over the checked plain-TCP operation. It does not
+/// A minimal HTTP/1.1 client over `std.net`. It does not
 /// implement TLS, redirects, content-length/chunked decoding, or connection
 /// reuse. `body` starts immediately after the header terminator and may contain
 /// chunk framing when the server sends `Transfer-Encoding: chunked`.
@@ -138,10 +139,14 @@ pub fn request(
     drop(prefix);
     drop(headers);
     drop(terminator);
-    let mut response = Bytes.with_capacity(65536);
-    let _received = NET.tcp_exchange(host, port, &outgoing, &mut response, timeout_ms)?;
+    let response = Bytes.with_capacity(65536);
+    let outcome = net.exchange(host, port, &outgoing, response, timeout_ms);
     drop(outgoing);
-    parse(response)
+    match outcome {
+        net.Outcome.Received(response, _) => parse(response),
+        net.Outcome.Stopped(_, code) => Result.Err(code),
+        net.Outcome.Failed(code) => Result.Err(code),
+    }
 }
 
 pub fn get(

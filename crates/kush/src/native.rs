@@ -1890,6 +1890,11 @@ int64_t kush_sys_clock_gettime(int64_t clock, int64_t field, int64_t *out) {
     if (clock != 0 && clock != 1) return EINVAL;
     if (clock_gettime(clock == 0 ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now) != 0) return errno;
     if (field == 0) { *out = (int64_t)now.tv_sec; return 0; }
+    if (field == 2) {
+        if (now.tv_sec < 0 || (uint64_t)now.tv_sec > (uint64_t)INT64_MAX / 1000 - 1) return EOVERFLOW;
+        *out = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+        return 0;
+    }
     if (field != 1) return EINVAL;
     if (now.tv_sec < 0 || (uint64_t)now.tv_sec > (uint64_t)INT64_MAX / UINT64_C(1000000000)) return EOVERFLOW;
     uint64_t seconds = (uint64_t)now.tv_sec * UINT64_C(1000000000);
@@ -2614,6 +2619,181 @@ int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
     if (code != 0) { return code; }
     *out = received_total;
     return 0;
+}
+/* STD-PROC-NET-IN-KUSH: one-call stubs for std.proc and std.net. Timeouts,
+   partial reads and retries are Kush code over these. */
+/* pipe2(O_CLOEXEC); the read end plus the write end times 2^32. */
+int64_t kush_sys_pipe(int64_t *out) {
+    int ends[2];
+    if (pipe2(ends, O_CLOEXEC) != 0) return errno;
+    *out = (int64_t)ends[0] + ((int64_t)ends[1] << 32);
+    return 0;
+}
+/* fork and execvp `program` with the NUL-separated `arguments` (empty
+   segments skipped), stdin and stderr on /dev/null and stdout on `stdout_fd`.
+   Waits only until the exec has happened: an exec failure is reaped and
+   returned as its errno. The child's pid otherwise. */
+int64_t kush_sys_spawn(const uint8_t *program, int64_t program_len,
+                       const uint8_t *arguments, int64_t arguments_len,
+                       int64_t stdout_fd, int64_t *out) {
+    if (program_len <= 0 || arguments_len < 0) return EINVAL;
+    int code = 0;
+    char *path = kush_sys_path(program, program_len, &code);
+    if (path == NULL) return code;
+    uint64_t total = 1;
+    for (int64_t i = 0, start = 0; i <= arguments_len; ++i) {
+        if (i == arguments_len || arguments[i] == 0) {
+            if (i > start) ++total;
+            start = i + 1;
+        }
+    }
+    char **argv = (char **)calloc((size_t)total + 1, sizeof(char *));
+    if (argv == NULL) { free(path); return ENOMEM; }
+    argv[0] = path;
+    uint64_t count = 1;
+    for (int64_t i = 0, start = 0; i <= arguments_len; ++i) {
+        if (i == arguments_len || arguments[i] == 0) {
+            if (i > start) {
+                char *text = (char *)malloc((size_t)(i - start) + 1);
+                if (text == NULL) { code = ENOMEM; break; }
+                memcpy(text, arguments + start, (size_t)(i - start));
+                text[i - start] = 0;
+                argv[count++] = text;
+            }
+            start = i + 1;
+        }
+    }
+    int report[2] = {-1, -1};
+    pid_t child = -1;
+    if (code == 0 && pipe2(report, O_CLOEXEC) != 0) code = errno;
+    if (code == 0) {
+        child = fork();
+        if (child < 0) code = errno;
+    }
+    if (child == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            (void)dup2(devnull, 0);
+            (void)dup2(devnull, 2);
+            if (devnull > 2) (void)close(devnull);
+        }
+        if ((int)stdout_fd != 1) (void)dup2((int)stdout_fd, 1);
+        else (void)fcntl(1, F_SETFD, 0);
+        (void)close(report[0]);
+        execvp(argv[0], argv);
+        int failure = errno;
+        kush_best_effort_write(report[1], &failure, sizeof(failure));
+        _exit(127);
+    }
+    if (report[1] >= 0) (void)close(report[1]);
+    if (child > 0) {
+        /* The report pipe closes on exec (EOF) or carries the exec errno. */
+        int failure = 0;
+        ssize_t received;
+        do { received = read(report[0], &failure, sizeof(failure)); }
+        while (received < 0 && errno == EINTR);
+        if (received == (ssize_t)sizeof(failure)) {
+            int status = 0;
+            kush_host_reap(child, &status);
+            code = failure;
+        }
+    }
+    if (report[0] >= 0) (void)close(report[0]);
+    for (uint64_t i = 0; i < count; ++i) free(argv[i]);
+    free(argv);
+    if (code != 0) return code;
+    *out = (int64_t)child;
+    return 0;
+}
+/* waitpid(2), blocking or not: -1 while the child runs, else its exit
+   status, or 128 + signal. */
+int64_t kush_sys_wait(int64_t pid, int64_t block, int64_t *out) {
+    int status = 0;
+    pid_t result = waitpid((pid_t)pid, &status, block ? 0 : WNOHANG);
+    if (result < 0) return errno;
+    if (result == 0) { *out = -1; return 0; }
+    if (WIFEXITED(status)) *out = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status)) *out = 128 + WTERMSIG(status);
+    else return EIO;
+    return 0;
+}
+int64_t kush_sys_kill(int64_t pid, int64_t signal) {
+    if (pid <= 0) return EINVAL;
+    return kill((pid_t)pid, (int)signal) != 0 ? errno : 0;
+}
+/* poll(2) on one descriptor for up to `timeout_ms` (-1 forever): the
+   returned events, 0 on timeout. Events: 1 POLLIN, 4 POLLOUT, 8 POLLERR,
+   16 POLLHUP. */
+int64_t kush_sys_poll(int64_t fd, int64_t events, int64_t timeout_ms, int64_t *out) {
+    if (timeout_ms < -1 || timeout_ms > INT32_MAX) return EINVAL;
+    struct pollfd waiting = { (int)fd, (short)events, 0 };
+    int ready = poll(&waiting, 1, (int)timeout_ms);
+    if (ready < 0) return errno;
+    *out = ready == 0 ? 0 : (int64_t)(unsigned short)waiting.revents;
+    return 0;
+}
+/* getaddrinfo(3) for a TCP connection to host:port; the list is the handle
+   for kush_sys_connect and must be freed with kush_sys_resolve_free. */
+int64_t kush_sys_resolve(const uint8_t *host, int64_t host_len, int64_t port, int64_t *out) {
+    if (port <= 0 || port > 65535) return EINVAL;
+    int code = 0;
+    char *text = kush_sys_path(host, host_len, &code);
+    if (text == NULL) return code;
+    if (!kush_utf8_valid_data((const unsigned char *)text, (uint64_t)host_len)) {
+        free(text);
+        return EINVAL;
+    }
+    char service[8];
+    (void)snprintf(service, sizeof(service), "%lld", (long long)port);
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *addresses = NULL;
+    int resolved = getaddrinfo(text, service, &hints, &addresses);
+    free(text);
+    if (resolved != 0) {
+        int failure = resolved == EAI_MEMORY ? ENOMEM : resolved == EAI_SYSTEM ? errno : EINVAL;
+        return failure == 0 ? EINVAL : failure;
+    }
+    *out = (int64_t)(uintptr_t)addresses;
+    return 0;
+}
+int64_t kush_sys_resolve_free(int64_t list) {
+    freeaddrinfo((struct addrinfo *)(uintptr_t)list);
+    return 0;
+}
+/* Connect to address `index` of a resolved list, waiting up to `timeout_ms`
+   (-1 forever). ENOENT past the end of the list. The socket comes back in
+   blocking mode: reads follow a poll, and kush_sys_send never blocks. */
+int64_t kush_sys_connect(int64_t list, int64_t index, int64_t timeout_ms, int64_t *out) {
+    if (index < 0 || timeout_ms < -1) return EINVAL;
+    struct addrinfo *address = (struct addrinfo *)(uintptr_t)list;
+    for (int64_t i = 0; address != NULL && i < index; ++i) address = address->ai_next;
+    if (address == NULL) return ENOENT;
+    int64_t deadline = timeout_ms < 0 ? -1 : timeout_ms == 0 ? 0 : kush_host_deadline(timeout_ms);
+    int64_t fd = kush_host_connect(address, deadline);
+    if (fd < 0) return -fd;
+    int flags = fcntl((int)fd, F_GETFL, 0);
+    if (flags < 0 || fcntl((int)fd, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+        int failure = errno; (void)close((int)fd); return failure;
+    }
+    *out = fd;
+    return 0;
+}
+/* One nonblocking send(2) of data[start..] (EAGAIN when the socket is full,
+   no SIGPIPE): the count sent. */
+int64_t kush_sys_send(int64_t fd, const uint8_t *data, int64_t length, int64_t start, int64_t *out) {
+    if (start < 0 || start > length) return EINVAL;
+    ssize_t sent = send((int)fd, data + start, (size_t)(length - start), MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (sent < 0) return errno;
+    *out = (int64_t)sent;
+    return 0;
+}
+/* shutdown(2): 0 read side, 1 write side, 2 both. */
+int64_t kush_sys_shutdown(int64_t fd, int64_t how) {
+    if (how < 0 || how > 2) return EINVAL;
+    return shutdown((int)fd, (int)how) != 0 ? errno : 0;
 }
 /* Vectors store fixed-width elements of `width` 64-bit words each. */
 typedef struct { uint64_t length; uint64_t capacity; uint64_t data[]; } KushVec;
