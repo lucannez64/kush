@@ -202,12 +202,18 @@ void kush_fuzz_arith(int64_t site, int64_t code, int64_t a, int64_t b) {
 #else
 #define KUSH_FUZZ_INDEX(index, length) ((void)0)
 #endif
+static void kush_task_recover_panic(void);
+static int64_t kush_recovered_panics = 0;
 _Noreturn void kush_panic(void) {
 #ifdef KUSH_FUZZ
     kush_fuzz_write(kush_fuzz_current >= 0 ? kush_fuzz_current : -2);
 #endif
     static const char message[] = "panic: checked arithmetic, memory, or I/O failure\n";
     kush_best_effort_write(2, message, sizeof(message) - 1);
+#ifndef KUSH_FUZZ
+    /* WEB-PANIC-500: an isolated task ends here instead of the process. */
+    kush_task_recover_panic();
+#endif
 #ifdef KUSH_FUZZ
     /* No abort(): a system core handler would run for every panicking
        input. The status is the one abort() gives a shell. */
@@ -3027,6 +3033,10 @@ struct KushTask {
        pure timer); wait_deadline is in monotonic ms (-1 for none);
        wait_result is the events, 0 on timeout, -1 when cancelled. */
     int waiting_io, wait_fd, wait_shielded;
+    /* WEB-PANIC-500: a panic in an isolated task finishes only that task,
+       with `panic_mark` as its (i64) result. */
+    int isolated;
+    int64_t panic_mark;
     int64_t wait_deadline, wait_result;
     KushTask *wait_previous, *wait_next;
 };
@@ -3295,9 +3305,25 @@ int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
     }
     return 0;
 }
+/* Freed task stacks are kept for reuse (a server spawns a task per
+   request): mmap, mprotect and munmap cost more than the request. */
+#define KUSH_STACK_CACHE 64
+static KUSH_TLS void *kush_stack_cache[KUSH_STACK_CACHE];
+static KUSH_TLS size_t kush_stack_cache_total[KUSH_STACK_CACHE];
+static KUSH_TLS int kush_stack_cached = 0;
 static void *kush_stack_alloc(size_t bytes, void **base_out, size_t *total_out) {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     size_t total = ((bytes + page - 1) / page) * page + page;
+    for (int i = kush_stack_cached - 1; i >= 0; --i) {
+        if (kush_stack_cache_total[i] != total) continue;
+        void *base = kush_stack_cache[i];
+        kush_stack_cached -= 1;
+        kush_stack_cache[i] = kush_stack_cache[kush_stack_cached];
+        kush_stack_cache_total[i] = kush_stack_cache_total[kush_stack_cached];
+        kush_note_allocation();
+        *base_out = base; *total_out = total;
+        return (void *)((char *)base + page);
+    }
     void *base = mmap(NULL, total, PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
     if (base == MAP_FAILED) kush_panic();
@@ -3308,8 +3334,20 @@ static void *kush_stack_alloc(size_t bytes, void **base_out, size_t *total_out) 
 }
 static void kush_stack_free(void *base, size_t total) {
     if (base == NULL) return;
-    if (munmap(base, total) != 0) kush_panic();
     kush_note_deallocation();
+    if (kush_stack_cached < KUSH_STACK_CACHE) {
+        kush_stack_cache[kush_stack_cached] = base;
+        kush_stack_cache_total[kush_stack_cached] = total;
+        kush_stack_cached += 1;
+        return;
+    }
+    if (munmap(base, total) != 0) kush_panic();
+}
+static void kush_stack_cache_drain(void) {
+    while (kush_stack_cached > 0) {
+        kush_stack_cached -= 1;
+        (void)munmap(kush_stack_cache[kush_stack_cached], kush_stack_cache_total[kush_stack_cached]);
+    }
 }
 static void kush_ready_push(KushTask *task) {
     if (kush_ready_count == kush_ready_capacity) {
@@ -3663,6 +3701,7 @@ static void kush_task_finish(void) {
     kush_ready_capacity = 0; kush_ready_head = kush_ready_tail = kush_ready_count = 0;
     kush_stack_free(kush_scheduler_stack, kush_scheduler_stack_total);
     kush_scheduler_stack = NULL;
+    kush_stack_cache_drain();
     if (kush_epoll >= 0) { (void)close(kush_epoll); kush_epoll = -1; }
     kush_waiting = NULL;
     kush_initialized = 0;
@@ -3714,6 +3753,52 @@ int64_t kush_sys_wait_ready(int64_t fd, int64_t events, int64_t timeout_ms, int6
     swapcontext(&t->context, &kush_scheduler_context);
     if (t->wait_result < 0) return ECANCELED;
     *out = t->wait_result;
+    return 0;
+}
+/* ---- WEB-PANIC-500: panics in isolated tasks --------------------------
+   A task that called kush_sys_task_isolate ends at a panic instead of the
+   process: kush_panic switches to the scheduler with the task finished and
+   its (i64) result set to the task's mark, and the joiner reads that like
+   a normal result. Nothing between the panic and the task's entry runs
+   again, so what the task owned is leaked, not freed: memory, and any
+   descriptor it opened itself. It is not recovered when the task still has
+   children in its scopes (they would outlive their parent), off the main
+   scheduler, or for stack exhaustion, which aborts from the fault
+   handler. */
+static void kush_task_recover_panic(void) {
+    if (!kush_initialized || kush_current == NULL) return;
+    KushTask *t = kush_current;
+    if (t->id == 0 || !t->isolated || t->state != KUSH_RUNNING) return;
+    for (int depth = 0; depth < t->scope_depth; ++depth)
+        if (t->scope_first[depth] != NULL) return;
+    static const char message[] = "panic: recovered in an isolated task\n";
+    kush_best_effort_write(2, message, sizeof(message) - 1);
+    kush_recovered_panics += 1;
+    if (t->result_size >= sizeof(int64_t)) memcpy(t->result, &t->panic_mark, sizeof(int64_t));
+    t->completed = 1;
+    t->state = KUSH_FINISHED;
+    if (t->waiter != NULL) {
+        t->waiter->state = KUSH_READY;
+        kush_ready_push(t->waiter);
+        t->waiter = NULL;
+    }
+    swapcontext(&t->context, &kush_scheduler_context);
+    abort();
+}
+/* Make a panic in the calling task end only this task, its result being
+   `mark` (until kush_sys_task_mark changes it). EINVAL outside a spawned
+   task. */
+int64_t kush_sys_task_isolate(int64_t mark) {
+    if (!kush_initialized || kush_current == NULL || kush_current->id == 0) return EINVAL;
+    kush_current->isolated = 1;
+    kush_current->panic_mark = mark;
+    return 0;
+}
+/* Change the result an isolated task's panic gives; EINVAL when the task
+   is not isolated. */
+int64_t kush_sys_task_mark(int64_t mark) {
+    if (!kush_initialized || kush_current == NULL || !kush_current->isolated) return EINVAL;
+    kush_current->panic_mark = mark;
     return 0;
 }
 #ifdef KUSH_HAS_THREADS
@@ -3942,7 +4027,8 @@ int main(int argc, char **argv) {
         if (length > 0) kush_best_effort_write(2, line, (size_t)(length < (int)sizeof(line) ? length : (int)sizeof(line) - 1));
     }
 #endif
-    if (kush_live_allocations != 0) {
+    /* A recovered panic leaks what its task owned (WEB-PANIC-500). */
+    if (kush_live_allocations != 0 && kush_recovered_panics == 0) {
         static const char message[] = "panic: live owning allocations after normal exit\n";
         kush_best_effort_write(2, message, sizeof(message)-1); abort();
     }

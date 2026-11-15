@@ -20,6 +20,7 @@ use std.net;
 use std.option.Option;
 use std.result.Result;
 use std.sys;
+use std.task.TaskExit;
 use std.time;
 
 /// A request: its method, target and header fields as received, and its
@@ -235,6 +236,9 @@ fn responder(conn: &net.Conn, request: &Request, timeout_ms: i64) -> Responder !
 
 /// Send all of `data` on the reactor within `timeout_ms`: whether it was.
 fn send(fd: i64, data: &Bytes, timeout_ms: i64) -> Bool ! {io, suspend} {
+    // In the server's isolated handler task, a panic from here on cannot be
+    // answered with a 500 any more (WEB-PANIC-500).
+    let _ = sys.task_mark(1);
     let deadline = time.deadline_ms(timeout_ms);
     let length = Bytes.len(data);
     let mut sent = 0;
@@ -680,10 +684,28 @@ fn connection(conn: net.Conn, handler: fn(&Request, Responder) -> Unit ! {io, al
         };
         let req = request(&bytes, head, body);
         let keep = req.keep_alive;
-        handler(&req, responder(&conn, &req, config.request_ms));
-        drop(req);
+        let res = responder(&conn, &req, config.request_ms);
+        // The handler runs in an isolated task: a panic in it ends that
+        // task only (WEB-PANIC-500). Its result is -1 when the handler
+        // returned, 0 when it panicked before sending anything, 1 after.
+        let ran = Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
+            let task = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+                let _ = sys.task_isolate(0);
+                handler(&req, res);
+                -1
+            });
+            match Task.join(task) {
+                TaskExit.Completed(value) => value,
+                TaskExit.Cancelled => -1,
+            }
+        });
         buffer = rest(bytes, used);
-        if !keep || Task.check_cancel() {
+        if ran == 0 {
+            refuse(fd, 500, config.request_ms);
+            let _ = net.close(conn);
+            return ();
+        }
+        if ran == 1 || !keep || Task.check_cancel() {
             let _ = net.close(conn);
             return ();
         }
@@ -701,8 +723,11 @@ fn transient(code: i64) -> Bool ! {} {
 /// and pipelining. Malformed or oversized requests are answered with their
 /// 4xx status by the server, without calling the handler. On cancellation
 /// the server stops gracefully: it accepts no more connections, closes
-/// idle ones, and lets responses being written finish (shielded waits,
-/// within `request_ms`); a handler's own waits see the cancellation.
+/// idle ones, and lets requests being handled finish (their handlers run in
+/// their own tasks, which are not cancelled; reading and writing use
+/// shielded waits within `request_ms`). A handler that panics ends only its
+/// own task: the client gets a 500 if nothing was sent yet, and the
+/// connection is closed; what the handler owned is leaked.
 /// Returns Ok(()) after such a stop, or the accept error that ended it.
 pub fn serve(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}, config: Config) -> Result<Unit, i64> ! {io, alloc, panic, suspend} {
     let ended = Task.scope(fn() -> Result<Unit, i64> ! {io, alloc, panic, suspend} {

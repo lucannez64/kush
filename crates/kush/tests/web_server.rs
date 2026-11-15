@@ -71,6 +71,16 @@ fn app(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
         // Cancellation ends this wait early; the answer is still sent.
         let _ = time.wait_ms(150);
         res.text(200, &Bytes.from("slow"))
+    } else if req.path_is(&Bytes.from("/boom")) {
+        // Panics before answering: the server answers 500.
+        let empty = Bytes.with_capacity(0);
+        let byte = Bytes.get(&empty, 3);
+        res.status(200 + byte)
+    } else if req.path_is(&Bytes.from("/late")) {
+        // Panics after starting the answer: the connection is closed.
+        let mut s = res.stream(200, &Bytes.from("text/plain"));
+        s = s.send(&Bytes.from("ab"));
+        panic()
     } else if req.path_is(&Bytes.from("/stream")) {
         let mut s = res.stream(200, &Bytes.from("text/plain"));
         s = s.send(&Bytes.from("ab"));
@@ -324,4 +334,64 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
     let _ = child.kill();
     let _ = child.wait();
     assert_eq!(answered, 80);
+}
+
+const PANICS: &str = r#"
+fn main() -> i64 ! {io, alloc, panic, suspend} {
+    let server_socket = listener();
+    let port = port_of(&server_socket);
+    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+            match web.serve(server_socket, app, web.config()) { Result.Ok(_) => 0, Result.Err(code) => code }
+        });
+        let client = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+            // The pipelined /hello is not answered: the connection closes.
+            exchange(port, &Bytes.from("GET /boom HTTP/1.1\r\nHost: x\r\n\r\nGET /hello HTTP/1.1\r\nHost: x\r\n\r\n"));
+            exchange(port, &Bytes.from("GET /late HTTP/1.1\r\nHost: x\r\n\r\n"));
+            // The server still serves.
+            exchange(port, &Bytes.from("GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"));
+            0
+        });
+        show(Task.join(client));
+        Task.cancel(&server);
+        show(Task.join(server));
+    });
+    0
+}
+"#;
+
+/// A panicking handler ends only its own task (WEB-PANIC-500).
+#[test]
+fn a_handler_panic_is_answered_with_500() {
+    let source = format!("{APP}{PANICS}");
+    let expected = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n|\n\
+HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n|\n\
+HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\n\r\nhi|\n\
+0\n-1\n";
+    // The panicking handlers leak what they owned, so the reference run's
+    // allocation counts are not balanced; compare the output only.
+    let program = checked(&source);
+    let mut output = Vec::new();
+    let (status, _) = program
+        .evaluate_with_host_and_stats(&mut io::empty(), &mut output, &Host::empty())
+        .unwrap();
+    assert_eq!(status, 0);
+    assert_eq!(String::from_utf8(output).unwrap(), expected, "reference");
+    let (_scratch, binary) = build(&source);
+    let run = Command::new(&binary).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(run.status.code(), Some(0));
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), expected, "native");
+    let stderr = String::from_utf8(run.stderr).unwrap();
+    assert_eq!(stderr.matches("panic: recovered in an isolated task").count(), 2, "{stderr}");
+}
+
+/// Isolation is std-internal: a program cannot make its own tasks survive
+/// panics.
+#[test]
+fn programs_cannot_isolate_tasks() {
+    let source = "use std.sys;
+        fn main() -> i64 ! {io} { let _ = sys.task_isolate(0); 0 }";
+    let program = kush::program::load_source("<web-server-test>", source).unwrap();
+    let error = executable::check_program(&program).err().expect("accepted");
+    assert!(error.message.contains("std-internal"), "{}", error.message);
 }

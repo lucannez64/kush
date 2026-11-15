@@ -205,7 +205,8 @@ impl Executable {
             .write_all(&output_bytes)
             .map_err(|e| Diagnostic::new(Span::default(), format!("output failed: {e}")))?;
         let result = result?;
-        if heap.len() != 0 {
+        // A recovered panic leaks what its task owned (WEB-PANIC-500).
+        if heap.len() != 0 && host.recovered_panics.load(Ordering::Relaxed) == 0 {
             return Err(Diagnostic::new(
                 Span::default(),
                 "internal ownership error: live owning allocations after normal task exit",
@@ -418,6 +419,8 @@ impl Executable {
             cancelled: cancelled.clone(),
             scopes: Vec::new(),
             joined: BTreeSet::new(),
+            root: id == 0,
+            isolated: None,
         };
         let evaluator = Evaluator {
             program: self,
@@ -497,7 +500,15 @@ impl Executable {
                         TaskOutcome::Completed(value, preserve)
                     }
                 }
-                Err(error) => TaskOutcome::Failed(error),
+                Err(error) => match evaluator.task.as_ref().and_then(|task| task.isolated) {
+                    // An isolated task's panic ends only the task; what it
+                    // owned stays in the heap, as natively.
+                    Some(mark) if error.message.starts_with("panic") => {
+                        evaluator.host.recovered_panics.fetch_add(1, Ordering::Relaxed);
+                        TaskOutcome::Completed(Value::Scalar(mark), false)
+                    }
+                    _ => TaskOutcome::Failed(error),
+                },
             };
             let _ = evaluator
                 .task
@@ -594,6 +605,9 @@ pub struct Host {
     monotonic_origin: Instant,
     /// Files opened by `FS.open`, by handle (STD-FILE). Shared by tasks.
     files: Arc<std::sync::Mutex<FileTable>>,
+    /// Panics recovered in isolated tasks (WEB-PANIC-500); their tasks'
+    /// values are leaked, so the final ownership check is relaxed.
+    recovered_panics: Arc<AtomicUsize>,
 }
 /// The evaluator's open files. Handles are never reused, so a stale handle
 /// is always `EBADF` here (natively the descriptor number may be reused,
@@ -818,6 +832,7 @@ impl Host {
             environment: Arc::new(BTreeMap::new()),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
+            recovered_panics: Arc::default(),
         }
     }
     /// The current process arguments (including argv[0]) and environment.
@@ -831,6 +846,7 @@ impl Host {
             environment: Arc::new(environment),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
+            recovered_panics: Arc::default(),
         }
     }
     /// Replace argv while retaining this host's environment and clock origin.
@@ -846,6 +862,7 @@ impl Host {
             environment: Arc::new(environment.into_iter().collect()),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
+            recovered_panics: Arc::default(),
         }
     }
     fn var(&self, name: &[u8]) -> Option<&[u8]> {
@@ -1374,6 +1391,11 @@ struct TaskComm {
     cancelled: Arc<AtomicBool>,
     scopes: Vec<ScopeFrame>,
     joined: BTreeSet<usize>,
+    /// The root task (`main`), which cannot be isolated.
+    root: bool,
+    /// WEB-PANIC-500: the result a panic gives this task, once it called
+    /// `kush_sys_task_isolate`.
+    isolated: Option<i64>,
 }
 impl TaskComm {
     fn yield_now(&mut self) -> Result<bool> {
@@ -5402,6 +5424,20 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     (9, 0)
                 }
             }
+            "kush_sys_task_isolate" => match self.task.as_mut() {
+                Some(task) if !task.root => {
+                    task.isolated = Some(args[0].scalar());
+                    (0, 0)
+                }
+                _ => (22, 0),
+            },
+            "kush_sys_task_mark" => match self.task.as_mut() {
+                Some(task) if task.isolated.is_some() => {
+                    task.isolated = Some(args[0].scalar());
+                    (0, 0)
+                }
+                _ => (22, 0),
+            },
             "kush_sys_stat" => {
                 let field = args[1].scalar();
                 match path(self, &args[0])? {

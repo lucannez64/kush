@@ -201,13 +201,27 @@ connections and closes the listener, and its connection tasks are
 cancelled. Waiting for a new request then ends at once, so idle
 connections close, but the rest of a started request and every response
 use shielded waits (`sys.WAIT_SHIELD`, [async.md](async.md)), so they
-finish within the request deadline. A handler's own waits do see the
-cancellation. `serve` then returns `Ok(())`.
-
-Not yet: a handler that panics still aborts the process, since a panic
-cannot be caught (WEB-PANIC-500). An HTTP/1.0 client gets a streamed body
-without chunking, ended by closing the connection. Tests:
+finish within the request deadline. Handlers run in their own tasks, which
+are not cancelled, so a request being handled completes. `serve` then
+returns `Ok(())`. An HTTP/1.0 client gets a streamed body without
+chunking, ended by closing the connection. Tests:
 `crates/kush/tests/web_server.rs`.
+
+**A handler panic is answered with 500** (WEB-PANIC-500). Each request's
+handler runs in a child task that calls the std-only `sys.task_isolate`:
+a panic in an isolated task ends that task instead of the process, and its
+join gives the task's mark. The Responder sets the mark when it starts
+writing, so the connection task knows whether to send `500 Internal Server
+Error` (nothing was sent yet) or only close the connection (a response was
+under way). The panic message is still printed, followed by `panic:
+recovered in an isolated task`.
+
+The price is that nothing unwinds: what the handler task owned (its
+request, its buffers, a file it opened) is leaked, not freed, and the
+end-of-run ownership check is skipped once a panic was recovered, in both
+backends. A panic is not recovered in `main`, in a task that still has
+unjoined children, in a thread, or for stack exhaustion. Freed task stacks
+are cached (64 per thread), so a task per request costs no mmap.
 
 ### One reactor per thread [WEB-MULTICORE]
 

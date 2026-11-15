@@ -210,6 +210,18 @@ checks its descriptor for up to 1 ms and then yields, so waiting tasks are
 polled in ready-queue order; a program without tasks just polls. Tests:
 `crates/kush/tests/web_reactor.rs`.
 
+### Isolated tasks (WEB-PANIC-500)
+
+A task that calls the std-only `sys.task_isolate(mark)` survives its own
+panics as a task: the runtime finishes it with `mark` as its `i64` result
+(changed later with `sys.task_mark`) instead of aborting the process, and
+`Task.join` returns `Completed(mark)`. No frame between the panic and the
+task's entry runs again, so what the task owned is leaked, and the final
+ownership check is skipped after such a recovery. Not recovered: the root
+task, a task with unjoined children, thread bodies, stack exhaustion.
+`std.web` runs each handler this way. The reference evaluator does the
+same with its `panic: ...` errors.
+
 ### Blocking calls
 
 Apart from the reactor's waits, the task system has no nonblocking
