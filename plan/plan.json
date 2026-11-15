@@ -7914,10 +7914,21 @@
       "deps": [
         "WEB-PANIC-500"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Decided 2026-11-15: full unwinding. A panic leaves every frame through the cleanup of ? (affine values freed), up to an isolated task or thread boundary, reusing the abortive propagation of E-ABORT-PROPAGATE (abort word, AbortCall after may-panic calls). Linear types may declare a cleanup run only when unwinding (File/Conn close, Responder answers 500); others are leaked and reported. Write docs/panic-unwinding.md: check sites, runtime C panics, Task.scope epilogues while unwinding, threads, cost, and the surface syntax for the linear cleanup (confirm with the user).",
-      "commit": null,
-      "log": []
+      "commit": "9007d58",
+      "log": [
+        {
+          "time": "2026-11-15 20:53:30",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 20:53:30",
+          "who": "agent",
+          "text": "done 9007d58"
+        }
+      ]
     },
     {
       "id": "PANIC-UNWIND-EVAL",
