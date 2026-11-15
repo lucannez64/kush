@@ -7881,6 +7881,97 @@
           "text": "done 1dc9129"
         }
       ]
+    },
+    {
+      "id": "TASK-CANCEL-PROPAGATE",
+      "title": "Cancelling a task cancels its descendants",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "WEB-PANIC-500"
+      ],
+      "status": "done",
+      "desc": "Structured cancellation (decided 2026-11-15): Task.cancel and a failed scope's cancellation also cancel every unjoined task in the cancelled task's scopes, recursively, in both backends. Fixes the graceful stop: isolated handler tasks see the server's cancellation in their own waits again.",
+      "commit": "039d7fe",
+      "log": [
+        {
+          "time": "2026-11-15 20:30:44",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 20:38:44",
+          "who": "agent",
+          "text": "done 039d7fe"
+        }
+      ]
+    },
+    {
+      "id": "PANIC-UNWIND-DESIGN",
+      "title": "Design: panics unwind to the task boundary",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "WEB-PANIC-500"
+      ],
+      "status": "todo",
+      "desc": "Decided 2026-11-15: full unwinding. A panic leaves every frame through the cleanup of ? (affine values freed), up to an isolated task or thread boundary, reusing the abortive propagation of E-ABORT-PROPAGATE (abort word, AbortCall after may-panic calls). Linear types may declare a cleanup run only when unwinding (File/Conn close, Responder answers 500); others are leaked and reported. Write docs/panic-unwinding.md: check sites, runtime C panics, Task.scope epilogues while unwinding, threads, cost, and the surface syntax for the linear cleanup (confirm with the user).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PANIC-UNWIND-EVAL",
+      "title": "Evaluator: panics unwind with cleanup",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "PANIC-UNWIND-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "The reference evaluator propagates a panic as a flow that runs each frame's cleanup (drop flags, closure environments, temporaries) like a return, to the isolated task or thread boundary; the end-of-run ownership check stays strict.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PANIC-UNWIND-NATIVE",
+      "title": "Native: panics unwind with cleanup",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "PANIC-UNWIND-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "Check sites and runtime C panics set the abort word and leave through the early-exit cleanup instead of abort(); calls to may-panic functions test the word (Cranelift and LLVM). Task and thread entries catch it. Measure the cost.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PANIC-LINEAR-CLEANUP",
+      "title": "Linear types: cleanup while unwinding",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "PANIC-UNWIND-EVAL",
+        "PANIC-UNWIND-NATIVE"
+      ],
+      "status": "todo",
+      "desc": "A linear type may name a cleanup function run only when a panic unwinds past a live value of it (std.file.File and std.net Conn/Listener close their descriptor, web.Responder answers 500). Values without one are leaked and the panic report names them. Syntax confirmed with the user in PANIC-UNWIND-DESIGN.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PANIC-UNWIND-USE",
+      "title": "Isolated tasks and web.serve on unwinding",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PANIC-LINEAR-CLEANUP",
+        "TASK-CANCEL-PROPAGATE"
+      ],
+      "status": "todo",
+      "desc": "Replace WEB-PANIC-500's leak-and-switch recovery with unwinding: no leaks, the exit ownership check stays strict, tasks with children and thread bodies recover too, and a public way to catch a panic at a task boundary.",
+      "commit": null,
+      "log": []
     }
   ]
 }
