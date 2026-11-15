@@ -7866,10 +7866,21 @@
       "deps": [
         "WEB-SERVER"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "A panic in a handler still aborts the process: Kush panics cannot be caught. Needs panic recovery at a task boundary (run the task's cleanup or abortive unwinding, see docs/abortive-handlers.md) so web.serve can answer 500 and drop only that connection. Split from WEB-SERVER.",
-      "commit": null,
-      "log": []
+      "commit": "1dc9129",
+      "log": [
+        {
+          "time": "2026-11-15 20:19:41",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 20:25:00",
+          "who": "agent",
+          "text": "done 1dc9129"
+        }
+      ]
     }
   ]
 }
