@@ -27,46 +27,69 @@ const TASK_STACK_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_EVAL_FUEL: usize = 10_000_000;
 
 impl Executable {
-    /// Whether any function obtains the standard input handle.
+    /// Whether a function reachable from the entry obtains the standard
+    /// input handle. Only then does a task program buffer standard input up
+    /// front (to its end). Reachability matters: `std.io.stdin()` exists in
+    /// every program that imports `std.io`, and counting it made a server
+    /// that never reads standard input wait for its end (EVAL-SERVE-HANG).
     fn reads_stdin(&self) -> bool {
-        fn walk(program: &Executable, expr: &Expr) -> bool {
-            // `std.io.stdin()` obtains the descriptor from `kush_sys_stdin`.
-            if let ExprKind::Call(crate::executable::Target::Foreign(index), _) = &expr.kind
-                && program.foreign_functions[*index]
-                    .as_ref()
-                    .is_some_and(|foreign| foreign.symbol == "kush_sys_stdin")
-            {
-                return true;
+        use crate::executable::{Statement, Target};
+        fn visit(expr: &Expr, f: &mut dyn FnMut(&Expr)) {
+            f(expr);
+            expr.for_each_child(&mut |child| visit(child, f));
+        }
+        fn each_expr(function: &crate::executable::Function, f: &mut dyn FnMut(&Expr)) {
+            for statement in &function.body.statements {
+                if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                    visit(value, f);
+                }
             }
-            if matches!(
-                expr.kind,
-                ExprKind::Call(
-                    crate::executable::Target::Io(crate::executable::IoOp::Stdin, _),
-                    _
+            if let Some(tail) = function.body.tail.as_deref() {
+                visit(tail, f);
+            }
+        }
+        let obtains = |expr: &Expr| {
+            matches!(&expr.kind, ExprKind::Call(Target::Foreign(index), _)
+                if self.foreign_functions[*index]
+                    .as_ref()
+                    .is_some_and(|foreign| foreign.symbol == "kush_sys_stdin"))
+                || matches!(
+                    expr.kind,
+                    ExprKind::Call(Target::Io(crate::executable::IoOp::Stdin, _), _)
                 )
-            ) {
-                return true;
+        };
+        // Roots: the entry, exported functions, and dynamic-object methods
+        // (reached through tables, not expressions).
+        let mut pending: Vec<usize> = self.entry().ok().into_iter().collect();
+        pending.extend(self.exports.iter().map(|export| export.index));
+        for members in &self.dyn_members {
+            for member in members {
+                pending.extend(member.methods.values().copied());
+            }
+        }
+        let mut seen = vec![false; self.functions.len()];
+        while let Some(index) = pending.pop() {
+            if index >= seen.len() || std::mem::replace(&mut seen[index], true) {
+                continue;
             }
             let mut found = false;
-            expr.for_each_child(&mut |child| found = found || walk(program, child));
-            found
+            each_expr(&self.functions[index], &mut |expr| {
+                found = found || obtains(expr);
+                match &expr.kind {
+                    ExprKind::Call(Target::Function(callee), _) => pending.push(*callee),
+                    ExprKind::FnValue { function, .. } => pending.push(*function),
+                    ExprKind::Suspend { callee: Some(callee), .. } => pending.push(*callee),
+                    ExprKind::Suspendable(suspendable) => {
+                        pending.extend(suspendable.handler_function);
+                    }
+                    _ => {}
+                }
+            });
+            if found {
+                return true;
+            }
         }
-        self.functions.iter().any(|function| {
-            function
-                .body
-                .statements
-                .iter()
-                .any(|statement| match statement {
-                    crate::executable::Statement::Let(_, value)
-                    | crate::executable::Statement::Expr(value) => walk(self, value),
-                    crate::executable::Statement::Declare(_) => false,
-                })
-                || function
-                    .body
-                    .tail
-                    .as_deref()
-                    .is_some_and(|tail| walk(self, tail))
-        })
+        false
     }
     /// Set the reference evaluator's step budget (per task); `kush eval
     /// --fuel N`. Native execution has no such budget.

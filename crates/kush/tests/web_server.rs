@@ -520,3 +520,45 @@ fn unwind_cleanups_are_checked() {
         assert!(error.message.contains(message), "{source}: {}", error.message);
     }
 }
+
+/// Standard input that must never be read.
+struct Untouched;
+impl Read for Untouched {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        panic!("the program never reads standard input")
+    }
+}
+
+/// EVAL-SERVE-HANG: a task program buffers standard input up front only when
+/// a function reachable from main reads it. This server imports std.io
+/// (whose `stdin()` it never calls), so the evaluator must not wait for the
+/// end of an input that, run from a terminal, never comes.
+#[test]
+fn the_evaluator_does_not_wait_for_unread_standard_input() {
+    let main = r#"
+fn main() -> i64 ! {io, alloc, panic, suspend} {
+    let server_socket = listener();
+    let port = port_of(&server_socket);
+    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+            match web.serve(server_socket, app, web.config()) { Result.Ok(_) => 0, Result.Err(code) => code }
+        });
+        let client = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+            exchange(port, &Bytes.from("GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"));
+            0
+        });
+        show(Task.join(client));
+        Task.cancel(&server);
+        show(Task.join(server));
+    });
+    0
+}
+"#;
+    let program = checked(&format!("{APP}{main}"));
+    let mut output = Vec::new();
+    let (status, _) = program
+        .evaluate_with_host_and_stats(&mut Untouched, &mut output, &Host::empty())
+        .unwrap();
+    assert_eq!(status, 0);
+    assert!(String::from_utf8(output).unwrap().ends_with("hi|\n0\n-1\n"));
+}
