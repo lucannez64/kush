@@ -1,0 +1,172 @@
+# Panics that unwind to a boundary
+
+Status: **design** (PANIC-UNWIND-DESIGN, 2026-11-15). Decided with the user:
+full unwinding, a cleanup per linear type spelled `#[linear(unwind = f)]`,
+`Task.catch` with uncaught task panics propagating to the joiner, and
+structured cancellation (done, TASK-CANCEL-PROPAGATE). Implementation nodes: PANIC-UNWIND-EVAL,
+PANIC-UNWIND-NATIVE, PANIC-LINEAR-CLEANUP, PANIC-UNWIND-USE.
+
+## 1. Today
+
+A panic (checked arithmetic, an index or byte out of range, an allocation
+refused, `panic()`) aborts the process. WEB-PANIC-500 added a narrow
+exception: a task that called the std-only `sys.task_isolate` is finished
+by the runtime at its panic, without running any frame's cleanup. What it
+owned leaks, the exit ownership check is skipped, and a task with children,
+a thread or `main` cannot recover. This design replaces that with real
+unwinding.
+
+## 2. What unwinding does
+
+A panic inside a **catch boundary** leaves every frame between the panic and
+the boundary through the same cleanup as `?` and as an abortive perform
+(docs/abortive-handlers.md 3.6): every live affine value is dropped once,
+closure environments and pending temporaries are released, handler frames
+pushed inside are popped. Live **linear** values run their type's unwind
+cleanup (section 5), or are leaked and named in the report when the type has
+none. A `Task.scope` left by unwinding first cancels its unjoined children
+and joins them, as when its lambda returns `Err`, so no child outlives its
+parent. At the boundary the panic becomes a value (section 6).
+
+A panic with **no** catch boundary still aborts the process at once, with no
+unwinding: there is nothing to keep alive, and the fast failure stays the
+same as today. The runtime knows, per task and per thread, how many catch
+boundaries are active.
+
+Stack exhaustion stays fatal: it is detected in a signal handler, where no
+frame can be left safely.
+
+## 3. Mechanism: the abort word
+
+Unwinding reuses E-ABORT-PROPAGATE's channel. A panic sets the thread's
+abort word to `KUSH_PANIC_WORD` (1: never the address of a handle's payload
+buffer, which every abortive activation uses) and returns; every caller that
+may see a panic tests the word after the call and, when it is set, leaves
+through its cleanup and returns. Abortive scopes compare the word with their
+own buffer, so a panic passes through them like any other foreign abort.
+
+- **Which calls are tested.** `suspend::mark_abort_calls` already wraps
+  calls that may abort in `AbortCall { exits, propagates }`. With unwinding,
+  every call to a function whose row has `panic`, and every call to a
+  runtime helper that can panic, is wrapped with `propagates` (or, inside an
+  abortive scope, with its exits too). A call that cannot panic costs
+  nothing; one that can costs a load, a test and a branch (measured within
+  noise for abortive calls).
+- **Panic sites in generated code** (the few `abort()` sites of the
+  lowering, and checked operations lowered inline) set the word and take the
+  same exit: `cleanup_all` then return.
+- **Panic sites in the C runtime.** About 120 `kush_panic()` calls. Each one
+  is classified:
+  - **recoverable** (a precondition on the program's values: an index, a
+    byte value, a capacity, a refused allocation, invalid UTF-8): replaced by
+    `KUSH_FAIL(value)`, which sets the word and returns a harmless value
+    without touching the operands, so the generated caller's test leaves
+    before using it;
+  - **fatal** (the runtime's own invariants: a double free, a corrupted
+    header, a broken task table): still abort, since unwinding over corrupted
+    state is not safe.
+  A runtime helper that calls another one that can fail checks the word and
+  returns too.
+- **The evaluator** already turns a callee's pending abort into its
+  caller's `AbortCall` exit (`Flow::Abort`). A panic becomes a pending abort
+  with the panic word instead of an `Err` that skips cleanup; the 60-odd
+  panic sites in `eval.rs` return it. The end-of-run ownership check stays
+  strict.
+
+## 4. Checker rules
+
+The ownership pass checks an `AbortCall` that propagates like `?`: affine
+values get drop flags. For the abort exits of declared operations it also
+rejects pending linear values ("linear value is not consumed before an
+abortive call"). Panic exits cannot reject them, or no function holding a
+`File` could do arithmetic. Instead:
+
+- a panic exit **records** the live linear values, and the backends run
+  their unwind cleanup (section 5) instead of rejecting the program;
+- an exit that may be a declared abortive operation keeps today's rule.
+
+So the checker distinguishes "may panic" from "may abort with `F`" on each
+`AbortCall` (a `panics: bool` beside `exits`), and only the second carries
+the linear-value obligation.
+
+Grades: a panic exit is a path on which an exact grade `@[1]` is not met.
+Like linear values, those values are listed for the unwind cleanup, not
+rejected.
+
+## 5. Linear types: a cleanup for unwinding
+
+A linear type may name a function the runtime calls on a live value of it
+when a panic unwinds past it. Spelling (confirmed 2026-11-15), on the type:
+
+```kush
+#[linear(unwind = discard)]
+pub struct File { fd: i64 }
+
+fn discard(file: File) -> Unit ! {io} { let _ = close(file); }
+```
+
+- The function takes the value by move and returns `Unit`; it is in the same
+  module as the type (it may read private fields). Its row may include `io`,
+  `alloc` and `suspend` (a `Responder` answers 500, which writes to a
+  socket), but not `panic` or declared operations: a panic while unwinding
+  aborts the process.
+- Without `unwind = ...` the value is leaked, and the report printed with
+  the panic names its type.
+- std uses it for `std.file.File`, `std.net.Conn` and `Listener` (close the
+  descriptor), and `std.web.Responder` (answer `500` unless it already
+  started) and `Stream` (end the connection).
+
+Values are cleaned up in reverse order of creation, as `?` drops them.
+
+## 6. Catch boundaries
+
+Two places stop a panic:
+
+1. **A catch call** in a task or `main`:
+
+   ```kush
+   match Task.catch(fn() -> i64 ! {io, panic} { risky() }) {
+       Result.Ok(value) => value,
+       Result.Err(panicked) => -1,
+   }
+   ```
+
+   `Task.catch(f)` runs `f` in the calling task and returns `Result<T,
+   Panic>`; `Panic` carries the panic's kind and source position. The body's
+   row loses `panic`. It is a call boundary, not a task, so it costs no
+   stack and no spawn: `std.web` uses it around each handler instead of an
+   isolated task.
+2. **A thread body.** `Thread.join` of a thread whose body panicked reports
+   it (today the process aborts), so a server per thread survives a
+   panicking request the same way.
+
+A task without a catch around the panic propagates it out of the task: its
+join reports the panic to the parent, whose own `Task.join` site then panics
+in turn, unless a catch is around it. This keeps "a panic is never silently
+dropped".
+
+`Task.catch` and propagation to the joiner were confirmed on 2026-11-15;
+the fields of `Panic` and how `Thread.join` reports a panic are settled in
+PANIC-UNWIND-USE.
+
+## 7. Cost
+
+- Calls that may panic: one load, test and branch each (the abort word is a
+  thread-local global, as for abortive operations).
+- Code size: every panic site gains a cleanup exit. The lowering already
+  shares nothing between exits; if size grows too much, exits with the same
+  live set can share one block (follow-up).
+- Runtime helpers: a failing precondition returns instead of aborting; the
+  normal path is unchanged.
+- No unwind tables, no landing pads, no change to calling conventions, the
+  LLVM translation or the bridge ABI.
+
+## 8. Order
+
+1. PANIC-UNWIND-EVAL: the evaluator (the oracle) unwinds with exact cleanup.
+2. PANIC-UNWIND-NATIVE: marking, runtime `KUSH_FAIL`, lowering, both
+   native backends; differential tests against the evaluator, including
+   allocation balance after caught panics.
+3. PANIC-LINEAR-CLEANUP: `#[linear(unwind = f)]`, std's cleanups.
+4. PANIC-UNWIND-USE: `Task.catch`, threads, `web.serve` on it; remove
+   `sys.task_isolate` and the leak-tolerant exit check.
