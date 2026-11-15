@@ -20,7 +20,7 @@ use std.net;
 use std.option.Option;
 use std.result.Result;
 use std.sys;
-use std.task.TaskExit;
+use std.task.Panic;
 use std.time;
 
 /// A request: its method, target and header fields as received, and its
@@ -256,9 +256,6 @@ fn responder(conn: &net.Conn, request: &Request, timeout_ms: i64) -> Responder !
 
 /// Send all of `data` on the reactor within `timeout_ms`: whether it was.
 fn send(fd: i64, data: &Bytes, timeout_ms: i64) -> Bool ! {io, suspend} {
-    // In the server's isolated handler task, a panic from here on cannot be
-    // answered with a 500 any more (WEB-PANIC-500).
-    let _ = sys.task_mark(1);
     let deadline = time.deadline_ms(timeout_ms);
     let length = Bytes.len(data);
     let mut sent = 0;
@@ -705,27 +702,19 @@ fn connection(conn: net.Conn, handler: fn(&Request, Responder) -> Unit ! {io, al
         let req = request(&bytes, head, body);
         let keep = req.keep_alive;
         let res = responder(&conn, &req, config.request_ms);
-        // The handler runs in an isolated task: a panic in it ends that
-        // task only (WEB-PANIC-500). Its result is -1 when the handler
-        // returned, 0 when it panicked before sending anything, 1 after.
-        let ran = Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
-            let task = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
-                let _ = sys.task_isolate(0);
-                handler(&req, res);
-                -1
-            });
-            match Task.join(task) {
-                TaskExit.Completed(value) => value,
-                TaskExit.Cancelled => -1,
-            }
+        // A panic in the handler is caught here (PANIC-UNWIND-USE): the
+        // handler's frames were unwound, and an unanswered Responder answered
+        // 500 on the way (its unwind cleanup). The connection then closes,
+        // since a response may be cut off.
+        let ran = Task.catch(fn() -> Unit ! {io, alloc, panic, suspend} {
+            handler(&req, res)
         });
         buffer = rest(bytes, used);
-        if ran == 0 {
-            refuse(fd, 500, config.request_ms);
-            let _ = net.close(conn);
-            return ();
-        }
-        if ran == 1 || !keep || Task.check_cancel() {
+        let panicked = match ran {
+            Result.Ok(_) => false,
+            Result.Err(_) => true,
+        };
+        if panicked || !keep || Task.check_cancel() {
             let _ = net.close(conn);
             return ();
         }

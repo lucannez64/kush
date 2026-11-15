@@ -459,7 +459,7 @@ impl Executable {
             scopes: Vec::new(),
             joined: BTreeSet::new(),
             root: id == 0,
-            isolated: None,
+            catch_depth: 0,
         };
         let evaluator = Evaluator {
             program: self,
@@ -539,15 +539,9 @@ impl Executable {
                         TaskOutcome::Completed(value, preserve)
                     }
                 }
-                Err(error) => match evaluator.task.as_ref().and_then(|task| task.isolated) {
-                    // An isolated task's panic ends only the task; its
-                    // frames were unwound on the way (PANIC-UNWIND-EVAL).
-                    Some(mark) if error.message.starts_with("panic") => {
-                        evaluator.host.recovered_panics.fetch_add(1, Ordering::Relaxed);
-                        TaskOutcome::Completed(Value::Scalar(mark), false)
-                    }
-                    _ => TaskOutcome::Failed(error),
-                },
+                // A panic unwound the task's frames on the way out
+                // (PANIC-UNWIND-USE); its join raises it in the parent.
+                Err(error) => TaskOutcome::Failed(error),
             };
             let _ = evaluator
                 .task
@@ -645,9 +639,6 @@ pub struct Host {
     monotonic_origin: Instant,
     /// Files opened by `FS.open`, by handle (STD-FILE). Shared by tasks.
     files: Arc<std::sync::Mutex<FileTable>>,
-    /// Panics recovered in isolated tasks (WEB-PANIC-500); their tasks'
-    /// values are leaked, so the final ownership check is relaxed.
-    recovered_panics: Arc<AtomicUsize>,
 }
 /// The evaluator's open files. Handles are never reused, so a stale handle
 /// is always `EBADF` here (natively the descriptor number may be reused,
@@ -872,7 +863,6 @@ impl Host {
             environment: Arc::new(BTreeMap::new()),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
-            recovered_panics: Arc::default(),
         }
     }
     /// The current process arguments (including argv[0]) and environment.
@@ -886,7 +876,6 @@ impl Host {
             environment: Arc::new(environment),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
-            recovered_panics: Arc::default(),
         }
     }
     /// Replace argv while retaining this host's environment and clock origin.
@@ -902,7 +891,6 @@ impl Host {
             environment: Arc::new(environment.into_iter().collect()),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
-            recovered_panics: Arc::default(),
         }
     }
     fn var(&self, name: &[u8]) -> Option<&[u8]> {
@@ -1433,11 +1421,12 @@ struct TaskComm {
     cancelled: Arc<AtomicBool>,
     scopes: Vec<ScopeFrame>,
     joined: BTreeSet<usize>,
-    /// The root task (`main`), which cannot be isolated.
+    /// The root task (`main`). Its panics unwind only inside a `Task.catch`;
+    /// every other task unwinds to its entry and its join raises the panic
+    /// in the parent (PANIC-UNWIND-USE).
     root: bool,
-    /// WEB-PANIC-500: the result a panic gives this task, once it called
-    /// `kush_sys_task_isolate`.
-    isolated: Option<i64>,
+    /// Active `Task.catch` bodies in this task.
+    catch_depth: usize,
 }
 impl TaskComm {
     fn yield_now(&mut self) -> Result<bool> {
@@ -5466,20 +5455,6 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     (9, 0)
                 }
             }
-            "kush_sys_task_isolate" => match self.task.as_mut() {
-                Some(task) if !task.root => {
-                    task.isolated = Some(args[0].scalar());
-                    (0, 0)
-                }
-                _ => (22, 0),
-            },
-            "kush_sys_task_mark" => match self.task.as_mut() {
-                Some(task) if task.isolated.is_some() => {
-                    task.isolated = Some(args[0].scalar());
-                    (0, 0)
-                }
-                _ => (22, 0),
-            },
             "kush_sys_stat" => {
                 let field = args[1].scalar();
                 match path(self, &args[0])? {
@@ -6487,11 +6462,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             Err(error) => Err(error),
         }
     }
-    /// Whether `error` is a panic that unwinds: it is a panic, and a catch
-    /// boundary (an isolated task) will stop it (docs/panic-unwinding.md).
+    /// Whether `error` is a panic that unwinds (docs/panic-unwinding.md): in a
+    /// spawned task it unwinds to the task's entry and the join raises it in
+    /// the parent; in `main` only a `Task.catch` stops it.
     fn unwinding(&self, error: &Diagnostic) -> bool {
         error.message.starts_with("panic")
-            && self.task.as_ref().is_some_and(|task| task.isolated.is_some())
+            && self
+                .task
+                .as_ref()
+                .is_some_and(|task| !task.root || task.catch_depth > 0)
     }
     /// PANIC-UNWIND-EVAL: a panic that a boundary will stop leaves `frame`
     /// like a return, dropping what it owns. Out of line: the call path is
@@ -6507,9 +6486,19 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     }
     /// `Task.scope`: run the body, then join every child. A body that
     /// returns `Err`, or a panic unwinding out of it, first cancels the
-    /// children. Out of line, to keep `expr`'s frame small.
+    /// children. With `catch` (`Task.catch`) it is also a catch boundary: a
+    /// panic out of the body or a child becomes `Err(Panic {})`. Out of
+    /// line, to keep `expr`'s frame small.
     #[inline(never)]
-    fn task_scope(&mut self, callable: Value, failure: Option<ResultShape>) -> Result<Value> {
+    fn task_scope(
+        &mut self,
+        callable: Value,
+        failure: Option<ResultShape>,
+        catch: Option<ResultShape>,
+    ) -> Result<Value> {
+        if catch.is_some() {
+            self.task_comm()?.catch_depth += 1;
+        }
         self.task_comm()?.scope_begin()?;
         let result = self.call_value(callable, vec![]);
         let cancel = match (&result, failure) {
@@ -6521,13 +6510,31 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             self.task_comm()?.cancel_scope()?;
         }
         let end = self.task_scope_end();
-        match (result, end) {
+        let outcome = match (result, end) {
             (Ok(value), Ok(())) => Ok(value),
             (Err(error), _) => Err(error),
             (Ok(value), Err(error)) => {
                 self.drop_value(value)?;
                 Err(error)
             }
+        };
+        let Some(shape) = catch else {
+            return outcome;
+        };
+        self.task_comm()?.catch_depth -= 1;
+        match outcome {
+            Ok(value) => Ok(Value::Enum {
+                tag: shape.ok_tag,
+                fields: vec![value],
+            }),
+            Err(error) if error.message.starts_with("panic") => Ok(Value::Enum {
+                tag: shape.err_tag,
+                fields: vec![Value::Enum {
+                    tag: 0,
+                    fields: Vec::new(),
+                }],
+            }),
+            Err(error) => Err(error),
         }
     }
     fn cleanup(&mut self, frame: &mut Frame) -> Result<()> {
@@ -7891,10 +7898,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     .spawn(function, environment, *obligation, handlers)?;
                 Value::Task(id)
             }
-            ExprKind::TaskScope { body, failure, .. } => {
+            ExprKind::TaskScope {
+                body,
+                failure,
+                catch,
+                ..
+            } => {
                 let callable = value!(self.expr(body, frame));
                 self.consume(body, frame);
-                self.task_scope(callable, *failure)?
+                self.task_scope(callable, *failure, *catch)?
             }
             ExprKind::TaskYield => {
                 let cancelled = self.task_comm()?.yield_now()?;

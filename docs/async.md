@@ -214,17 +214,21 @@ checks its descriptor for up to 1 ms and then yields, so waiting tasks are
 polled in ready-queue order; a program without tasks just polls. Tests:
 `crates/kush/tests/web_reactor.rs`.
 
-### Isolated tasks (WEB-PANIC-500)
+### Catching panics (PANIC-UNWIND-USE)
 
-A task that calls the std-only `sys.task_isolate(mark)` survives its own
-panics as a task: the runtime finishes it with `mark` as its `i64` result
-(changed later with `sys.task_mark`) instead of aborting the process, and
-`Task.join` returns `Completed(mark)`. No frame between the panic and the
-task's entry runs again, so what the task owned is leaked, and the final
-ownership check is skipped after such a recovery. Not recovered: the root
-task, a task with unjoined children, thread bodies, stack exhaustion.
-`std.web` runs each handler this way. The reference evaluator does the
-same with its `panic: ...` errors.
+`Task.catch(fn() -> T ! {...} { ... })` runs the lambda in the current
+task and returns `Result<T, std.task.Panic>`: `Err` when a panic unwound out
+of it. Like `Task.scope` it is a scope (children spawned in it are joined
+before it returns) and needs `{alloc, panic, suspend}`. A panic unwinds
+(docs/panic-unwinding.md): every frame up to the catch frees what it owns,
+and linear values run their `#[linear(unwind = f)]` cleanup.
+
+In a program that uses `Task.catch`, a spawned task or thread whose body
+panics unwinds to its entry; its `Task.join`/`Thread.join`, or the scope
+epilogue that joins it, raises the panic in the joiner, which unwinds in
+turn up to a catch. In `main` a panic with no catch around it still aborts
+the process, so a panic is never silently dropped. Stack exhaustion is
+always fatal.
 
 ### Blocking calls
 

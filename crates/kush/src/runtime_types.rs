@@ -5228,6 +5228,39 @@ impl<'a> Types<'a> {
             result: ty,
         })
     }
+    /// PANIC-UNWIND-USE: `Result<payload, Panic>` for `Task.catch`, from
+    /// `std.result.Result` and `std.task.Panic` (the program must use
+    /// `std.task`).
+    pub fn catch_result(&mut self, payload: Type, span: Span) -> Result<(Type, ResultShape)> {
+        let std_definition = |types: &Self, module: &str, name: &str| {
+            types
+                .definitions
+                .iter()
+                .find(|(id, def)| {
+                    def.name == name
+                        && types
+                            .resolution
+                            .unit_of
+                            .get(id)
+                            .and_then(|unit| types.resolution.units.get(*unit))
+                            .is_some_and(|path| path.len() == 2 && path[0] == "std" && path[1] == module)
+                })
+                .map(|(id, _)| *id)
+        };
+        let (Some(result), Some(panic)) = (
+            std_definition(self, "result", "Result"),
+            std_definition(self, "task", "Panic"),
+        ) else {
+            return Err(Diagnostic::new(
+                span,
+                "Task.catch returns std.result.Result<T, std.task.Panic>: use std.task.Panic and std.result.Result",
+            ));
+        };
+        let panic = Type::Enum(self.instantiate(panic, vec![], vec![], vec![], span)?);
+        let ty = Type::Enum(self.instantiate(result, vec![payload, panic], vec![], vec![], span)?);
+        let shape = self.result(ty, span)?;
+        Ok((ty, shape))
+    }
     /// Whether `ty` is the builtin name `Never`. It is accepted only as the
     /// result of an effect operation, which makes the operation abortive
     /// (docs/abortive-handlers.md); elsewhere it is not a runtime type.

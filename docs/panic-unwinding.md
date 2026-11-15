@@ -1,6 +1,7 @@
 # Panics that unwind to a boundary
 
-Status: **design** (PANIC-UNWIND-DESIGN, 2026-11-15). Decided with the user:
+Status: **implemented** (all nodes below done, 2026-11-15; section 8 says
+how each was built). Decided with the user:
 full unwinding, a cleanup per linear type spelled `#[linear(unwind = f)]`,
 `Task.catch` with uncaught task panics propagating to the joiner, and
 structured cancellation (done, TASK-CANCEL-PROPAGATE). Implementation nodes: PANIC-UNWIND-EVAL,
@@ -233,6 +234,30 @@ off). Tests: `unwinding_closes_linear_resources` (five panicking handlers
 holding an open file inside a `Result` leave the process's descriptor count
 unchanged, natively and in the evaluator, run as its own process)
 and `unwind_cleanups_are_checked` in `crates/kush/tests/web_server.rs`.
+
+**PANIC-UNWIND-USE (2026-11-15).** `Task.catch(lambda)` is a `TaskScope`
+with a `catch` shape: `Result<T, std.task.Panic>` (`Panic` is an empty
+record, the message having gone to standard error). The checker finds
+`std.result.Result` and `std.task.Panic` and turns on unwinding for the
+program. Natively the catch counts itself (`kush_catch_enter`/`leave`, per
+task, or per thread on an OS thread); after the body it clears a set panic
+word, cancels and joins the children, and yields `Err`; a child's panic
+that the scope epilogue raises is caught the same way. The evaluator keeps
+a catch depth per task and turns a panic error into `Err` there.
+
+When a panic unwinds (`kush_panic_unwinds`, the evaluator's `unwinding`):
+on an OS thread and in any spawned task always, since the join raises it
+again; in `main` only inside a catch. A task or thread whose body unwound is
+marked panicked; `Task.join`/`Thread.join` (status 2) and the scope
+epilogues raise it in the joiner with `kush_unwind_rethrow` (no second
+message), which aborts when nothing can stop it. `web.serve` uses
+`Task.catch` around each handler instead of an isolated task, and
+`sys.task_isolate`/`sys.task_mark` are gone. Tests:
+`crates/kush/tests/panic_catch.rs` (owned values, a box and a vector freed
+on both backends; nested catches; checked arithmetic and `panic()`; a
+child's panic at its join and at the scope epilogue, with a waiting
+sibling cancelled; a thread's; an uncaught one still aborting) and the
+server tests.
 
 ## 9. Order
 

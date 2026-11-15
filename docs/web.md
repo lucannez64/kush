@@ -208,21 +208,14 @@ returns `Ok(())`. An HTTP/1.0 client gets a streamed body without
 chunking, ended by closing the connection. Tests:
 `crates/kush/tests/web_server.rs`.
 
-**A handler panic is answered with 500** (WEB-PANIC-500). Each request's
-handler runs in a child task that calls the std-only `sys.task_isolate`:
-a panic in an isolated task ends that task instead of the process, and its
-join gives the task's mark. The Responder sets the mark when it starts
-writing, so the connection task knows whether to send `500 Internal Server
-Error` (nothing was sent yet) or only close the connection (a response was
-under way). The panic message is still printed, followed by `panic:
-recovered in an isolated task`.
-
-The price is that nothing unwinds: what the handler task owned (its
-request, its buffers, a file it opened) is leaked, not freed, and the
-end-of-run ownership check is skipped once a panic was recovered, in both
-backends. A panic is not recovered in `main`, in a task that still has
-unjoined children, in a thread, or for stack exhaustion. Freed task stacks
-are cached (64 per thread), so a task per request costs no mmap.
+**A handler panic is answered with 500** (WEB-PANIC-500, reworked by the
+unwinding nodes, docs/panic-unwinding.md). Each request's handler runs in
+a `Task.catch` in its connection's task. A panic unwinds the handler's
+frames, freeing what they own and closing descriptors through the linear
+types' unwind cleanups; an unanswered `Responder` answers `500 Internal
+Server Error` on the way, a `Stream` sends nothing more. The catch then
+returns `Err` and the server closes the connection. The panic message is
+still printed. Freed task stacks are cached (64 per thread).
 
 ### One reactor per thread [WEB-MULTICORE]
 

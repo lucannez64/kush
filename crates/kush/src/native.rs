@@ -210,6 +210,11 @@ void kush_fuzz_arith(int64_t site, int64_t code, int64_t a, int64_t b) {
 static int kush_panic_unwinds(void);
 static void kush_raise_panic(void);
 static int64_t *kush_panic_word(void);
+void kush_unwind_rethrow(void);
+/* PANIC-UNWIND-USE: set on an OS thread started by Thread.spawn, whose body
+   is a boundary of its own; the Task.catch depth of such a thread. */
+static KUSH_TLS int kush_in_thread = 0;
+static KUSH_TLS int kush_thread_catch_depth = 0;
 #define KUSH_FAIL(value) do { if (kush_panic_unwinds()) { kush_raise_panic(); return value; } kush_panic(); } while (0)
 #define KUSH_FAIL_VOID() do { if (kush_panic_unwinds()) { kush_raise_panic(); return; } kush_panic(); } while (0)
 _Noreturn void kush_panic(void) {
@@ -3054,10 +3059,9 @@ struct KushTask {
        pure timer); wait_deadline is in monotonic ms (-1 for none);
        wait_result is the events, 0 on timeout, -1 when cancelled. */
     int waiting_io, wait_fd, wait_shielded;
-    /* WEB-PANIC-500: a panic in an isolated task finishes only that task,
-       with `panic_mark` as its (i64) result. */
-    int isolated;
-    int64_t panic_mark;
+    /* PANIC-UNWIND-USE: active Task.catch bodies in this task, and whether a
+       panic unwound the whole task (its join raises it again). */
+    int catch_depth, panicked;
     int64_t wait_deadline, wait_result;
     KushTask *wait_previous, *wait_next;
 };
@@ -3627,12 +3631,13 @@ static void kush_task_entry(unsigned int low, unsigned int high) {
         t->code, t->env, (uint64_t)(uintptr_t)t->result);
     t->completed = (t->cancelled && !t->preserve) ? 0 : 1;
 #ifdef KUSH_UNWIND
-    /* A panic unwound the whole task body: the boundary of an isolated
-       task. Its result is the mark. */
-    if (t->isolated && *kush_panic_word() == 1) {
+    /* A panic unwound the whole task body: the task ends here and its join
+       raises the panic in the parent (PANIC-UNWIND-USE). Its result buffer
+       holds nothing. */
+    if (*kush_panic_word() == 1) {
         *kush_panic_word() = 0;
-        if (t->result_size >= sizeof(int64_t)) memcpy(t->result, &t->panic_mark, sizeof(int64_t));
-        t->completed = 1;
+        t->panicked = 1;
+        t->completed = 0;
     }
 #endif
     t->state = KUSH_FINISHED;
@@ -3655,8 +3660,11 @@ uint64_t kush_task_join(uint64_t handle, void *out) {
         swapcontext(&kush_current->context, &kush_scheduler_context);
     }
     int completed = t->completed;
-    if (out == NULL && t->preserve) kush_panic();
-    if (out != NULL) {
+    int panicked = t->panicked;
+    if (out == NULL && t->preserve && !panicked) kush_panic();
+    if (panicked) {
+        /* No result to copy or drop. */
+    } else if (out != NULL) {
         memcpy(out, t->result, t->result_size);
     } else if (t->drop != NULL) {
         t->drop(t->result);
@@ -3670,7 +3678,7 @@ uint64_t kush_task_join(uint64_t handle, void *out) {
     kush_free((uint64_t)(uintptr_t)t->result);
     kush_stack_free(t->stack_base, t->stack_total);
     kush_free((uint64_t)(uintptr_t)t);
-    return completed ? 0 : 1;
+    return panicked ? 2 : completed ? 0 : 1;
 }
 uint64_t kush_task_yield(void) {
     kush_task_init();
@@ -3716,9 +3724,15 @@ uint64_t kush_task_scope_end(void) {
     int depth = kush_current->scope_depth;
     /* Every listed child is unjoined and joining unlinks it, so join the
        first child until none is left: spawn order, as before. */
+    int panicked = 0;
     while (kush_current->scope_first[depth] != NULL) {
-        (void)kush_task_join(kush_current->scope_first[depth]->handle, NULL);
+        if (kush_task_join(kush_current->scope_first[depth]->handle, NULL) == 2) panicked = 1;
     }
+#ifdef KUSH_UNWIND
+    /* A child the epilogue joined panicked: raise it here (PANIC-UNWIND-USE). */
+    if (panicked) kush_unwind_rethrow();
+#endif
+    (void)panicked;
     return 0;
 }
 static void kush_task_finish(void) {
@@ -3791,15 +3805,28 @@ int64_t kush_sys_wait_ready(int64_t fd, int64_t events, int64_t timeout_ms, int6
     *out = t->wait_result;
     return 0;
 }
-/* PANIC-UNWIND-NATIVE: whether a panic now unwinds (a catch boundary, for
-   now an isolated task, is active) instead of aborting. */
+/* PANIC-UNWIND-USE: whether a panic now unwinds instead of aborting. A
+   thread body and a spawned task unwind to their entry, and their join
+   raises the panic in the joiner; `main` unwinds only inside a Task.catch.
+   A panic nothing catches still aborts the process, at the root. */
 static int kush_panic_unwinds(void) {
 #ifdef KUSH_UNWIND
-    return kush_initialized && kush_current != NULL && kush_current->id != 0
-        && kush_current->isolated && kush_current->state == KUSH_RUNNING;
+    if (kush_in_thread) return 1;
+    if (!kush_initialized || kush_current == NULL || kush_current->state != KUSH_RUNNING) return 0;
+    return kush_current->id != 0 || kush_current->catch_depth > 0;
 #else
     return 0;
 #endif
+}
+/* Task.catch: count the bodies running in this task, or in this thread. */
+void kush_catch_enter(void) {
+    if (kush_in_thread) { kush_thread_catch_depth += 1; return; }
+    kush_task_init();
+    kush_current->catch_depth += 1;
+}
+void kush_catch_leave(void) {
+    if (kush_in_thread) { kush_thread_catch_depth -= 1; return; }
+    kush_current->catch_depth -= 1;
 }
 static int64_t *kush_panic_word(void) {
 #ifdef KUSH_HAS_THREADS
@@ -3832,21 +3859,15 @@ void kush_unwind_panic(void) {
     if (!kush_panic_unwinds()) kush_panic();
     kush_raise_panic();
 }
-/* Make a panic in the calling task end only this task, its result being
-   `mark` (until kush_sys_task_mark changes it). EINVAL outside a spawned
-   task. */
-int64_t kush_sys_task_isolate(int64_t mark) {
-    if (!kush_initialized || kush_current == NULL || kush_current->id == 0) return EINVAL;
-    kush_current->isolated = 1;
-    kush_current->panic_mark = mark;
-    return 0;
-}
-/* Change the result an isolated task's panic gives; EINVAL when the task
-   is not isolated. */
-int64_t kush_sys_task_mark(int64_t mark) {
-    if (!kush_initialized || kush_current == NULL || !kush_current->isolated) return EINVAL;
-    kush_current->panic_mark = mark;
-    return 0;
+/* A joined task or thread panicked: raise the panic again in the joiner
+   (its message was already printed), or abort when nothing can stop it. */
+void kush_unwind_rethrow(void) {
+    if (!kush_panic_unwinds()) {
+        static const char message[] = "panic: a joined task or thread panicked\n";
+        kush_best_effort_write(2, message, sizeof(message) - 1);
+        abort();
+    }
+    *kush_panic_word() = 1;
 }
 #ifdef KUSH_HAS_THREADS
 /* ---- THREAD-SCOPE: structured OS threads ---------------------------------
@@ -3862,6 +3883,8 @@ typedef struct KushThread {
     size_t result_size;
     void (*drop)(void *);
     int preserve, joined;
+    /* PANIC-UNWIND-USE: a panic unwound the whole body; the join raises it. */
+    int panicked;
     struct KushThread *next;
 } KushThread;
 #define KUSH_THREAD_SCOPES 64
@@ -3872,8 +3895,15 @@ static void *kush_thread_main(void *argument) {
     kush_handler_context *handlers = (kush_handler_context *)calloc(1, sizeof(kush_handler_context));
     if (handlers == NULL) kush_panic();
     kush_thread_handlers = handlers;
+    kush_in_thread = 1;
     ((void (*)(uint64_t, uint64_t, uint64_t))(uintptr_t)t->wrapper)(
         t->code, t->env, (uint64_t)(uintptr_t)t->result);
+#ifdef KUSH_UNWIND
+    if (*kush_panic_word() == 1) {
+        *kush_panic_word() = 0;
+        t->panicked = 1;
+    }
+#endif
     kush_handler_restore(0);
     kush_kstack_drain(handlers);
     kush_thread_handlers = NULL;
@@ -3892,17 +3922,27 @@ static void kush_thread_wait(KushThread *t) {
 void kush_thread_scope_end(void) {
     if (kush_thread_scope_depth == 0) kush_panic();
     KushThread *t = kush_thread_scopes[--kush_thread_scope_depth];
+    int panicked = 0;
     while (t != NULL) {
         KushThread *next = t->next;
         if (!t->joined) {
             kush_thread_wait(t);
-            if (t->preserve) kush_panic();
-            if (t->drop != NULL) t->drop(t->result);
+            if (t->panicked) {
+                panicked = 1;
+            } else {
+                if (t->preserve) kush_panic();
+                if (t->drop != NULL) t->drop(t->result);
+            }
             kush_free((uint64_t)(uintptr_t)t->result);
         }
         kush_free((uint64_t)(uintptr_t)t);
         t = next;
     }
+#ifdef KUSH_UNWIND
+    /* A thread the epilogue joined panicked: raise it here. */
+    if (panicked) kush_unwind_rethrow();
+#endif
+    (void)panicked;
 }
 uint64_t kush_thread_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
                            uint64_t result_size, uint64_t drop, uint64_t preserve) {
@@ -3989,9 +4029,10 @@ uint64_t kush_thread_join(uint64_t handle, void *out) {
     KushThread *t = (KushThread *)(uintptr_t)handle;
     if (t == NULL || t->joined) kush_panic();
     kush_thread_wait(t);
-    memcpy(out, t->result, t->result_size);
+    /* 2: the body panicked; the joiner raises it (PANIC-UNWIND-USE). */
+    if (!t->panicked) memcpy(out, t->result, t->result_size);
     kush_free((uint64_t)(uintptr_t)t->result);
-    return 0;
+    return t->panicked ? 2 : 0;
 }
 #endif
 #ifndef KUSH_NO_MAIN
@@ -5309,6 +5350,15 @@ fn lower(
     let unwind_panic = module
         .declare_function("kush_unwind_panic", Linkage::Import, &panic_sig)
         .map_err(error)?;
+    let unwind_rethrow = module
+        .declare_function("kush_unwind_rethrow", Linkage::Import, &panic_sig)
+        .map_err(error)?;
+    let catch_enter = module
+        .declare_function("kush_catch_enter", Linkage::Import, &panic_sig)
+        .map_err(error)?;
+    let catch_leave = module
+        .declare_function("kush_catch_leave", Linkage::Import, &panic_sig)
+        .map_err(error)?;
     let fuzz = if codegen.fuzz {
         let mut enter_sig = module.make_signature();
         enter_sig.params.push(AbiParam::new(I64));
@@ -6069,6 +6119,9 @@ fn lower(
             float_rem,
             panic,
             unwind_panic,
+            unwind_rethrow,
+            catch_enter,
+            catch_leave,
             failing,
             unwind_emitting: false,
             fuzz: fuzz.clone(),
@@ -8088,6 +8141,11 @@ struct Generator<'a, 'b> {
     /// PANIC-UNWIND-NATIVE: `kush_unwind_panic`, and the runtime imports
     /// that may return with the panic word set (docs/panic-unwinding.md).
     unwind_panic: FuncId,
+    /// PANIC-UNWIND-USE: raise again the panic of a joined task or thread,
+    /// and the `Task.catch` depth counter.
+    unwind_rethrow: FuncId,
+    catch_enter: FuncId,
+    catch_leave: FuncId,
     failing: std::collections::BTreeSet<FuncId>,
     /// Set while an unwind exit is emitted: its own runtime calls are not
     /// tested again.
@@ -9080,6 +9138,27 @@ impl Generator<'_, '_> {
         self.cleanup_all();
         self.return_dummy();
         self.unwind_emitting = emitting;
+    }
+    /// After a join: status 2 means the task or thread panicked; raise the
+    /// panic here (`kush_unwind_rethrow` aborts when nothing can stop it)
+    /// and unwind (PANIC-UNWIND-USE).
+    fn rethrow_if_panicked(&mut self, status: Value) {
+        if !self.program.uses_unwinding {
+            return;
+        }
+        let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 2);
+        let rethrow = self.builder.create_block();
+        let normal = self.builder.create_block();
+        self.builder.ins().brif(panicked, rethrow, &[], normal, &[]);
+        self.builder.switch_to_block(rethrow);
+        self.runtime_void_raw(self.unwind_rethrow, &[]);
+        self.unwind_exit();
+        self.builder.switch_to_block(normal);
+    }
+    /// A runtime call that is never followed by a panic test.
+    fn runtime_void_raw(&mut self, id: FuncId, values: &[Value]) {
+        let callee = self.module.declare_func_in_func(id, self.builder.func);
+        self.builder.ins().call(callee, values);
     }
     /// After a call that may panic: unwind when the panic word is set.
     fn test_panic(&mut self) {
@@ -11618,6 +11697,7 @@ impl Generator<'_, '_> {
                 body,
                 result,
                 failure,
+                catch,
                 parallel,
                 ..
             } => {
@@ -11643,6 +11723,12 @@ impl Generator<'_, '_> {
                 } else {
                     None
                 };
+                // PANIC-UNWIND-USE: `Task.catch` is a scope that is also a
+                // catch boundary; its value is `Result<T, Panic>`.
+                let caught = catch.map(|shape| (shape, self.join(expr.ty).unwrap()));
+                if caught.is_some() {
+                    self.runtime_void(self.catch_enter, &[]);
+                }
                 self.runtime_void(scope_begin, &[]);
                 let mut arguments = Vec::new();
                 if let Some(pointer) = pointer {
@@ -11655,10 +11741,10 @@ impl Generator<'_, '_> {
                     .builder
                     .ins()
                     .call_indirect(signature, values[0], &arguments);
-                if self.program.uses_unwinding && !*parallel {
+                if self.program.uses_unwinding {
                     // A panic unwinding out of the body: cancel and join the
                     // children with the word clear (other tasks run during
-                    // the join), then go on unwinding.
+                    // the join), then stop here (a catch) or go on unwinding.
                     let address = self.abort_word_address();
                     let word = self
                         .builder
@@ -11673,14 +11759,26 @@ impl Generator<'_, '_> {
                     self.builder
                         .ins()
                         .store(ir::MemFlagsData::new(), zero, address, 0);
-                    self.runtime_void(self.task_cancel_scope, &[]);
-                    self.runtime_void(scope_end, &[]);
+                    if !*parallel {
+                        self.runtime_void(self.task_cancel_scope, &[]);
+                    }
+                    self.runtime_void_raw(scope_end, &[]);
                     let address = self.abort_word_address();
-                    let one = self.constant(1);
-                    self.builder
-                        .ins()
-                        .store(ir::MemFlagsData::new(), one, address, 0);
-                    self.unwind_exit();
+                    if let Some((shape, join)) = caught {
+                        let zero = self.constant(0);
+                        self.builder
+                            .ins()
+                            .store(ir::MemFlagsData::new(), zero, address, 0);
+                        self.runtime_void(self.catch_leave, &[]);
+                        let values = self.encode_variant(expr.ty, shape.err_tag, &[]);
+                        self.jump(join, &values);
+                    } else {
+                        let one = self.constant(1);
+                        self.builder
+                            .ins()
+                            .store(ir::MemFlagsData::new(), one, address, 0);
+                        self.unwind_exit();
+                    }
                     self.builder.switch_to_block(normal);
                 }
                 let result_values = if let Some(pointer) = pointer {
@@ -11689,7 +11787,13 @@ impl Generator<'_, '_> {
                     self.builder.inst_results(call).to_vec()
                 };
                 if result_ty == Type::Never {
-                    self.runtime_void(scope_end, &[]);
+                    self.runtime_void_raw(scope_end, &[]);
+                    if let Some((_, join)) = caught {
+                        self.builder.ins().trap(TrapCode::unwrap_user(1));
+                        self.builder.switch_to_block(join);
+                        return Some(self.builder.block_params(join).to_vec());
+                    }
+                    self.test_panic();
                     return None;
                 }
                 if let Some(shape) = *failure {
@@ -11711,9 +11815,38 @@ impl Generator<'_, '_> {
                     self.jump(done, &[]);
                     self.builder.switch_to_block(done);
                 }
-                self.runtime_void(scope_end, &[]);
+                // The epilogue raises the panic of a child it joined.
+                self.runtime_void_raw(scope_end, &[]);
                 let _ = result;
-                return Some(result_values);
+                let Some((shape, join)) = caught else {
+                    self.test_panic();
+                    return Some(result_values);
+                };
+                let address = self.abort_word_address();
+                let word = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), address, 0);
+                let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, word, 1);
+                let child = self.builder.create_block();
+                let fine = self.builder.create_block();
+                self.builder.ins().brif(panicked, child, &[], fine, &[]);
+                self.builder.switch_to_block(child);
+                let zero = self.constant(0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), zero, address, 0);
+                // The body's result is dropped: the catch answers Err.
+                self.drop_value(result_ty, &result_values);
+                self.runtime_void(self.catch_leave, &[]);
+                let values = self.encode_variant(expr.ty, shape.err_tag, &[]);
+                self.jump(join, &values);
+                self.builder.switch_to_block(fine);
+                self.runtime_void(self.catch_leave, &[]);
+                let values = self.encode_variant(expr.ty, shape.ok_tag, &result_values);
+                self.jump(join, &values);
+                self.builder.switch_to_block(join);
+                return Some(self.builder.block_params(join).to_vec());
             }
             ExprKind::TaskYield => self.runtime_call(self.task_yield, &[]),
             ExprKind::TaskCheckCancel => self.runtime_call(self.task_check_cancel, &[]),
@@ -11733,7 +11866,8 @@ impl Generator<'_, '_> {
                 self.consume(task);
                 let width = self.program.width(exit.payload).max(1);
                 let out = self.stack_words(width);
-                self.runtime_call(self.thread_join, &[handle, out]);
+                let status = self.runtime_call(self.thread_join, &[handle, out]);
+                self.rethrow_if_panicked(status);
                 return Some(self.load_words(out, 0, self.program.width(exit.payload)));
             }
             ExprKind::TaskJoin { task, exit, .. } => {
@@ -11742,6 +11876,7 @@ impl Generator<'_, '_> {
                 let width = self.program.width(exit.payload).max(1);
                 let out = self.stack_words(width);
                 let status = self.runtime_call(self.task_join, &[handle, out]);
+                self.rethrow_if_panicked(status);
                 let completed = self.builder.create_block();
                 let cancelled = self.builder.create_block();
                 let join = self.join(exit.result).unwrap();

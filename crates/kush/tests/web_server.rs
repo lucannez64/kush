@@ -443,17 +443,6 @@ HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\
     assert!(!stderr.contains("recovered in an isolated task"), "{stderr}");
 }
 
-/// Isolation is std-internal: a program cannot make its own tasks survive
-/// panics.
-#[test]
-fn programs_cannot_isolate_tasks() {
-    let source = "use std.sys;
-        fn main() -> i64 ! {io} { let _ = sys.task_isolate(0); 0 }";
-    let program = kush::program::load_source("<web-server-test>", source).unwrap();
-    let error = executable::check_program(&program).err().expect("accepted");
-    assert!(error.message.contains("std-internal"), "{}", error.message);
-}
-
 /// A panic unwinding past an open file closes it (PANIC-LINEAR-CLEANUP):
 /// the process's descriptor count is the same before and after.
 #[test]

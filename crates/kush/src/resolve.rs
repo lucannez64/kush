@@ -417,6 +417,7 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "AllocVec.clear",
     "Task",
     "Task.scope",
+    "Task.catch",
     "Task.spawn",
     "Task.yield",
     "Task.join",

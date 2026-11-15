@@ -5,3 +5,8 @@ module std.task;
 /// request and returned through its cleanup path.
 
 pub enum TaskExit<T> { Completed(T), Cancelled }
+
+/// A panic that `Task.catch` stopped (PANIC-UNWIND-USE,
+/// docs/panic-unwinding.md). The panic's message went to standard error;
+/// everything the unwound code owned was freed on the way.
+pub struct Panic {}

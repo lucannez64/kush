@@ -327,9 +327,9 @@ pub struct Executable {
     pub(crate) uses_tasks: bool,
     /// THREAD-SCOPE: the program runs OS threads (thread-safe runtime paths).
     pub(crate) uses_threads: bool,
-    /// PANIC-UNWIND-NATIVE: the program has a panic catch boundary (it calls
-    /// `kush_sys_task_isolate`), so native panics unwind: generated code
-    /// tests the abort word after calls that may panic.
+    /// PANIC-UNWIND-NATIVE: the program has a panic catch boundary (it uses
+    /// `Task.catch`), so native panics unwind: generated code tests the
+    /// abort word after calls that may panic.
     pub(crate) uses_unwinding: bool,
     /// LANG-STACK-SIZE: `#[stack_size(N)]` on main, in bytes. The native
     /// runtime runs the program on a thread with a stack this large.
@@ -1343,6 +1343,10 @@ pub(crate) enum ExprKind {
         /// `Err` result requests cancellation of every unjoined child before
         /// the scope epilogue joins them.
         failure: Option<crate::runtime_types::ResultShape>,
+        /// PANIC-UNWIND-USE: `Task.catch`. The scope is also a catch
+        /// boundary: its value is `Ok(body)`, or `Err(Panic {})` when a panic
+        /// unwound out of the body (`Result<T, Panic>`, this shape).
+        catch: Option<crate::runtime_types::ResultShape>,
         /// THREAD-SCOPE: `Thread.scope`, whose epilogue joins child threads.
         parallel: bool,
     },
@@ -32444,25 +32448,34 @@ impl Checker<'_, '_> {
             self.functions.uses_threads = true;
         }
         match name {
-            "Task.scope" => {
+            // PANIC-UNWIND-USE: `Task.catch(lambda)` is a task scope that is
+            // also a catch boundary; its value is `Result<T, Panic>`.
+            "Task.scope" | "Task.catch" => {
+                let catching = name == "Task.catch";
+                if catching && parallel {
+                    return Err(Diagnostic::new(span, "there is no Thread.catch; use Task.catch"));
+                }
                 if explicit.is_some() {
                     return Err(Diagnostic::new(
                         span,
-                        "Task.scope takes no type arguments; its result is the scope lambda's result",
+                        format!("{name} takes no type arguments; its result follows the lambda's result"),
                     ));
                 }
                 if arguments.len() != 1 {
                     return Err(Diagnostic::new(
                         span,
                         format!(
-                            "Task.scope expects one scope lambda, found {} arguments",
+                            "{name} expects one lambda, found {} arguments",
                             arguments.len()
                         ),
                     ));
                 }
+                if catching {
+                    self.functions.uses_unwinding = true;
+                }
                 self.next_scope_parallel = parallel;
                 let checked =
-                    self.task_callable(&arguments[0], true, false, "Task.scope", parallel, span);
+                    self.task_callable(&arguments[0], true, false, name, parallel, span);
                 self.next_scope_parallel = false;
                 let (body, result, effects, result_grade) = checked?;
                 if crate::runtime_types::is_reference_container(self.types, result) {
@@ -32494,15 +32507,22 @@ impl Checker<'_, '_> {
                 } else {
                     self.types.result(result, span).ok()
                 };
+                let (ty, catch) = if catching {
+                    let (ty, shape) = self.types.catch_result(result, span)?;
+                    (ty, Some(shape))
+                } else {
+                    (result, None)
+                };
                 let value = Expr {
                     kind: ExprKind::TaskScope {
                         body: Box::new(body),
                         result,
                         obligation,
                         failure,
+                        catch,
                         parallel,
                     },
-                    ty: result,
+                    ty,
                     span,
                     resource: None,
                 };
@@ -33481,14 +33501,6 @@ impl Checker<'_, '_> {
                     f.name
                 ),
             ));
-        }
-        if self
-            .functions
-            .foreign_functions
-            .get(&index)
-            .is_some_and(|foreign| foreign.symbol == "kush_sys_task_isolate")
-        {
-            self.functions.uses_unwinding = true;
         }
         self.apply_effect_writes(signature.effects);
         let (statements, values) = self.two_phase_arguments(values, ty)?;
