@@ -7938,10 +7938,26 @@
       "deps": [
         "PANIC-UNWIND-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "The reference evaluator propagates a panic as a flow that runs each frame's cleanup (drop flags, closure environments, temporaries) like a return, to the isolated task or thread boundary; the end-of-run ownership check stays strict.",
-      "commit": null,
-      "log": []
+      "commit": "d4ed008",
+      "log": [
+        {
+          "time": "2026-11-15 20:55:44",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 21:08:10",
+          "who": "agent",
+          "text": "done 5e93ba5"
+        },
+        {
+          "time": "2026-11-15 21:08:28",
+          "who": "agent",
+          "text": "done d4ed008"
+        }
+      ]
     },
     {
       "id": "PANIC-UNWIND-NATIVE",
