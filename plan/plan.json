@@ -7967,10 +7967,21 @@
       "deps": [
         "PANIC-UNWIND-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Check sites and runtime C panics set the abort word and leave through the early-exit cleanup instead of abort(); calls to may-panic functions test the word (Cranelift and LLVM). Task and thread entries catch it. Measure the cost.",
-      "commit": null,
-      "log": []
+      "commit": "df3a8d4",
+      "log": [
+        {
+          "time": "2026-11-15 21:21:53",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 21:21:53",
+          "who": "agent",
+          "text": "done df3a8d4"
+        }
+      ]
     },
     {
       "id": "PANIC-LINEAR-CLEANUP",
