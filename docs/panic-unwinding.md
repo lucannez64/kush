@@ -176,6 +176,40 @@ waiting child task) handlers in `crates/kush/tests/web_server.rs`, which
 must leave the heap empty. Live linear values are dropped like affine ones
 for now; their unwind cleanup is PANIC-LINEAR-CLEANUP.
 
+**PANIC-UNWIND-NATIVE (2026-11-15).** Simpler than section 3 planned: the
+lowering already tracks every live value (`cleanup_all` works at any
+point), so no checker marking was needed. In a program with a catch
+boundary (`Executable::uses_unwinding`, set when `kush_sys_task_isolate` is
+called; the runtime gets `-DKUSH_UNWIND`):
+
+- `abort()` (every inline check: overflow, division, bounds, `panic()`)
+  calls `kush_unwind_panic`, which aborts unless the current task is
+  isolated and otherwise sets the panic word (1) and returns; the frame then
+  drops its live values and returns.
+- After every direct call, every call of a function value that may panic,
+  handler and vector-callback calls, and the runtime helpers in
+  `FAILING_RUNTIME`, generated code tests the word and leaves the same way.
+- Those helpers' precondition failures use `KUSH_FAIL`: bytes and vector
+  indexing, byte values and reserved capacity in `Bytes.push` (which frees
+  the buffer moved into it), negative capacities, UTF-8 scalar access. A
+  failing element store leaves the item with the caller's cleanup. The other
+  `kush_panic` sites check the runtime's own invariants and abort; one
+  reached in an isolated task still takes WEB-PANIC-500's leaking recovery,
+  the only case that relaxes the exit ownership check.
+- In optimized builds an invalid byte in an inline `Bytes.push` goes to the
+  runtime call, which frees the moved buffer, instead of the inline guard.
+- `Task.scope` tests the word after its body: it clears the word, cancels
+  and joins the children (other tasks run meanwhile), sets it again and
+  unwinds.
+- The isolated task's entry clears the word and finishes the task with its
+  mark.
+
+Programs without a boundary compile as before. With one, a 100-million-call
+loop ran in the same time (0.38-0.39 s); every call site gains a load, a
+compare and a branch, and an exit block. Tests: the panic cases of
+`crates/kush/tests/web_server.rs` run natively too, with the strict exit
+check, on Cranelift and LLVM.
+
 ## 9. Order
 
 1. PANIC-UNWIND-EVAL: the evaluator (the oracle) unwinds with exact cleanup.

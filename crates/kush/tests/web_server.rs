@@ -395,25 +395,23 @@ HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n
 SCOPED\
 HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\n\r\nhi|\n\
 0\n-1\n";
-    // The reference evaluator unwinds the panicking handlers
-    // (PANIC-UNWIND-EVAL): every allocation is freed, a child task of the
-    // handler is cancelled and joined. Natively a handler task with a child
-    // cannot recover until PANIC-UNWIND-NATIVE, so that case runs only here.
+    // Both backends unwind the panicking handlers (PANIC-UNWIND-EVAL and
+    // -NATIVE): every allocation is freed (the reference run and the native
+    // exit check both require it), and a child task of the handler is
+    // cancelled and joined.
     let scoped = r#"exchange(port, &Bytes.from("GET /scoped HTTP/1.1\r\nHost: x\r\n\r\n"));"#;
     let five_hundred = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n|\n";
-    assert_eq!(
-        reference(&source.replace("SCOPED", scoped)),
-        expected.replace("SCOPED", five_hundred),
-        "reference"
-    );
-    let source = source.replace("SCOPED", "");
-    let expected = expected.replace("SCOPED", "");
+    let source = source.replace("SCOPED", scoped);
+    let expected = expected.replace("SCOPED", five_hundred);
+    assert_eq!(reference(&source), expected, "reference");
     let (_scratch, binary) = build(&source);
     let run = Command::new(&binary).stdin(Stdio::null()).output().unwrap();
     assert_eq!(run.status.code(), Some(0));
     assert_eq!(String::from_utf8(run.stdout).unwrap(), expected, "native");
     let stderr = String::from_utf8(run.stderr).unwrap();
-    assert_eq!(stderr.matches("panic: recovered in an isolated task").count(), 3, "{stderr}");
+    // Four panics, each reported once; none needed the leaking fallback.
+    assert_eq!(stderr.matches("panic: checked arithmetic").count(), 4, "{stderr}");
+    assert!(!stderr.contains("recovered in an isolated task"), "{stderr}");
 }
 
 /// Isolation is std-internal: a program cannot make its own tasks survive

@@ -327,6 +327,10 @@ pub struct Executable {
     pub(crate) uses_tasks: bool,
     /// THREAD-SCOPE: the program runs OS threads (thread-safe runtime paths).
     pub(crate) uses_threads: bool,
+    /// PANIC-UNWIND-NATIVE: the program has a panic catch boundary (it calls
+    /// `kush_sys_task_isolate`), so native panics unwind: generated code
+    /// tests the abort word after calls that may panic.
+    pub(crate) uses_unwinding: bool,
     /// LANG-STACK-SIZE: `#[stack_size(N)]` on main, in bytes. The native
     /// runtime runs the program on a thread with a stack this large.
     pub(crate) main_stack: Option<u64>,
@@ -5067,6 +5071,7 @@ struct Functions<'a> {
     /// Set when any body uses a structured-task operation.
     uses_tasks: bool,
     uses_threads: bool,
+    uses_unwinding: bool,
     /// GPU-SUBSET: declarations marked `#[gpu]`.
     gpu: BTreeSet<BindingId>,
     /// Task body functions whose binding-based linear result must be rejected
@@ -5570,6 +5575,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         allocator_contexts: Vec::new(),
         uses_tasks: false,
         uses_threads: false,
+        uses_unwinding: false,
         gpu: BTreeSet::new(),
         elided_lifetimes: 0,
         traits: BTreeMap::new(),
@@ -6334,6 +6340,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         obligations: sorted_obligations(&functions.obligations),
         discharged: sorted_obligations(&functions.discharged),
         uses_tasks: functions.uses_tasks,
+        uses_unwinding: functions.uses_unwinding,
         main_stack,
         // A channel type anywhere needs the threaded runtime (its drop glue).
         uses_threads: functions.uses_threads
@@ -33431,6 +33438,14 @@ impl Checker<'_, '_> {
                     f.name
                 ),
             ));
+        }
+        if self
+            .functions
+            .foreign_functions
+            .get(&index)
+            .is_some_and(|foreign| foreign.symbol == "kush_sys_task_isolate")
+        {
+            self.functions.uses_unwinding = true;
         }
         self.apply_effect_writes(signature.effects);
         let (statements, values) = self.two_phase_arguments(values, ty)?;

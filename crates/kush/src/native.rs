@@ -204,6 +204,16 @@ void kush_fuzz_arith(int64_t site, int64_t code, int64_t a, int64_t b) {
 #endif
 static void kush_task_recover_panic(void);
 static int64_t kush_recovered_panics = 0;
+/* PANIC-UNWIND-NATIVE (docs/panic-unwinding.md): when a catch boundary is
+   active, a failed precondition sets the panic word and returns `value`
+   (which the generated caller never uses: it tests the word and unwinds);
+   otherwise it panics as before. Only for preconditions on the program's
+   values, checked before anything is changed or consumed. */
+static int kush_panic_unwinds(void);
+static void kush_raise_panic(void);
+static int64_t *kush_panic_word(void);
+#define KUSH_FAIL(value) do { if (kush_panic_unwinds()) { kush_raise_panic(); return value; } kush_panic(); } while (0)
+#define KUSH_FAIL_VOID() do { if (kush_panic_unwinds()) { kush_raise_panic(); return; } kush_panic(); } while (0)
 _Noreturn void kush_panic(void) {
 #ifdef KUSH_FUZZ
     kush_fuzz_write(kush_fuzz_current >= 0 ? kush_fuzz_current : -2);
@@ -1048,7 +1058,7 @@ void kush_bytes_free(uint64_t handle) {
     kush_buffer_free(handle);
 }
 uint64_t kush_bytes_with_capacity(int64_t capacity) {
-    if (capacity < 0 || (uint64_t)capacity > KUSH_MAX_CAPACITY) kush_panic();
+    if (capacity < 0 || (uint64_t)capacity > KUSH_MAX_CAPACITY) KUSH_FAIL(0);
     KushBytes *b = (KushBytes *)(uintptr_t)kush_buffer_alloc(sizeof(KushBytes) + (uint64_t)capacity, (uint64_t)capacity, 0);
     b->length = 0; b->capacity = (uint64_t)capacity; return (uint64_t)(uintptr_t)b;
 }
@@ -1284,7 +1294,10 @@ uint64_t kush_alloc_vec_try_push(uint64_t handle, const uint64_t *item) {
 }
 void kush_alloc_vec_pop(uint64_t handle, uint64_t *out) {
     KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
-    if (v->length == 0) kush_panic();
+    if (v->length == 0) {
+        if (kush_panic_unwinds()) memset(out, 0, (size_t)(v->width * 8));
+        KUSH_FAIL_VOID();
+    }
     uint64_t index = --v->length;
     memcpy(out, kush_alloc_block_data(v->block) + index * v->width * 8,
            (size_t)(v->width * 8));
@@ -1314,7 +1327,10 @@ uint64_t kush_alloc_vec_push(uint64_t handle, const uint64_t *item) {
 uint64_t kush_alloc_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint64_t *old) {
     KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
     KUSH_FUZZ_INDEX(index, v->length);
-    if (index < 0 || (uint64_t)index >= v->length) kush_panic();
+    if (index < 0 || (uint64_t)index >= v->length) {
+        if (kush_panic_unwinds()) memset(old, 0, (size_t)(v->width * 8));
+        KUSH_FAIL(handle);
+    }
     unsigned char *slot = kush_alloc_block_data(v->block) + (uint64_t)index * v->width * 8;
     memcpy(old, slot, (size_t)(v->width * 8));
     memcpy(slot, item, (size_t)(v->width * 8));
@@ -1337,7 +1353,7 @@ int64_t kush_bytes_capacity(uint64_t handle) { return (int64_t)((const KushBytes
 int64_t kush_bytes_get(uint64_t handle, int64_t index) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
     KUSH_FUZZ_INDEX(index, b->length);
-    if (index < 0 || (uint64_t)index >= b->length) kush_panic();
+    if (index < 0 || (uint64_t)index >= b->length) KUSH_FAIL(0);
     return (int64_t)b->data[(uint64_t)index];
 }
 uint64_t kush_bytes_clear(uint64_t handle) {
@@ -1348,9 +1364,10 @@ uint64_t kush_bytes_copy(uint64_t handle) {
 }
 static uint64_t kush_bytes_push_impl(uint64_t handle, int64_t value, int grow) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
-    if (value < 0 || value > 255) kush_panic();
+    /* The buffer was moved into the push: free it before failing. */
+    if (value < 0 || value > 255) { if (kush_panic_unwinds()) kush_bytes_free(handle); KUSH_FAIL(0); }
     if (b->length == b->capacity) {
-        if (!grow) kush_panic();
+        if (!grow) { if (kush_panic_unwinds()) kush_bytes_free(handle); KUSH_FAIL(0); }
         uint64_t next = b->capacity == 0 ? 8 : (b->capacity <= KUSH_MAX_CAPACITY / 2 ? b->capacity * 2 : KUSH_MAX_CAPACITY);
         if (next <= b->capacity || next > KUSH_MAX_CAPACITY) kush_panic();
         kush_bytes_encode(b);
@@ -1393,7 +1410,7 @@ int64_t kush_utf8_validate(uint64_t handle) {
 }
 int64_t kush_utf8_scalar_len(uint64_t handle) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
-    if (!kush_utf8_valid_data(b->data, b->length)) kush_panic();
+    if (!kush_utf8_valid_data(b->data, b->length)) KUSH_FAIL(0);
     int64_t count = 0;
     for (uint64_t i = 0; i < b->length; ++i) {
         if ((b->data[i] & 0xC0) != 0x80) ++count;
@@ -1403,7 +1420,7 @@ int64_t kush_utf8_scalar_len(uint64_t handle) {
 /* Scalar-indexed code point, or -1 when the scalar index is out of range. */
 int64_t kush_utf8_scalar_at(uint64_t handle, int64_t index) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
-    if (!kush_utf8_valid_data(b->data, b->length)) kush_panic();
+    if (!kush_utf8_valid_data(b->data, b->length)) KUSH_FAIL(-1);
     if (index < 0) return -1;
     uint64_t target = (uint64_t)index, scalar = 0, i = 0;
     while (i < b->length) {
@@ -1431,7 +1448,7 @@ int64_t kush_str_scalar_len(const unsigned char *data, int64_t length) {
     return count;
 }
 int64_t kush_str_byte_at(const unsigned char *data, int64_t length, int64_t index) {
-    if (index < 0 || index >= length) kush_panic();
+    if (index < 0 || index >= length) KUSH_FAIL(0);
     return (int64_t)data[index];
 }
 int64_t kush_str_scalar_at(const unsigned char *data, int64_t length, int64_t index) {
@@ -1472,11 +1489,11 @@ int64_t kush_str_ascii_lower(unsigned char *data, int64_t length) {
     return 0;
 }
 int64_t kush_str_set_scalar(unsigned char *data, int64_t length, int64_t index, int64_t code) {
-    if (index < 0 || index >= length || (data[index] & 0xC0) == 0x80) kush_panic();
+    if (index < 0 || index >= length || (data[index] & 0xC0) == 0x80) KUSH_FAIL(0);
     unsigned char lead = data[index];
     int64_t width = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : 4;
     int64_t wanted = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
-    if (width != wanted || index + width > length) kush_panic();
+    if (width != wanted || index + width > length) KUSH_FAIL(0);
     uint32_t c = (uint32_t)code;
     if (width == 1) {
         data[index] = (unsigned char)c;
@@ -2889,7 +2906,7 @@ static uint64_t kush_vec_bytes(uint64_t capacity, uint64_t width) {
     return sizeof(KushVec) + capacity * width * 8;
 }
 uint64_t kush_vec_with_capacity(int64_t capacity, int64_t width) {
-    if (capacity < 0 || width <= 0) kush_panic();
+    if (capacity < 0 || width <= 0) KUSH_FAIL(0);
     KushVec *v = (KushVec *)(uintptr_t)kush_buffer_alloc(kush_vec_bytes((uint64_t)capacity, (uint64_t)width), (uint64_t)capacity, 0);
     v->length = 0;
     return (uint64_t)(uintptr_t)v;
@@ -2898,7 +2915,10 @@ int64_t kush_vec_len(uint64_t handle) { return (int64_t)((KushVec *)(uintptr_t)h
 void kush_vec_get(uint64_t handle, int64_t index, uint64_t *out, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     KUSH_FUZZ_INDEX(index, v->length);
-    if (index < 0 || (uint64_t)index >= v->length) kush_panic();
+    if (index < 0 || (uint64_t)index >= v->length) {
+        if (kush_panic_unwinds()) memset(out, 0, (size_t)(width * 8));
+        KUSH_FAIL_VOID();
+    }
     memcpy(out, v->data + (uint64_t)index * width, (size_t)(width * 8));
 }
 uint64_t kush_vec_push(uint64_t handle, const uint64_t *item, uint64_t width) {
@@ -2917,7 +2937,11 @@ uint64_t kush_vec_push(uint64_t handle, const uint64_t *item, uint64_t width) {
 uint64_t kush_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint64_t *old, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     KUSH_FUZZ_INDEX(index, v->length);
-    if (index < 0 || (uint64_t)index >= v->length) kush_panic();
+    if (index < 0 || (uint64_t)index >= v->length) {
+        /* The item stays with the caller's cleanup; the vector is unchanged. */
+        if (kush_panic_unwinds()) memset(old, 0, (size_t)(width * 8));
+        KUSH_FAIL(handle);
+    }
     uint64_t *slot = v->data + (uint64_t)index * width;
     memcpy(old, slot, (size_t)(width * 8));
     memcpy(slot, item, (size_t)(width * 8));
@@ -2929,7 +2953,7 @@ uint64_t kush_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint
 uint64_t kush_vec_element(uint64_t handle, int64_t index, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     KUSH_FUZZ_INDEX(index, v->length);
-    if (index < 0 || (uint64_t)index >= v->length) kush_panic();
+    if (index < 0 || (uint64_t)index >= v->length) KUSH_FAIL((uint64_t)(uintptr_t)v->data);
     return (uint64_t)(uintptr_t)(v->data + (uint64_t)index * width);
 }
 /* Ensure room for `additional` elements after the current length. Growth
@@ -3605,6 +3629,15 @@ static void kush_task_entry(unsigned int low, unsigned int high) {
     ((void (*)(uint64_t, uint64_t, uint64_t))(uintptr_t)t->wrapper)(
         t->code, t->env, (uint64_t)(uintptr_t)t->result);
     t->completed = (t->cancelled && !t->preserve) ? 0 : 1;
+#ifdef KUSH_UNWIND
+    /* A panic unwound the whole task body: the boundary of an isolated
+       task. Its result is the mark. */
+    if (t->isolated && *kush_panic_word() == 1) {
+        *kush_panic_word() = 0;
+        if (t->result_size >= sizeof(int64_t)) memcpy(t->result, &t->panic_mark, sizeof(int64_t));
+        t->completed = 1;
+    }
+#endif
     t->state = KUSH_FINISHED;
     if (t->waiter != NULL) {
         t->waiter->state = KUSH_READY;
@@ -3790,6 +3823,35 @@ static void kush_task_recover_panic(void) {
     }
     swapcontext(&t->context, &kush_scheduler_context);
     abort();
+}
+/* PANIC-UNWIND-NATIVE: whether a panic now unwinds (a catch boundary, for
+   now an isolated task, is active) instead of aborting. */
+static int kush_panic_unwinds(void) {
+#ifdef KUSH_UNWIND
+    return kush_initialized && kush_current != NULL && kush_current->id != 0
+        && kush_current->isolated && kush_current->state == KUSH_RUNNING;
+#else
+    return 0;
+#endif
+}
+static int64_t *kush_panic_word(void) {
+#ifdef KUSH_HAS_THREADS
+    return &kush_abort_word_local;
+#else
+    return &kush_abort_word;
+#endif
+}
+static void kush_raise_panic(void) {
+    static const char message[] = "panic: checked arithmetic, memory, or I/O failure\n";
+    kush_best_effort_write(2, message, sizeof(message) - 1);
+    *kush_panic_word() = 1;
+}
+/* Generated code's panic sites: unwind when a boundary is active (set the
+   word and return, the caller then leaves through its cleanup), otherwise
+   abort. */
+void kush_unwind_panic(void) {
+    if (!kush_panic_unwinds()) kush_panic();
+    kush_raise_panic();
 }
 /* Make a panic in the calling task end only this task, its result being
    `mark` (until kush_sys_task_mark changes it). EINVAL outside a spawned
@@ -4672,6 +4734,9 @@ pub fn build_with_codegen(
     if program.uses_threads {
         defines.push("-DKUSH_HAS_THREADS=1".to_owned());
     }
+    if program.uses_unwinding {
+        defines.push("-DKUSH_UNWIND=1".to_owned());
+    }
     if let Some(bytes) = program.main_stack {
         defines.push(format!("-DKUSH_MAIN_STACK={bytes}ULL"));
     }
@@ -5262,6 +5327,9 @@ fn lower(
     let panic_sig = module.make_signature();
     let panic = module
         .declare_function("kush_panic", Linkage::Import, &panic_sig)
+        .map_err(error)?;
+    let unwind_panic = module
+        .declare_function("kush_unwind_panic", Linkage::Import, &panic_sig)
         .map_err(error)?;
     let fuzz = if codegen.fuzz {
         let mut enter_sig = module.make_signature();
@@ -5989,6 +6057,21 @@ fn lower(
             .signature
             .clone();
         let mut function_context = FunctionBuilderContext::new();
+        let failing = if program.uses_unwinding {
+            module
+                .declarations()
+                .get_functions()
+                .filter(|(_, declaration)| {
+                    declaration
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| FAILING_RUNTIME.contains(&name))
+                })
+                .map(|(id, _)| id)
+                .collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
         let builder = FunctionBuilder::new(&mut context.func, &mut function_context);
         let mut g = Generator {
             builder,
@@ -6007,6 +6090,9 @@ fn lower(
             float_int_present,
             float_rem,
             panic,
+            unwind_panic,
+            failing,
+            unwind_emitting: false,
             fuzz: fuzz.clone(),
             fuzz_depth: 0,
             variables: Vec::new(),
@@ -7931,6 +8017,25 @@ impl ScalarCallback {
     }
 }
 
+/// PANIC-UNWIND-NATIVE: runtime functions whose failed preconditions return
+/// with the panic word set (KUSH_FAIL in the runtime) when a catch boundary
+/// is active; generated code tests the word after calling them.
+const FAILING_RUNTIME: &[&str] = &[
+    "kush_bytes_get",
+    "kush_bytes_push",
+    "kush_bytes_push_reserved",
+    "kush_bytes_with_capacity",
+    "kush_vec_get",
+    "kush_vec_set",
+    "kush_vec_element",
+    "kush_vec_with_capacity",
+    "kush_str_byte_at",
+    "kush_utf8_scalar_at",
+    "kush_utf8_scalar_len",
+    "kush_str_set_scalar",
+    "kush_alloc_vec_set",
+    "kush_alloc_vec_pop",
+];
 struct Generator<'a, 'b> {
     builder: FunctionBuilder<'a>,
     module: &'b mut CodeModule,
@@ -7966,6 +8071,13 @@ struct Generator<'a, 'b> {
     float_int_present: FuncId,
     float_rem: FuncId,
     panic: FuncId,
+    /// PANIC-UNWIND-NATIVE: `kush_unwind_panic`, and the runtime imports
+    /// that may return with the panic word set (docs/panic-unwinding.md).
+    unwind_panic: FuncId,
+    failing: std::collections::BTreeSet<FuncId>,
+    /// Set while an unwind exit is emitted: its own runtime calls are not
+    /// tested again.
+    unwind_emitting: bool,
     /// PROOF-FUZZ hooks, in fuzz builds only.
     fuzz: Option<FuzzHooks>,
     /// Obligation sites entered by the expression being lowered; `expr`
@@ -8481,11 +8593,18 @@ impl Generator<'_, '_> {
     fn runtime_call(&mut self, id: FuncId, values: &[Value]) -> Value {
         let callee = self.module.declare_func_in_func(id, self.builder.func);
         let call = self.builder.ins().call(callee, values);
-        self.builder.inst_results(call)[0]
+        let result = self.builder.inst_results(call)[0];
+        if self.failing.contains(&id) {
+            self.test_panic();
+        }
+        result
     }
     fn runtime_void(&mut self, id: FuncId, values: &[Value]) {
         let callee = self.module.declare_func_in_func(id, self.builder.func);
         self.builder.ins().call(callee, values);
+        if self.failing.contains(&id) {
+            self.test_panic();
+        }
     }
     /// Resolve a dynamic-object member identifier and call the checked method
     /// selected for that member. Owned dispatch loads the payload and releases
@@ -8822,6 +8941,9 @@ impl Generator<'_, '_> {
             .module
             .declare_func_in_func(self.ids[index], self.builder.func);
         let call = self.builder.ins().call(callee, &values);
+        // The callee's row is not kept on executable functions; a call
+        // that cannot panic never sets the word, so testing it is only code.
+        self.test_panic();
         if erased_result {
             return vec![self.constant(0)];
         }
@@ -8868,6 +8990,9 @@ impl Generator<'_, '_> {
             .builder
             .ins()
             .call_indirect(ir_signature, code, &values);
+        if signature.effects & crate::executable::PANIC != 0 {
+            self.test_panic();
+        }
         if result_erased {
             return vec![self.constant(0)];
         }
@@ -8916,11 +9041,49 @@ impl Generator<'_, '_> {
         result
     }
     fn abort(&mut self) {
+        if self.program.uses_unwinding && !self.unwind_emitting {
+            // `kush_unwind_panic` aborts unless a catch boundary is active;
+            // then it sets the panic word, and this frame unwinds.
+            let unwind = self
+                .module
+                .declare_func_in_func(self.unwind_panic, self.builder.func);
+            self.builder.ins().call(unwind, &[]);
+            self.unwind_exit();
+            return;
+        }
         let panic = self
             .module
             .declare_func_in_func(self.panic, self.builder.func);
         self.builder.ins().call(panic, &[]);
         self.builder.ins().trap(TrapCode::unwrap_user(1));
+    }
+    /// Leave the function while a panic unwinds: drop every live value and
+    /// return a dummy result; the caller tests the word in turn.
+    fn unwind_exit(&mut self) {
+        let emitting = std::mem::replace(&mut self.unwind_emitting, true);
+        self.cleanup_all();
+        self.return_dummy();
+        self.unwind_emitting = emitting;
+    }
+    /// After a call that may panic: unwind when the panic word is set.
+    fn test_panic(&mut self) {
+        if !self.program.uses_unwinding || self.unwind_emitting {
+            return;
+        }
+        let emitting = std::mem::replace(&mut self.unwind_emitting, true);
+        let address = self.abort_word_address();
+        self.unwind_emitting = emitting;
+        let word = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), address, 0);
+        let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, word, 1);
+        let unwind = self.builder.create_block();
+        let normal = self.builder.create_block();
+        self.builder.ins().brif(panicked, unwind, &[], normal, &[]);
+        self.builder.switch_to_block(unwind);
+        self.unwind_exit();
+        self.builder.switch_to_block(normal);
     }
     /// Trap when a runtime index is negative or outside `0..length`.
     fn check_index(&mut self, index: Value, length: i64) {
@@ -9473,7 +9636,8 @@ impl Generator<'_, '_> {
                     self.jump(target.aborted, &payload);
                     self.builder.switch_to_block(miss);
                 }
-                if *propagates {
+                if *propagates || self.program.uses_unwinding {
+                    // A foreign abort, or a panic unwinding through.
                     self.cleanup_all();
                     self.return_dummy();
                 } else {
@@ -9642,6 +9806,7 @@ impl Generator<'_, '_> {
                     let signature = self.indirect_signature_mode(*handler, call_once);
                     let signature = self.builder.import_signature(signature);
                     let call = self.builder.ins().call_indirect(signature, code, &values);
+                    self.test_panic();
                     let results = match pointer {
                         Some(pointer) => (0..self.program.width(result))
                             .map(|i| {
@@ -11374,6 +11539,7 @@ impl Generator<'_, '_> {
                     let signature = self.indirect_signature(id);
                     let signature = self.builder.import_signature(signature);
                     let call = self.builder.ins().call_indirect(signature, *code, &values);
+                    self.test_panic();
                     current = if let Some(pointer) = pointer {
                         self.load_words(pointer, 0, self.program.width(result))
                     } else {
@@ -11473,6 +11639,34 @@ impl Generator<'_, '_> {
                     .builder
                     .ins()
                     .call_indirect(signature, values[0], &arguments);
+                if self.program.uses_unwinding && !*parallel {
+                    // A panic unwinding out of the body: cancel and join the
+                    // children with the word clear (other tasks run during
+                    // the join), then go on unwinding.
+                    let address = self.abort_word_address();
+                    let word = self
+                        .builder
+                        .ins()
+                        .load(I64, ir::MemFlagsData::new(), address, 0);
+                    let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, word, 1);
+                    let unwind = self.builder.create_block();
+                    let normal = self.builder.create_block();
+                    self.builder.ins().brif(panicked, unwind, &[], normal, &[]);
+                    self.builder.switch_to_block(unwind);
+                    let zero = self.constant(0);
+                    self.builder
+                        .ins()
+                        .store(ir::MemFlagsData::new(), zero, address, 0);
+                    self.runtime_void(self.task_cancel_scope, &[]);
+                    self.runtime_void(scope_end, &[]);
+                    let address = self.abort_word_address();
+                    let one = self.constant(1);
+                    self.builder
+                        .ins()
+                        .store(ir::MemFlagsData::new(), one, address, 0);
+                    self.unwind_exit();
+                    self.builder.switch_to_block(normal);
+                }
                 let result_values = if let Some(pointer) = pointer {
                     self.load_words(pointer, 0, self.program.width(result_ty))
                 } else {
@@ -12551,7 +12745,19 @@ impl Generator<'_, '_> {
             .builder
             .ins()
             .icmp_imm_u(IntCC::UnsignedGreaterThan, value, 255);
-        self.guard(invalid);
+        if self.program.uses_unwinding {
+            // The buffer was moved into the push: let the runtime free it
+            // when the byte is invalid, then unwind.
+            let slow_invalid = self.builder.create_block();
+            let valid = self.builder.create_block();
+            self.builder.ins().brif(invalid, slow_invalid, &[], valid, &[]);
+            self.builder.switch_to_block(slow_invalid);
+            let _ = self.runtime_call(self.bytes_ops[&op], &[handle, value]);
+            self.unwind_exit();
+            self.builder.switch_to_block(valid);
+        } else {
+            self.guard(invalid);
+        }
         let (length, capacity) = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
             (
                 g.builder
