@@ -1706,8 +1706,11 @@ static int kush_cpu_disabled(const char *name) {
     }
     return 0;
 }
+/* Threads may race to fill the cache; every one computes the same bits, and
+   atomic accesses make the race defined (SIMD-REVIEW). */
 int64_t kush_sys_cpu_features(int64_t *out) {
-    if (kush_cpu_feature_bits < 0) {
+    int64_t cached = __atomic_load_n(&kush_cpu_feature_bits, __ATOMIC_ACQUIRE);
+    if (cached < 0) {
         unsigned int a = 0, b = 0, c = 0, d = 0;
         int64_t bits = 0;
         if (__get_cpuid(1, &a, &b, &c, &d)) {
@@ -1729,9 +1732,10 @@ int64_t kush_sys_cpu_features(int64_t *out) {
         if (kush_cpu_disabled("sse41")) bits &= ~2;
         if (kush_cpu_disabled("avx2")) bits &= ~4;
         if (kush_cpu_disabled("sha")) bits &= ~8;
-        kush_cpu_feature_bits = bits;
+        __atomic_store_n(&kush_cpu_feature_bits, bits, __ATOMIC_RELEASE);
+        cached = bits;
     }
-    *out = kush_cpu_feature_bits;
+    *out = cached;
     return 0;
 }
 /* The standard input descriptor. A separate call (not the constant 0) so the

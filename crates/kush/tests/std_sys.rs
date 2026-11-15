@@ -4,7 +4,8 @@
 use kush::executable;
 
 fn checked(source: &str) -> Result<executable::Executable, String> {
-    let program = kush::program::load_source("<std-sys-test>", source).unwrap();
+    let program = kush::program::load_source("<std-sys-test>", source)
+        .map_err(|(_, error)| error.message)?;
     executable::check_program(&program).map_err(|error| program.sources.render(&error))
 }
 

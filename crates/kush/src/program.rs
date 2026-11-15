@@ -232,6 +232,20 @@ impl Loader<'_> {
     fn run(&mut self, name: &str, text: &str) -> Result<(), Diagnostic> {
         let (file, module) = self.parse(name.to_owned(), text.to_owned())?;
         let path = Self::header(&module).unwrap_or_default();
+        // Only the embedded standard library may live under `std`. A root
+        // named `std.cpu` would otherwise be found by the real std modules'
+        // imports (by_path is searched first), letting it forge capability
+        // tokens or stand in for std's intrinsics (SIMD-REVIEW).
+        if path.first().is_some_and(|p| p == "std") {
+            let span = module.items.first().map(|d| d.item.span).unwrap_or_default();
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "module '{}' is reserved for the Kush standard library; a program cannot be named under 'std'",
+                    path.join(".")
+                ),
+            ));
+        }
         let mut queue = vec![self.push_unit(path.clone(), file, module)];
         if !path.is_empty() {
             self.by_path.insert(path, 0);

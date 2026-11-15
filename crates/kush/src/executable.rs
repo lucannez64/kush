@@ -6305,7 +6305,9 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             let binding = signature.binding;
             let unit = *resolution.unit_of.get(&binding)?;
             let path = resolution.units.get(unit)?;
-            if path.len() != 2 || path[0] != "std" {
+            // The root unit is never std (the loader also rejects a root
+            // under `std`).
+            if unit == 0 || path.len() != 2 || path[0] != "std" {
                 return None;
             }
             let declared = functions.declared.get(&binding)?;

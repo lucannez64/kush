@@ -23,7 +23,8 @@ fn unique_directory(label: &str) -> PathBuf {
 }
 
 fn checked(source: &str) -> Result<executable::Executable, String> {
-    let program = kush::program::load_source("<std-file-test>", source).unwrap();
+    let program = kush::program::load_source("<std-file-test>", source)
+        .map_err(|(_, error)| error.message)?;
     executable::check_program(&program).map_err(|error| program.sources.render(&error))
 }
 
@@ -251,7 +252,7 @@ fn a_root_module_named_std_cannot_call_raw_handles() {
     let Err(error) = checked(source) else {
         panic!("accepted a root std module")
     };
-    assert!(error.contains("reserved for std"), "{error}");
+    assert!(error.contains("reserved for the Kush standard library"), "{error}");
 }
 
 /// A record holding a `File` and ordinary data (kush-kv's store): taking it

@@ -113,3 +113,35 @@ fn tokens_are_copyable_and_cannot_be_forged() {
         "requires the 'io' effect",
     );
 }
+
+/// SIMD-REVIEW: a root file cannot take a std module's path. Named
+/// `std.cpu`, it would be what the real `std.x86` imports, so it could forge
+/// `cpu.Sha`; named `std.x86`, its functions would be taken for the SHA
+/// intrinsics.
+#[test]
+fn a_root_module_cannot_stand_in_for_std() {
+    let rejects = |source: &str| match check(source) {
+        Ok(_) => panic!("accepted:\n{source}"),
+        Err(error) => assert!(
+            error.message.contains("reserved for the Kush standard library"),
+            "{error:?}"
+        ),
+    };
+    rejects(
+        "module std.cpu;
+         use std.x86;
+         use std.simd.u32x4;
+         pub struct Sha { pub held: Bool }
+         fn main() -> i64 ! {} {
+             let sha = Sha { held: true };
+             let v = x86.sha256msg1(&sha, u32x4.zero(), u32x4.zero());
+             Int.convert(u32x4.lane(v, 0, _))
+         }",
+    );
+    rejects(
+        "module std.x86;
+         pub fn sha256msg1(a: i64, b: i64) -> i64 ! {panic} { a + b }
+         fn main() -> i64 ! {panic} { sha256msg1(1, 2) }",
+    );
+    rejects("module std; fn main() -> i64 ! {} { 0 }");
+}
