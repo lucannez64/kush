@@ -117,6 +117,27 @@ copies the child's stdout, so `poll` can wait on it with a timeout without
 any unsafe code; a socket's readability is a `peek` under a read timeout,
 and its writes block.
 
+### Server sockets (WEB-NET)
+
+`std.net` also has the server side: a linear `Listener` from `listen(host,
+port, backlog, reuse_port)` (SO_REUSEADDR always, SO_REUSEPORT on request;
+port 0 picks one, `local_port` tells which), `accept` with a timeout, and a
+linear `Conn` from `accept` or `connect`, with `read` (one read of what is
+there, after a poll with the timeout), `write` (all of it, polling on
+EAGAIN), `shutdown`, `set_nodelay` and `close`. The new stubs are
+`socket` (for one address of a resolved list), `setsockopt` (int values),
+`bind`, `listen`, `accept` (accept4, close-on-exec) and `local_port`
+(getsockname). Timeouts use `poll`, not SO_RCVTIMEO/SO_SNDTIMEO. The calls
+block the thread until WEB-REACTOR.
+
+In the evaluator, Rust's std has no unbound socket, so `socket` and `bind`
+only record the address and `listen` binds and listens at once; SO_REUSEPORT
+is ignored (a second listener on a port is EADDRINUSE there); `poll` on a
+listener tries a nonblocking accept every 2 ms and keeps what it accepts for
+the next `accept`. Tests: `crates/kush/tests/web_net.rs` (a server and a
+client in one program on both backends, a native server answering a Rust
+client, SO_REUSEPORT natively, linearity).
+
 Not yet: the `IO.*`, `FS.*`, `ENV.*`, `TIME.*`, `OS.*`, `PROC.*` and `NET.*`
 builtins still exist next to their std modules; removal is
 HOST-BUILTINS-REMOVE. Tests: `crates/kush/tests/std_proc_net.rs` (each

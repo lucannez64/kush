@@ -615,6 +615,14 @@ struct FileTable {
     sockets: BTreeMap<i64, TcpStream>,
     /// Address lists from `kush_sys_resolve`.
     addresses: BTreeMap<i64, Vec<std::net::SocketAddr>>,
+    /// WEB-NET: sockets from `kush_sys_socket` that do not listen yet, with
+    /// the address `kush_sys_bind` gave them. Rust's std has no unbound
+    /// socket, so `kush_sys_listen` binds and listens in one step.
+    unbound: BTreeMap<i64, Option<std::net::SocketAddr>>,
+    listeners: BTreeMap<i64, std::net::TcpListener>,
+    /// Connections a poll on a listener already accepted, for the next
+    /// `kush_sys_accept`.
+    accepted: BTreeMap<i64, VecDeque<TcpStream>>,
     next: i64,
 }
 impl FileTable {
@@ -4714,7 +4722,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 } else if table.open.remove(&fd).is_some()
                     || table.pipes.remove(&fd).is_some()
                     || table.sockets.remove(&fd).is_some()
+                    || table.unbound.remove(&fd).is_some()
+                    || table.listeners.remove(&fd).is_some()
                 {
+                    table.accepted.remove(&fd);
                     (0, 0)
                 } else {
                     (9, 0)
@@ -5034,6 +5045,41 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let table = self.host.files.lock().unwrap();
                 if timeout < -1 {
                     (22, 0)
+                } else if table.accepted.get(&fd).is_some_and(|queue| !queue.is_empty()) {
+                    (0, events & 1)
+                } else if let Some(listener) = table.listeners.get(&fd).map(std::net::TcpListener::try_clone) {
+                    drop(table);
+                    // No poll without FFI: try a nonblocking accept every
+                    // 2 ms until the timeout, keeping what it accepts.
+                    let deadline = wait.map(|wait| Instant::now() + wait);
+                    match listener.and_then(|listener| listener.set_nonblocking(true).map(|()| listener)) {
+                        Err(error) => code(Err(error)),
+                        Ok(_) if events & 1 == 0 => (0, 0),
+                        Ok(listener) => loop {
+                            match listener.accept() {
+                                Ok((stream, _)) => {
+                                    let _ = stream.set_nonblocking(false);
+                                    let _ = listener.set_nonblocking(false);
+                                    self.host.files.lock().unwrap().accepted.entry(fd).or_default().push_back(stream);
+                                    break (0, 1);
+                                }
+                                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                    let now = Instant::now();
+                                    if deadline.is_some_and(|deadline| now >= deadline) {
+                                        let _ = listener.set_nonblocking(false);
+                                        break (0, 0);
+                                    }
+                                    let step = Duration::from_millis(2);
+                                    thread::sleep(deadline.map_or(step, |deadline| step.min(deadline - now)));
+                                }
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                                Err(error) => {
+                                    let _ = listener.set_nonblocking(false);
+                                    break code(Err(error));
+                                }
+                            }
+                        },
+                    }
                 } else if let Some(pipe) = table.pipes.get(&fd).cloned() {
                     drop(table);
                     if events & 1 == 0 || !pipe.wait(wait) {
@@ -5078,6 +5124,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                 } else if table.open.contains_key(&fd) || (0..=2).contains(&fd) {
                     (0, events & 5)
+                } else if table.unbound.contains_key(&fd) {
+                    (0, 4 & events)
                 } else {
                     (9, 0)
                 }
@@ -5086,7 +5134,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let host = self.borrowed_bytes(&args[0]).ok_or_else(internal)?;
                 let port = args[1].scalar();
                 let resolved = match std::str::from_utf8(&host) {
-                    _ if !(1..=65535).contains(&port) || host.contains(&0) => Err(22),
+                    _ if !(0..=65535).contains(&port) || host.contains(&0) => Err(22),
                     Err(_) => Err(22),
                     Ok(host) => match (host, port as u16).to_socket_addrs() {
                         Ok(addresses) => Ok(addresses.collect::<Vec<_>>()),
@@ -5161,6 +5209,108 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     (_, None) => (22, 0),
                     (None, _) => (9, 0),
                     (Some(socket), Some(how)) => code(socket.shutdown(how).map(|()| 0)),
+                }
+            }
+            "kush_sys_socket" => {
+                let (list, index) = (args[0].scalar(), args[1].scalar());
+                let mut table = self.host.files.lock().unwrap();
+                match table.addresses.get(&list).map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i))) {
+                    None => (9, 0),
+                    Some(None) => (2, 0),
+                    Some(Some(_)) => {
+                        let handle = table.handle();
+                        table.unbound.insert(handle, None);
+                        (0, handle)
+                    }
+                }
+            }
+            "kush_sys_setsockopt" => {
+                let (fd, level, name, value) = (args[0].scalar(), args[1].scalar(), args[2].scalar(), args[3].scalar());
+                let table = self.host.files.lock().unwrap();
+                match (level, name) {
+                    // SO_REUSEADDR is Rust's default for listeners; it cannot
+                    // set SO_REUSEPORT, so the evaluator ignores it (a second
+                    // listener on the same port is EADDRINUSE here).
+                    (1, 2 | 15) if table.unbound.contains_key(&fd) || table.listeners.contains_key(&fd) => (0, 0),
+                    (6, 1) => match table.sockets.get(&fd) {
+                        Some(socket) => code(socket.set_nodelay(value != 0).map(|()| 0)),
+                        None => (9, 0),
+                    },
+                    _ if table.unbound.contains_key(&fd) || table.sockets.contains_key(&fd) || table.listeners.contains_key(&fd) => (92, 0), // ENOPROTOOPT
+                    _ => (9, 0),
+                }
+            }
+            "kush_sys_bind" => {
+                let (fd, list, index) = (args[0].scalar(), args[1].scalar(), args[2].scalar());
+                let mut table = self.host.files.lock().unwrap();
+                let address = table.addresses.get(&list).map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied()));
+                match (address, table.unbound.get_mut(&fd)) {
+                    (_, None) => (9, 0),
+                    (None, _) => (9, 0),
+                    (Some(None), _) => (2, 0),
+                    (Some(Some(_)), Some(Some(_))) => (22, 0), // already bound
+                    (Some(Some(address)), Some(slot)) => {
+                        *slot = Some(address);
+                        (0, 0)
+                    }
+                }
+            }
+            "kush_sys_listen" => {
+                let fd = args[0].scalar();
+                let mut table = self.host.files.lock().unwrap();
+                match table.unbound.get(&fd).copied() {
+                    None => (if table.listeners.contains_key(&fd) { 0 } else { 9 }, 0),
+                    Some(None) => (22, 0),
+                    Some(Some(address)) => match std::net::TcpListener::bind(address) {
+                        Ok(listener) => {
+                            table.unbound.remove(&fd);
+                            table.listeners.insert(fd, listener);
+                            (0, 0)
+                        }
+                        Err(error) => code(Err(error)),
+                    },
+                }
+            }
+            "kush_sys_accept" => {
+                let fd = args[0].scalar();
+                let mut table = self.host.files.lock().unwrap();
+                let queued = table.accepted.get_mut(&fd).and_then(VecDeque::pop_front);
+                let listener = table.listeners.get(&fd).map(std::net::TcpListener::try_clone);
+                drop(table);
+                let accepted = match queued {
+                    Some(stream) => Some(Ok(stream)),
+                    None => listener.map(|listener| {
+                        listener.and_then(|listener| loop {
+                            match listener.accept() {
+                                Ok((stream, _)) => break Ok(stream),
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                                Err(error) => break Err(error),
+                            }
+                        })
+                    }),
+                };
+                match accepted {
+                    None => (9, 0),
+                    Some(Err(error)) => code(Err(error)),
+                    Some(Ok(stream)) => {
+                        let mut table = self.host.files.lock().unwrap();
+                        let handle = table.handle();
+                        table.sockets.insert(handle, stream);
+                        (0, handle)
+                    }
+                }
+            }
+            "kush_sys_local_port" => {
+                let fd = args[0].scalar();
+                let table = self.host.files.lock().unwrap();
+                if let Some(listener) = table.listeners.get(&fd) {
+                    code(listener.local_addr().map(|address| i64::from(address.port())))
+                } else if let Some(socket) = table.sockets.get(&fd) {
+                    code(socket.local_addr().map(|address| i64::from(address.port())))
+                } else if let Some(address) = table.unbound.get(&fd) {
+                    (0, address.map_or(0, |address| i64::from(address.port())))
+                } else {
+                    (9, 0)
                 }
             }
             "kush_sys_stat" => {

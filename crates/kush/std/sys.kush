@@ -105,8 +105,9 @@ pub foreign "kush_sys_kill" fn kill(pid: i64, signal: i64) -> Result<Unit, i64> 
 /// poll(2) on one descriptor for up to `timeout_ms` (-1 forever): the events
 /// that happened (POLLIN, POLLOUT, 8 error, 16 hang-up), 0 on timeout.
 pub foreign "kush_sys_poll" fn poll(fd: i64, events: i64, timeout_ms: i64) -> Result<i64, i64> ! {io};
-/// getaddrinfo(3) for a TCP connection to host:port (1..=65535). The list is
-/// a handle for `connect`; free it with `resolve_free`.
+/// getaddrinfo(3) for TCP on host:port (0..=65535; 0 lets `bind` pick a
+/// port). The list is a handle for `connect`, `socket` and `bind`; free it
+/// with `resolve_free`.
 pub foreign "kush_sys_resolve" fn resolve(host: &Bytes, port: i64) -> Result<i64, i64> ! {io};
 pub foreign "kush_sys_resolve_free" fn resolve_free(list: i64) -> Result<Unit, i64> ! {io};
 /// Connect a new socket to address `index` of a resolved list, waiting up to
@@ -119,3 +120,25 @@ pub foreign "kush_sys_connect" fn connect(list: i64, index: i64, timeout_ms: i64
 pub foreign "kush_sys_send" fn send(fd: i64, data: &Bytes, start: i64) -> Result<i64, i64> ! {io};
 /// shutdown(2): 0 the read side, 1 the write side, 2 both.
 pub foreign "kush_sys_shutdown" fn shutdown(fd: i64, how: i64) -> Result<Unit, i64> ! {io};
+
+// Server sockets (WEB-NET).
+
+pub fn SOL_SOCKET() -> i64 ! {} { 1 }
+pub fn SO_REUSEADDR() -> i64 ! {} { 2 }
+pub fn SO_REUSEPORT() -> i64 ! {} { 15 }
+pub fn IPPROTO_TCP() -> i64 ! {} { 6 }
+pub fn TCP_NODELAY() -> i64 ! {} { 1 }
+
+/// A blocking TCP socket of the family of address `index` of a resolved
+/// list (ENOENT past its end), close-on-exec.
+pub foreign "kush_sys_socket" fn socket(list: i64, index: i64) -> Result<i64, i64> ! {io};
+/// setsockopt(2) with an int value.
+pub foreign "kush_sys_setsockopt" fn setsockopt(fd: i64, level: i64, name: i64, value: i64) -> Result<Unit, i64> ! {io};
+/// bind(2) to address `index` of a resolved list.
+pub foreign "kush_sys_bind" fn bind(fd: i64, list: i64, index: i64) -> Result<Unit, i64> ! {io};
+pub foreign "kush_sys_listen" fn listen(fd: i64, backlog: i64) -> Result<Unit, i64> ! {io};
+/// accept4(2), close-on-exec: a blocking connected socket. It blocks until a
+/// connection arrives, so `poll` the listener first.
+pub foreign "kush_sys_accept" fn accept(fd: i64) -> Result<i64, i64> ! {io};
+/// The local port of a bound socket (getsockname).
+pub foreign "kush_sys_local_port" fn local_port(fd: i64) -> Result<i64, i64> ! {io};

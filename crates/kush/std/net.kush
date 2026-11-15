@@ -1,10 +1,12 @@
 module std.net;
 
-// Plain TCP (STD-PROC-NET-IN-KUSH), as Kush loops over `std.sys`: the
-// stubs resolve, connect, poll, send and read once each, and the shared
-// timeout budget, the partial sends and the bounded receive are here. Same
-// behaviour as the `NET.tcp_exchange` builtin, which HOST-BUILTINS-REMOVE
-// retires.
+// Plain TCP (STD-PROC-NET-IN-KUSH, WEB-NET), as Kush loops over
+// `std.sys`: the stubs resolve, connect, bind, listen, accept, poll, send
+// and read once each, and the shared timeout budgets, the partial sends and
+// the bounded receives are here. `exchange` behaves like the
+// `NET.tcp_exchange` builtin, which HOST-BUILTINS-REMOVE retires; `Listener`
+// and `Conn` are the server side. These calls block the thread (with
+// timeouts); WEB-REACTOR makes them suspend a task instead.
 
 use std.result.Result;
 use std.sys;
@@ -56,6 +58,23 @@ fn open(host: &Bytes, port: i64, deadline: i64) -> Result<i64, i64> ! {io} {
     }
 }
 
+/// Wait until `fd` has one of `events` or the deadline passes: 0, ETIMEDOUT
+/// (110), or the errno of the poll.
+fn wait(fd: i64, events: i64, deadline: i64) -> i64 ! {io} {
+    loop {
+        match sys.poll(fd, events, time.remaining_ms(deadline)) {
+            Result.Ok(0) => {
+                // poll waits at most 60 s; only a spent budget is a timeout.
+                if time.remaining_ms(deadline) == 0 { return 110; }
+            },
+            Result.Ok(_) => { return 0; },
+            Result.Err(code) => {
+                if code != sys.EINTR() { return code; }
+            },
+        }
+    }
+}
+
 /// Send all of `request` within the budget: 0, or the errno that stopped it.
 fn send_all(fd: i64, request: &Bytes, deadline: i64) -> i64 ! {io} {
     let length = Bytes.len(request);
@@ -68,15 +87,8 @@ fn send_all(fd: i64, request: &Bytes, deadline: i64) -> i64 ! {io} {
             },
             Result.Err(code) => {
                 if code == sys.EAGAIN() {
-                    match sys.poll(fd, sys.POLLOUT(), time.remaining_ms(deadline)) {
-                        Result.Ok(0) => {
-                            if time.remaining_ms(deadline) == 0 { return 110; }
-                        },
-                        Result.Ok(_) => {},
-                        Result.Err(code) => {
-                            if code != sys.EINTR() { return code; }
-                        },
-                    }
+                    let waited = wait(fd, sys.POLLOUT(), deadline);
+                    if waited != 0 { return waited; }
                 } else if code != sys.EINTR() {
                     return code;
                 }
@@ -149,4 +161,153 @@ pub fn exchange(host: &Bytes, port: i64, request: &Bytes, response: Bytes, timeo
     }
     let _ = sys.close(fd);
     Outcome.Stopped(buffer, stop)
+}
+
+/// A listening socket. Linear: every path must pass it to `close_listener`.
+#[linear]
+pub struct Listener {
+    fd: i64,
+}
+
+/// A connected socket, accepted or connected. Linear: every path must pass
+/// it to `close`.
+#[linear]
+pub struct Conn {
+    fd: i64,
+}
+
+/// SO_REUSEADDR (and SO_REUSEPORT), bind and listen on a fresh socket.
+fn bind_listen(fd: i64, list: i64, index: i64, backlog: i64, reuse_port: Bool) -> Result<Unit, i64> ! {io} {
+    match sys.setsockopt(fd, sys.SOL_SOCKET(), sys.SO_REUSEADDR(), 1) {
+        Result.Err(code) => { return Result.Err(code); },
+        Result.Ok(_) => {},
+    }
+    if reuse_port {
+        match sys.setsockopt(fd, sys.SOL_SOCKET(), sys.SO_REUSEPORT(), 1) {
+            Result.Err(code) => { return Result.Err(code); },
+            Result.Ok(_) => {},
+        }
+    }
+    match sys.bind(fd, list, index) {
+        Result.Err(code) => { return Result.Err(code); },
+        Result.Ok(_) => {},
+    }
+    sys.listen(fd, backlog)
+}
+
+/// Listen on `host`:`port` with SO_REUSEADDR, using the first address of
+/// `host` that binds. Port 0 picks a free port (see `local_port`).
+/// `reuse_port` sets SO_REUSEPORT too, so several listeners (one per
+/// thread) can share the port and the kernel spreads connections over them.
+pub fn listen(host: &Bytes, port: i64, backlog: i64, reuse_port: Bool) -> Result<Listener, i64> ! {io} {
+    if port < 0 || port > 65535 || backlog < 0 { return Result.Err(22); }
+    let list = match sys.resolve(host, port) {
+        Result.Ok(list) => list,
+        Result.Err(code) => { return Result.Err(code); },
+    };
+    let mut last = 99; // EADDRNOTAVAIL
+    let mut index = 0;
+    loop {
+        match sys.socket(list, index) {
+            Result.Err(code) => {
+                if code == 2 {
+                    // The end of the list.
+                    let _ = sys.resolve_free(list);
+                    return Result.Err(last);
+                }
+                last = code;
+            },
+            Result.Ok(fd) => {
+                match bind_listen(fd, list, index, backlog, reuse_port) {
+                    Result.Ok(_) => {
+                        let _ = sys.resolve_free(list);
+                        return Result.Ok(Listener { fd: fd });
+                    },
+                    Result.Err(code) => {
+                        let _ = sys.close(fd);
+                        last = code;
+                    },
+                }
+            },
+        }
+        index = Int.wrapping_add::<i64>(index, 1);
+    }
+}
+
+/// The port the listener is bound to.
+pub fn local_port(listener: &Listener) -> Result<i64, i64> ! {io} {
+    sys.local_port(listener.fd)
+}
+
+/// Wait up to `timeout_ms` (0 forever; negative is EINVAL) for the next
+/// connection; ETIMEDOUT (110) when none came.
+pub fn accept(listener: &Listener, timeout_ms: i64) -> Result<Conn, i64> ! {io} {
+    if timeout_ms < 0 { return Result.Err(22); }
+    let deadline = time.deadline_ms(timeout_ms);
+    loop {
+        let waited = wait(listener.fd, sys.POLLIN(), deadline);
+        if waited != 0 { return Result.Err(waited); }
+        match sys.accept(listener.fd) {
+            Result.Ok(fd) => { return Result.Ok(Conn { fd: fd }); },
+            Result.Err(code) => {
+                // A connection reset while queued is skipped.
+                if code != sys.EINTR() && code != 103 { return Result.Err(code); }
+            },
+        }
+    }
+}
+
+pub fn close_listener(listener: Listener) -> Result<Unit, i64> ! {io} {
+    match listener {
+        Listener { fd } => sys.close(fd),
+    }
+}
+
+/// Connect to `host`:`port` (1..=65535) within `timeout_ms` (0 forever;
+/// negative is EINVAL), trying each address of `host` in turn.
+pub fn connect(host: &Bytes, port: i64, timeout_ms: i64) -> Result<Conn, i64> ! {io} {
+    if timeout_ms < 0 || port <= 0 || port > 65535 { return Result.Err(22); }
+    match open(host, port, time.deadline_ms(timeout_ms)) {
+        Result.Ok(fd) => Result.Ok(Conn { fd: fd }),
+        Result.Err(code) => Result.Err(code),
+    }
+}
+
+/// Wait up to `timeout_ms` (0 forever) for data and read what is there into
+/// `buffer`'s spare capacity. The buffer comes back with its length
+/// advanced, or unchanged when the peer closed its side; on failure,
+/// including ETIMEDOUT (110), it is freed. EFBIG (27) when it has no spare
+/// capacity.
+pub fn read(conn: &Conn, buffer: Bytes, timeout_ms: i64) -> Result<Bytes, i64> ! {io} {
+    if timeout_ms < 0 { return Result.Err(22); }
+    let spare = Int.wrapping_sub::<i64>(Bytes.capacity(&buffer), Bytes.len(&buffer));
+    if spare <= 0 { return Result.Err(27); }
+    let waited = wait(conn.fd, sys.POLLIN(), time.deadline_ms(timeout_ms));
+    if waited != 0 { return Result.Err(waited); }
+    sys.read(conn.fd, buffer, spare, -1)
+}
+
+/// Send all of `data` within `timeout_ms` (0 forever; negative is EINVAL).
+/// A peer that closed is EPIPE (32), never a signal.
+pub fn write(conn: &Conn, data: &Bytes, timeout_ms: i64) -> Result<Unit, i64> ! {io} {
+    if timeout_ms < 0 { return Result.Err(22); }
+    let stop = send_all(conn.fd, data, time.deadline_ms(timeout_ms));
+    if stop == 0 { Result.Ok(()) } else { Result.Err(stop) }
+}
+
+/// Stop reading (0), writing (1, the peer then reads end of file) or both
+/// (2).
+pub fn shutdown(conn: &Conn, how: i64) -> Result<Unit, i64> ! {io} {
+    sys.shutdown(conn.fd, how)
+}
+
+/// TCP_NODELAY: send small writes at once instead of batching them.
+pub fn set_nodelay(conn: &Conn, on: Bool) -> Result<Unit, i64> ! {io} {
+    sys.setsockopt(conn.fd, sys.IPPROTO_TCP(), sys.TCP_NODELAY(), if on { 1 } else { 0 })
+}
+
+pub fn close(conn: Conn) -> Result<Unit, i64> ! {io} {
+    match conn {
+        Conn { fd } => sys.close(fd),
+    }
 }

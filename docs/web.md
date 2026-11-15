@@ -29,9 +29,12 @@ and is not planned here.
 
 ## What is missing
 
-1. **Server sockets.** `NET.tcp_exchange` connects, sends one request and
-   reads one reply. There is no `socket`/`bind`/`listen`/`accept`, no
-   socket handle and no way to keep a connection open.
+1. **Server sockets** (done, WEB-NET). `std.net` has a linear `Listener`
+   (`listen`, `local_port`, `accept`, `close_listener`) and a linear `Conn`
+   (`connect`, `read`, `write`, `shutdown`, `set_nodelay`, `close`), so a
+   socket that is leaked, closed twice or used after close is a compile
+   error. They still block the thread, with timeouts; WEB-REACTOR makes them
+   suspend a task. See [std-sys.md](std-sys.md).
 2. **Nonblocking I/O.** [async.md](async.md) says it plainly: blocking I/O
    stalls the task scheduler, and tasks run on one OS thread. A server that
    holds thousands of connections needs a reactor that suspends a task on a
@@ -202,7 +205,7 @@ stranger can run.
 
 ```
 WEB-DESIGN (done)
-├─ WEB-NET (after STD-PROC-NET-IN-KUSH) ─┐
+├─ WEB-NET (done) ───────────────────────┐
 │                     TASK-ID-REUSE ─────┴─ WEB-REACTOR ─┐
 ├─ WEB-HTTP-PARSE ── WEB-CORE ───────────────────────────┴─ WEB-SERVER ─┬─ WEB-MULTICORE (after THREAD-TASKS)
 ├─ WEB-URL ─────────────┴─ WEB-ROUTER ─ WEB-EFFECTS ─ WEB-TEST-CLIENT  ├─ WEB-TLS

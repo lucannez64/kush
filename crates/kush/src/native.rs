@@ -2735,7 +2735,7 @@ int64_t kush_sys_poll(int64_t fd, int64_t events, int64_t timeout_ms, int64_t *o
 /* getaddrinfo(3) for a TCP connection to host:port; the list is the handle
    for kush_sys_connect and must be freed with kush_sys_resolve_free. */
 int64_t kush_sys_resolve(const uint8_t *host, int64_t host_len, int64_t port, int64_t *out) {
-    if (port <= 0 || port > 65535) return EINVAL;
+    if (port < 0 || port > 65535) return EINVAL;
     int code = 0;
     char *text = kush_sys_path(host, host_len, &code);
     if (text == NULL) return code;
@@ -2794,6 +2794,54 @@ int64_t kush_sys_send(int64_t fd, const uint8_t *data, int64_t length, int64_t s
 int64_t kush_sys_shutdown(int64_t fd, int64_t how) {
     if (how < 0 || how > 2) return EINVAL;
     return shutdown((int)fd, (int)how) != 0 ? errno : 0;
+}
+/* WEB-NET: server sockets, one call each; std.net builds Listener and Conn
+   on them. Address `index` of a resolved list as in kush_sys_connect. */
+static struct addrinfo *kush_sys_address(int64_t list, int64_t index) {
+    struct addrinfo *address = (struct addrinfo *)(uintptr_t)list;
+    for (int64_t i = 0; address != NULL && i < index; ++i) address = address->ai_next;
+    return index < 0 ? NULL : address;
+}
+/* A blocking TCP socket of the family of address `index`. */
+int64_t kush_sys_socket(int64_t list, int64_t index, int64_t *out) {
+    struct addrinfo *address = kush_sys_address(list, index);
+    if (address == NULL) return ENOENT;
+    int fd = socket(address->ai_family, address->ai_socktype | SOCK_CLOEXEC, address->ai_protocol);
+    if (fd < 0) return errno;
+    *out = fd;
+    return 0;
+}
+/* setsockopt(2) with an int value. */
+int64_t kush_sys_setsockopt(int64_t fd, int64_t level, int64_t name, int64_t value) {
+    if (value < INT32_MIN || value > INT32_MAX) return EINVAL;
+    int option = (int)value;
+    return setsockopt((int)fd, (int)level, (int)name, &option, sizeof(option)) != 0 ? errno : 0;
+}
+int64_t kush_sys_bind(int64_t fd, int64_t list, int64_t index) {
+    struct addrinfo *address = kush_sys_address(list, index);
+    if (address == NULL) return ENOENT;
+    return bind((int)fd, address->ai_addr, address->ai_addrlen) != 0 ? errno : 0;
+}
+int64_t kush_sys_listen(int64_t fd, int64_t backlog) {
+    if (backlog < 0 || backlog > INT32_MAX) return EINVAL;
+    return listen((int)fd, (int)backlog) != 0 ? errno : 0;
+}
+/* accept4(2) with SOCK_CLOEXEC: a blocking connected socket. */
+int64_t kush_sys_accept(int64_t fd, int64_t *out) {
+    int accepted = accept4((int)fd, NULL, NULL, SOCK_CLOEXEC);
+    if (accepted < 0) return errno;
+    *out = accepted;
+    return 0;
+}
+/* The local port of a bound socket (getsockname). */
+int64_t kush_sys_local_port(int64_t fd, int64_t *out) {
+    struct sockaddr_storage address;
+    socklen_t length = sizeof(address);
+    if (getsockname((int)fd, (struct sockaddr *)&address, &length) != 0) return errno;
+    if (address.ss_family == AF_INET) *out = ntohs(((struct sockaddr_in *)&address)->sin_port);
+    else if (address.ss_family == AF_INET6) *out = ntohs(((struct sockaddr_in6 *)&address)->sin6_port);
+    else return EAFNOSUPPORT;
+    return 0;
 }
 /* Vectors store fixed-width elements of `width` 64-bit words each. */
 typedef struct { uint64_t length; uint64_t capacity; uint64_t data[]; } KushVec;
