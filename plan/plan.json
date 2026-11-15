@@ -7088,10 +7088,21 @@
         "WEB-DESIGN",
         "STD-PROC-NET-IN-KUSH"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "std.net: kush_sys stubs for socket, setsockopt (SO_REUSEADDR, SO_REUSEPORT, SO_RCVTIMEO, SO_SNDTIMEO, TCP_NODELAY), bind, listen, accept4, recv, send, shutdown; linear Listener and Conn; evaluator shims. Reuses the getaddrinfo/send/recv stubs STD-PROC-NET-IN-KUSH adds. See docs/web.md.",
-      "commit": null,
-      "log": []
+      "commit": "c5623db",
+      "log": [
+        {
+          "time": "2026-11-15 18:13:42",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 18:20:12",
+          "who": "agent",
+          "text": "done c5623db"
+        }
+      ]
     },
     {
       "id": "WEB-HTTP-PARSE",
