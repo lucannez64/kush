@@ -202,8 +202,6 @@ void kush_fuzz_arith(int64_t site, int64_t code, int64_t a, int64_t b) {
 #else
 #define KUSH_FUZZ_INDEX(index, length) ((void)0)
 #endif
-static void kush_task_recover_panic(void);
-static int64_t kush_recovered_panics = 0;
 /* PANIC-UNWIND-NATIVE (docs/panic-unwinding.md): when a catch boundary is
    active, a failed precondition sets the panic word and returns `value`
    (which the generated caller never uses: it tests the word and unwinds);
@@ -220,10 +218,9 @@ _Noreturn void kush_panic(void) {
 #endif
     static const char message[] = "panic: checked arithmetic, memory, or I/O failure\n";
     kush_best_effort_write(2, message, sizeof(message) - 1);
-#ifndef KUSH_FUZZ
-    /* WEB-PANIC-500: an isolated task ends here instead of the process. */
-    kush_task_recover_panic();
-#endif
+    /* A panic a catch boundary could stop unwinds instead (KUSH_FAIL,
+       kush_unwind_panic); one that reaches here checks the runtime's own
+       invariants, or has no boundary, and ends the process. */
 #ifdef KUSH_FUZZ
     /* No abort(): a system core handler would run for every panicking
        input. The status is the one abort() gives a shell. */
@@ -322,7 +319,7 @@ int64_t kush_print_i64(int64_t value) {
     while (p < end) {
         ssize_t count = write(1, p, (size_t)(end - p));
         if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) kush_panic();
+        if (count <= 0) KUSH_FAIL(0);
         p += count;
     }
     return 0;
@@ -335,7 +332,7 @@ int64_t kush_print_u64(uint64_t magnitude) {
     while (p < end) {
         ssize_t count = write(1, p, (size_t)(end - p));
         if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) kush_panic();
+        if (count <= 0) KUSH_FAIL(0);
         p += count;
     }
     return 0;
@@ -459,7 +456,7 @@ static void kush_write_line(const char *text, size_t length) {
     while (at < length) {
         ssize_t count = write(1, text + at, length - at);
         if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) kush_panic();
+        if (count <= 0) KUSH_FAIL_VOID();
         at += (size_t)count;
     }
 }
@@ -3698,7 +3695,7 @@ uint64_t kush_task_cancel(uint64_t *handle) {
 }
 uint64_t kush_task_scope_begin(void) {
     kush_task_init();
-    if (kush_current->scope_depth >= KUSH_MAX_SCOPES) kush_panic();
+    if (kush_current->scope_depth >= KUSH_MAX_SCOPES) KUSH_FAIL(0);
     kush_current->scope_first[kush_current->scope_depth] = NULL;
     kush_current->scope_last[kush_current->scope_depth] = NULL;
     ++kush_current->scope_depth;
@@ -3793,36 +3790,6 @@ int64_t kush_sys_wait_ready(int64_t fd, int64_t events, int64_t timeout_ms, int6
     if (t->wait_result < 0) return ECANCELED;
     *out = t->wait_result;
     return 0;
-}
-/* ---- WEB-PANIC-500: panics in isolated tasks --------------------------
-   A task that called kush_sys_task_isolate ends at a panic instead of the
-   process: kush_panic switches to the scheduler with the task finished and
-   its (i64) result set to the task's mark, and the joiner reads that like
-   a normal result. Nothing between the panic and the task's entry runs
-   again, so what the task owned is leaked, not freed: memory, and any
-   descriptor it opened itself. It is not recovered when the task still has
-   children in its scopes (they would outlive their parent), off the main
-   scheduler, or for stack exhaustion, which aborts from the fault
-   handler. */
-static void kush_task_recover_panic(void) {
-    if (!kush_initialized || kush_current == NULL) return;
-    KushTask *t = kush_current;
-    if (t->id == 0 || !t->isolated || t->state != KUSH_RUNNING) return;
-    for (int depth = 0; depth < t->scope_depth; ++depth)
-        if (t->scope_first[depth] != NULL) return;
-    static const char message[] = "panic: recovered in an isolated task\n";
-    kush_best_effort_write(2, message, sizeof(message) - 1);
-    kush_recovered_panics += 1;
-    if (t->result_size >= sizeof(int64_t)) memcpy(t->result, &t->panic_mark, sizeof(int64_t));
-    t->completed = 1;
-    t->state = KUSH_FINISHED;
-    if (t->waiter != NULL) {
-        t->waiter->state = KUSH_READY;
-        kush_ready_push(t->waiter);
-        t->waiter = NULL;
-    }
-    swapcontext(&t->context, &kush_scheduler_context);
-    abort();
 }
 /* PANIC-UNWIND-NATIVE: whether a panic now unwinds (a catch boundary, for
    now an isolated task, is active) instead of aborting. */
@@ -4107,8 +4074,7 @@ int main(int argc, char **argv) {
         if (length > 0) kush_best_effort_write(2, line, (size_t)(length < (int)sizeof(line) ? length : (int)sizeof(line) - 1));
     }
 #endif
-    /* A recovered panic leaks what its task owned (WEB-PANIC-500). */
-    if (kush_live_allocations != 0 && kush_recovered_panics == 0) {
+    if (kush_live_allocations != 0) {
         static const char message[] = "panic: live owning allocations after normal exit\n";
         kush_best_effort_write(2, message, sizeof(message)-1); abort();
     }
@@ -8078,6 +8044,11 @@ const FAILING_RUNTIME: &[&str] = &[
     "kush_str_set_scalar",
     "kush_alloc_vec_set",
     "kush_alloc_vec_pop",
+    "kush_task_scope_begin",
+    "kush_print_i64",
+    "kush_print_u64",
+    "kush_print_f64",
+    "kush_print_f32",
 ];
 struct Generator<'a, 'b> {
     builder: FunctionBuilder<'a>,

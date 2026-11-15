@@ -6417,14 +6417,64 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         if let Some(id) = id
             && let Some(value) = frame.resources[id].take()
         {
-            if let Type::Enum(layout) = self.program.functions[frame.function].resources[id]
-                && let Some(&cleanup) = self.program.unwind_functions.get(&layout)
-            {
-                return self.unwind_cleanup(cleanup, value);
-            }
-            self.drop_value(value)?;
+            let ty = self.program.functions[frame.function].resources[id];
+            return self.drop_typed(ty, value);
         }
         Ok(())
+    }
+    /// Whether a value of `ty` can hold a linear value with an unwind
+    /// cleanup (PANIC-LINEAR-CLEANUP). `depth` bounds recursive types.
+    fn holds_unwind(&self, ty: Type, depth: usize) -> bool {
+        if depth > 16 || self.program.unwind_functions.is_empty() {
+            return false;
+        }
+        match ty {
+            Type::Enum(layout) => {
+                self.program.unwind_functions.contains_key(&layout)
+                    || self.program.enums[layout]
+                        .variants
+                        .iter()
+                        .flat_map(|variant| variant.fields.iter())
+                        .any(|field| self.holds_unwind(*field, depth + 1))
+            }
+            Type::Box(pointee) => self.holds_unwind(self.program.pointees[pointee], depth + 1),
+            _ => false,
+        }
+    }
+    /// Drop `value` of type `ty`, running the unwind cleanup of every linear
+    /// value inside it that has one: a live linear value only reaches a drop
+    /// while a panic unwinds. Without such a value inside, this is
+    /// `drop_value`.
+    #[inline(never)]
+    fn drop_typed(&mut self, ty: Type, value: Value) -> Result<()> {
+        if !self.holds_unwind(ty, 0) {
+            return self.drop_value(value);
+        }
+        match (ty, value) {
+            (Type::Enum(layout), value) if self.program.unwind_functions.contains_key(&layout) => {
+                let cleanup = self.program.unwind_functions[&layout];
+                self.unwind_cleanup(cleanup, value)
+            }
+            (Type::Enum(layout), Value::Enum { tag, fields }) => {
+                let types = self.program.enums[layout].variants[tag].fields.clone();
+                for (field_ty, field) in types.into_iter().zip(fields).rev() {
+                    self.drop_typed(field_ty, field)?;
+                }
+                Ok(())
+            }
+            (ty, Value::RecordCell(cell)) => {
+                let value = std::mem::replace(&mut *cell.lock().unwrap(), Value::Scalar(0));
+                self.drop_typed(ty, value)
+            }
+            (Type::Box(pointee), Value::Owned(id)) => {
+                let value = self.heap.take(id).ok_or_else(|| {
+                    Diagnostic::new(Span::default(), "internal ownership error: double free")
+                })?;
+                self.stats.deallocation();
+                self.drop_typed(self.program.pointees[pointee], value)
+            }
+            (_, value) => self.drop_value(value),
+        }
     }
     /// PANIC-LINEAR-CLEANUP: a linear value is only still live at cleanup
     /// when a panic unwinds, so its type's unwind function takes it. A panic

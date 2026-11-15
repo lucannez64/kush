@@ -192,10 +192,14 @@ called; the runtime gets `-DKUSH_UNWIND`):
 - Those helpers' precondition failures use `KUSH_FAIL`: bytes and vector
   indexing, byte values and reserved capacity in `Bytes.push` (which frees
   the buffer moved into it), negative capacities, UTF-8 scalar access. A
-  failing element store leaves the item with the caller's cleanup. The other
-  `kush_panic` sites check the runtime's own invariants and abort; one
-  reached in an isolated task still takes WEB-PANIC-500's leaking recovery,
-  the only case that relaxes the exit ownership check.
+  failing element store leaves the item with the caller's cleanup. So do a
+  `Task.scope` nested too deep and a failed write in `print_*`. The other
+  `kush_panic` sites abort the process even under a boundary: they check
+  the runtime's own invariants (a double free, a corrupted header, the task
+  table), or fail after an owner was moved into C code that cannot drop it
+  (`Vec.reserve` with a negative count, the handler stack overflowing), or
+  report memory exhaustion, which aborts as in Rust. WEB-PANIC-500's
+  leaking recovery is gone, so the exit ownership check is always strict.
 - In optimized builds an invalid byte in an inline `Bytes.push` goes to the
   runtime call, which frees the moved buffer, instead of the inline guard.
 - `Task.scope` tests the word after its body: it clears the word, cancels
@@ -219,15 +223,15 @@ for tracking, so a live value of it, and any value holding one (a
 calls `f` between `kush_unwind_hold` and `kush_unwind_restore`, which keep
 the panic word clear while `f` runs (a panic inside `f` ends `f`, and
 unwinding goes on). Normal paths never reach that glue: a linear value is
-always consumed before its frame ends. The evaluator calls `f` from its
-frame cleanup for a live value of the type; a linear value nested inside
-another value is not reached there yet (the evaluator's values do not carry
-their layout), which only matters for side effects like closing a
-descriptor. std uses it for `std.file.File` and `std.net.Conn`/`Listener`
+always consumed before its frame ends. The evaluator's frame cleanup drops
+each value with its type (`drop_typed`), so it finds a linear value nested
+in a record, an enum payload or a box and calls `f` on it, like the native
+glue. std uses it for `std.file.File` and `std.net.Conn`/`Listener`
 (close the descriptor), `std.web.Responder` (answer 500 with `Connection:
 close`) and `Stream` (send nothing more; the client sees the body cut
 off). Tests: `unwinding_closes_linear_resources` (five panicking handlers
-holding open files leave the process's descriptor count unchanged, natively)
+holding an open file inside a `Result` leave the process's descriptor count
+unchanged, natively and in the evaluator, run as its own process)
 and `unwind_cleanups_are_checked` in `crates/kush/tests/web_server.rs`.
 
 ## 9. Order

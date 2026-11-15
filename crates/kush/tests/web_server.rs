@@ -98,12 +98,13 @@ fn app(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
         });
         res.status(200 + code)
     } else if req.path_is(&Bytes.from("/file")) {
-        // Panics holding an open file: its unwind cleanup closes it.
+        // Panics holding an open file inside a Result: its unwind cleanup
+        // closes it.
         let opened = file.open_read(&Bytes.from("/dev/null"));
+        let empty = Bytes.with_capacity(0);
+        let _ = Bytes.get(&empty, 1);
         match opened {
             Result.Ok(f) => {
-                let empty = Bytes.with_capacity(0);
-                let _ = Bytes.get(&empty, 1);
                 let _ = file.close(f);
                 res.status(200)
             },
@@ -495,10 +496,23 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
 }
 "#;
     let source = format!("{APP}{main}");
-    let (_scratch, binary) = build(&source);
+    let expected = "500\n500\n500\n500\n500\n1\n-1\n";
+    let (scratch, binary) = build(&source);
     let run = Command::new(&binary).stdin(Stdio::null()).output().unwrap();
     assert_eq!(run.status.code(), Some(0), "{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8(run.stdout).unwrap(), "500\n500\n500\n500\n500\n1\n-1\n");
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), expected, "native");
+    // The reference evaluator in a process of its own, so the descriptor
+    // count is only this program's (the File sits inside a Result there).
+    let file = scratch.path().join("fds.kush");
+    std::fs::write(&file, &source).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_kush"))
+        .arg("eval")
+        .arg(&file)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(run.status.code(), Some(0), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), expected, "reference");
 }
 
 #[test]
