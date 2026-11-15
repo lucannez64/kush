@@ -7992,10 +7992,21 @@
         "PANIC-UNWIND-EVAL",
         "PANIC-UNWIND-NATIVE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "A linear type may name a cleanup function run only when a panic unwinds past a live value of it (std.file.File and std.net Conn/Listener close their descriptor, web.Responder answers 500). Values without one are leaked and the panic report names them. Syntax confirmed with the user in PANIC-UNWIND-DESIGN.",
-      "commit": null,
-      "log": []
+      "commit": "1ac22c4",
+      "log": [
+        {
+          "time": "2026-11-15 21:58:54",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 21:58:55",
+          "who": "agent",
+          "text": "done 1ac22c4"
+        }
+      ]
     },
     {
       "id": "PANIC-UNWIND-USE",
@@ -8008,6 +8019,19 @@
       ],
       "status": "todo",
       "desc": "Replace WEB-PANIC-500's leak-and-switch recovery with unwinding: no leaks, the exit ownership check stays strict, tasks with children and thread bodies recover too, and a public way to catch a panic at a task boundary.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EVAL-SERVE-HANG",
+      "title": "Evaluator: a client task that cancels web.serve hangs",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "WEB-SERVER"
+      ],
+      "status": "todo",
+      "desc": "Found 2026-11-15, predates the unwinding work (reproduces with main's eval.rs): in the reference evaluator, a program whose client task sends two requests through status_of-style exchanges to web.serve, then cancels the server, never ends; it finishes under strace (timing). Natively fine. Repro: the main of unwinding_closes_linear_resources in crates/kush/tests/web_server.rs with the /file loop removed.",
       "commit": null,
       "log": []
     }
