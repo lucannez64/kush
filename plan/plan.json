@@ -8030,10 +8030,26 @@
       "deps": [
         "WEB-SERVER"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Found 2026-11-15, predates the unwinding work (reproduces with main's eval.rs): in the reference evaluator, a program whose client task sends two requests through status_of-style exchanges to web.serve, then cancels the server, never ends; it finishes under strace (timing). Natively fine. Repro: the main of unwinding_closes_linear_resources in crates/kush/tests/web_server.rs with the /file loop removed.",
-      "commit": null,
-      "log": []
+      "commit": "70bc71f",
+      "log": [
+        {
+          "time": "2026-11-15 22:39:05",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 22:39:05",
+          "who": "agent",
+          "text": "done 70bc71f"
+        },
+        {
+          "time": "2026-11-15 22:39:05",
+          "who": "agent",
+          "text": "Cause: the evaluator read stdin to EOF because an unreachable std.io.stdin() counted; it only looked timing-dependent because strace/gdb runs had a different stdin."
+        }
+      ]
     }
   ]
 }
