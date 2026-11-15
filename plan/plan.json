@@ -8017,10 +8017,26 @@
         "PANIC-LINEAR-CLEANUP",
         "TASK-CANCEL-PROPAGATE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Replace WEB-PANIC-500's leak-and-switch recovery with unwinding: no leaks, the exit ownership check stays strict, tasks with children and thread bodies recover too, and a public way to catch a panic at a task boundary.",
-      "commit": null,
-      "log": []
+      "commit": "4201ca8",
+      "log": [
+        {
+          "time": "2026-11-15 23:07:24",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 23:07:24",
+          "who": "agent",
+          "text": "done 4201ca8"
+        },
+        {
+          "time": "2026-11-15 23:07:24",
+          "who": "agent",
+          "text": "Thread programs still do not build on the LLVM backend (runtime thread_local globals are refused by split_runtime); pre-existing, threads.rs fails the same way under KUSH_BACKEND=llvm."
+        }
+      ]
     },
     {
       "id": "EVAL-SERVE-HANG",
