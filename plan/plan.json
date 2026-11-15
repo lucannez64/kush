@@ -7307,10 +7307,26 @@
         "WEB-REACTOR",
         "WEB-CORE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "The only server (no blocking v1, decided 2026-11-14): one task per connection on the reactor; accept, parse, route, answer, keep-alive with an idle deadline, handler panic answered as 500, graceful stop.",
-      "commit": null,
-      "log": []
+      "commit": "88ee90e",
+      "log": [
+        {
+          "time": "2026-11-15 20:08:18",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 20:13:19",
+          "who": "agent",
+          "text": "done 88ee90e"
+        },
+        {
+          "time": "2026-11-15 20:13:19",
+          "who": "agent",
+          "text": "Handler panic -> 500 split out as WEB-PANIC-500 (panics cannot be caught yet)."
+        }
+      ]
     },
     {
       "id": "WEB-MULTICORE",
@@ -7841,6 +7857,19 @@
           "text": "Full suite on the second PC: 1983 passed."
         }
       ]
+    },
+    {
+      "id": "WEB-PANIC-500",
+      "title": "A handler panic answered as 500",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "WEB-SERVER"
+      ],
+      "status": "todo",
+      "desc": "A panic in a handler still aborts the process: Kush panics cannot be caught. Needs panic recovery at a task boundary (run the task's cleanup or abortive unwinding, see docs/abortive-handlers.md) so web.serve can answer 500 and drop only that connection. Split from WEB-SERVER.",
+      "commit": null,
+      "log": []
     }
   ]
 }
