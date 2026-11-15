@@ -7260,10 +7260,21 @@
         "WEB-NET",
         "TASK-ID-REUSE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "epoll reactor in the native scheduler: nonblocking sockets, EAGAIN registers the fd and suspends the task, epoll_wait when nothing is runnable, timers for sleep and deadlines. Deterministic polling model in the reference evaluator.",
-      "commit": null,
-      "log": []
+      "commit": "2e73987",
+      "log": [
+        {
+          "time": "2026-11-15 18:43:36",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 18:48:51",
+          "who": "agent",
+          "text": "done 2e73987"
+        }
+      ]
     },
     {
       "id": "WEB-SERVER",
