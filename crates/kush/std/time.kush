@@ -14,3 +14,33 @@ pub fn monotonic_ns() -> Result<i64, i64> ! {io} { sys.clock_gettime(1, 1) }
 
 /// Block the thread for `milliseconds`; a negative duration is EINVAL (22).
 pub fn sleep_ms(milliseconds: i64) -> Result<Unit, i64> ! {io} { sys.nanosleep(milliseconds) }
+
+/// The monotonic clock in milliseconds, or -1 when it cannot be read.
+fn now_ms() -> i64 ! {io} {
+    match sys.clock_gettime(1, 2) {
+        Result.Ok(ms) => ms,
+        Result.Err(_) => -1,
+    }
+}
+
+/// A deadline `timeout_ms` (>= 0) from now, for `remaining_ms`; -1 when
+/// `timeout_ms` is 0, which means no timeout. It saturates instead of
+/// wrapping, and an unreadable clock gives a deadline already passed.
+pub fn deadline_ms(timeout_ms: i64) -> i64 ! {io} {
+    if timeout_ms == 0 { return -1; }
+    let now = now_ms();
+    if now < 0 { return 0; }
+    if timeout_ms > 9223372036854775807 - now { return 9223372036854775807; }
+    now + timeout_ms
+}
+
+/// The time left before `deadline` as a poll(2) timeout: -1 without a
+/// deadline, 0 once it passed, else at most 60000 ms (callers wait again
+/// while time is left).
+pub fn remaining_ms(deadline: i64) -> i64 ! {io} {
+    if deadline < 0 { return -1; }
+    let now = now_ms();
+    if now < 0 || now >= deadline { return 0; }
+    let left = deadline - now;
+    if left > 60000 { 60000 } else { left }
+}

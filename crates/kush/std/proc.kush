@@ -1,0 +1,150 @@
+module std.proc;
+
+// Subprocesses (STD-PROC-NET-IN-KUSH), as Kush loops over `std.sys`: the
+// stubs fork and exec, poll, read, wait and kill once each, and the timeout,
+// the bounded capture and the cleanup are here. Same behaviour as the
+// `PROC.run` builtin, which HOST-BUILTINS-REMOVE retires.
+
+use std.result.Result;
+use std.sys;
+use std.time;
+
+/// How a run ended. The output buffer comes back unless reading it failed.
+pub enum Outcome {
+    /// The child exited: its output and its status (128 + signal when a
+    /// signal ended it).
+    Exited(Bytes, i64),
+    /// The run was stopped with the child killed and reaped: ETIMEDOUT (110)
+    /// when the timeout passed, EFBIG (27) when the output did not fit, or
+    /// another errno. The output keeps what was read before.
+    Stopped(Bytes, i64),
+    /// The child could not be started, or reading its output failed (the
+    /// buffer is freed then): the errno.
+    Failed(i64),
+}
+
+fn close(fd: i64) -> Unit ! {io} {
+    let _ = sys.close(fd);
+}
+
+/// pipe(2) with EINTR retried.
+fn pipe() -> Result<i64, i64> ! {io} {
+    loop {
+        match sys.pipe() {
+            Result.Ok(ends) => { return Result.Ok(ends); },
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+        }
+    }
+}
+
+/// Kill and reap the child.
+fn kill(pid: i64) -> Unit ! {io} {
+    let _ = sys.kill(pid, sys.SIGKILL());
+    loop {
+        match sys.wait(pid, 1) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return (); }
+            },
+            Result.Ok(_) => { return (); },
+        }
+    }
+}
+
+/// Run `program` (looked up in PATH, no shell) with the NUL-separated
+/// `arguments`, stdin and stderr on /dev/null, appending its stdout to
+/// `output` up to the buffer's capacity. `timeout_ms` covers the whole run
+/// (0 waits forever; negative is EINVAL).
+pub fn run(program: &Bytes, arguments: &Bytes, output: Bytes, timeout_ms: i64) -> Outcome ! {io} {
+    if timeout_ms < 0 { return Outcome.Failed(22); }
+    let ends = match pipe() {
+        Result.Ok(ends) => ends,
+        Result.Err(code) => { return Outcome.Failed(code); },
+    };
+    let reader = ends & 4294967295;
+    let writer = ends >> 32;
+    let spawned = sys.spawn(program, arguments, writer);
+    close(writer);
+    let pid = match spawned {
+        Result.Ok(pid) => pid,
+        Result.Err(code) => {
+            close(reader);
+            return Outcome.Failed(code);
+        },
+    };
+    let deadline = time.deadline_ms(timeout_ms);
+    let mut buffer = output;
+    // The errno that stops the run; 0 while it goes on.
+    let mut stop = 0;
+    // Read until end of output.
+    loop {
+        match sys.poll(reader, sys.POLLIN(), time.remaining_ms(deadline)) {
+            Result.Err(code) => {
+                if code != sys.EINTR() {
+                    stop = code;
+                    break;
+                }
+            },
+            Result.Ok(0) => {
+                // poll waits at most 60 s; only a spent budget is a timeout.
+                if time.remaining_ms(deadline) == 0 {
+                    stop = 110;
+                    break;
+                }
+            },
+            Result.Ok(_) => {
+                let before = Bytes.len(&buffer);
+                let spare = Int.wrapping_sub::<i64>(Bytes.capacity(&buffer), before);
+                if spare == 0 {
+                    // Full: one more byte means the output does not fit.
+                    match sys.probe(reader) {
+                        Result.Ok(0) => { break; },
+                        Result.Ok(_) => {
+                            stop = 27;
+                            break;
+                        },
+                        Result.Err(code) => {
+                            if code != sys.EINTR() {
+                                stop = code;
+                                break;
+                            }
+                        },
+                    }
+                } else {
+                    match sys.read(reader, buffer, spare, -1) {
+                        Result.Err(code) => {
+                            close(reader);
+                            kill(pid);
+                            return Outcome.Failed(code);
+                        },
+                        Result.Ok(next) => {
+                            buffer = next;
+                            if Bytes.len(&buffer) == before { break; }
+                        },
+                    }
+                }
+            },
+        }
+    }
+    close(reader);
+    // The output ended; wait for the exit within the same budget.
+    while stop == 0 {
+        let block = if deadline < 0 { 1 } else { 0 };
+        match sys.wait(pid, block) {
+            Result.Ok(status) => {
+                if status >= 0 { return Outcome.Exited(buffer, status); }
+                if time.remaining_ms(deadline) == 0 {
+                    stop = 110;
+                } else {
+                    let _ = sys.nanosleep(2);
+                }
+            },
+            Result.Err(code) => {
+                if code != sys.EINTR() { stop = code; }
+            },
+        }
+    }
+    kill(pid);
+    Outcome.Stopped(buffer, stop)
+}

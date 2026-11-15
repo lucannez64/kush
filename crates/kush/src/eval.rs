@@ -603,7 +603,101 @@ struct FileTable {
     open: BTreeMap<i64, fs::File>,
     /// Directories opened by `std.sys.opendir`, sharing the handle counter.
     dirs: BTreeMap<i64, fs::ReadDir>,
+    /// STD-PROC-NET-IN-KUSH: pipe read ends from `kush_sys_pipe`, filled by a
+    /// thread copying a spawned child's stdout, so `kush_sys_poll` can wait on
+    /// them with a timeout.
+    pipes: BTreeMap<i64, Arc<EvalPipe>>,
+    /// Pipe write ends; usable only as a spawned child's stdout.
+    pipe_writers: BTreeMap<i64, Arc<EvalPipe>>,
+    /// Spawned children by pid, until they are reaped.
+    children: BTreeMap<i64, std::process::Child>,
+    /// Connected sockets from `kush_sys_connect`.
+    sockets: BTreeMap<i64, TcpStream>,
+    /// Address lists from `kush_sys_resolve`.
+    addresses: BTreeMap<i64, Vec<std::net::SocketAddr>>,
     next: i64,
+}
+impl FileTable {
+    fn handle(&mut self) -> i64 {
+        self.next = self.next.max(2) + 1;
+        self.next
+    }
+}
+/// A pipe in the reference evaluator. It reaches end of file once its write
+/// end is closed and every child writing to it has closed its stdout.
+#[derive(Debug, Default)]
+struct EvalPipe {
+    state: Mutex<PipeState>,
+    ready: std::sync::Condvar,
+}
+#[derive(Debug, Default)]
+struct PipeState {
+    data: VecDeque<u8>,
+    /// Copy threads still reading a child's stdout into `data`.
+    writers: usize,
+    /// The write handle was closed.
+    closed: bool,
+    error: Option<i64>,
+}
+impl EvalPipe {
+    /// Wait until bytes, an error or end of file are there, up to `timeout`
+    /// (forever when `None`). Whether anything is.
+    fn wait(&self, timeout: Option<Duration>) -> bool {
+        let ready = |state: &PipeState| {
+            !state.data.is_empty() || state.error.is_some() || (state.closed && state.writers == 0)
+        };
+        let state = self.state.lock().unwrap();
+        match timeout {
+            None => ready(&self.ready.wait_while(state, |state| !ready(state)).unwrap()),
+            Some(timeout) => {
+                let (state, _) =
+                    self.ready.wait_timeout_while(state, timeout, |state| !ready(state)).unwrap();
+                ready(&state)
+            }
+        }
+    }
+    /// One blocking read, like read(2) on a pipe: 0 at end of file.
+    fn read(&self, target: &mut [u8]) -> io::Result<usize> {
+        if target.is_empty() {
+            return Ok(0);
+        }
+        self.wait(None);
+        let mut state = self.state.lock().unwrap();
+        if state.data.is_empty() {
+            return match state.error {
+                Some(code) => Err(io::Error::from_raw_os_error(code as i32)),
+                None => Ok(0),
+            };
+        }
+        let count = target.len().min(state.data.len());
+        for (slot, byte) in target.iter_mut().zip(state.data.drain(..count)) {
+            *slot = byte;
+        }
+        Ok(count)
+    }
+    /// Copy `source` into the pipe until it ends.
+    fn feed(self: Arc<Self>, mut source: impl Read + Send + 'static) {
+        self.state.lock().unwrap().writers += 1;
+        thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match source.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        self.state.lock().unwrap().data.extend(&chunk[..count]);
+                        self.ready.notify_all();
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        self.state.lock().unwrap().error = Some(io_error_code(&error));
+                        break;
+                    }
+                }
+            }
+            self.state.lock().unwrap().writers -= 1;
+            self.ready.notify_all();
+        });
+    }
 }
 impl Default for Host {
     fn default() -> Self {
@@ -4446,6 +4540,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 Some(file) => code(f(file)),
             }
         };
+        // One read from a pipe or socket, without holding the table while
+        // it blocks; `None` for any other descriptor.
+        let stream_read = |fd: i64, target: &mut [u8]| -> Option<io::Result<usize>> {
+            let table = files.lock().unwrap();
+            if let Some(pipe) = table.pipes.get(&fd).cloned() {
+                drop(table);
+                return Some(pipe.read(target));
+            }
+            let socket = table.sockets.get(&fd).map(TcpStream::try_clone);
+            drop(table);
+            socket.map(|socket| socket.and_then(|mut socket| socket.read(target)))
+        };
         // Standard streams: descriptor 0 reads the evaluator's input and 1
         // writes its output (file handles start at 3). Positioned I/O on a
         // stream is ESPIPE, as on a pipe.
@@ -4598,17 +4704,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                 }
             }
-            "kush_sys_close" => match self
-                .host
-                .files
-                .lock()
-                .unwrap()
-                .open
-                .remove(&args[0].scalar())
-            {
-                Some(_) => (0, 0),
-                None => (9, 0),
-            },
+            "kush_sys_close" => {
+                let fd = args[0].scalar();
+                let mut table = self.host.files.lock().unwrap();
+                if let Some(writer) = table.pipe_writers.remove(&fd) {
+                    writer.state.lock().unwrap().closed = true;
+                    writer.ready.notify_all();
+                    (0, 0)
+                } else if table.open.remove(&fd).is_some()
+                    || table.pipes.remove(&fd).is_some()
+                    || table.sockets.remove(&fd).is_some()
+                {
+                    (0, 0)
+                } else {
+                    (9, 0)
+                }
+            }
             "kush_sys_fsync" => with_file(args[0].scalar(), &|file| file.sync_all().map(|()| 0)),
             "kush_sys_ftruncate" => {
                 let length = args[1].scalar();
@@ -4650,10 +4761,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     27 // EFBIG
                 } else {
                     data.resize(start + length as usize, 0);
+                    let streamed =
+                        if offset < 0 { stream_read(fd, &mut data[start..]) } else { None };
                     let table = self.host.files.lock().unwrap();
-                    let (status, received) = match table.open.get(&fd) {
-                        None => (9, 0), // EBADF
-                        Some(file) => loop {
+                    let (status, received) = match (streamed, table.open.get(&fd)) {
+                        (Some(Ok(count)), _) => (0, count),
+                        (Some(Err(error)), _) => (io_error_code(&error), 0),
+                        (None, None) => (9, 0), // EBADF
+                        (None, Some(file)) => loop {
                             let target = &mut data[start..];
                             let result = if offset < 0 {
                                 io::Read::read(&mut &*file, target)
@@ -4677,16 +4792,19 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.heap.insert(id, Value::Buffer { data, capacity });
                 return Ok(self.host_result(shape, 0, Value::Owned(id)));
             }
-            "kush_sys_probe" => with_file(args[0].scalar(), &|file| {
-                let mut probe = [0u8; 1];
-                loop {
-                    match io::Read::read(&mut &*file, &mut probe) {
-                        Ok(count) => break Ok(count as i64),
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                        Err(error) => break Err(error),
+            "kush_sys_probe" => match stream_read(args[0].scalar(), &mut [0u8; 1]) {
+                Some(result) => code(result.map(|count| count as i64)),
+                None => with_file(args[0].scalar(), &|file| {
+                    let mut probe = [0u8; 1];
+                    loop {
+                        match io::Read::read(&mut &*file, &mut probe) {
+                            Ok(count) => break Ok(count as i64),
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                            Err(error) => break Err(error),
+                        }
                     }
-                }
-            }),
+                }),
+            },
             "kush_sys_opendir" => match path(self, &args[0])? {
                 Err(error) => code(Err(error)),
                 Ok(path) => match fs::read_dir(path) {
@@ -4808,6 +4926,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 },
                 (1, 0) => (0, self.host.monotonic_ns() / 1_000_000_000),
                 (1, 1) => (0, self.host.monotonic_ns()),
+                (0, 2) => match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(duration) => (0, i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)),
+                    Err(_) => (75, 0),
+                },
+                (1, 2) => (0, self.host.monotonic_ns() / 1_000_000),
                 _ => (22, 0),
             },
             "kush_sys_nanosleep" => {
@@ -4835,6 +4958,211 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 (Ok(from), Ok(to)) => code(fs::rename(from, to).map(|()| 0)),
                 (Err(error), _) | (_, Err(error)) => code(Err(error)),
             },
+            "kush_sys_pipe" => {
+                let pipe = Arc::new(EvalPipe::default());
+                let mut table = self.host.files.lock().unwrap();
+                let reader = table.handle();
+                let writer = table.handle();
+                table.pipes.insert(reader, Arc::clone(&pipe));
+                table.pipe_writers.insert(writer, pipe);
+                (0, reader + (writer << 32))
+            }
+            "kush_sys_spawn" => {
+                let program = self.borrowed_bytes(&args[0]).ok_or_else(internal)?;
+                let arguments = self.borrowed_bytes(&args[1]).ok_or_else(internal)?;
+                let target = self.host.files.lock().unwrap().pipe_writers.get(&args[2].scalar()).cloned();
+                match target {
+                    None => (9, 0),
+                    Some(_) if program.is_empty() || program.contains(&0) => (22, 0),
+                    Some(pipe) => {
+                        let spawned = Command::new(value_bytes(&program))
+                            .args(split_nul(&arguments))
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::null())
+                            .spawn();
+                        match spawned {
+                            Err(error) => (io_error_code(&error), 0),
+                            Ok(mut child) => {
+                                pipe.feed(child.stdout.take().expect("piped stdout"));
+                                let pid = i64::from(child.id());
+                                self.host.files.lock().unwrap().children.insert(pid, child);
+                                (0, pid)
+                            }
+                        }
+                    }
+                }
+            }
+            "kush_sys_wait" => {
+                use std::os::unix::process::ExitStatusExt;
+                let (pid, block) = (args[0].scalar(), args[1].scalar() != 0);
+                let child = self.host.files.lock().unwrap().children.remove(&pid);
+                match child {
+                    None => (10, 0), // ECHILD
+                    Some(mut child) => {
+                        let status = if block { child.wait().map(Some) } else { child.try_wait() };
+                        match status {
+                            Ok(None) => {
+                                self.host.files.lock().unwrap().children.insert(pid, child);
+                                (0, -1)
+                            }
+                            Ok(Some(status)) => match (status.code(), status.signal()) {
+                                (Some(code), _) => (0, i64::from(code)),
+                                (None, Some(signal)) => (0, 128 + i64::from(signal)),
+                                (None, None) => (5, 0),
+                            },
+                            Err(error) => {
+                                self.host.files.lock().unwrap().children.insert(pid, child);
+                                code(Err(error))
+                            }
+                        }
+                    }
+                }
+            }
+            "kush_sys_kill" => {
+                // Only SIGKILL, which is all std.proc sends.
+                let (pid, signal) = (args[0].scalar(), args[1].scalar());
+                match self.host.files.lock().unwrap().children.get_mut(&pid) {
+                    None => (3, 0), // ESRCH
+                    Some(_) if signal != 9 => (22, 0),
+                    Some(child) => code(child.kill().map(|()| 0)),
+                }
+            }
+            "kush_sys_poll" => {
+                let (fd, events, timeout) = (args[0].scalar(), args[1].scalar(), args[2].scalar());
+                let wait = (timeout >= 0).then(|| Duration::from_millis(timeout as u64));
+                let table = self.host.files.lock().unwrap();
+                if timeout < -1 {
+                    (22, 0)
+                } else if let Some(pipe) = table.pipes.get(&fd).cloned() {
+                    drop(table);
+                    if events & 1 == 0 || !pipe.wait(wait) {
+                        (0, 0)
+                    } else {
+                        let state = pipe.state.lock().unwrap();
+                        let ended = state.data.is_empty() && state.error.is_none();
+                        (0, if ended { 1 | 16 } else { 1 })
+                    }
+                } else if let Some(socket) = table.sockets.get(&fd).map(TcpStream::try_clone) {
+                    drop(table);
+                    // Writes block in the evaluator, so a socket is always
+                    // writable; readability is a peek with a read timeout.
+                    match socket {
+                        Err(error) => code(Err(error)),
+                        Ok(_) if events & 4 != 0 => (0, 4),
+                        Ok(_) if events & 1 == 0 => (0, 0),
+                        Ok(socket) => {
+                            let armed = match wait {
+                                Some(wait) if wait.is_zero() => socket.set_nonblocking(true),
+                                wait => socket.set_read_timeout(wait),
+                            };
+                            let peeked = armed.and_then(|()| socket.peek(&mut [0u8; 1]));
+                            let _ = socket.set_nonblocking(false);
+                            let _ = socket.set_read_timeout(None);
+                            match peeked {
+                                Ok(0) => (0, 1 | 16),
+                                Ok(_) => (0, 1),
+                                Err(error)
+                                    if matches!(
+                                        error.kind(),
+                                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                                    ) =>
+                                {
+                                    (0, 0)
+                                }
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => (4, 0),
+                                // The read that follows reports the error.
+                                Err(_) => (0, 1 | 8),
+                            }
+                        }
+                    }
+                } else if table.open.contains_key(&fd) || (0..=2).contains(&fd) {
+                    (0, events & 5)
+                } else {
+                    (9, 0)
+                }
+            }
+            "kush_sys_resolve" => {
+                let host = self.borrowed_bytes(&args[0]).ok_or_else(internal)?;
+                let port = args[1].scalar();
+                let resolved = match std::str::from_utf8(&host) {
+                    _ if !(1..=65535).contains(&port) || host.contains(&0) => Err(22),
+                    Err(_) => Err(22),
+                    Ok(host) => match (host, port as u16).to_socket_addrs() {
+                        Ok(addresses) => Ok(addresses.collect::<Vec<_>>()),
+                        Err(error) => Err(error.raw_os_error().filter(|code| *code > 0).map_or(22, i64::from)),
+                    },
+                };
+                match resolved {
+                    Err(status) => (status, 0),
+                    Ok(addresses) => {
+                        let mut table = self.host.files.lock().unwrap();
+                        let handle = table.handle();
+                        table.addresses.insert(handle, addresses);
+                        (0, handle)
+                    }
+                }
+            }
+            "kush_sys_resolve_free" => {
+                self.host.files.lock().unwrap().addresses.remove(&args[0].scalar());
+                (0, 0)
+            }
+            "kush_sys_connect" => {
+                let (list, index, timeout) = (args[0].scalar(), args[1].scalar(), args[2].scalar());
+                let address = self
+                    .host
+                    .files
+                    .lock()
+                    .unwrap()
+                    .addresses
+                    .get(&list)
+                    .map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied()));
+                match address {
+                    None => (9, 0),
+                    Some(None) => (2, 0), // ENOENT: past the end
+                    Some(Some(_)) if timeout < -1 => (22, 0),
+                    Some(Some(address)) => {
+                        let connected = if timeout < 0 {
+                            TcpStream::connect(address)
+                        } else {
+                            TcpStream::connect_timeout(&address, Duration::from_millis(timeout.max(1) as u64))
+                        };
+                        match connected {
+                            Ok(socket) => {
+                                let mut table = self.host.files.lock().unwrap();
+                                let handle = table.handle();
+                                table.sockets.insert(handle, socket);
+                                (0, handle)
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::TimedOut => (110, 0),
+                            Err(error) => code(Err(error)),
+                        }
+                    }
+                }
+            }
+            "kush_sys_send" => {
+                let data = self.borrowed_bytes(&args[1]).ok_or_else(internal)?;
+                let start = args[2].scalar();
+                let socket = self.host.files.lock().unwrap().sockets.get(&args[0].scalar()).map(TcpStream::try_clone);
+                match socket {
+                    None => (9, 0),
+                    Some(_) if start < 0 || start as usize > data.len() => (22, 0),
+                    Some(socket) => code(socket.and_then(|mut socket| socket.write(&data[start as usize..])).map(|count| count as i64)),
+                }
+            }
+            "kush_sys_shutdown" => {
+                let how = match args[1].scalar() {
+                    0 => Some(Shutdown::Read),
+                    1 => Some(Shutdown::Write),
+                    2 => Some(Shutdown::Both),
+                    _ => None,
+                };
+                match (self.host.files.lock().unwrap().sockets.get(&args[0].scalar()), how) {
+                    (_, None) => (22, 0),
+                    (None, _) => (9, 0),
+                    (Some(socket), Some(how)) => code(socket.shutdown(how).map(|()| 0)),
+                }
+            }
             "kush_sys_stat" => {
                 let field = args[1].scalar();
                 match path(self, &args[0])? {

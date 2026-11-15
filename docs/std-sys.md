@@ -88,9 +88,38 @@ evaluator descriptor 0 reads the injected input and 1 writes the output;
 `io.stdin()` goes through a `kush_sys_stdin` call so the evaluator still
 buffers standard input only for programs that can read it.
 
-Not yet: the `IO.*`, `FS.*`, `ENV.*`, `TIME.*` and `OS.*` builtins still
-exist next to their std modules; `PROC.*` and `NET.*` are still compiler
-builtins only (STD-PROC-NET-IN-KUSH); removal is HOST-BUILTINS-REMOVE. Tests:
+[`std.proc`](../crates/kush/std/proc.kush) and
+[`std.net`](../crates/kush/std/net.kush) replace `PROC.run` and
+`NET.tcp_exchange` (STD-PROC-NET-IN-KUSH). The stubs below each do one
+thing; the poll loops, the shared timeout budget (`time.deadline_ms` and
+`time.remaining_ms`, over a millisecond `clock_gettime` field), partial
+sends, the bounded capture with its one-byte overflow probe, and the
+kill-and-reap cleanup are Kush code:
+
+- `pipe` (both ends packed in one `i64`), `spawn` (fork and `execvp`,
+  stdout on a given descriptor; it waits for the exec on a close-on-exec
+  report pipe, so a missing program is `Err(ENOENT)` from the call itself),
+  `wait` (blocking or not, decoded to the exit status or 128 + signal) and
+  `kill`;
+- `poll` on one descriptor, `resolve`/`resolve_free` (a `getaddrinfo` list as
+  a handle), `connect` (one address of the list, with its own timeout,
+  leaving the socket in blocking mode), `send` (never blocks, no `SIGPIPE`)
+  and `shutdown`. Reads go through the existing `read` and `probe`.
+
+Since the std versions take the buffer by value instead of `&mut Bytes`,
+they return an `Outcome`: `Exited(output, status)` or `Received(response,
+count)`; `Stopped(buffer, errno)` for a timeout, an overflow or another
+failure after the start, with the filled prefix kept; `Failed(errno)` when
+nothing was started, or a read failed and freed the buffer. `std.http` now
+uses `std.net`. In the evaluator a pipe is a buffer filled by a thread that
+copies the child's stdout, so `poll` can wait on it with a timeout without
+any unsafe code; a socket's readability is a `peek` under a read timeout,
+and its writes block.
+
+Not yet: the `IO.*`, `FS.*`, `ENV.*`, `TIME.*`, `OS.*`, `PROC.*` and `NET.*`
+builtins still exist next to their std modules; removal is
+HOST-BUILTINS-REMOVE. Tests: `crates/kush/tests/std_proc_net.rs` (each
+scenario through the builtin and std, both backends),
 `crates/kush/tests/std_sys.rs`, `crates/kush/tests/std_file.rs`,
 `crates/kush/tests/host_api.rs` (`std_fs_*`, `std_env_*`, `std_time_*`),
 `crates/kush/tests/native_stdio.rs` (every program also runs through

@@ -1,0 +1,152 @@
+module std.net;
+
+// Plain TCP (STD-PROC-NET-IN-KUSH), as Kush loops over `std.sys`: the
+// stubs resolve, connect, poll, send and read once each, and the shared
+// timeout budget, the partial sends and the bounded receive are here. Same
+// behaviour as the `NET.tcp_exchange` builtin, which HOST-BUILTINS-REMOVE
+// retires.
+
+use std.result.Result;
+use std.sys;
+use std.time;
+
+/// How an exchange ended. The response buffer comes back unless reading it
+/// failed.
+pub enum Outcome {
+    /// The peer closed the connection: the response and the number of bytes
+    /// received (not counting what the buffer held before).
+    Received(Bytes, i64),
+    /// The exchange was stopped and the socket closed: ETIMEDOUT (110) when
+    /// the timeout passed, EFBIG (27) when the response did not fit, or the
+    /// errno of a failed send or poll. The buffer keeps what was received.
+    Stopped(Bytes, i64),
+    /// Resolving, connecting or reading failed (the buffer is freed if it
+    /// was being read): the errno.
+    Failed(i64),
+}
+
+/// Connect to the first address of `host` that accepts, within the budget.
+/// A timeout ends the search; otherwise the last address's error is kept.
+fn open(host: &Bytes, port: i64, deadline: i64) -> Result<i64, i64> ! {io} {
+    let list = match sys.resolve(host, port) {
+        Result.Ok(list) => list,
+        Result.Err(code) => { return Result.Err(code); },
+    };
+    let mut last = 111; // ECONNREFUSED
+    let mut index = 0;
+    loop {
+        match sys.connect(list, index, time.remaining_ms(deadline)) {
+            Result.Ok(fd) => {
+                let _ = sys.resolve_free(list);
+                return Result.Ok(fd);
+            },
+            Result.Err(code) => {
+                if code == 2 || code == 110 {
+                    // The end of the list, or the budget is spent.
+                    if code == 110 { last = 110; }
+                    let _ = sys.resolve_free(list);
+                    return Result.Err(last);
+                }
+                if code != sys.EINTR() {
+                    last = code;
+                    index = Int.wrapping_add::<i64>(index, 1);
+                }
+            },
+        }
+    }
+}
+
+/// Send all of `request` within the budget: 0, or the errno that stopped it.
+fn send_all(fd: i64, request: &Bytes, deadline: i64) -> i64 ! {io} {
+    let length = Bytes.len(request);
+    let mut sent = 0;
+    while sent < length {
+        match sys.send(fd, request, sent) {
+            Result.Ok(count) => {
+                if count == 0 { return 5; } // EIO
+                sent = Int.wrapping_add::<i64>(sent, count);
+            },
+            Result.Err(code) => {
+                if code == sys.EAGAIN() {
+                    match sys.poll(fd, sys.POLLOUT(), time.remaining_ms(deadline)) {
+                        Result.Ok(0) => {
+                            if time.remaining_ms(deadline) == 0 { return 110; }
+                        },
+                        Result.Ok(_) => {},
+                        Result.Err(code) => {
+                            if code != sys.EINTR() { return code; }
+                        },
+                    }
+                } else if code != sys.EINTR() {
+                    return code;
+                }
+            },
+        }
+    }
+    0
+}
+
+/// Connect to `host`:`port` (1..=65535), send all of `request`, shut down
+/// the sending side, and append everything the peer sends until it closes
+/// to `response`, up to the buffer's capacity. `timeout_ms` is one budget for
+/// connecting, sending and receiving (0 waits forever; negative is EINVAL);
+/// name resolution itself is not timed. TCP is a byte stream: one call is
+/// not one message.
+pub fn exchange(host: &Bytes, port: i64, request: &Bytes, response: Bytes, timeout_ms: i64) -> Outcome ! {io} {
+    if timeout_ms < 0 || port <= 0 || port > 65535 { return Outcome.Failed(22); }
+    let deadline = time.deadline_ms(timeout_ms);
+    let fd = match open(host, port, deadline) {
+        Result.Ok(fd) => fd,
+        Result.Err(code) => { return Outcome.Failed(code); },
+    };
+    let mut buffer = response;
+    let mut stop = send_all(fd, request, deadline);
+    if stop == 0 { let _ = sys.shutdown(fd, 1); }
+    let mut received = 0;
+    while stop == 0 {
+        match sys.poll(fd, sys.POLLIN(), time.remaining_ms(deadline)) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { stop = code; }
+            },
+            Result.Ok(0) => {
+                // poll waits at most 60 s; only a spent budget is a timeout.
+                if time.remaining_ms(deadline) == 0 { stop = 110; }
+            },
+            Result.Ok(_) => {
+                let before = Bytes.len(&buffer);
+                let spare = Int.wrapping_sub::<i64>(Bytes.capacity(&buffer), before);
+                if spare == 0 {
+                    // Full: one more byte means the response does not fit.
+                    match sys.probe(fd) {
+                        Result.Ok(0) => {
+                            let _ = sys.close(fd);
+                            return Outcome.Received(buffer, received);
+                        },
+                        Result.Ok(_) => { stop = 27; },
+                        Result.Err(code) => {
+                            if code != sys.EINTR() { stop = code; }
+                        },
+                    }
+                } else {
+                    match sys.read(fd, buffer, spare, -1) {
+                        Result.Err(code) => {
+                            let _ = sys.close(fd);
+                            return Outcome.Failed(code);
+                        },
+                        Result.Ok(next) => {
+                            buffer = next;
+                            let count = Int.wrapping_sub::<i64>(Bytes.len(&buffer), before);
+                            if count == 0 {
+                                let _ = sys.close(fd);
+                                return Outcome.Received(buffer, received);
+                            }
+                            received = Int.wrapping_add::<i64>(received, count);
+                        },
+                    }
+                }
+            },
+        }
+    }
+    let _ = sys.close(fd);
+    Outcome.Stopped(buffer, stop)
+}
