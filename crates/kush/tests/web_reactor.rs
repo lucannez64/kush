@@ -302,3 +302,36 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
     let source = format!("{PRELUDE}{}", SERVER_AND_CLIENTS.split("fn main()").next().unwrap()) + main;
     assert_eq!(native(&source), "200\n");
 }
+
+const PROPAGATE: &str = r#"
+fn main() -> i64 ! {io, alloc, panic, suspend} {
+    let start = now();
+    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+        // A grandchild waiting a minute wakes when its grandparent is
+        // cancelled (TASK-CANCEL-PROPAGATE).
+        let parent = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+            Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
+                let child = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+                    Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
+                        let grandchild = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+                            match time.wait_ms(60000) { Result.Ok(_) => 0, Result.Err(code) => code }
+                        });
+                        match Task.join(grandchild) { TaskExit.Completed(v) => v, TaskExit.Cancelled => -1 }
+                    })
+                });
+                match Task.join(child) { TaskExit.Completed(v) => v, TaskExit.Cancelled => -1 }
+            })
+        });
+        let _ = time.wait_ms(20);
+        Task.cancel(&parent);
+        show(Task.join(parent));
+    });
+    print_i64(if now() - start < 5000000000 { 1 } else { 0 });
+    0
+}
+"#;
+
+#[test]
+fn cancelling_a_task_cancels_its_descendants() {
+    both(&format!("{PRELUDE}{PROPAGATE}"), "-1\n1\n");
+}

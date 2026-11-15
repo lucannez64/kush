@@ -723,9 +723,9 @@ fn transient(code: i64) -> Bool ! {} {
 /// and pipelining. Malformed or oversized requests are answered with their
 /// 4xx status by the server, without calling the handler. On cancellation
 /// the server stops gracefully: it accepts no more connections, closes
-/// idle ones, and lets requests being handled finish (their handlers run in
-/// their own tasks, which are not cancelled; reading and writing use
-/// shielded waits within `request_ms`). A handler that panics ends only its
+/// idle ones, and lets requests being handled finish: reading the rest of a
+/// request and writing a response use shielded waits within `request_ms`,
+/// while a handler's own waits see the cancellation. A handler that panics ends only its
 /// own task: the client gets a 500 if nothing was sent yet, and the
 /// connection is closed; what the handler owned is leaked.
 /// Returns Ok(()) after such a stop, or the accept error that ended it.

@@ -294,6 +294,7 @@ impl Executable {
                             handlers,
                         );
                         let _ = records[id].commands.send(TaskCommand::Spawned(child));
+                        records[child].parent = Some(id);
                         records[child].state = TaskState::Ready;
                         ready.push_back(child);
                     }
@@ -328,8 +329,24 @@ impl Executable {
                         }
                     }
                     TaskEvent::Cancel(target) => {
+                        // Structured cancellation (TASK-CANCEL-PROPAGATE):
+                        // the target's unfinished descendants too.
                         if target < records.len() {
                             records[target].cancelled.store(true, Ordering::Relaxed);
+                            let mut pending = vec![target];
+                            while let Some(parent) = pending.pop() {
+                                for (child, record) in records.iter().enumerate() {
+                                    // `claimed` is set when a join starts, so a
+                                    // child its parent is waiting for is still
+                                    // cancelled; only finished tasks are skipped.
+                                    if record.parent == Some(parent)
+                                        && record.state != TaskState::Finished
+                                    {
+                                        record.cancelled.store(true, Ordering::Relaxed);
+                                        pending.push(child);
+                                    }
+                                }
+                            }
                         }
                     }
                     TaskEvent::Done(outcome) => {
@@ -528,6 +545,7 @@ impl Executable {
             outcome: None,
             claimed: false,
             pending: None,
+            parent: None,
         });
         id
     }
@@ -1379,6 +1397,8 @@ struct TaskRecord {
     outcome: Option<TaskOutcome>,
     claimed: bool,
     pending: Option<TaskCommand>,
+    /// The spawning task, for structured cancellation.
+    parent: Option<usize>,
 }
 struct ScopeFrame {
     children: Vec<usize>,

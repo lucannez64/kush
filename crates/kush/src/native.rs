@@ -3479,9 +3479,15 @@ static void kush_reactor_poll(int block) {
         if (t->wait_deadline >= 0 && now >= t->wait_deadline) kush_reactor_wake(t, 0);
     }
 }
+/* Cancellation is structured (TASK-CANCEL-PROPAGATE): cancelling a task
+   also cancels every unjoined task in its scopes, recursively. */
 static void kush_task_request_cancel(KushTask *t) {
+    if (t->joined || t->state == KUSH_FINISHED) return;
     t->cancelled = 1;
     if (t->waiting_io && !t->wait_shielded) kush_reactor_wake(t, -1);
+    for (int depth = 0; depth < t->scope_depth; ++depth)
+        for (KushTask *child = t->scope_first[depth]; child != NULL; child = child->next_sibling)
+            kush_task_request_cancel(child);
 }
 static void kush_scheduler(void) {
     for (;;) {

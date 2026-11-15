@@ -113,6 +113,10 @@ Cancellation is cooperative and explicit:
 
 - `Task.cancel(&t)` sets a request bit. It does not stop, preempt, or destroy a
   task, and it does not itself suspend.
+- Cancellation is structured (TASK-CANCEL-PROPAGATE): cancelling a task also
+  sets the bit on every unfinished, unjoined task in its scopes, and theirs,
+  recursively, and wakes those waiting on the reactor. The same holds for the
+  cancellation a scope requests when its lambda returns `Err`.
 - `Task.check_cancel()` reads the bit.
 - `Task.yield()` returns the bit after resuming, so a loop can react at every
   yield point.

@@ -201,8 +201,9 @@ connections and closes the listener, and its connection tasks are
 cancelled. Waiting for a new request then ends at once, so idle
 connections close, but the rest of a started request and every response
 use shielded waits (`sys.WAIT_SHIELD`, [async.md](async.md)), so they
-finish within the request deadline. Handlers run in their own tasks, which
-are not cancelled, so a request being handled completes. `serve` then
+finish within the request deadline. Cancellation reaches the handler
+tasks too (it propagates to descendants), so a handler's own waits end
+early; what it then sends still goes out. `serve` then
 returns `Ok(())`. An HTTP/1.0 client gets a streamed body without
 chunking, ended by closing the connection. Tests:
 `crates/kush/tests/web_server.rs`.
