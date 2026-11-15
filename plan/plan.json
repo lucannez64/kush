@@ -7112,10 +7112,21 @@
       "deps": [
         "WEB-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Pure HTTP/1.1 request parser and response writer over borrowed bytes: request line, headers, Content-Length, chunked, keep-alive; hard limits as 4xx; reject conflicting Content-Length/Transfer-Encoding. Bounds proved or sent to kush fuzz. See docs/web.md.",
-      "commit": null,
-      "log": []
+      "commit": "15cae51",
+      "log": [
+        {
+          "time": "2026-11-15 19:15:03",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 19:20:05",
+          "who": "agent",
+          "text": "done 15cae51"
+        }
+      ]
     },
     {
       "id": "WEB-URL",
@@ -7151,10 +7162,21 @@
       "deps": [
         "WEB-HTTP-PARSE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Request and Response types; handlers are fn(&Request, Responder) -> Unit (decided 2026-11-14); #[linear] Responder consumed by exactly one of text/json/html/status/stream on every path, streamed responses included; fn(&Request) -> Response offered as a wrapper.",
-      "commit": null,
-      "log": []
+      "commit": "dc7f430",
+      "log": [
+        {
+          "time": "2026-11-15 19:15:03",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-15 19:20:05",
+          "who": "agent",
+          "text": "done dc7f430"
+        }
+      ]
     },
     {
       "id": "WEB-ROUTER",
