@@ -101,6 +101,34 @@ it on every path, with exactly one of `res.text`, `res.json`, `res.html`,
 answering twice, is a compile error. A handler that panics is answered with a
 500 by the server loop, which owns the connection.
 
+Implemented in [`std.web`](../crates/kush/std/web.kush) (2026-11-15):
+
+- `Request` has a public `method`, `keep_alive` and `body`, and methods
+  `target()`, `path()`, `query()` (copies, still percent-encoded),
+  `path_is(&path)` (no allocation), `header(&name)` (first field, ASCII
+  case-insensitive) and `field_count()`. It keeps the head as received and
+  the fields as ranges of it. `web.request(&buffer, head, body)` builds one
+  from `std.http1`'s parse; `web.request_for(method, &target, body)` builds
+  one directly, for tests and in-process calls.
+- `Responder` (linear, private fields) answers with `text`, `json`,
+  `status`, `reply(Response)` or `stream(status, &content_type)`, which
+  returns a linear `Stream` with `send(&data)` and `finish()` (chunked
+  transfer coding). Each writes one response: Content-Type, Content-Length
+  (none for 1xx, 204 and 304), `Connection: close` when the connection ends
+  after it, no body for HEAD. A Content-Type with a control character is
+  replaced by `application/octet-stream`, so a value from a request cannot
+  inject a header. Writes go through the task reactor; a failed write is
+  dropped and the server closes the connection. `html` comes with the
+  `Html` type [WEB-HTML].
+- `Response { status, content_type, body }` and `web.answer(req, res,
+  handler)` give the `fn(&Request) -> Response` form.
+- `web.capture(&request, handler)` runs a handler over a loopback
+  connection in the calling task and returns the raw response, for tests;
+  WEB-TEST-CLIENT builds on it.
+
+The server loop that reads, parses, builds the `Responder` and keeps the
+connection alive is WEB-SERVER. Tests: `crates/kush/tests/web_core.rs`.
+
 ### Effect rows as permissions [WEB-EFFECTS]
 
 Services are declared operations: `Db`, `CurrentUser`, `Log`, `Clock`. A
@@ -173,6 +201,25 @@ are rejected (request smuggling). The response writer emits the status line,
 headers and body or chunks. Its bounds checks are meant to be proved; the
 ones the prover leaves go to `kush fuzz` (PROOF-FUZZ). URL and query
 decoding is separate [WEB-URL].
+
+Implemented in [`std.http1`](../crates/kush/std/http1.kush) (2026-11-15):
+`parse_head(&buffer, &limits)` answers `Incomplete`, `Complete(Head)` or
+`Reject(status)`. `Head` has the method, the target and the fields as
+ranges of the buffer, the minor version, the framing (`Empty`,
+`Length(n)`, `Chunked`), keep-alive, and the head's size. It rejects bare
+LF (400), obsolete folding and whitespace before a colon (400), missing or
+repeated Host in HTTP/1.1 (400), differing or list-valued Content-Length
+(400), Content-Length with Transfer-Encoding, two Transfer-Encoding fields
+or chunked in HTTP/1.0 (400), any coding but `chunked` (501), Expect (417),
+versions other than 1.x (505), and limits on the request line (414), field
+lines, field count and head size (431) and the declared body (413).
+`chunked_size` checks a chunked body (extensions skipped, trailers
+ignored, limits applied) and `chunked_copy` decodes it. The writer has
+`status_line`, `field` (EINVAL for a name that is not a token or a value
+with CR, LF or another control character), `content_length`, `end_head`,
+`chunk` and `last_chunk`. Every byte is read through a helper that answers
+-1 outside the buffer, so no input can make it panic, and the prover
+leaves no check in the module. Tests: `crates/kush/tests/web_http1.rs`.
 
 ## Security and ecosystem
 

@@ -1,0 +1,458 @@
+module std.web;
+
+// Requests, and the linear Responder that answers each one exactly once
+// (WEB-CORE, docs/web.md). A handler is `fn(&Request, Responder) -> Unit`:
+// it receives the Responder by value and must pass it to exactly one of
+// `text`, `json`, `status`, `reply` or `stream` (then `finish`) on every
+// path, so a handler that forgets to answer on an error branch, or answers
+// twice, does not compile. `html` comes with the `Html` type (WEB-HTML).
+// The server loop (WEB-SERVER) builds the Request from `std.http1` and
+// owns the connection; the Responder writes to it on the task reactor.
+
+use std.http1;
+use std.http1.Field;
+use std.http1.Method;
+use std.net;
+use std.option.Option;
+use std.result.Result;
+use std.sys;
+use std.time;
+
+/// A request: its method, target and header fields as received, and its
+/// body. Header names and values are untrusted bytes.
+pub struct Request {
+    pub method: Method,
+    /// The head as received; the target and `fields` are ranges of it.
+    head: Bytes,
+    target_from: i64,
+    target_to: i64,
+    fields: Vec<Field>,
+    /// Whether the connection may carry another request afterwards.
+    pub keep_alive: Bool,
+    pub body: Bytes,
+}
+
+/// The request whose head `http1.parse_head` parsed at the start of
+/// `buffer`, with its decoded `body`.
+pub fn request(buffer: &Bytes, head: http1.Head, body: Bytes) -> Request ! {alloc, panic} {
+    match head {
+        http1.Head { method, target, target_end, minor, fields, framing, keep_alive, size } => {
+            let mut copy = Bytes.with_capacity(size);
+            let mut i = 0;
+            while i < size && i < Bytes.len(buffer) {
+                copy = Bytes.push(copy, Bytes.at(buffer, i, _));
+                i = i + 1;
+            }
+            Request {
+                method: method,
+                head: copy,
+                target_from: target,
+                target_to: target_end,
+                fields: fields,
+                keep_alive: keep_alive,
+                body: body,
+            }
+        },
+    }
+}
+
+/// A request built directly, without parsing: no header fields. For tests
+/// and in-process calls.
+pub fn request_for(method: Method, target: &Bytes, body: Bytes) -> Request ! {alloc, panic} {
+    let n = Bytes.len(target);
+    let mut head = Bytes.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        head = Bytes.push(head, Bytes.at(target, i, _));
+        i = i + 1;
+    }
+    Request {
+        method: method,
+        head: head,
+        target_from: 0,
+        target_to: n,
+        fields: Vec.new(),
+        keep_alive: true,
+        body: body,
+    }
+}
+
+/// The byte at `i` of `b`, or -1 outside it.
+fn byte(b: &Bytes, i: i64) -> i64 ! {} {
+    if i >= 0 && i < Bytes.len(b) { Bytes.at(b, i, _) } else { -1 }
+}
+
+fn lower(c: i64) -> i64 ! {} {
+    if c >= 65 && c <= 90 { c + 32 } else { c }
+}
+
+/// A copy of `b[start..end]`.
+fn slice(b: &Bytes, start: i64, end: i64) -> Bytes ! {alloc, panic} {
+    let length = if end > start { Int.wrapping_sub::<i64>(end, start) } else { 0 };
+    let mut out = Bytes.with_capacity(length);
+    let mut i = start;
+    while i < end {
+        let c = byte(b, i);
+        if c < 0 { return out; }
+        out = Bytes.push(out, c);
+        i = Int.wrapping_add::<i64>(i, 1);
+    }
+    out
+}
+
+impl Request {
+    /// The request target as sent: path and query.
+    pub fn target(self: &Self) -> Bytes ! {alloc, panic} {
+        slice(&self.head, self.target_from, self.target_to)
+    }
+
+    /// The end of the path: the '?' before the query, or the target's end.
+    fn path_end(self: &Self) -> i64 ! {} {
+        let mut i = self.target_from;
+        while i < self.target_to {
+            if byte(&self.head, i) == 63 { return i; }
+            i = Int.wrapping_add::<i64>(i, 1);
+        }
+        self.target_to
+    }
+
+    /// The path, without the query (still percent-encoded; WEB-URL decodes).
+    pub fn path(self: &Self) -> Bytes ! {alloc, panic} {
+        slice(&self.head, self.target_from, self.path_end())
+    }
+
+    /// The query after '?', empty when there is none.
+    pub fn query(self: &Self) -> Bytes ! {alloc, panic} {
+        let end = self.path_end();
+        if end == self.target_to { return Bytes.with_capacity(0); }
+        slice(&self.head, Int.wrapping_add::<i64>(end, 1), self.target_to)
+    }
+
+    /// Whether the path is exactly `path`.
+    pub fn path_is(self: &Self, path: &Bytes) -> Bool ! {} {
+        let end = self.path_end();
+        let n = Bytes.len(path);
+        if Int.wrapping_sub::<i64>(end, self.target_from) != n { return false; }
+        let mut i = 0;
+        while i < n {
+            if byte(&self.head, Int.wrapping_add::<i64>(self.target_from, i)) != Bytes.at(path, i, _) {
+                return false;
+            }
+            i = i + 1;
+        }
+        true
+    }
+
+    /// The number of header fields.
+    pub fn field_count(self: &Self) -> i64 ! {} {
+        Vec.len(&self.fields)
+    }
+
+    /// The value of the first header field named `name` (ASCII
+    /// case-insensitive), or None.
+    pub fn header(self: &Self, name: &Bytes) -> Option<Bytes> ! {alloc, panic} {
+        let count = Vec.len(&self.fields);
+        let n = Bytes.len(name);
+        let mut index = 0;
+        while index < count {
+            let field = Vec.get(&self.fields, index);
+            if Int.wrapping_sub::<i64>(field.name_end, field.name) == n {
+                let mut i = 0;
+                let mut same = true;
+                while i < n && same {
+                    if lower(byte(&self.head, Int.wrapping_add::<i64>(field.name, i))) != lower(Bytes.at(name, i, _)) {
+                        same = false;
+                    }
+                    i = i + 1;
+                }
+                if same {
+                    return Option.Some(slice(&self.head, field.value, field.value_end));
+                }
+            }
+            index = index + 1;
+        }
+        Option.None
+    }
+}
+
+/// A response as a value, for handlers written as `fn(&Request) ->
+/// Response`; see `answer`.
+pub struct Response {
+    pub status: i64,
+    /// Sent as Content-Type unless empty; an invalid one is replaced by
+    /// application/octet-stream.
+    pub content_type: Bytes,
+    pub body: Bytes,
+}
+
+/// Answers one request. Linear: a handler must pass it to exactly one of
+/// `text`, `json`, `status`, `reply` or `stream` on every path. Only this
+/// module makes one.
+#[linear]
+pub struct Responder {
+    fd: i64,
+    /// A HEAD request: the head is sent, the body is not.
+    head_only: Bool,
+    keep_alive: Bool,
+    timeout_ms: i64,
+}
+
+/// A response being streamed in chunks. Linear: it must reach `finish`.
+#[linear]
+pub struct Stream {
+    fd: i64,
+    head_only: Bool,
+    /// A write failed; the rest is skipped and the server drops the
+    /// connection.
+    failed: Bool,
+    timeout_ms: i64,
+}
+
+/// The Responder for `request` on `conn` (for the server and `capture`).
+fn responder(conn: &net.Conn, request: &Request, timeout_ms: i64) -> Responder ! {} {
+    let head_only = match request.method { Method.Head => true, _ => false };
+    Responder {
+        fd: net.descriptor(conn),
+        head_only: head_only,
+        keep_alive: request.keep_alive,
+        timeout_ms: timeout_ms,
+    }
+}
+
+/// Send all of `data` on the reactor within `timeout_ms`: whether it was.
+fn send(fd: i64, data: &Bytes, timeout_ms: i64) -> Bool ! {io, suspend} {
+    let deadline = time.deadline_ms(timeout_ms);
+    let length = Bytes.len(data);
+    let mut sent = 0;
+    while sent < length {
+        match sys.send(fd, data, sent) {
+            Result.Ok(count) => {
+                if count == 0 { return false; }
+                sent = Int.wrapping_add::<i64>(sent, count);
+            },
+            Result.Err(code) => {
+                if code == sys.EAGAIN() {
+                    match sys.wait_ready(fd, sys.POLLOUT(), time.remaining_ms(deadline)) {
+                        Result.Ok(0) => {
+                            if time.remaining_ms(deadline) == 0 { return false; }
+                        },
+                        Result.Ok(_) => {},
+                        Result.Err(code) => {
+                            if code != sys.EINTR() { return false; }
+                        },
+                    }
+                } else if code != sys.EINTR() {
+                    return false;
+                }
+            },
+        }
+    }
+    true
+}
+
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let n = Bytes.len(text);
+    let mut i = 0;
+    while i < n {
+        out = Bytes.push(out, Bytes.at(text, i, _));
+        i = i + 1;
+    }
+    out
+}
+
+/// Whether `value` may be a header value: no CR, LF, NUL or other control
+/// character but tab.
+fn valid_value(value: &Bytes) -> Bool ! {} {
+    let n = Bytes.len(value);
+    let mut i = 0;
+    while i < n {
+        let c = Bytes.at(value, i, _);
+        if !(c == 9 || (c >= 32 && c != 127)) { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+/// Whether a response with `status` carries no body (1xx, 204, 304).
+fn bodiless(status: i64) -> Bool ! {} {
+    status < 200 || status == 204 || status == 304
+}
+
+/// The response head: status line, Content-Type unless `content_type` is
+/// empty, Content-Length (or chunked when `length` is negative), and
+/// Connection: close when the connection ends after it.
+fn head(status: i64, content_type: &Bytes, length: i64, keep_alive: Bool) -> Bytes ! {alloc, panic} {
+    let mut out = http1.status_line(Bytes.with_capacity(128), status);
+    if Bytes.len(content_type) > 0 {
+        let name = Bytes.from("Content-Type: ");
+        out = append(out, &name);
+        if valid_value(content_type) {
+            out = append(out, content_type);
+        } else {
+            // A value with CR or LF could inject header fields.
+            let fallback = Bytes.from("application/octet-stream");
+            out = append(out, &fallback);
+        }
+        out = Bytes.push(Bytes.push(out, 13), 10);
+    }
+    if !bodiless(status) {
+        if length >= 0 {
+            out = http1.content_length(out, length);
+        } else {
+            let chunked = Bytes.from("Transfer-Encoding: chunked\r\n");
+            out = append(out, &chunked);
+        }
+    }
+    if !keep_alive {
+        let close = Bytes.from("Connection: close\r\n");
+        out = append(out, &close);
+    }
+    http1.end_head(out)
+}
+
+impl Responder {
+    /// Answer with `body` as text/plain; charset=utf-8.
+    pub fn text(self: Self, status: i64, body: &Bytes) -> Unit ! {io, alloc, panic, suspend} {
+        let kind = Bytes.from("text/plain; charset=utf-8");
+        self.complete(status, &kind, body)
+    }
+
+    /// Answer with `body` as application/json.
+    pub fn json(self: Self, status: i64, body: &Bytes) -> Unit ! {io, alloc, panic, suspend} {
+        let kind = Bytes.from("application/json");
+        self.complete(status, &kind, body)
+    }
+
+    /// Answer with an empty body.
+    pub fn status(self: Self, status: i64) -> Unit ! {io, alloc, panic, suspend} {
+        let none = Bytes.with_capacity(0);
+        self.complete(status, &none, &none)
+    }
+
+    /// Answer with a `Response` value.
+    pub fn reply(self: Self, response: Response) -> Unit ! {io, alloc, panic, suspend} {
+        match response {
+            Response { status, content_type, body } => self.complete(status, &content_type, &body),
+        }
+    }
+
+    /// Start a chunked response; send the body with `Stream.send` and end
+    /// it with `Stream.finish`. For HEAD only the head is sent.
+    pub fn stream(self: Self, status: i64, content_type: &Bytes) -> Stream ! {io, alloc, panic, suspend} {
+        match self {
+            Responder { fd, head_only, keep_alive, timeout_ms } => {
+                let bytes = head(status, content_type, -1, keep_alive);
+                let sent = send(fd, &bytes, timeout_ms);
+                Stream {
+                    fd: fd,
+                    head_only: head_only || bodiless(status),
+                    failed: !sent,
+                    timeout_ms: timeout_ms,
+                }
+            },
+        }
+    }
+
+    fn complete(self: Self, status: i64, content_type: &Bytes, body: &Bytes) -> Unit ! {io, alloc, panic, suspend} {
+        match self {
+            Responder { fd, head_only, keep_alive, timeout_ms } => {
+                let mut bytes = head(status, content_type, Bytes.len(body), keep_alive);
+                if !head_only && !bodiless(status) { bytes = append(bytes, body); }
+                let _ = send(fd, &bytes, timeout_ms);
+            },
+        }
+    }
+}
+
+impl Stream {
+    /// Send `data` as one chunk (empty data sends nothing).
+    pub fn send(self: Self, data: &Bytes) -> Stream ! {io, alloc, panic, suspend} {
+        match self {
+            Stream { fd, head_only, failed, timeout_ms } => {
+                let mut failed = failed;
+                if !failed && !head_only && Bytes.len(data) > 0 {
+                    let bytes = http1.chunk(Bytes.with_capacity(Int.saturating_add::<i64>(Bytes.len(data), 32)), data);
+                    failed = !send(fd, &bytes, timeout_ms);
+                }
+                Stream { fd: fd, head_only: head_only, failed: failed, timeout_ms: timeout_ms }
+            },
+        }
+    }
+
+    /// End the body.
+    pub fn finish(self: Self) -> Unit ! {io, alloc, panic, suspend} {
+        match self {
+            Stream { fd, head_only, failed, timeout_ms } => {
+                if !failed && !head_only {
+                    let bytes = http1.last_chunk(Bytes.with_capacity(8));
+                    let _ = send(fd, &bytes, timeout_ms);
+                }
+            },
+        }
+    }
+}
+
+/// Answer `request` with what `handler` returns: the `fn(&Request) ->
+/// Response` form of a handler.
+pub fn answer(request: &Request, res: Responder, handler: fn(&Request) -> Response ! {io, alloc, panic, suspend}) -> Unit ! {io, alloc, panic, suspend} {
+    res.reply(handler(request))
+}
+
+/// Run `handler` on `request` over a loopback connection and return the
+/// raw response (status line, head and body), for tests. Everything runs in
+/// the calling task, so the response must fit in the loopback socket
+/// buffers (megabytes). WEB-TEST-CLIENT builds on this.
+pub fn capture(request: &Request, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}) -> Result<Bytes, i64> ! {io, alloc, panic, suspend} {
+    let host = Bytes.from("127.0.0.1");
+    let listener = match net.listen(&host, 0, 1, false) {
+        Result.Ok(listener) => listener,
+        Result.Err(code) => { return Result.Err(code); },
+    };
+    let port = match net.local_port(&listener) {
+        Result.Ok(port) => port,
+        Result.Err(code) => {
+            let _ = net.close_listener(listener);
+            return Result.Err(code);
+        },
+    };
+    let client = match net.connect(&host, port, 5000) {
+        Result.Ok(conn) => conn,
+        Result.Err(code) => {
+            let _ = net.close_listener(listener);
+            return Result.Err(code);
+        },
+    };
+    let accepted = net.accept(&listener, 5000);
+    let _ = net.close_listener(listener);
+    let server = match accepted {
+        Result.Ok(conn) => conn,
+        Result.Err(code) => {
+            let _ = net.close(client);
+            return Result.Err(code);
+        },
+    };
+    handler(request, responder(&server, request, 5000));
+    let _ = net.close(server);
+    let mut out = Bytes.with_capacity(65536);
+    loop {
+        let before = Bytes.len(&out);
+        if before == Bytes.capacity(&out) {
+            let mut bigger = Bytes.with_capacity(Int.saturating_mul::<i64>(before, 2));
+            bigger = append(bigger, &out);
+            drop(out);
+            out = bigger;
+        }
+        out = match net.read(&client, out, 5000) {
+            Result.Ok(next) => next,
+            Result.Err(code) => {
+                let _ = net.close(client);
+                return Result.Err(code);
+            },
+        };
+        if Bytes.len(&out) == before {
+            let _ = net.close(client);
+            return Result.Ok(out);
+        }
+    }
+}

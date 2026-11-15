@@ -388,6 +388,13 @@ pub fn set_nodelay(conn: &Conn, on: Bool) -> Result<Unit, i64> ! {io} {
     sys.setsockopt(conn.fd, sys.IPPROTO_TCP(), sys.TCP_NODELAY(), if on { 1 } else { 0 })
 }
 
+/// The connection's descriptor number, for std.web's `Responder`, which
+/// writes the response while the server keeps the `Conn`. A program can do
+/// nothing with the number itself: the system calls are std-only.
+pub fn descriptor(conn: &Conn) -> i64 ! {} {
+    conn.fd
+}
+
 pub fn close(conn: Conn) -> Result<Unit, i64> ! {io} {
     match conn {
         Conn { fd } => sys.close(fd),
