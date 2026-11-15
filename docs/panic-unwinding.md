@@ -210,6 +210,26 @@ compare and a branch, and an exit block. Tests: the panic cases of
 `crates/kush/tests/web_server.rs` run natively too, with the strict exit
 check, on Cranelift and LLVM.
 
+**PANIC-LINEAR-CLEANUP (2026-11-15).** `#[linear(unwind = f)]` names a
+function of the type's module taking the value by move and returning
+`Unit`; the checker rejects a missing function or another signature
+(`Executable::unwind_functions`, by layout). Such a layout counts as owned
+for tracking, so a live value of it, and any value holding one (a
+`Result<File, i64>`), is in a frame's cleanup. Natively its drop glue
+calls `f` between `kush_unwind_hold` and `kush_unwind_restore`, which keep
+the panic word clear while `f` runs (a panic inside `f` ends `f`, and
+unwinding goes on). Normal paths never reach that glue: a linear value is
+always consumed before its frame ends. The evaluator calls `f` from its
+frame cleanup for a live value of the type; a linear value nested inside
+another value is not reached there yet (the evaluator's values do not carry
+their layout), which only matters for side effects like closing a
+descriptor. std uses it for `std.file.File` and `std.net.Conn`/`Listener`
+(close the descriptor), `std.web.Responder` (answer 500 with `Connection:
+close`) and `Stream` (send nothing more; the client sees the body cut
+off). Tests: `unwinding_closes_linear_resources` (five panicking handlers
+holding open files leave the process's descriptor count unchanged, natively)
+and `unwind_cleanups_are_checked` in `crates/kush/tests/web_server.rs`.
+
 ## 9. Order
 
 1. PANIC-UNWIND-EVAL: the evaluator (the oracle) unwinds with exact cleanup.

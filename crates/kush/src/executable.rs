@@ -343,6 +343,9 @@ pub struct Executable {
     /// backend may replace with vector instructions. The Kush body stays the
     /// specification (and the evaluator's implementation).
     pub(crate) simd_functions: Vec<Option<(String, String)>>,
+    /// PANIC-LINEAR-CLEANUP: record layout -> the function run on a live
+    /// value of it while a panic unwinds (`#[linear(unwind = f)]`).
+    pub(crate) unwind_functions: BTreeMap<usize, usize>,
     /// Effect-row bit of each declared operation, by operation id.
     pub(crate) effect_bits: Vec<u16>,
     /// Whether each declared operation is abortive (`-> Never`).
@@ -5761,7 +5764,11 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     "noalloc" | "nosuspend" | "test" | "fuzz" | "gpu"
                 ) && attribute.argument.is_none()
             } else if data {
-                (attribute.kind == "linear" && attribute.argument.is_none())
+                (attribute.kind == "linear"
+                    && attribute
+                        .argument
+                        .as_deref()
+                        .is_none_or(|argument| argument.starts_with("unwind=")))
                     || attribute.kind == "foreign"
             } else {
                 false
@@ -5772,7 +5779,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     if function {
                         "functions support the #[noalloc], #[nosuspend], #[test], #[fuzz], and #[gpu] attributes"
                     } else if data {
-                        "data declarations support #[linear] or #[foreign(\"release_symbol\")]"
+                        "data declarations support #[linear], #[linear(unwind = cleanup)] or #[foreign(\"release_symbol\")]"
                     } else {
                         "attributes apply to functions, enums, and structs only"
                     },
@@ -6304,6 +6311,41 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         .iter()
         .map(|signature| functions.gpu.contains(&signature.binding))
         .collect();
+    // PANIC-LINEAR-CLEANUP: `#[linear(unwind = f)]`, by record layout: the
+    // function in the type's module run on a live value while a panic
+    // unwinds past it. It takes the value by move and returns Unit.
+    let mut unwind_functions = BTreeMap::new();
+    for (layout, record) in types.enums.iter().enumerate() {
+        let Some((name, span)) = types.unwind_names.get(&record.definition) else {
+            continue;
+        };
+        let unit = resolution.unit_of.get(&record.definition).copied();
+        let found = functions.signatures.iter().position(|signature| {
+            signature.name == *name
+                && resolution.unit_of.get(&signature.binding).copied() == unit
+                && functions
+                    .declared
+                    .get(&signature.binding)
+                    .is_some_and(|declared| declared.self_ty.is_none())
+        });
+        let Some(index) = found else {
+            return Err(Diagnostic::new(
+                *span,
+                format!("#[linear(unwind = {name})] names no function '{name}' in this module"),
+            ));
+        };
+        let signature = &functions.signatures[index];
+        if signature.parameters != [Type::Enum(layout)] || signature.result != Type::Unit {
+            return Err(Diagnostic::new(
+                *span,
+                format!(
+                    "the unwind cleanup '{name}' must take the {} by value and return Unit",
+                    resolution.bindings[record.definition].name
+                ),
+            ));
+        }
+        unwind_functions.insert(layout, index);
+    }
     let simd_functions = functions
         .signatures
         .iter()
@@ -6332,6 +6374,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     let mut executable = Executable {
         gpu_functions,
         simd_functions,
+        unwind_functions,
         eval_fuel: crate::eval::DEFAULT_EVAL_FUEL,
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,

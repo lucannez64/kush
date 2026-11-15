@@ -6394,9 +6394,25 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         if let Some(id) = id
             && let Some(value) = frame.resources[id].take()
         {
+            if let Type::Enum(layout) = self.program.functions[frame.function].resources[id]
+                && let Some(&cleanup) = self.program.unwind_functions.get(&layout)
+            {
+                return self.unwind_cleanup(cleanup, value);
+            }
             self.drop_value(value)?;
         }
         Ok(())
+    }
+    /// PANIC-LINEAR-CLEANUP: a linear value is only still live at cleanup
+    /// when a panic unwinds, so its type's unwind function takes it. A panic
+    /// inside that function ends it; unwinding goes on.
+    #[inline(never)]
+    fn unwind_cleanup(&mut self, cleanup: usize, value: Value) -> Result<()> {
+        match self.call_with(cleanup, Vec::new(), vec![value]) {
+            Ok(result) => self.drop_value(result),
+            Err(error) if error.message.starts_with("panic") => Ok(()),
+            Err(error) => Err(error),
+        }
     }
     /// Whether `error` is a panic that unwinds: it is a panic, and a catch
     /// boundary (an isolated task) will stop it (docs/panic-unwinding.md).

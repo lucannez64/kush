@@ -10,9 +10,14 @@ use std.result.Result;
 use std.sys;
 
 /// An open file. Only this module can build one, from a successful open.
-#[linear]
+/// A panic unwinding past a live one closes it (PANIC-LINEAR-CLEANUP).
+#[linear(unwind = discard)]
 pub struct File {
     fd: i64,
+}
+
+fn discard(file: File) -> Unit ! {io} {
+    let _ = close(file);
 }
 
 /// open(2) with EINTR retried.

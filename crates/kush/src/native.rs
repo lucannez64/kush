@@ -3846,6 +3846,18 @@ static void kush_raise_panic(void) {
     kush_best_effort_write(2, message, sizeof(message) - 1);
     *kush_panic_word() = 1;
 }
+/* PANIC-LINEAR-CLEANUP: the drop glue of a linear type with an unwind
+   cleanup holds the panic word clear while the cleanup runs, so the
+   cleanup's own calls run normally. */
+int64_t kush_unwind_hold(void) {
+    int64_t *word = kush_panic_word();
+    int64_t held = *word;
+    *word = 0;
+    return held;
+}
+void kush_unwind_restore(int64_t held) {
+    *kush_panic_word() = held;
+}
 /* Generated code's panic sites: unwind when a boundary is active (set the
    word and return, the caller then leaves through its cleanup), otherwise
    abort. */
@@ -7617,6 +7629,37 @@ fn synthesize_drops(
                 emit_drop(&mut builder, module, buffer_free, &args);
                 builder.ins().return_(&[]);
             }
+            Type::Enum(index) if program.unwind_functions.contains_key(&index) => {
+                // PANIC-LINEAR-CLEANUP: only a panic unwinding leaves a live
+                // value of this linear type to drop: its unwind function
+                // takes it, with the panic word held clear meanwhile.
+                let function = program.unwind_functions[&index];
+                let mut signature = module.make_signature();
+                signature
+                    .params
+                    .extend((0..program.width(Type::Enum(index))).map(|_| AbiParam::new(I64)));
+                signature.returns.push(AbiParam::new(I64));
+                let cleanup = module
+                    .declare_function(&format!("kush_fn_{function}"), Linkage::Local, &signature)
+                    .map_err(error)?;
+                let mut hold_signature = module.make_signature();
+                hold_signature.returns.push(AbiParam::new(I64));
+                let hold = module
+                    .declare_function("kush_unwind_hold", Linkage::Import, &hold_signature)
+                    .map_err(error)?;
+                let mut restore_signature = module.make_signature();
+                restore_signature.params.push(AbiParam::new(I64));
+                let restore = module
+                    .declare_function("kush_unwind_restore", Linkage::Import, &restore_signature)
+                    .map_err(error)?;
+                let hold = module.declare_func_in_func(hold, builder.func);
+                let call = builder.ins().call(hold, &[]);
+                let held = builder.inst_results(call)[0];
+                let cleanup = module.declare_func_in_func(cleanup, builder.func);
+                builder.ins().call(cleanup, &args);
+                emit_drop(&mut builder, module, restore, &[held]);
+                builder.ins().return_(&[]);
+            }
             Type::Enum(index) => {
                 if let Some(foreign) = program.enums[index].foreign.clone() {
                     // The one-word handle is released by the trusted foreign
@@ -8279,6 +8322,8 @@ impl Generator<'_, '_> {
                     .map(|v| self.builder.use_var(*v))
                     .collect::<Vec<_>>()
             };
+            // A linear type with an unwind cleanup is owned: its drop glue
+            // calls the cleanup (PANIC-LINEAR-CLEANUP).
             self.drop_value(self.tracked[id].ty, &values);
             self.jump(no, &[]);
             self.builder.switch_to_block(no);

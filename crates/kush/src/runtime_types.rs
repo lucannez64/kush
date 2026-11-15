@@ -510,6 +510,9 @@ pub(crate) struct Types<'a> {
     definitions: BTreeMap<BindingId, Definition<'a>>,
     aliases: BTreeMap<BindingId, Alias<'a>>,
     alias_active: BTreeSet<BindingId>,
+    /// PANIC-LINEAR-CLEANUP: `#[linear(unwind = f)]` on a declaration, by its
+    /// binding: the cleanup function's name, resolved by the checker.
+    pub unwind_names: BTreeMap<BindingId, (String, Span)>,
     pub enums: Vec<Enum>,
     pub pointees: Vec<Type>,
     pub unions: Vec<UnionType>,
@@ -573,6 +576,7 @@ impl<'a> Types<'a> {
         dynamic_traits: BTreeSet<BindingId>,
     ) -> Result<Self> {
         let mut definitions = BTreeMap::new();
+        let mut unwind_names = BTreeMap::new();
         let mut aliases = BTreeMap::new();
         for declaration in &module.items {
             if matches!(
@@ -773,6 +777,23 @@ impl<'a> Types<'a> {
                     linear,
                 )?;
             }
+            if let Some(name) = declaration
+                .attributes
+                .iter()
+                .find(|attribute| attribute.kind == "linear")
+                .and_then(|attribute| attribute.argument.as_deref())
+                .and_then(|argument| argument.strip_prefix("unwind="))
+            {
+                let span = declaration
+                    .attributes
+                    .iter()
+                    .find(|attribute| attribute.kind == "linear")
+                    .map_or(declaration.item.span, |attribute| attribute.span);
+                unwind_names.insert(
+                    resolution.declarations[&declaration.item.span.start],
+                    (name.to_owned(), span),
+                );
+            }
             definitions.insert(
                 resolution.declarations[&declaration.item.span.start],
                 Definition {
@@ -792,6 +813,7 @@ impl<'a> Types<'a> {
             definitions,
             aliases,
             alias_active: BTreeSet::new(),
+            unwind_names,
             enums: Vec::new(),
             pointees: Vec::new(),
             unions: Vec::new(),

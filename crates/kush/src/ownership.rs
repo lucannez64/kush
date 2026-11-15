@@ -29,7 +29,10 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
         let (old_owned, old_linear, old_dyn) = (owned.clone(), linear.clone(), dyn_linear.clone());
         for (index, layout) in program.enums.iter().enumerate() {
             let fields = || layout.variants.iter().flat_map(|v| v.fields.iter());
+            // PANIC-LINEAR-CLEANUP: a type with an unwind cleanup is tracked
+            // like an owner, so unwinding (and the types holding it) reach it.
             owned[index] = layout.foreign.is_some()
+                || program.unwind_functions.contains_key(&index)
                 || fields().any(|ty| owns(*ty, &old_owned, &program.unions, &program.pointees));
             linear[index] |= fields().any(|ty| {
                 is_linear(

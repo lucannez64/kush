@@ -52,6 +52,8 @@ fn both(source: &str, expected: &str) {
 const APP: &str = r#"
 use std.http1;
 use std.http1.Method;
+use std.file;
+use std.fs;
 use std.io;
 use std.net;
 use std.result.Result;
@@ -95,6 +97,32 @@ fn app(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
             Bytes.get(&empty, 1)
         });
         res.status(200 + code)
+    } else if req.path_is(&Bytes.from("/file")) {
+        // Panics holding an open file: its unwind cleanup closes it.
+        let opened = file.open_read(&Bytes.from("/dev/null"));
+        match opened {
+            Result.Ok(f) => {
+                let empty = Bytes.with_capacity(0);
+                let _ = Bytes.get(&empty, 1);
+                let _ = file.close(f);
+                res.status(200)
+            },
+            Result.Err(code) => res.status(500 + code),
+        }
+    } else if req.path_is(&Bytes.from("/fds")) {
+        // How many descriptors the process has open.
+        match fs.list(&Bytes.from("/proc/self/fd"), Bytes.with_capacity(65536)) {
+            Result.Ok(names) => {
+                let mut count = 0;
+                let mut i = 0;
+                while i < Bytes.len(&names) {
+                    if Bytes.get(&names, i) == 10 { count = count + 1; }
+                    i = i + 1;
+                }
+                res.status(200 + count)
+            },
+            Result.Err(code) => res.status(500 + code),
+        }
     } else if req.path_is(&Bytes.from("/late")) {
         // Panics after starting the answer: the connection is closed.
         let mut s = res.stream(200, &Bytes.from("text/plain"));
@@ -423,4 +451,72 @@ fn programs_cannot_isolate_tasks() {
     let program = kush::program::load_source("<web-server-test>", source).unwrap();
     let error = executable::check_program(&program).err().expect("accepted");
     assert!(error.message.contains("std-internal"), "{}", error.message);
+}
+
+/// A panic unwinding past an open file closes it (PANIC-LINEAR-CLEANUP):
+/// the process's descriptor count is the same before and after.
+#[test]
+fn unwinding_closes_linear_resources() {
+    let main = r#"
+fn status_of(port: i64, request: &Bytes) -> i64 ! {io, alloc, panic, suspend} {
+    let conn = open(port);
+    let _ = net.write(&conn, request, 5000);
+    let _ = net.shutdown(&conn, 1);
+    let reply = read_all(&conn);
+    let _ = net.close(conn);
+    // "HTTP/1.1 NNN": the status digits.
+    if Bytes.len(&reply) < 12 { return -1; }
+    (Bytes.get(&reply, 9) - 48) * 100 + (Bytes.get(&reply, 10) - 48) * 10 + Bytes.get(&reply, 11) - 48
+}
+
+fn main() -> i64 ! {io, alloc, panic, suspend} {
+    let server_socket = listener();
+    let port = port_of(&server_socket);
+    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+            match web.serve(server_socket, app, web.config()) { Result.Ok(_) => 0, Result.Err(code) => code }
+        });
+        let client = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+            let fds = Bytes.from("GET /fds HTTP/1.1\r\nHost: x\r\n\r\n");
+            let before = status_of(port, &fds);
+            let mut i = 0;
+            while i < 5 {
+                print_i64(status_of(port, &Bytes.from("GET /file HTTP/1.1\r\nHost: x\r\n\r\n")));
+                i = i + 1;
+            }
+            let after = status_of(port, &fds);
+            if before == after { 1 } else { after - before }
+        });
+        show(Task.join(client));
+        Task.cancel(&server);
+        show(Task.join(server));
+    });
+    0
+}
+"#;
+    let source = format!("{APP}{main}");
+    let (_scratch, binary) = build(&source);
+    let run = Command::new(&binary).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(run.status.code(), Some(0), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), "500\n500\n500\n500\n500\n1\n-1\n");
+}
+
+#[test]
+fn unwind_cleanups_are_checked() {
+    for (source, message) in [
+        ("#[linear(unwind = missing)] struct R { x: i64 }\nfn main() -> i64 ! {} { 0 }", "names no function"),
+        (
+            "#[linear(unwind = wrong)] struct R { x: i64 }\nfn wrong(r: &R) -> Unit ! {} { }\nfn main() -> i64 ! {} { 0 }",
+            "must take the R by value",
+        ),
+        (
+            "#[linear(unwind = wrong)] struct R { x: i64 }\nfn wrong(r: R) -> i64 ! {} { match r { R { x } => x } }\nfn main() -> i64 ! {} { 0 }",
+            "return Unit",
+        ),
+        ("#[linear(close = f)] struct R { x: i64 }\nfn main() -> i64 ! {} { 0 }", "#[linear(unwind = cleanup)]"),
+    ] {
+        let program = kush::program::load_source("<unwind-test>", source).unwrap();
+        let error = executable::check_program(&program).err().unwrap_or_else(|| panic!("accepted: {source}"));
+        assert!(error.message.contains(message), "{source}: {}", error.message);
+    }
 }

@@ -164,6 +164,19 @@ impl Parser {
                 let name = self.ident()?;
                 let argument = if self.eat(&Kind::LParen) {
                     let value = match self.current().kind.clone() {
+                        // A named argument, as in `#[linear(unwind = close)]`
+                        // (PANIC-LINEAR-CLEANUP): stored as "name=value".
+                        Kind::Ident(key)
+                            if self
+                                .tokens
+                                .get(self.pos + 1)
+                                .is_some_and(|token| token.kind == Kind::Eq) =>
+                        {
+                            self.bump();
+                            self.bump();
+                            let value = self.ident()?;
+                            format!("{key}={value}")
+                        }
                         Kind::String(value) => {
                             self.bump();
                             value
@@ -175,7 +188,7 @@ impl Parser {
                         }
                         _ => {
                             return Err(self.error(
-                                "attribute arguments must be one string or integer literal",
+                                "attribute arguments must be one string or integer literal, or name = identifier",
                             ));
                         }
                     };

@@ -207,16 +207,25 @@ pub fn exchange(host: &Bytes, port: i64, request: &Bytes, response: Bytes, timeo
 }
 
 /// A listening socket. Linear: every path must pass it to `close_listener`.
-#[linear]
+/// A panic unwinding past a live one closes it (PANIC-LINEAR-CLEANUP).
+#[linear(unwind = discard_listener)]
 pub struct Listener {
     fd: i64,
 }
 
 /// A connected socket, accepted or connected. Linear: every path must pass
-/// it to `close`.
-#[linear]
+/// it to `close`. A panic unwinding past a live one closes it.
+#[linear(unwind = discard_conn)]
 pub struct Conn {
     fd: i64,
+}
+
+fn discard_listener(listener: Listener) -> Unit ! {io} {
+    let _ = close_listener(listener);
+}
+
+fn discard_conn(conn: Conn) -> Unit ! {io} {
+    let _ = close(conn);
 }
 
 /// SO_REUSEADDR (and SO_REUSEPORT), bind and listen on a fresh socket.

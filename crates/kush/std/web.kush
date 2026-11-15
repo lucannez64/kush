@@ -196,8 +196,10 @@ pub struct Response {
 
 /// Answers one request. Linear: a handler must pass it to exactly one of
 /// `text`, `json`, `status`, `reply` or `stream` on every path. Only this
-/// module makes one.
-#[linear]
+/// module makes one. When a panic unwinds past an unanswered one, it answers
+/// `500 Internal Server Error` and the connection is closed
+/// (PANIC-LINEAR-CLEANUP).
+#[linear(unwind = abandon)]
 pub struct Responder {
     fd: i64,
     /// A HEAD request: the head is sent, the body is not.
@@ -210,7 +212,9 @@ pub struct Responder {
 }
 
 /// A response being streamed in chunks. Linear: it must reach `finish`.
-#[linear]
+/// When a panic unwinds past one, nothing more is sent: the connection is
+/// closed, so the client sees the body cut off, not a complete one.
+#[linear(unwind = abandon_stream)]
 pub struct Stream {
     fd: i64,
     head_only: Bool,
@@ -220,6 +224,22 @@ pub struct Stream {
     /// connection.
     failed: Bool,
     timeout_ms: i64,
+}
+
+fn abandon(res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+    match res {
+        Responder { fd, head_only, keep_alive, chunked, timeout_ms } => {
+            let none = Bytes.with_capacity(0);
+            let bytes = head(500, &none, 0, false);
+            let _ = send(fd, &bytes, timeout_ms);
+        },
+    }
+}
+
+fn abandon_stream(stream: Stream) -> Unit ! {} {
+    match stream {
+        Stream { fd, head_only, raw, failed, timeout_ms } => (),
+    }
 }
 
 /// The Responder for `request` on `conn` (for the server and `capture`).
