@@ -161,7 +161,22 @@ PANIC-UNWIND-USE.
 - No unwind tables, no landing pads, no change to calling conventions, the
   LLVM translation or the bridge ABI.
 
-## 8. Order
+## 8. As built
+
+**PANIC-UNWIND-EVAL (2026-11-15).** The evaluator needed no marking: a
+panic is still an `Err` diagnostic, and owned temporaries already live in
+hidden frame slots. When a panic error leaves a function and a catch
+boundary will stop it, the frame runs its normal cleanup (every active
+slot, in reverse) before the error moves on; a `Task.scope` the panic leaves
+cancels its unjoined children before its epilogue joins them. The boundary
+is still WEB-PANIC-500's isolated task until `Task.catch` exists. The
+end-of-run ownership check is strict again in the evaluator. Tests: the
+`/owned` (owned locals, a vector, a pending temporary) and `/scoped` (a
+waiting child task) handlers in `crates/kush/tests/web_server.rs`, which
+must leave the heap empty. Live linear values are dropped like affine ones
+for now; their unwind cleanup is PANIC-LINEAR-CLEANUP.
+
+## 9. Order
 
 1. PANIC-UNWIND-EVAL: the evaluator (the oracle) unwinds with exact cleanup.
 2. PANIC-UNWIND-NATIVE: marking, runtime `KUSH_FAIL`, lowering, both

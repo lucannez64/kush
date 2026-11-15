@@ -76,6 +76,25 @@ fn app(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
         let empty = Bytes.with_capacity(0);
         let byte = Bytes.get(&empty, 3);
         res.status(200 + byte)
+    } else if req.path_is(&Bytes.from("/owned")) {
+        // Panics with owned locals, a vector and a pending temporary.
+        let kept = Bytes.from("kept");
+        let mut list: Vec<i64> = Vec.with_capacity(4);
+        list = Vec.push(list, 1);
+        let total = weigh(Bytes.from("temporary"), Bytes.get(&kept, 99), &list);
+        res.status(200 + total)
+    } else if req.path_is(&Bytes.from("/scoped")) {
+        // Panics while a child task waits: the child is cancelled and joined.
+        let code = Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
+            let child = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+                let held = Bytes.from("held by the child");
+                match time.wait_ms(60000) { Result.Ok(_) => Bytes.len(&held), Result.Err(code) => code }
+            });
+            let _ = time.wait_ms(5);
+            let empty = Bytes.with_capacity(0);
+            Bytes.get(&empty, 1)
+        });
+        res.status(200 + code)
     } else if req.path_is(&Bytes.from("/late")) {
         // Panics after starting the answer: the connection is closed.
         let mut s = res.stream(200, &Bytes.from("text/plain"));
@@ -89,6 +108,10 @@ fn app(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
     } else {
         res.status(404)
     }
+}
+
+fn weigh(owned: Bytes, extra: i64, list: &Vec<i64>) -> i64 ! {panic} {
+    Bytes.len(&owned) + extra + Vec.len(list)
 }
 
 fn show(exit: TaskExit<i64>) -> Unit ! {io, panic} {
@@ -348,6 +371,8 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
             // The pipelined /hello is not answered: the connection closes.
             exchange(port, &Bytes.from("GET /boom HTTP/1.1\r\nHost: x\r\n\r\nGET /hello HTTP/1.1\r\nHost: x\r\n\r\n"));
             exchange(port, &Bytes.from("GET /late HTTP/1.1\r\nHost: x\r\n\r\n"));
+            exchange(port, &Bytes.from("GET /owned HTTP/1.1\r\nHost: x\r\n\r\n"));
+            SCOPED
             // The server still serves.
             exchange(port, &Bytes.from("GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"));
             0
@@ -366,23 +391,29 @@ fn a_handler_panic_is_answered_with_500() {
     let source = format!("{APP}{PANICS}");
     let expected = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n|\n\
 HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n|\n\
+HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n|\n\
+SCOPED\
 HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\n\r\nhi|\n\
 0\n-1\n";
-    // The panicking handlers leak what they owned, so the reference run's
-    // allocation counts are not balanced; compare the output only.
-    let program = checked(&source);
-    let mut output = Vec::new();
-    let (status, _) = program
-        .evaluate_with_host_and_stats(&mut io::empty(), &mut output, &Host::empty())
-        .unwrap();
-    assert_eq!(status, 0);
-    assert_eq!(String::from_utf8(output).unwrap(), expected, "reference");
+    // The reference evaluator unwinds the panicking handlers
+    // (PANIC-UNWIND-EVAL): every allocation is freed, a child task of the
+    // handler is cancelled and joined. Natively a handler task with a child
+    // cannot recover until PANIC-UNWIND-NATIVE, so that case runs only here.
+    let scoped = r#"exchange(port, &Bytes.from("GET /scoped HTTP/1.1\r\nHost: x\r\n\r\n"));"#;
+    let five_hundred = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n|\n";
+    assert_eq!(
+        reference(&source.replace("SCOPED", scoped)),
+        expected.replace("SCOPED", five_hundred),
+        "reference"
+    );
+    let source = source.replace("SCOPED", "");
+    let expected = expected.replace("SCOPED", "");
     let (_scratch, binary) = build(&source);
     let run = Command::new(&binary).stdin(Stdio::null()).output().unwrap();
     assert_eq!(run.status.code(), Some(0));
     assert_eq!(String::from_utf8(run.stdout).unwrap(), expected, "native");
     let stderr = String::from_utf8(run.stderr).unwrap();
-    assert_eq!(stderr.matches("panic: recovered in an isolated task").count(), 2, "{stderr}");
+    assert_eq!(stderr.matches("panic: recovered in an isolated task").count(), 3, "{stderr}");
 }
 
 /// Isolation is std-internal: a program cannot make its own tasks survive

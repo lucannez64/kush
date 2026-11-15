@@ -205,8 +205,7 @@ impl Executable {
             .write_all(&output_bytes)
             .map_err(|e| Diagnostic::new(Span::default(), format!("output failed: {e}")))?;
         let result = result?;
-        // A recovered panic leaks what its task owned (WEB-PANIC-500).
-        if heap.len() != 0 && host.recovered_panics.load(Ordering::Relaxed) == 0 {
+        if heap.len() != 0 {
             return Err(Diagnostic::new(
                 Span::default(),
                 "internal ownership error: live owning allocations after normal task exit",
@@ -518,8 +517,8 @@ impl Executable {
                     }
                 }
                 Err(error) => match evaluator.task.as_ref().and_then(|task| task.isolated) {
-                    // An isolated task's panic ends only the task; what it
-                    // owned stays in the heap, as natively.
+                    // An isolated task's panic ends only the task; its
+                    // frames were unwound on the way (PANIC-UNWIND-EVAL).
                     Some(mark) if error.message.starts_with("panic") => {
                         evaluator.host.recovered_panics.fetch_add(1, Ordering::Relaxed);
                         TaskOutcome::Completed(Value::Scalar(mark), false)
@@ -6399,6 +6398,49 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
         Ok(())
     }
+    /// Whether `error` is a panic that unwinds: it is a panic, and a catch
+    /// boundary (an isolated task) will stop it (docs/panic-unwinding.md).
+    fn unwinding(&self, error: &Diagnostic) -> bool {
+        error.message.starts_with("panic")
+            && self.task.as_ref().is_some_and(|task| task.isolated.is_some())
+    }
+    /// PANIC-UNWIND-EVAL: a panic that a boundary will stop leaves `frame`
+    /// like a return, dropping what it owns. Out of line: the call path is
+    /// deeply recursive, and its frame size limits the evaluator's depth.
+    #[inline(never)]
+    fn unwind_frame(&mut self, error: Diagnostic, frame: &mut Frame) -> Diagnostic {
+        if self.unwinding(&error)
+            && let Err(cleanup) = self.cleanup(frame)
+        {
+            return cleanup;
+        }
+        error
+    }
+    /// `Task.scope`: run the body, then join every child. A body that
+    /// returns `Err`, or a panic unwinding out of it, first cancels the
+    /// children. Out of line, to keep `expr`'s frame small.
+    #[inline(never)]
+    fn task_scope(&mut self, callable: Value, failure: Option<ResultShape>) -> Result<Value> {
+        self.task_comm()?.scope_begin()?;
+        let result = self.call_value(callable, vec![]);
+        let cancel = match (&result, failure) {
+            (Ok(Value::Enum { tag, .. }), Some(shape)) => *tag == shape.err_tag,
+            (Err(error), _) => self.unwinding(error),
+            _ => false,
+        };
+        if cancel {
+            self.task_comm()?.cancel_scope()?;
+        }
+        let end = self.task_scope_end();
+        match (result, end) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(value), Err(error)) => {
+                self.drop_value(value)?;
+                Err(error)
+            }
+        }
+    }
     fn cleanup(&mut self, frame: &mut Frame) -> Result<()> {
         for id in (0..frame.resources.len()).rev() {
             self.drop_resource(Some(id), frame)?;
@@ -6686,7 +6728,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
         let result = self.block(&f.body, &mut frame);
         self.depth -= 1;
-        let flow = result?;
+        let flow = match result {
+            Ok(flow) => flow,
+            Err(error) => return Err(self.unwind_frame(error, &mut frame)),
+        };
         self.cleanup(&mut frame)?;
         Ok(match flow {
             Flow::Value(v) | Flow::Return(v) => {
@@ -7760,22 +7805,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             ExprKind::TaskScope { body, failure, .. } => {
                 let callable = value!(self.expr(body, frame));
                 self.consume(body, frame);
-                self.task_comm()?.scope_begin()?;
-                let result = self.call_value(callable, vec![]);
-                if let (Ok(Value::Enum { tag, .. }), Some(shape)) = (&result, *failure)
-                    && *tag == shape.err_tag
-                {
-                    self.task_comm()?.cancel_scope()?;
-                }
-                let end = self.task_scope_end();
-                match (result, end) {
-                    (Ok(value), Ok(())) => value,
-                    (Err(error), _) => return Err(error),
-                    (Ok(value), Err(error)) => {
-                        self.drop_value(value)?;
-                        return Err(error);
-                    }
-                }
+                self.task_scope(callable, *failure)?
             }
             ExprKind::TaskYield => {
                 let cancelled = self.task_comm()?.yield_now()?;
