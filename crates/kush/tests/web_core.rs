@@ -181,7 +181,7 @@ fn a_responder_is_answered_exactly_once() {
         ),
         (
             "fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
-                 let forged = web.Responder { fd: 1, head_only: false, keep_alive: true, timeout_ms: 0 };
+                 let forged = web.Responder { fd: 1, head_only: false, keep_alive: true, chunked: true, timeout_ms: 0 };
                  forged.status(200); res.status(200)
              }",
             "private",

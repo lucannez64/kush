@@ -5160,8 +5160,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                 } else {
                     let deadline = (timeout >= 0).then(|| Instant::now() + Duration::from_millis(timeout as u64));
+                    let shielded = events & 256 != 0;
                     loop {
-                        if self.task_comm()?.check_cancel() {
+                        if !shielded && self.task_comm()?.check_cancel() {
                             break (125, 0); // ECANCELED
                         }
                         let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));

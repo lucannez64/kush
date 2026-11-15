@@ -3026,7 +3026,7 @@ struct KushTask {
        duplicate of the descriptor, registered one-shot with epoll (-1 for a
        pure timer); wait_deadline is in monotonic ms (-1 for none);
        wait_result is the events, 0 on timeout, -1 when cancelled. */
-    int waiting_io, wait_fd;
+    int waiting_io, wait_fd, wait_shielded;
     int64_t wait_deadline, wait_result;
     KushTask *wait_previous, *wait_next;
 };
@@ -3443,7 +3443,7 @@ static void kush_reactor_poll(int block) {
 }
 static void kush_task_request_cancel(KushTask *t) {
     t->cancelled = 1;
-    if (t->waiting_io) kush_reactor_wake(t, -1);
+    if (t->waiting_io && !t->wait_shielded) kush_reactor_wake(t, -1);
 }
 static void kush_scheduler(void) {
     for (;;) {
@@ -3672,13 +3672,17 @@ static void kush_task_finish(void) {
 /* Wait until `fd` has one of `events` (poll(2) bits) or `timeout_ms` passes
    (-1 forever; fd -1 waits for the timeout alone), letting the other tasks
    run meanwhile: the events, 0 on timeout. ECANCELED (125) when the task is
-   or becomes cancelled. Thread bodies cannot suspend, so this always runs on
+   or becomes cancelled, unless `events` has KUSH_WAIT_SHIELD (256): a
+   shielded wait (finishing a response during a graceful stop) runs to its
+   event or timeout. Thread bodies cannot suspend, so this always runs on
    the main thread's scheduler; `main` itself may wait too. */
 int64_t kush_sys_wait_ready(int64_t fd, int64_t events, int64_t timeout_ms, int64_t *out) {
     if (timeout_ms < -1 || timeout_ms > INT32_MAX) return EINVAL;
     kush_task_init();
     KushTask *t = kush_current;
-    if (t->cancelled) return ECANCELED;
+    int shielded = (events & 256) != 0;
+    if (t->cancelled && !shielded) return ECANCELED;
+    t->wait_shielded = shielded;
     t->wait_fd = -1;
     if (fd >= 0) {
         if (kush_epoll < 0) {

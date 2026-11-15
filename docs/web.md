@@ -183,6 +183,32 @@ The server runs one task per connection [WEB-SERVER]: accept, parse,
 route, answer, keep-alive with an idle deadline, a handler panic answered as
 500, graceful stop. Idle connections cost a suspended task, not a thread.
 
+Implemented as `web.serve(listener, handler, config)` in
+[`std.web`](../crates/kush/std/web.kush) (2026-11-15). Each connection's
+task reads a head with `http1.parse_head` (growing its buffer up to the
+head limit), reads a `Content-Length` or chunked body, builds the
+`Request`, calls the handler with a `Responder`, and keeps the connection
+for the next request unless either side asked to close; bytes a client
+pipelined after a request stay in the buffer. A malformed or oversized
+request is answered by the server with its status (400, 408, 413, 414, 417,
+431, 501, 505) and `Connection: close`, without calling the handler.
+`Config` holds the limits, the idle deadline (waiting for the next
+request, 5 s) and the request deadline (the rest of a started request, and
+each response, 30 s).
+
+Stopping is cancelling the task that runs `serve`: it accepts no more
+connections and closes the listener, and its connection tasks are
+cancelled. Waiting for a new request then ends at once, so idle
+connections close, but the rest of a started request and every response
+use shielded waits (`sys.WAIT_SHIELD`, [async.md](async.md)), so they
+finish within the request deadline. A handler's own waits do see the
+cancellation. `serve` then returns `Ok(())`.
+
+Not yet: a handler that panics still aborts the process, since a panic
+cannot be caught (WEB-PANIC-500). An HTTP/1.0 client gets a streamed body
+without chunking, ended by closing the connection. Tests:
+`crates/kush/tests/web_server.rs`.
+
 ### One reactor per thread [WEB-MULTICORE]
 
 Thread bodies may capture moved values and borrowed slice views only, and

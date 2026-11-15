@@ -6,12 +6,16 @@ module std.web;
 // `text`, `json`, `status`, `reply` or `stream` (then `finish`) on every
 // path, so a handler that forgets to answer on an error branch, or answers
 // twice, does not compile. `html` comes with the `Html` type (WEB-HTML).
-// The server loop (WEB-SERVER) builds the Request from `std.http1` and
-// owns the connection; the Responder writes to it on the task reactor.
+// `serve` (WEB-SERVER) runs one task per connection on the task reactor:
+// it reads and parses each request with `std.http1`, keeps the connection
+// alive, and stops gracefully when its task is cancelled.
 
 use std.http1;
 use std.http1.Field;
+use std.http1.Body;
+use std.http1.Framing;
 use std.http1.Method;
+use std.http1.Parse;
 use std.net;
 use std.option.Option;
 use std.result.Result;
@@ -29,6 +33,8 @@ pub struct Request {
     fields: Vec<Field>,
     /// Whether the connection may carry another request afterwards.
     pub keep_alive: Bool,
+    /// 0 for HTTP/1.0, 1 for HTTP/1.1.
+    minor: i64,
     pub body: Bytes,
 }
 
@@ -50,6 +56,7 @@ pub fn request(buffer: &Bytes, head: http1.Head, body: Bytes) -> Request ! {allo
                 target_to: target_end,
                 fields: fields,
                 keep_alive: keep_alive,
+                minor: minor,
                 body: body,
             }
         },
@@ -73,6 +80,7 @@ pub fn request_for(method: Method, target: &Bytes, body: Bytes) -> Request ! {al
         target_to: n,
         fields: Vec.new(),
         keep_alive: true,
+        minor: 1,
         body: body,
     }
 }
@@ -194,6 +202,9 @@ pub struct Responder {
     /// A HEAD request: the head is sent, the body is not.
     head_only: Bool,
     keep_alive: Bool,
+    /// HTTP/1.1: a stream may use chunked transfer coding. An HTTP/1.0
+    /// client gets the body as is, ended by closing the connection.
+    chunked: Bool,
     timeout_ms: i64,
 }
 
@@ -202,6 +213,8 @@ pub struct Responder {
 pub struct Stream {
     fd: i64,
     head_only: Bool,
+    /// Data goes out as is (HTTP/1.0), not in chunks.
+    raw: Bool,
     /// A write failed; the rest is skipped and the server drops the
     /// connection.
     failed: Bool,
@@ -215,6 +228,7 @@ fn responder(conn: &net.Conn, request: &Request, timeout_ms: i64) -> Responder !
         fd: net.descriptor(conn),
         head_only: head_only,
         keep_alive: request.keep_alive,
+        chunked: request.minor == 1,
         timeout_ms: timeout_ms,
     }
 }
@@ -232,7 +246,9 @@ fn send(fd: i64, data: &Bytes, timeout_ms: i64) -> Bool ! {io, suspend} {
             },
             Result.Err(code) => {
                 if code == sys.EAGAIN() {
-                    match sys.wait_ready(fd, sys.POLLOUT(), time.remaining_ms(deadline)) {
+                    // Shielded: a response is finished even while the
+                    // server stops (within its timeout).
+                    match sys.wait_ready(fd, sys.POLLOUT() | sys.WAIT_SHIELD(), time.remaining_ms(deadline)) {
                         Result.Ok(0) => {
                             if time.remaining_ms(deadline) == 0 { return false; }
                         },
@@ -280,8 +296,9 @@ fn bodiless(status: i64) -> Bool ! {} {
 }
 
 /// The response head: status line, Content-Type unless `content_type` is
-/// empty, Content-Length (or chunked when `length` is negative), and
-/// Connection: close when the connection ends after it.
+/// empty, Content-Length (chunked when `length` is -1, neither when -2:
+/// the body ends with the connection), and Connection: close when the
+/// connection ends after it.
 fn head(status: i64, content_type: &Bytes, length: i64, keep_alive: Bool) -> Bytes ! {alloc, panic} {
     let mut out = http1.status_line(Bytes.with_capacity(128), status);
     if Bytes.len(content_type) > 0 {
@@ -299,7 +316,7 @@ fn head(status: i64, content_type: &Bytes, length: i64, keep_alive: Bool) -> Byt
     if !bodiless(status) {
         if length >= 0 {
             out = http1.content_length(out, length);
-        } else {
+        } else if length == -1 {
             let chunked = Bytes.from("Transfer-Encoding: chunked\r\n");
             out = append(out, &chunked);
         }
@@ -341,12 +358,14 @@ impl Responder {
     /// it with `Stream.finish`. For HEAD only the head is sent.
     pub fn stream(self: Self, status: i64, content_type: &Bytes) -> Stream ! {io, alloc, panic, suspend} {
         match self {
-            Responder { fd, head_only, keep_alive, timeout_ms } => {
-                let bytes = head(status, content_type, -1, keep_alive);
+            Responder { fd, head_only, keep_alive, chunked, timeout_ms } => {
+                let length = if chunked { -1 } else { -2 };
+                let bytes = head(status, content_type, length, keep_alive && chunked);
                 let sent = send(fd, &bytes, timeout_ms);
                 Stream {
                     fd: fd,
                     head_only: head_only || bodiless(status),
+                    raw: !chunked,
                     failed: !sent,
                     timeout_ms: timeout_ms,
                 }
@@ -356,7 +375,7 @@ impl Responder {
 
     fn complete(self: Self, status: i64, content_type: &Bytes, body: &Bytes) -> Unit ! {io, alloc, panic, suspend} {
         match self {
-            Responder { fd, head_only, keep_alive, timeout_ms } => {
+            Responder { fd, head_only, keep_alive, chunked, timeout_ms } => {
                 let mut bytes = head(status, content_type, Bytes.len(body), keep_alive);
                 if !head_only && !bodiless(status) { bytes = append(bytes, body); }
                 let _ = send(fd, &bytes, timeout_ms);
@@ -369,13 +388,17 @@ impl Stream {
     /// Send `data` as one chunk (empty data sends nothing).
     pub fn send(self: Self, data: &Bytes) -> Stream ! {io, alloc, panic, suspend} {
         match self {
-            Stream { fd, head_only, failed, timeout_ms } => {
+            Stream { fd, head_only, raw, failed, timeout_ms } => {
                 let mut failed = failed;
                 if !failed && !head_only && Bytes.len(data) > 0 {
-                    let bytes = http1.chunk(Bytes.with_capacity(Int.saturating_add::<i64>(Bytes.len(data), 32)), data);
-                    failed = !send(fd, &bytes, timeout_ms);
+                    if raw {
+                        failed = !send(fd, data, timeout_ms);
+                    } else {
+                        let bytes = http1.chunk(Bytes.with_capacity(Int.saturating_add::<i64>(Bytes.len(data), 32)), data);
+                        failed = !send(fd, &bytes, timeout_ms);
+                    }
                 }
-                Stream { fd: fd, head_only: head_only, failed: failed, timeout_ms: timeout_ms }
+                Stream { fd: fd, head_only: head_only, raw: raw, failed: failed, timeout_ms: timeout_ms }
             },
         }
     }
@@ -383,8 +406,8 @@ impl Stream {
     /// End the body.
     pub fn finish(self: Self) -> Unit ! {io, alloc, panic, suspend} {
         match self {
-            Stream { fd, head_only, failed, timeout_ms } => {
-                if !failed && !head_only {
+            Stream { fd, head_only, raw, failed, timeout_ms } => {
+                if !failed && !head_only && !raw {
                     let bytes = http1.last_chunk(Bytes.with_capacity(8));
                     let _ = send(fd, &bytes, timeout_ms);
                 }
@@ -454,5 +477,254 @@ pub fn capture(request: &Request, handler: fn(&Request, Responder) -> Unit ! {io
             let _ = net.close(client);
             return Result.Ok(out);
         }
+    }
+}
+
+// ---- The server (WEB-SERVER) ----------------------------------------------
+
+/// Server settings.
+pub struct Config {
+    pub limits: http1.Limits,
+    /// How long a kept-alive connection may wait for its next request.
+    pub idle_ms: i64,
+    /// How long the rest of a started request may take to arrive, and how
+    /// long each response may take to send.
+    pub request_ms: i64,
+}
+
+/// `http1.limits()`, 5 s idle, 30 s per request and response.
+pub fn config() -> Config ! {} {
+    Config { limits: http1.limits(), idle_ms: 5000, request_ms: 30000 }
+}
+
+/// What reading a request produced.
+enum Got {
+    /// The buffer holding the head, and the parsed head.
+    Head(Bytes, http1.Head),
+    /// The buffer, the decoded body, and the bytes the request used.
+    Body(Bytes, Bytes, i64),
+    /// Close the connection without an answer (peer gone, idle timeout,
+    /// stopping).
+    Close,
+    /// Answer with this status, then close.
+    Refuse(i64),
+}
+
+fn min(a: i64, b: i64) -> i64 ! {} { if a < b { a } else { b } }
+
+/// Read more into `buffer`, growing it up to `cap` bytes, within
+/// `timeout_ms`. A shielded read is not interrupted by cancellation. The
+/// buffer comes back longer, or unchanged when the peer closed; on failure
+/// (ETIMEDOUT 110, ECANCELED 125, EFBIG 27 at `cap`, ...) it is freed.
+fn receive(fd: i64, buffer: Bytes, cap: i64, timeout_ms: i64, shield: Bool) -> Result<Bytes, i64> ! {io, alloc, panic, suspend} {
+    let mut buffer = buffer;
+    let length = Bytes.len(&buffer);
+    if length >= Bytes.capacity(&buffer) {
+        if length >= cap { return Result.Err(27); }
+        let wanted = min(Int.saturating_add::<i64>(Int.saturating_mul::<i64>(length, 2), 4096), cap);
+        let mut bigger = Bytes.with_capacity(wanted);
+        bigger = append(bigger, &buffer);
+        drop(buffer);
+        buffer = bigger;
+    }
+    let spare = Int.wrapping_sub::<i64>(Bytes.capacity(&buffer), Bytes.len(&buffer));
+    let deadline = time.deadline_ms(timeout_ms);
+    let events = if shield { sys.POLLIN() | sys.WAIT_SHIELD() } else { sys.POLLIN() };
+    loop {
+        match sys.wait_ready(fd, events, time.remaining_ms(deadline)) {
+            Result.Ok(0) => {
+                if time.remaining_ms(deadline) == 0 { return Result.Err(110); }
+            },
+            Result.Ok(_) => { return sys.read(fd, buffer, spare, -1); },
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+        }
+    }
+}
+
+/// Read until a whole request head is in `buffer`. Waiting for the first
+/// byte uses the idle deadline and can be cancelled; the rest of a started
+/// head is shielded and uses the request deadline.
+fn read_head(fd: i64, buffer: Bytes, config: &Config) -> Got ! {io, alloc, panic, suspend} {
+    let mut buffer = buffer;
+    let cap = Int.saturating_add::<i64>(config.limits.head, 1);
+    loop {
+        match http1.parse_head(&buffer, &config.limits) {
+            Parse.Complete(head) => { return Got.Head(buffer, head); },
+            Parse.Reject(status) => { return Got.Refuse(status); },
+            Parse.Incomplete => {},
+        }
+        let before = Bytes.len(&buffer);
+        let idle = before == 0;
+        let timeout = if idle { config.idle_ms } else { config.request_ms };
+        match receive(fd, buffer, cap, timeout, !idle) {
+            Result.Ok(next) => {
+                buffer = next;
+                if Bytes.len(&buffer) == before { return Got.Close; }
+            },
+            Result.Err(code) => {
+                return if code == 110 && !idle { Got.Refuse(408) }
+                    else if code == 27 { Got.Refuse(431) }
+                    else { Got.Close };
+            },
+        }
+    }
+}
+
+/// Read the body `head` declares (shielded, within the request deadline):
+/// the buffer, the decoded body, and the bytes the request used.
+fn read_body(fd: i64, buffer: Bytes, head: &http1.Head, config: &Config) -> Got ! {io, alloc, panic, suspend} {
+    let mut buffer = buffer;
+    let start = head.size;
+    match head.framing {
+        Framing.Empty => Got.Body(buffer, Bytes.with_capacity(0), start),
+        Framing.Length(length) => {
+            let end = Int.saturating_add::<i64>(start, length);
+            while Bytes.len(&buffer) < end {
+                let before = Bytes.len(&buffer);
+                match receive(fd, buffer, end, config.request_ms, true) {
+                    Result.Ok(next) => {
+                        buffer = next;
+                        if Bytes.len(&buffer) == before { return Got.Close; }
+                    },
+                    Result.Err(code) => {
+                        return if code == 110 { Got.Refuse(408) } else { Got.Close };
+                    },
+                }
+            }
+            let body = slice(&buffer, start, end);
+            Got.Body(buffer, body, end)
+        },
+        Framing.Chunked => {
+            // Chunk framing adds a little to the body; allow for it.
+            let cap = Int.saturating_add::<i64>(
+                Int.saturating_add::<i64>(start, Int.saturating_mul::<i64>(config.limits.body, 2)),
+                config.limits.head,
+            );
+            loop {
+                match http1.chunked_size(&buffer, start, &config.limits) {
+                    Body.Complete(length, next) => {
+                        let body = http1.chunked_copy(&buffer, start, Bytes.with_capacity(length));
+                        return Got.Body(buffer, body, next);
+                    },
+                    Body.Reject(status) => { return Got.Refuse(status); },
+                    Body.Incomplete => {},
+                }
+                let before = Bytes.len(&buffer);
+                match receive(fd, buffer, cap, config.request_ms, true) {
+                    Result.Ok(next) => {
+                        buffer = next;
+                        if Bytes.len(&buffer) == before { return Got.Close; }
+                    },
+                    Result.Err(code) => {
+                        return if code == 110 { Got.Refuse(408) }
+                            else if code == 27 { Got.Refuse(413) }
+                            else { Got.Close };
+                    },
+                }
+            }
+        },
+    }
+}
+
+/// `buffer` without its first `from` bytes: what a pipelining client sent
+/// after the request just answered.
+fn rest(buffer: Bytes, from: i64) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(Bytes.capacity(&buffer));
+    let n = Bytes.len(&buffer);
+    let mut i = if from > 0 { from } else { 0 };
+    while i < n {
+        out = Bytes.push(out, byte(&buffer, i));
+        i = Int.wrapping_add::<i64>(i, 1);
+    }
+    out
+}
+
+/// Answer `status` with an empty body and Connection: close.
+fn refuse(fd: i64, status: i64, timeout_ms: i64) -> Unit ! {io, alloc, panic, suspend} {
+    let none = Bytes.with_capacity(0);
+    let bytes = head(status, &none, 0, false);
+    let _ = send(fd, &bytes, timeout_ms);
+}
+
+/// Serve the requests of one connection until it closes, it is not kept
+/// alive, or the server stops.
+fn connection(conn: net.Conn, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}, config: Config) -> Unit ! {io, alloc, panic, suspend} {
+    let fd = net.descriptor(&conn);
+    let mut buffer = Bytes.with_capacity(4096);
+    loop {
+        let (bytes, head) = match read_head(fd, buffer, &config) {
+            Got.Head(bytes, head) => (bytes, head),
+            Got.Refuse(status) => {
+                refuse(fd, status, config.request_ms);
+                let _ = net.close(conn);
+                return ();
+            },
+            _ => {
+                let _ = net.close(conn);
+                return ();
+            },
+        };
+        let (bytes, body, used) = match read_body(fd, bytes, &head, &config) {
+            Got.Body(bytes, body, used) => (bytes, body, used),
+            Got.Refuse(status) => {
+                refuse(fd, status, config.request_ms);
+                let _ = net.close(conn);
+                return ();
+            },
+            _ => {
+                let _ = net.close(conn);
+                return ();
+            },
+        };
+        let req = request(&bytes, head, body);
+        let keep = req.keep_alive;
+        handler(&req, responder(&conn, &req, config.request_ms));
+        drop(req);
+        buffer = rest(bytes, used);
+        if !keep || Task.check_cancel() {
+            let _ = net.close(conn);
+            return ();
+        }
+    }
+}
+
+/// Whether an accept error is worth retrying (out of descriptors or
+/// memory, a protocol error on one connection).
+fn transient(code: i64) -> Bool ! {} {
+    code == 23 || code == 24 || code == 12 || code == 105 || code == 71
+}
+
+/// Serve `listener` until the calling task is cancelled: one task per
+/// connection, running `handler` for each request on it, with keep-alive
+/// and pipelining. Malformed or oversized requests are answered with their
+/// 4xx status by the server, without calling the handler. On cancellation
+/// the server stops gracefully: it accepts no more connections, closes
+/// idle ones, and lets responses being written finish (shielded waits,
+/// within `request_ms`); a handler's own waits see the cancellation.
+/// Returns Ok(()) after such a stop, or the accept error that ended it.
+pub fn serve(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}, config: Config) -> Result<Unit, i64> ! {io, alloc, panic, suspend} {
+    let ended = Task.scope(fn() -> Result<Unit, i64> ! {io, alloc, panic, suspend} {
+        loop {
+            match net.accept(&listener, 0) {
+                Result.Ok(conn) => {
+                    Task.spawn(fn() -> Unit ! {io, alloc, panic, suspend} { connection(conn, handler, config) });
+                },
+                Result.Err(code) => {
+                    if code == sys.ECANCELED() || !transient(code) {
+                        let _ = net.close_listener(listener);
+                        // An Err result makes the scope cancel the
+                        // connection tasks before joining them.
+                        return Result.Err(code);
+                    }
+                    let _ = time.wait_ms(10);
+                },
+            }
+        }
+    });
+    match ended {
+        Result.Err(code) => if code == sys.ECANCELED() { Result.Ok(()) } else { Result.Err(code) },
+        Result.Ok(_) => Result.Ok(()),
     }
 }

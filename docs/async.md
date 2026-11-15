@@ -193,7 +193,10 @@ switches, so a task that keeps yielding cannot starve the waiting ones.
 `main` may wait too, without a `Task.scope`. `Task.cancel` on a waiting
 task wakes it, and the wait returns `ECANCELED` (125), as it does when the
 task was already cancelled; this is the cooperative cancellation above,
-delivered at the wait. Thread bodies cannot suspend, so the reactor only
+delivered at the wait. A wait with `sys.WAIT_SHIELD` in its events is
+shielded: cancellation neither refuses nor interrupts it, so it runs to its
+event or deadline; `std.web` finishes responses that way during a graceful
+stop. Thread bodies cannot suspend, so the reactor only
 runs on the main thread (one reactor per thread is WEB-MULTICORE).
 
 On it are `std.net`'s `Listener` and `Conn` (`accept`, `connect`, `read`,

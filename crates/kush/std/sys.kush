@@ -147,13 +147,16 @@ pub foreign "kush_sys_local_port" fn local_port(fd: i64) -> Result<i64, i64> ! {
 // The task reactor (WEB-REACTOR).
 
 pub fn ECANCELED() -> i64 ! {} { 125 }
+pub fn WAIT_SHIELD() -> i64 ! {} { 256 }
 
 /// Wait until `fd` has one of `events` (POLLIN, POLLOUT) or `timeout_ms`
 /// passes (-1 forever; with fd -1 only the timeout counts): the events that
 /// happened, 0 on timeout. Unlike `poll` it suspends only the calling task:
 /// the scheduler runs the others and sleeps in epoll_wait when none is
 /// ready. ECANCELED (125) when the task is, or while waiting becomes,
-/// cancelled.
+/// cancelled, unless `events` includes WAIT_SHIELD: a shielded wait runs to
+/// its event or timeout (std.web finishes responses that way when a server
+/// stops).
 pub foreign "kush_sys_wait_ready" fn wait_ready(fd: i64, events: i64, timeout_ms: i64) -> Result<i64, i64> ! {io, suspend};
 /// Start connecting a new nonblocking socket to address `index` of a
 /// resolved list (ENOENT past its end); wait for POLLOUT, then call
