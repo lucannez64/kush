@@ -5016,10 +5016,21 @@
       "deps": [
         "THREAD-SCOPE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Thread bodies cannot suspend in v1: the task scheduler state is per process; make it per thread so a thread can run Task.scope.",
-      "commit": null,
-      "log": []
+      "commit": "edfa237",
+      "log": [
+        {
+          "time": "2026-11-16 15:46:00",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-16 15:57:21",
+          "who": "agent",
+          "text": "done edfa237"
+        }
+      ]
     },
     {
       "id": "STD-SYS-FOREIGN",
