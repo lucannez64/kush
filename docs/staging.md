@@ -1,6 +1,6 @@
 # Typed staging
 
-Status: design proposal for STAGING-DESIGN. Not implemented. Scope:
+Status: design approved by the user, 2026-11-17. Implementation in progress. Scope:
 STAGING-DESIGN, STAGING and STAGING-RUNTIME, independently of the web track.
 The Game Boy specializer/JIT and format generators remain consumers of this
 facility, with their own completion criteria.
@@ -187,7 +187,7 @@ A parser-only feature or a scalar-only prototype leaves the parent node open.
 Benchmark compile latency, generated code size and steady-state execution
 separately. Record restrictions and supported targets in this document.
 
-## Design decisions that need review
+## Approved design decisions
 
 - Callable-first `Code<F>` and explicit lift instead of implicit capture.
 - `quote fn`, `splice(...)`, `lift(...)` and `#[staged]` declaration spelling.
@@ -195,6 +195,26 @@ separately. Record restrictions and supported targets in this document.
 - Compile-time sandbox and resource budgets.
 - Runtime owner-bound callables and Linux x86-64 as the initial JIT target.
 
-The existing STAGING-DESIGN plan node requires design approval before STAGING.
-This proposal makes that approval concrete; no implementation status is
-claimed by this document.
+The user approved this design and autonomous implementation on 2026-11-17.
+Approval covers routine implementation decisions; completion still requires
+the acceptance criteria above.
+
+## Implementation status
+
+The parser recognizes quotation syntax, splice/lift operands and staged
+function initializers structurally, retaining their original spans. These
+forms use private AST call markers that cannot be written as source names;
+ordinary AST visitors still traverse their operands. No source-text rewrite
+or generated-source parser is involved.
+
+`resolve_staged_program` resolves quoted templates with stage-indexed local
+binding identities. It rejects implicit local captures, quoted locals used
+inside an earlier-stage operand, and generated-function parameters used by
+their generator initializer. Explicit lift/splice operands resolve one stage
+earlier; module references retain the existing visibility checks. This
+entry point resolves names only: it does not certify executable types,
+ownership, generated code or safe compilation.
+
+Ordinary executable checking deliberately rejects unelaborated quotations.
+Code typing, generator evaluation, AOT materialization and runtime compilation
+remain unfinished. STAGING and STAGING-RUNTIME remain open in the plan.

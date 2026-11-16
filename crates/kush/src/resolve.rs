@@ -65,6 +65,9 @@ pub struct Reference {
 #[derive(Debug, Default)]
 pub struct Resolution {
     pub bindings: Vec<Binding>,
+    /// Lexical stage of each runtime local/parameter, keyed by its resolved
+    /// binding identity. Type/generic and module declarations are stage-neutral.
+    pub binding_stages: BTreeMap<BindingId, usize>,
     pub references: Vec<Reference>,
     pub declarations: BTreeMap<usize, BindingId>,
     pub dependencies: BTreeMap<BindingId, BTreeSet<BindingId>>,
@@ -170,6 +173,21 @@ pub fn resolve_program(program: &Program) -> Result<Resolution> {
         })
         .collect::<Vec<_>>();
     Resolver::new().run(&program.module.items, &units)
+}
+/// Resolve staging templates with stage-indexed local binding identities.
+/// This is a front-end building block, not executable type checking. The
+/// ordinary entry points continue to reject unelaborated staging forms.
+pub fn resolve_staged_program(program: &Program) -> Result<Resolution> {
+    let units = program.units.iter().map(|u| UnitInfo {
+        items: u.items.clone(), imports: &u.imports,
+    }).collect::<Vec<_>>();
+    let mut resolver = Resolver::new();
+    resolver.staged = true;
+    for name in ["Code", "Code.clone", "Code.compile"] {
+        let id = resolver.add(name.into(), BindingKind::Builtin, Span::default(), None);
+        resolver.builtins.insert(name.into(), id);
+    }
+    resolver.run(&program.module.items, &units)
 }
 struct UnitInfo<'a> {
     items: std::ops::Range<usize>,
@@ -462,6 +480,8 @@ struct Resolver {
     /// declaration, so `Self { .. }` in its methods builds that record.
     self_record: Option<BindingId>,
     depth: usize,
+    stage: usize,
+    staged: bool,
     /// Names of declared associated constants. `Type.NAME` is treated as a
     /// projection only when `NAME` is one of these, so qualified constructors
     /// such as `Option.Some` keep their ordinary value meaning.
@@ -482,6 +502,8 @@ impl Resolver {
             owner: None,
             self_record: None,
             depth: 0,
+            stage: 0,
+            staged: false,
             associated_const_names: BTreeSet::new(),
             associated_type_names: BTreeSet::new(),
         };
@@ -537,6 +559,9 @@ impl Resolver {
             return Err(Diagnostic::new(span, format!("duplicate binder '{name}'")));
         }
         let id = self.add(name.to_owned(), kind, span, self.owner);
+        if matches!(kind, BindingKind::Local | BindingKind::Parameter) {
+            self.result.binding_stages.insert(id, self.stage);
+        }
         self.scopes
             .last_mut()
             .expect("internal scope")
@@ -586,9 +611,14 @@ impl Resolver {
             path
         };
         let name = path.join(".");
+        if name.starts_with("$stage_") {
+            return Err(Diagnostic::new(span,
+                "staging form has not been elaborated; typed staging is not yet implemented"));
+        }
         if path.len() == 1 {
             for scope in self.scopes.iter().rev() {
                 if let Some(id) = scope.get(&name) {
+                    self.check_stage(*id, span)?;
                     return Ok(*id);
                 }
             }
@@ -1063,18 +1093,27 @@ impl Resolver {
                 GenericContext::Executable
             },
         )?;
+        let staged_definition = f.body.as_ref().and_then(|b| b.tail.as_deref())
+            .and_then(Expr::staging).is_some_and(|(form, _)| form == crate::ast::StagingForm::Definition);
         for p in &f.parameters {
             self.ty(&p.ty)?;
             if let Some(length) = &p.min_length {
                 self.expr(length)?;
             }
-            self.local(&p.name, BindingKind::Parameter, p.span, false)?;
+            let id = self.local(&p.name, BindingKind::Parameter, p.span, false)?;
+            if staged_definition { self.result.binding_stages.insert(id, self.stage + 1); }
         }
         self.ty(&f.result)?;
         for effect in &f.effects {
             self.ty(effect)?;
         }
         // Postconditions see the parameters, `result`, and their binders.
+        // A staged declaration's parameters and postconditions describe the
+        // generated function, while its initializer runs one stage earlier.
+        let signature_stage = self.stage;
+        if staged_definition {
+            self.stage += 1;
+        }
         for clause in &f.ensures {
             self.scoped(|r| {
                 r.local("result", BindingKind::Local, clause.result_span, true)?;
@@ -1086,6 +1125,7 @@ impl Resolver {
                 r.expr(&clause.body)
             })?;
         }
+        self.stage = signature_stage;
         if let Some(body) = &f.body {
             self.block(body)?;
         }
@@ -1468,8 +1508,35 @@ impl Resolver {
             }
         }
     }
+    fn check_stage(&self, id: BindingId, span: Span) -> Result<()> {
+        if let Some(stage) = self.result.binding_stages.get(&id)
+            && *stage != self.stage {
+            return Err(Diagnostic::new(span, format!(
+                "'{}' belongs to stage {}, but is used at stage {}; use explicit lift or splice instead of crossing a quotation boundary",
+                self.result.bindings[id].name, stage, self.stage)));
+        }
+        Ok(())
+    }
     fn expr(&mut self, expr: &Expr) -> Result<()> {
         self.nested(expr.span, |r| {
+            if let Some((form, operand)) = expr.staging() {
+                if !r.staged {
+                    return Err(Diagnostic::new(expr.span,
+                        "staging form has not been elaborated; typed staging is not yet implemented"));
+                }
+                let stage = r.stage;
+                match form {
+                    crate::ast::StagingForm::Quote => r.stage += 1,
+                    crate::ast::StagingForm::Splice | crate::ast::StagingForm::Lift => {
+                        if stage == 0 { return Err(Diagnostic::new(expr.span, "splice and lift require a surrounding quotation")); }
+                        r.stage -= 1;
+                    }
+                    crate::ast::StagingForm::Definition => {}
+                }
+                let result = r.expr(operand);
+                r.stage = stage;
+                return result;
+            }
             match &expr.kind {
                 // '_' as an expression is a proof hole for an erased argument.
                 ExprKind::Name(name) if name == "_" => {}
@@ -1590,6 +1657,7 @@ impl Resolver {
                     // `perform op(x)` through a capability binding in scope:
                     // the perform expression's span refers to that binding.
                     if let Some(id) = r.local_capability(operation) {
+                        r.check_stage(id, expr.span)?;
                         r.result.references.push(Reference {
                             span: expr.span,
                             binding: id,

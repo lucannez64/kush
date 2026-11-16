@@ -10,7 +10,7 @@ const LIMIT: usize = 128;
 
 /// `if`, `match`, `while`, `loop`, `handle` and plain blocks end in `}`.
 fn is_block_like(expr: &Expr) -> bool {
-    matches!(
+    expr.staging().is_some_and(|(form, _)| form == StagingForm::Quote) || matches!(
         expr.kind,
         ExprKind::If { .. }
             | ExprKind::Match { .. }
@@ -54,6 +54,7 @@ pub fn parse_at(source: &str, base: usize) -> Result<Module> {
         depth: 0,
         in_ensures: false,
         statement_expr: false,
+        stage: 0,
     }
     .module()
 }
@@ -68,6 +69,8 @@ struct Parser {
     in_ensures: bool,
     /// The next expression starts a statement (see `expr_inner`).
     statement_expr: bool,
+    /// Lexical quotation stage; splice/lift operands are parsed one stage out.
+    stage: usize,
 }
 impl Parser {
     fn current(&self) -> &Token {
@@ -275,7 +278,19 @@ impl Parser {
                 function.export = Some(symbol);
                 ItemKind::Function(function)
             } else if self.eat(&Kind::Fn) {
-                ItemKind::Function(self.function(total)?)
+                let staged = attributes.iter().any(|a| a.kind == "staged");
+                let function = self.function(total)?;
+                let definition = function.body.as_ref().and_then(|b| b.tail.as_deref())
+                    .and_then(Expr::staging).is_some_and(|(f, _)| f == StagingForm::Definition);
+                if staged != definition {
+                    return Err(Diagnostic::new(self.since(start),
+                        "a staged function requires '#[staged] fn name(...) -> T ! {...} = generator;"));
+                }
+                if staged && (total || attributes.iter().any(|a| a.kind == "staged" && a.argument.is_some())) {
+                    return Err(Diagnostic::new(self.since(start),
+                        "#[staged] takes no arguments and requires an executable function"));
+                }
+                ItemKind::Function(function)
             } else if self.eat(&Kind::Module) {
                 let path = self.path()?;
                 self.expect(&Kind::Semi, "';' after module path")?;
@@ -439,6 +454,10 @@ impl Parser {
                 }
                 return Err(self.error("expected a declaration; this frontend supports fn, const, struct, enum, type, module, and use"));
             };
+            if attributes.iter().any(|a| a.kind == "staged")
+                && !matches!(kind, ItemKind::Function(ref f) if !f.total && !f.constant && f.foreign.is_none() && f.export.is_none()) {
+                return Err(Diagnostic::new(self.since(start), "#[staged] applies only to an executable function definition"));
+            }
             items.push(Declaration {
                 public,
                 attributes,
@@ -910,6 +929,16 @@ impl Parser {
         let ensures = self.ensures_clauses()?;
         let body = if self.eat(&Kind::Semi) {
             None
+        } else if self.at(&Kind::Eq) {
+            let start = self.bump().span;
+            let generator = self.expr()?;
+            self.expect(&Kind::Semi, "';' after a staged generator")?;
+            let span = self.since(start);
+            Some(Block {
+                statements: Vec::new(),
+                tail: Some(Box::new(StagingForm::Definition.expression(generator, span))),
+                span,
+            })
         } else {
             Some(self.block()?)
         };
@@ -1985,6 +2014,28 @@ impl Parser {
     fn prefix(&mut self) -> Result<Expr> {
         let start = self.current().span;
         let kind = match self.current().kind.clone() {
+            Kind::Ident(word) if word == "quote" && self.tokens.get(self.pos + 1)
+                .is_some_and(|t| t.kind == Kind::Fn) => {
+                self.bump();
+                self.stage += 1;
+                let lambda = self.nested(|p| p.lambda());
+                self.stage -= 1;
+                let span = self.since(start);
+                let value = Node::new(ExprKind::Lambda(Box::new(lambda?)), span);
+                return Ok(StagingForm::Quote.expression(value, span));
+            }
+            Kind::Ident(word) if self.stage > 0 && (word == "splice" || word == "lift")
+                && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == Kind::LParen) => {
+                self.bump();
+                self.bump();
+                self.stage -= 1;
+                let value = self.expr();
+                self.stage += 1;
+                let value = value?;
+                self.expect(&Kind::RParen, "')' after a staging operand")?;
+                let form = if word == "splice" { StagingForm::Splice } else { StagingForm::Lift };
+                return Ok(form.expression(value, self.since(start)));
+            }
             // `handle` is contextual: `handle Name: ...` starts a handler,
             // anywhere else it is an ordinary identifier.
             Kind::Ident(word)
