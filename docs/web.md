@@ -351,3 +351,38 @@ sessions and HTML are in; `WEB` closes the track.
    a helper that wraps it.
 4. **No blocking v1 server.** The first server runs on the epoll reactor;
    WEB-NET, WEB-REACTOR and TASK-ID-REUSE are on the path to the demo.
+
+### URL decoding [WEB-URL]
+
+`std.url` decodes UTF-8 request text without I/O:
+
+- `percent_decode(&bytes, max_bytes)` decodes `%HH` once, leaving `+` literal.
+- `path_segments(&request.path(), max_bytes)` splits on literal `/` before
+  decoding. `/a%2Fb/` becomes `["", "a/b", ""]`: escaped slashes stay within
+  a segment, and leading, trailing and repeated empty segments are preserved.
+  Dot segments are not normalized.
+- `query(&request.query(), max_bytes)` splits on `&` and the first `=`, then
+  decodes names and values. `+` stays literal. For HTML form conventions in
+  a query string, use `form` instead.
+- `form(&request.body, max_bytes)` decodes
+  `application/x-www-form-urlencoded`, replacing literal `+` with space
+  while `%2B` remains `+`.
+
+Query and form results are ordered `url.Fields` values with `field_count()`,
+`name(i)` and `value(i)` methods. Paths return `url.Segments` with `segment_count()`
+and `segment(i)`. Accessors copy decoded bytes and panic on an invalid index.
+Both containers use one owned byte buffer with internal ranges. Duplicate
+names are retained; a bare name has an empty value; empty fields between
+ampersands are ignored.
+Neither query nor form input includes a leading `?`.
+
+Every entry point checks the encoded input length before allocating and
+returns `Result<_, url.Error>`: `TooLong`, `InvalidEscape`, or `InvalidUtf8`.
+A negative limit rejects even empty input. Decoded text must be valid UTF-8:
+truncated sequences, overlong encodings, surrogates, and code points above
+U+10FFFF are rejected, whether literal or percent-encoded. Encoded delimiters
+never become separators, and `%252F` becomes `%2F`, not `/`. UTF-8 validity
+alone does not make input trusted: NUL, control characters, dot segments and
+application-specific constraints still require validation by the caller.
+The functions do not parse full URLs, normalize paths, or produce HTML-safe
+text. Request's existing `path()` and `query()` accessors remain raw.

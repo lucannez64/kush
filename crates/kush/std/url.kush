@@ -1,0 +1,195 @@
+module std.url;
+
+use std.result.Result;
+
+/// Decoding errors; callers choose the HTTP status (normally 400, or 414
+/// for a request target that exceeds their limit).
+pub enum Error { TooLong, InvalidEscape, InvalidUtf8 }
+
+// Decoded byte ranges; neither record owns resources.
+struct Range { start: i64, end: i64 }
+struct Field { name: Range, value: Range }
+
+/// Decoded path segments in one owned buffer, accessed by copy.
+pub struct Segments { bytes: Bytes, entries: Vec<Range> }
+/// Ordered decoded fields in one owned buffer, accessed by copy.
+/// Duplicate names and empty values are kept.
+pub struct Fields { bytes: Bytes, entries: Vec<Field> }
+
+fn append(buffer: Bytes, part: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut buffer = buffer;
+    let mut i = 0;
+    while i < Bytes.len(part) {
+        buffer = Bytes.push(buffer, Bytes.get(part, i));
+        i = i + 1;
+    }
+    buffer
+}
+
+fn copy(buffer: &Bytes, range: Range) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(range.end - range.start);
+    let mut i = range.start;
+    while i < range.end {
+        out = Bytes.push(out, Bytes.get(buffer, i));
+        i = i + 1;
+    }
+    out
+}
+
+impl Segments {
+    pub fn segment_count(self: &Self) -> i64 ! {} { Vec.len(&self.entries) }
+    /// Copy segment i; panics when the index is out of bounds.
+    pub fn segment(self: &Self, i: i64) -> Bytes ! {alloc, panic} {
+        copy(&self.bytes, Vec.get(&self.entries, i))
+    }
+}
+
+impl Fields {
+    pub fn field_count(self: &Self) -> i64 ! {} { Vec.len(&self.entries) }
+    /// Copy the name at i; panics when the index is out of bounds.
+    pub fn name(self: &Self, i: i64) -> Bytes ! {alloc, panic} {
+        let field = Vec.get(&self.entries, i);
+        copy(&self.bytes, field.name)
+    }
+    /// Copy the value at i; panics when the index is out of bounds.
+    pub fn value(self: &Self, i: i64) -> Bytes ! {alloc, panic} {
+        let field = Vec.get(&self.entries, i);
+        copy(&self.bytes, field.value)
+    }
+}
+
+fn hex(c: i64) -> i64 ! {} {
+    if c >= 48 && c <= 57 { return c - 48; }
+    if c >= 65 && c <= 70 { return c - 55; }
+    if c >= 97 && c <= 102 { return c - 87; }
+    -1
+}
+
+fn valid_utf8(input: &Bytes) -> Bool ! {panic} {
+    let n = Bytes.len(input);
+    let mut at = 0;
+    while at < n {
+        let lead = Bytes.get(input, at);
+        if lead < 128 { at = at + 1; } else {
+            let mut width = 0;
+            if lead >= 194 && lead <= 223 { width = 2; }
+            if lead >= 224 && lead <= 239 { width = 3; }
+            if lead >= 240 && lead <= 244 { width = 4; }
+            if width == 0 || n - at < width { return false; }
+            let second = Bytes.get(input, at + 1);
+            if (lead == 224 && second < 160) || (lead == 237 && second >= 160)
+                || (lead == 240 && second < 144) || (lead == 244 && second >= 144) {
+                return false;
+            }
+            let mut j = 1;
+            while j < width {
+                let c = Bytes.get(input, at + j);
+                if c < 128 || c > 191 { return false; }
+                j = j + 1;
+            }
+            at = at + width;
+        }
+    }
+    true
+}
+
+// Decode one range only once. Split delimiters before calling this, so
+// escaped delimiters cannot become structure. All ranges are internal.
+fn decode(input: &Bytes, start: i64, end: i64, plus: Bool) -> Result<Bytes, Error> ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(end - start);
+    let mut at = start;
+    while at < end {
+        let c = Bytes.get(input, at);
+        if c == 37 {
+            if end - at < 3 { return Err(Error.InvalidEscape); }
+            let hi = hex(Bytes.get(input, at + 1));
+            let lo = hex(Bytes.get(input, at + 2));
+            if hi < 0 || lo < 0 { return Err(Error.InvalidEscape); }
+            out = Bytes.push(out, hi * 16 + lo);
+            at = at + 3;
+        } else {
+            out = Bytes.push(out, if plus && c == 43 { 32 } else { c });
+            at = at + 1;
+        }
+    }
+    if !valid_utf8(&out) { return Err(Error.InvalidUtf8); }
+    Ok(out)
+}
+
+/// Percent-decode UTF-8 text, leaving '+' literal. max_bytes bounds the
+/// encoded input before allocation; negative limits reject every input.
+/// Decoding does not validate application-level rules (e.g. filenames).
+pub fn percent_decode(input: &Bytes, max_bytes: i64) -> Result<Bytes, Error> ! {alloc, panic} {
+    if Bytes.len(input) > max_bytes { return Err(Error.TooLong); }
+    decode(input, 0, Bytes.len(input), false)
+}
+
+/// Split an encoded path on '/', then decode each segment. Empty segments
+/// are preserved, including the leading one in an absolute path. No dot
+/// normalization is performed. Pass Request.path(), without a query.
+pub fn path_segments(input: &Bytes, max_bytes: i64) -> Result<Segments, Error> ! {alloc, panic} {
+    let n = Bytes.len(input);
+    if n > max_bytes { return Err(Error.TooLong); }
+    let mut out: Vec<Range> = Vec.new();
+    let mut bytes = Bytes.with_capacity(n);
+    let mut start = 0;
+    let mut at = 0;
+    while at <= n {
+        if at == n || Bytes.get(input, at) == 47 {
+            let part = decode(input, start, at, false)?;
+            let from = Bytes.len(&bytes);
+            bytes = append(bytes, &part);
+            out = Vec.push(out, Range { start: from, end: Bytes.len(&bytes) });
+            if at == n { return Ok(Segments { bytes: bytes, entries: out }); }
+            start = at + 1;
+        }
+        at = at + 1;
+    }
+    Ok(Segments { bytes: bytes, entries: out })
+}
+
+fn fields(input: &Bytes, max_bytes: i64, plus: Bool) -> Result<Fields, Error> ! {alloc, panic} {
+    let n = Bytes.len(input);
+    if n > max_bytes { return Err(Error.TooLong); }
+    let mut out: Vec<Field> = Vec.new();
+    let mut bytes = Bytes.with_capacity(n);
+    let mut start = 0;
+    let mut at = 0;
+    while at <= n {
+        if at == n || Bytes.get(input, at) == 38 {
+            // Ignore empty fields between ampersands. A bare name has an
+            // empty value; only the first literal '=' separates it.
+            if at > start {
+                let mut eq = start;
+                while eq < at && Bytes.get(input, eq) != 61 { eq = eq + 1; }
+                let name = decode(input, start, eq, plus)?;
+                let value_start = if eq < at { eq + 1 } else { at };
+                let value = decode(input, value_start, at, plus)?;
+                let name_start = Bytes.len(&bytes);
+                bytes = append(bytes, &name);
+                let value_start = Bytes.len(&bytes);
+                bytes = append(bytes, &value);
+                out = Vec.push(out, Field {
+                    name: Range { start: name_start, end: value_start },
+                    value: Range { start: value_start, end: Bytes.len(&bytes) },
+                });
+            }
+            if at == n { return Ok(Fields { bytes: bytes, entries: out }); }
+            start = at + 1;
+        }
+        at = at + 1;
+    }
+    Ok(Fields { bytes: bytes, entries: out })
+}
+
+/// Decode a query without its leading '?'. '+' stays literal; use form
+/// when the sender uses application/x-www-form-urlencoded conventions.
+/// Split on '&' and the first '=' before decoding. Preserve field order.
+pub fn query(input: &Bytes, max_bytes: i64) -> Result<Fields, Error> ! {alloc, panic} {
+    fields(input, max_bytes, false)
+}
+
+/// Decode application/x-www-form-urlencoded: '+' is space; %2B is '+'.
+pub fn form(input: &Bytes, max_bytes: i64) -> Result<Fields, Error> ! {alloc, panic} {
+    fields(input, max_bytes, true)
+}
