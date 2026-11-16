@@ -5880,9 +5880,9 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Code<T>, quote/splice, hygiene, effects and ownership of generated code. Design approval before STAGING. See docs/showcase-roadmap.md.",
-      "commit": null,
+      "commit": "70566d5",
       "log": [
         {
           "time": "2026-11-17 00:31:05",
@@ -5893,6 +5893,11 @@
           "time": "2026-11-17 00:32:46",
           "who": "agent",
           "text": "Drafted docs/staging.md: callable-first Code<F>, explicit lift, hygienic splice, staged declarations, evaluator sandbox, generated-body rechecking, owner-bound JIT callables, W^X and acceptance criteria. Existing design-approval gate remains pending."
+        },
+        {
+          "time": "2026-11-17 00:35:32",
+          "who": "agent",
+          "text": "User approved docs/staging.md and autonomous implementation on 2026-11-17."
         }
       ]
     },
@@ -5902,12 +5907,24 @@
       "size": "L",
       "hard": true,
       "deps": [
-        "STAGING-DESIGN"
+        "STAGING-DESIGN",
+        "STAGING-AOT"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "See docs/showcase-roadmap.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-17 00:35:32",
+          "who": "agent",
+          "text": "Implement approved typed staging: syntax, stage-aware checking, generator evaluator, compile-time lowering and backend parity."
+        },
+        {
+          "time": "2026-11-17 00:51:05",
+          "who": "agent",
+          "text": "Approved design recorded; implemented structured staging syntax and stage-indexed name resolution. Full scripts/test-all.sh gate: 2039 passed, 3 skipped, 534.446s test runtime with two workers; approximately 55s compilation. Code typing, generator evaluation, AOT materialization and runtime JIT are not implemented."
+        }
+      ]
     },
     {
       "id": "STAGING-RUNTIME",
@@ -5915,7 +5932,8 @@
       "size": "L",
       "hard": true,
       "deps": [
-        "STAGING"
+        "STAGING",
+        "STAGING-JIT"
       ],
       "status": "todo",
       "desc": "In-process code generation; executable memory as a linear resource (writable or executable, never both). See docs/showcase-roadmap.md.",
@@ -8120,6 +8138,106 @@
           "text": "Cause: the evaluator read stdin to EOF because an unreachable std.io.stdin() counted; it only looked timing-dependent because strace/gdb runs had a different stdin."
         }
       ]
+    },
+    {
+      "id": "STAGING-SYNTAX",
+      "title": "Staging syntax and source diagnostics",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "STAGING-DESIGN"
+      ],
+      "status": "done",
+      "desc": "Parse hygienic staging forms and staged declarations structurally, retain spans, validate stage transitions; reject unlowered forms before ordinary execution.",
+      "commit": "9437018bcef83eb2087b22d86691f69e17a0fbc0",
+      "log": [
+        {
+          "time": "2026-11-17 00:35:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-17 00:51:05",
+          "who": "agent",
+          "text": "Structural quote/splice/lift and staged declaration syntax, original spans, malformed syntax and nesting-budget regressions. Full gate: 2039 passed, 3 skipped."
+        }
+      ]
+    },
+    {
+      "id": "STAGING-SCOPES",
+      "title": "Resolve stage-indexed binders and explicit cross-stage references",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "STAGING-SYNTAX"
+      ],
+      "status": "done",
+      "desc": "Retain binding identities and lexical stages, reject implicit local captures and staged initializer parameter captures, preserve module visibility; front-end validation only.",
+      "commit": "9437018bcef83eb2087b22d86691f69e17a0fbc0",
+      "log": [
+        {
+          "time": "2026-11-17 00:40:48",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-17 00:51:05",
+          "who": "agent",
+          "text": "Stage-indexed resolved binder identities, explicit lift/splice boundaries, generic template capture rejection, staged initializer isolation and module privacy tests. Name resolution only; executable typing remains open. Full gate: 2039 passed, 3 skipped."
+        }
+      ]
+    },
+    {
+      "id": "STAGING-TYPES",
+      "title": "Type Code signatures and quotation holes",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "STAGING-SCOPES"
+      ],
+      "status": "todo",
+      "desc": "Check generators and every template before execution; include effect rows, callable multiplicity, affine code ownership and typed lift/splice holes. Ordinary executable checking must remain strict.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STAGING-EVAL",
+      "title": "Evaluate generators and construct hygienic template graphs",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "STAGING-TYPES"
+      ],
+      "status": "todo",
+      "desc": "Use restricted reference evaluation for branches, loops and recursion, typed substitution, lifting, code cloning, deterministic limits, cleanup and diagnostics.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STAGING-AOT",
+      "title": "Lower staged declarations through ordinary backend checks",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "STAGING-EVAL"
+      ],
+      "status": "todo",
+      "desc": "Order dependencies, recheck materialized functions, preserve source provenance and module references, test evaluator/Cranelift/LLVM parity and a specialized interpreter.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STAGING-JIT",
+      "title": "Compile generated functions in process with owned executable storage",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "STAGING-AOT"
+      ],
+      "status": "todo",
+      "desc": "Share native lowering, checked relocation and symbol resolution, W^X publication, owner-bound callables, evaluator parity, failure cleanup and runtime-input specialization.",
+      "commit": null,
+      "log": []
     }
   ]
 }
