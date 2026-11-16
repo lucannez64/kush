@@ -7348,10 +7348,21 @@
         "WEB-SERVER",
         "THREAD-TASKS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "One scheduler and reactor per thread, each with its own SO_REUSEPORT listener (threads cannot share a &Listener); a connection stays on one thread (tasks cannot cross threads, no work stealing).",
-      "commit": null,
-      "log": []
+      "commit": "dbbeccc",
+      "log": [
+        {
+          "time": "2026-11-16 16:05:43",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-16 16:26:15",
+          "who": "agent",
+          "text": "done dbbeccc"
+        }
+      ]
     },
     {
       "id": "WEB-CODECS",
