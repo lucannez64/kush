@@ -5880,10 +5880,21 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Code<T>, quote/splice, hygiene, effects and ownership of generated code. Design approval before STAGING. See docs/showcase-roadmap.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-17 00:31:05",
+          "who": "agent",
+          "text": "User requested the full staging track autonomously; separate from web work."
+        },
+        {
+          "time": "2026-11-17 00:32:46",
+          "who": "agent",
+          "text": "Drafted docs/staging.md: callable-first Code<F>, explicit lift, hygienic splice, staged declarations, evaluator sandbox, generated-body rechecking, owner-bound JIT callables, W^X and acceptance criteria. Existing design-approval gate remains pending."
+        }
+      ]
     },
     {
       "id": "STAGING",
