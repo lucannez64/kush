@@ -299,6 +299,7 @@ impl Executable {
                         environment,
                         preserve,
                         handlers,
+                        parallel,
                     } => {
                         let child = self.start_task(
                             scope,
@@ -316,7 +317,7 @@ impl Executable {
                             handlers,
                         );
                         let _ = records[id].commands.send(TaskCommand::Spawned(child));
-                        records[child].parent = Some(id);
+                        records[child].parent = (!parallel).then_some(id);
                         records[child].state = TaskState::Ready;
                         ready.push_back(child);
                     }
@@ -1379,6 +1380,9 @@ enum TaskEvent {
         /// for copyable noncapturing `fn` handlers. Capturing or one-shot
         /// frames are a task boundary and are not inherited.
         handlers: Vec<(usize, usize)>,
+        /// `Thread.spawn`: a thread is never cancelled, natively or here, so
+        /// it is a root of structured cancellation (THREAD-TASKS).
+        parallel: bool,
     },
     Join(usize),
     Cancel(usize),
@@ -1447,6 +1451,7 @@ impl TaskComm {
         environment: Option<usize>,
         preserve: bool,
         handlers: Vec<(usize, usize)>,
+        parallel: bool,
     ) -> Result<usize> {
         let Some(scope) = self.scopes.last_mut() else {
             return Err(Diagnostic::new(
@@ -1460,6 +1465,7 @@ impl TaskComm {
                 environment,
                 preserve,
                 handlers,
+                parallel,
             })
             .map_err(|_| Diagnostic::new(Span::default(), "task scheduler disconnected"))?;
         match self.commands.recv() {
@@ -6495,6 +6501,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         callable: Value,
         failure: Option<ResultShape>,
         catch: Option<ResultShape>,
+        parallel: bool,
     ) -> Result<Value> {
         if catch.is_some() {
             self.task_comm()?.catch_depth += 1;
@@ -6505,7 +6512,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             (Ok(Value::Enum { tag, .. }), Some(shape)) => *tag == shape.err_tag,
             (Err(error), _) => self.unwinding(error),
             _ => false,
-        };
+        } && !parallel; // threads are never cancelled (THREAD-TASKS)
         if cancel {
             self.task_comm()?.cancel_scope()?;
         }
@@ -7878,7 +7885,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
             }
             ExprKind::TaskSpawn {
-                body, obligation, ..
+                body,
+                obligation,
+                parallel,
+                ..
             } => {
                 let callable = value!(self.expr(body, frame));
                 let Value::Function {
@@ -7892,21 +7902,31 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ));
                 };
                 self.consume(body, frame);
-                let handlers = self.inheritable_handlers();
-                let id = self
-                    .task_comm()?
-                    .spawn(function, environment, *obligation, handlers)?;
+                // A thread starts with an empty handler stack, as natively.
+                let handlers = if *parallel {
+                    Vec::new()
+                } else {
+                    self.inheritable_handlers()
+                };
+                let id = self.task_comm()?.spawn(
+                    function,
+                    environment,
+                    *obligation,
+                    handlers,
+                    *parallel,
+                )?;
                 Value::Task(id)
             }
             ExprKind::TaskScope {
                 body,
                 failure,
                 catch,
+                parallel,
                 ..
             } => {
                 let callable = value!(self.expr(body, frame));
                 self.consume(body, frame);
-                self.task_scope(callable, *failure, *catch)?
+                self.task_scope(callable, *failure, *catch, *parallel)?
             }
             ExprKind::TaskYield => {
                 let cancelled = self.task_comm()?.yield_now()?;

@@ -2,7 +2,8 @@
 //! / `Thread.join` run children on real OS threads. Children receive moved
 //! values and borrowed views; ownership keeps each loan until the child is
 //! joined, so exclusive views reach one thread only (disjoint halves may go to
-//! different threads). Thread bodies use only `{io, alloc, panic}`. The
+//! different threads). Thread bodies use only `{io, alloc, panic, suspend}`;
+//! each thread runs its own task scheduler (THREAD-TASKS). The
 //! reference evaluator runs threads as cooperative tasks (one valid schedule);
 //! without shared mutable state both backends agree.
 use kush::executable::check;
@@ -182,11 +183,7 @@ fn thread_rules_are_checked() {
             "Task.scope(fn() -> i64 ! {alloc, panic, suspend} { let t = Thread.spawn(fn() -> i64 ! {} { 1 }); 0 })",
             "Thread.spawn requires an enclosing Thread.scope",
         ),
-        // Thread bodies cannot suspend or leave declared operations unhandled.
-        (
-            "Thread.scope(fn() -> i64 ! {alloc, panic} { let t = Thread.spawn(fn() -> i64 ! {suspend} { 1 }); Thread.join(t) })",
-            "only have the effects",
-        ),
+        // Thread bodies cannot leave declared operations unhandled.
         (
             "Thread.scope(fn() -> i64 ! {alloc, panic} { let t = Thread.spawn(fn() -> i64 ! {Ask, panic} { perform Ask(1) }); Thread.join(t) })",
             "only have the effects",
@@ -518,4 +515,103 @@ fn channel_rules() {
             Ok(_) => panic!("accepted: {source}"),
         }
     }
+}
+
+/// THREAD-TASKS: each OS thread runs its own cooperative scheduler, so a
+/// thread body may run `Task.scope`, yield, cancel its own tasks and wait for
+/// a timer on its own reactor, while `main` does the same on its scheduler.
+const TASKS_IN_THREADS: &str = "
+use std.result.Result;
+use std.task.TaskExit;
+use std.time;
+
+fn steps(seed: i64) -> i64 ! {alloc, panic, suspend} {
+    let held = Box.new(seed);
+    let mut acc = 0;
+    let mut i = 0;
+    while i < 50 { acc = (acc + i * seed) % 1000003; let _ = Task.yield(); i = i + 1; }
+    acc + Box.take(held)
+}
+
+fn worker(seed: i64) -> i64 ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
+        let a = Task.spawn(fn() -> i64 ! {alloc, panic, suspend} { steps(seed) });
+        let b = Task.spawn(fn() -> i64 ! {alloc, panic, suspend} { steps(seed + 1) });
+        let sleeper = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+            match time.wait_ms(2) { Result.Ok(_) => 5, Result.Err(_) => 0 }
+        });
+        let spinner = Task.spawn(fn() -> i64 ! {alloc, panic, suspend} {
+            let mut n = 0;
+            while !Task.yield() { n = n + 1; }
+            0
+        });
+        let mut i = 0;
+        while i < 3 { let _ = Task.yield(); i = i + 1; }
+        Task.cancel(&spinner);
+        let stopped = match Task.join(spinner) { TaskExit.Completed(_) => 0, TaskExit.Cancelled => 1 };
+        let x = match Task.join(a) { TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 };
+        let y = match Task.join(b) { TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 };
+        let z = match Task.join(sleeper) { TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 };
+        (x + y + z + stopped) % 1000003
+    })
+}
+";
+
+#[test]
+fn threads_run_their_own_task_schedulers() {
+    agrees(
+        &format!(
+            "{TASKS_IN_THREADS}
+            fn main() -> i64 ! {{io, alloc, panic, suspend}} {{
+                let expected = (worker(3) + worker(7) + worker(11) + worker(13)) % 256;
+                let got = Thread.scope(fn() -> i64 ! {{io, alloc, panic, suspend}} {{
+                    let a = Thread.spawn(fn() -> i64 ! {{io, alloc, panic, suspend}} {{ worker(3) }});
+                    let b = Thread.spawn(fn() -> i64 ! {{io, alloc, panic, suspend}} {{ worker(7) }});
+                    let c = Thread.spawn(fn() -> i64 ! {{io, alloc, panic, suspend}} {{
+                        // The thread's root yields and waits too.
+                        let _ = Task.yield();
+                        match time.wait_ms(1) {{ Result.Ok(_) => worker(11), Result.Err(_) => 0 }}
+                    }});
+                    // Meanwhile main runs tasks on its own scheduler.
+                    let d = worker(13);
+                    (Thread.join(a) + Thread.join(b) + Thread.join(c) + d) % 256
+                }});
+                if got == expected {{ 7 }} else {{ 1 }}
+            }}"
+        ),
+        7,
+        "",
+    );
+}
+
+#[test]
+fn cancelling_a_task_does_not_reach_its_threads() {
+    // A thread is never cancelled: cancelling the task that started it stops
+    // at the thread, in the evaluator as natively.
+    agrees(
+        "use std.task.TaskExit;
+         fn main() -> i64 ! {io, alloc, panic, suspend} {
+             Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+                 let t = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+                     let seen = Thread.scope(fn() -> i64 ! {alloc, panic} {
+                         let w = Thread.spawn(fn() -> i64 ! {alloc, panic, suspend} {
+                             let mut i = 0;
+                             while i < 100 { let _ = Task.yield(); i = i + 1; }
+                             if Task.check_cancel() { 1 } else { 0 }
+                         });
+                         Thread.join(w)
+                     });
+                     print_i64(seen);
+                     seen
+                 });
+                 let mut i = 0;
+                 while i < 5 { let _ = Task.yield(); i = i + 1; }
+                 Task.cancel(&t);
+                 let _ = Task.join(t);
+             });
+             0
+         }",
+        0,
+        "0\n",
+    );
 }

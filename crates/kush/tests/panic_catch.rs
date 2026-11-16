@@ -158,6 +158,44 @@ fn main() -> i64 ! {{io, alloc, panic, suspend}} {{
 }
 
 #[test]
+fn a_task_panic_inside_a_thread_reaches_the_thread_join() {
+    // THREAD-TASKS: a thread runs its own tasks; one's panic is raised at its
+    // join inside the thread, unwinds the thread, and is raised again at the
+    // thread's join. A thread can also stop it itself with Task.catch.
+    both(
+        &format!(
+            "{PRELUDE}
+fn main() -> i64 ! {{io, alloc, panic, suspend}} {{
+    show(Task.catch(fn() -> i64 ! {{io, alloc, panic, suspend}} {{
+        Thread.scope(fn() -> i64 ! {{io, alloc, panic}} {{
+            let w = Thread.spawn(fn() -> i64 ! {{alloc, panic, suspend}} {{
+                Task.scope(fn() -> i64 ! {{alloc, panic, suspend}} {{
+                    let c = Task.spawn(fn() -> i64 ! {{alloc, panic}} {{ boom(2) }});
+                    match Task.join(c) {{ TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 }}
+                }})
+            }});
+            Thread.join(w)
+        }})
+    }}));
+    show(Task.catch(fn() -> i64 ! {{io, alloc, panic, suspend}} {{
+        Thread.scope(fn() -> i64 ! {{io, alloc, panic}} {{
+            let w = Thread.spawn(fn() -> i64 ! {{alloc, panic, suspend}} {{
+                match Task.catch(fn() -> i64 ! {{alloc, panic, suspend}} {{
+                    Task.spawn(fn() -> i64 ! {{alloc, panic}} {{ boom(1) }});
+                    1
+                }}) {{ Result.Ok(v) => v, Result.Err(_) => 3 }}
+            }});
+            Thread.join(w)
+        }})
+    }}));
+    0
+}}"
+        ),
+        "-1\n3\n",
+    );
+}
+
+#[test]
 fn an_uncaught_panic_still_ends_the_program() {
     let source = format!(
         "{PRELUDE}

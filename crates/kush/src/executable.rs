@@ -33217,15 +33217,17 @@ impl Checker<'_, '_> {
         }
         let result = signature.result;
         // THREAD-SCOPE: a thread body runs on its own OS thread with an empty
-        // handler stack and no task scheduler, so it may only use builtin
-        // effects other than `suspend` (declared operations must be handled
-        // inside it), and it may not hold values whose allocators or
-        // environments other threads could reach.
+        // handler stack, so it may only use builtin effects (declared
+        // operations must be handled inside it), and it may not hold values
+        // whose allocators or environments other threads could reach.
+        // THREAD-TASKS: the thread has its own task scheduler, so its body may
+        // suspend (run `Task.scope`, yield, wait for I/O); that stays inside
+        // the thread and is not an effect of the spawner.
         let effects = if parallel && !scope_root {
-            if signature.effects & !(IO | ALLOC | PANIC) != 0 {
+            if signature.effects & !(IO | ALLOC | PANIC | SUSPEND) != 0 {
                 return Err(Diagnostic::new(
                     value.span,
-                    "a thread body may only have the effects {io, alloc, panic}: it cannot suspend, and a declared operation must be handled inside the thread",
+                    "a thread body may only have the effects {io, alloc, panic, suspend}: a declared operation must be handled inside the thread",
                 ));
             }
             if let Some(types) = self.closure_capture_types(&value)
@@ -33245,7 +33247,14 @@ impl Checker<'_, '_> {
         } else {
             signature.effects | ALLOC | PANIC | SUSPEND
         };
-        self.require(effects, span)?;
+        // A thread's `suspend` runs on the thread's own scheduler: the
+        // spawner does not need it.
+        let required = if parallel && !scope_root {
+            effects & !SUSPEND
+        } else {
+            effects
+        };
+        self.require(required, span)?;
         let static_function = Self::callable_function(&value);
         if static_body && static_function.is_none() {
             return Err(Diagnostic::new(

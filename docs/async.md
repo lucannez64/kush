@@ -200,8 +200,8 @@ task was already cancelled; this is the cooperative cancellation above,
 delivered at the wait. A wait with `sys.WAIT_SHIELD` in its events is
 shielded: cancellation neither refuses nor interrupts it, so it runs to its
 event or deadline; `std.web` finishes responses that way during a graceful
-stop. Thread bodies cannot suspend, so the reactor only
-runs on the main thread (one reactor per thread is WEB-MULTICORE).
+stop. Every OS thread has its own scheduler and reactor (THREAD-TASKS):
+a task waits on the reactor of the thread that runs it.
 
 On it are `std.net`'s `Listener` and `Conn` (`accept`, `connect`, `read`,
 `write`; the listener is nonblocking and a connection is started
@@ -269,8 +269,10 @@ behavior and ordinary finite-input tests.
 
 ## Current limits
 
-- Tasks run on a single OS thread, with no cross-thread handles; sockets
-  and timers wait on the reactor, other I/O blocks the thread.
+- Tasks never leave the OS thread that spawned them, and task handles never
+  cross threads; each thread runs its own scheduler (THREAD-TASKS, see
+  [threads.md](threads.md)). Sockets and timers wait on the thread's
+  reactor; other I/O blocks the thread.
 - Cancellation is cooperative; no masking regions or cancellation handlers yet.
 - Standard streams, files and `std.net.exchange` block the scheduler.
 - Task bodies may return owning/linear results or copyable must-use observations

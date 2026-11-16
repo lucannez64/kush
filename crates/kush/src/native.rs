@@ -3067,22 +3067,25 @@ struct KushTask {
 };
 /* Slot table: kush_task_count slots have ever been used, freed ones are on
    kush_free_slots. Runtime bookkeeping uses malloc, not kush_alloc, so the
-   allocation statistics count only task stacks, control blocks and results. */
-static KushTask **kush_tasks = NULL;
-static uint32_t *kush_task_generations = NULL;
-static int *kush_free_slots = NULL;
-static int kush_free_count = 0;
-static int kush_task_capacity = 0;
-static int kush_task_count = 0;
+   allocation statistics count only task stacks, control blocks and results.
+   THREAD-TASKS: every OS thread runs its own scheduler, so all of its state
+   is per thread; a thread's tasks never leave it (task handles cannot cross
+   a thread boundary), and the thread tears its scheduler down at its end. */
+static KUSH_TLS KushTask **kush_tasks = NULL;
+static KUSH_TLS uint32_t *kush_task_generations = NULL;
+static KUSH_TLS int *kush_free_slots = NULL;
+static KUSH_TLS int kush_free_count = 0;
+static KUSH_TLS int kush_task_capacity = 0;
+static KUSH_TLS int kush_task_count = 0;
 static KUSH_TLS KushTask *kush_current = NULL;
-static ucontext_t kush_scheduler_context;
-static void *kush_scheduler_stack = NULL;
-static size_t kush_scheduler_stack_total = 0;
-static int kush_initialized = 0;
+static KUSH_TLS ucontext_t kush_scheduler_context;
+static KUSH_TLS void *kush_scheduler_stack = NULL;
+static KUSH_TLS size_t kush_scheduler_stack_total = 0;
+static KUSH_TLS int kush_initialized = 0;
 /* Ready queue of task handles, a ring that doubles when full. */
-static uint64_t *kush_ready = NULL;
-static int kush_ready_capacity = 0;
-static int kush_ready_head = 0, kush_ready_tail = 0, kush_ready_count = 0;
+static KUSH_TLS uint64_t *kush_ready = NULL;
+static KUSH_TLS int kush_ready_capacity = 0;
+static KUSH_TLS int kush_ready_head = 0, kush_ready_tail = 0, kush_ready_count = 0;
 /* ---- Dynamic one-shot effect handlers -----------------------------------
    Declared effect operations use a small per-task stack of handler code
    pointers and optional owned one-shot environments. A lexical handle pushes one entry for
@@ -3126,11 +3129,15 @@ static kush_handler_context kush_root_handlers;
 static KUSH_TLS kush_handler_context *kush_thread_handlers = NULL;
 #endif
 static kush_handler_context *kush_handlers(void) {
-#ifdef KUSH_HAS_THREADS
-    if (kush_thread_handlers != NULL) return kush_thread_handlers;
-#endif
     KushTask *task = kush_current;
-    if (task == NULL || task->id == 0) return &kush_root_handlers;
+    if (task == NULL || task->id == 0) {
+#ifdef KUSH_HAS_THREADS
+        /* A thread's root (its body) uses the thread's stack; the tasks it
+           spawns have their own, as on the main thread (THREAD-TASKS). */
+        if (kush_thread_handlers != NULL) return kush_thread_handlers;
+#endif
+        return &kush_root_handlers;
+    }
     if (task->handlers == NULL) {
         task->handlers = (kush_handler_context *)calloc(1, sizeof(kush_handler_context));
         if (task->handlers == NULL) kush_panic();
@@ -3460,9 +3467,10 @@ static void kush_task_release_handlers(KushTask *t) {
    registered descriptor is ready or the nearest deadline; while tasks are
    ready it still checks every 64 switches so none waits forever. */
 #include <sys/epoll.h>
-static int kush_epoll = -1;
-static KushTask *kush_waiting = NULL;
-static unsigned kush_reactor_turns = 0;
+/* Per thread, like the scheduler: each thread has its own reactor. */
+static KUSH_TLS int kush_epoll = -1;
+static KUSH_TLS KushTask *kush_waiting = NULL;
+static KUSH_TLS unsigned kush_reactor_turns = 0;
 static void kush_reactor_wake(KushTask *t, int64_t result) {
     if (t->wait_previous != NULL) t->wait_previous->wait_next = t->wait_next;
     else kush_waiting = t->wait_next;
@@ -3589,7 +3597,7 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
         kush_handler_context *parent = kush_handlers();
         /* Walk the frames visible to the parent: a redirect frame (pushed by
            a resumed continuation) skips the frames its handler pushed. */
-        static int64_t picked[KUSH_HANDLER_MAX];
+        static KUSH_TLS int64_t picked[KUSH_HANDLER_MAX];
         int64_t count = 0;
         int64_t index = parent->depth - 1;
         while (index >= 0) {
@@ -3763,8 +3771,8 @@ static void kush_task_finish(void) {
    run meanwhile: the events, 0 on timeout. ECANCELED (125) when the task is
    or becomes cancelled, unless `events` has KUSH_WAIT_SHIELD (256): a
    shielded wait (finishing a response during a graceful stop) runs to its
-   event or timeout. Thread bodies cannot suspend, so this always runs on
-   the main thread's scheduler; `main` itself may wait too. */
+   event or timeout. It waits on the calling thread's own scheduler and
+   reactor (THREAD-TASKS); a thread's body and `main` may wait too. */
 int64_t kush_sys_wait_ready(int64_t fd, int64_t events, int64_t timeout_ms, int64_t *out) {
     if (timeout_ms < -1 || timeout_ms > INT32_MAX) return EINVAL;
     kush_task_init();
@@ -3874,8 +3882,8 @@ void kush_unwind_rethrow(void) {
    A Thread.scope frame lists the threads spawned in it; Thread.join waits for
    one, and the scope epilogue joins every one not joined yet and drops its
    result. Threads run the same task wrapper (code, environment, result
-   buffer) as cooperative tasks. A thread has its own handler stack and
-   allocator pool; its pool is drained when it finishes. */
+   buffer) as cooperative tasks. A thread has its own handler stack,
+   allocator pool and task scheduler; they are freed when it finishes. */
 typedef struct KushThread {
     pthread_t thread;
     uint64_t wrapper, code, env;
@@ -3904,6 +3912,9 @@ static void *kush_thread_main(void *argument) {
         t->panicked = 1;
     }
 #endif
+    /* THREAD-TASKS: free this thread's scheduler (every task it ran was
+       joined by its scope), before the pool its blocks return to drains. */
+    kush_task_finish();
     kush_handler_restore(0);
     kush_kstack_drain(handlers);
     kush_thread_handlers = NULL;

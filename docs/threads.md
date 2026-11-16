@@ -1,7 +1,8 @@
 # Parallel threads
 
 Status: THREAD-SCOPE, THREAD-ATOMICS and THREAD-CHANNELS implemented
-2026-11-06 (design approved by the user). Tests:
+2026-11-06 (design approved by the user); THREAD-TASKS (a scheduler per
+thread) 2026-11-16. Tests:
 `crates/kush/tests/threads.rs`.
 
 ```kush
@@ -29,10 +30,12 @@ unchanged.
   cancelled). The scope's epilogue joins every thread not joined yet and
   drops its result; a linear result must be joined explicitly.
 - **Effects.** `Thread.scope` and `Thread.spawn` need `{alloc, panic}`. A
-  thread body may only have `{io, alloc, panic}`: it cannot suspend (no
-  cooperative tasks inside threads in this version) and must handle any
-  declared operation inside itself, since a thread starts with an empty
-  handler stack. A panic in a thread ends the process.
+  thread body may only have `{io, alloc, panic, suspend}` and must handle
+  any declared operation inside itself, since a thread starts with an empty
+  handler stack. Its `suspend` stays inside the thread (see below), so the
+  spawner does not need it. A panic in a thread unwinds it when the program
+  uses `Task.catch`, and its join raises the panic again in the joiner
+  ([async.md](async.md)); otherwise it ends the process.
 - **Standard input.** The reference evaluator buffers standard input before
   running a program with tasks or threads, and now only when the program can
   read it, so `kush eval` of a thread program no longer waits for the end of
@@ -131,13 +134,50 @@ evaluator reports the exhausted step budget instead. Natively a channel is
 one counted allocation (header and ring) with a mutex and two condition
 variables; in the evaluator a blocked operation yields to the other threads.
 
+## Tasks inside threads (THREAD-TASKS)
+
+```kush
+let total = Thread.scope(fn() -> i64 ! {alloc, panic} {
+    let a = Thread.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+        Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
+            let x = Task.spawn(fn() -> i64 ! {alloc, panic, suspend} { work(1) });
+            let y = Task.spawn(fn() -> i64 ! {alloc, panic, suspend} { work(2) });
+            // value: TaskExit<i64> -> i64
+            value(Task.join(x)) + value(Task.join(y))
+        })
+    });
+    Thread.join(a)
+});
+```
+
+Every OS thread runs its own cooperative scheduler and reactor. A thread
+body is the root task of its thread: it may run `Task.scope`, yield, wait
+on sockets and timers (`std.time.wait_ms`), cancel and catch, exactly like
+`main` on the main thread, while other threads do the same in parallel.
+
+- **Tasks stay on their thread.** A task runs on the thread that spawned
+  it; task handles cannot be captured, so they never reach another thread.
+  There is no work stealing.
+- **Cancellation stops at a thread.** Threads are never cancelled:
+  cancelling a task cancels its tasks, but not threads it started, and a
+  thread body's `Task.check_cancel()` is false.
+- **Panics.** A panic in a task inside a thread is raised at that task's
+  join (or its scope's end) inside the thread, then at the thread's join.
+- The reference evaluator still runs every thread and task as cooperative
+  tasks of one scheduler (one valid schedule), with the same cancellation
+  boundary.
+
+Natively the scheduler state (task table, ready queue, scheduler context,
+reactor) is thread-local and created on first use; a thread frees it, with
+its cached task stacks, when it finishes.
+
 ## Runtime
 
 Threads run the cooperative tasks' wrapper (code, environment, result
 buffer) under `pthread_create`, with a 64 MiB stack. A program that uses
 threads is built with `KUSH_HAS_THREADS` and linked with `-pthread`; then the
 allocation counters are atomic, and the allocator pool, the dynamic handler
-stack, the current task and the abort word are per thread (generated code
+stack, the task scheduler and reactor and the abort word are per thread (generated code
 reaches the abort word through `kush_abort_word_address`). Programs without
 threads keep the single-threaded runtime unchanged.
 
