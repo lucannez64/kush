@@ -8,7 +8,8 @@ module std.web;
 // twice, does not compile. `html` comes with the `Html` type (WEB-HTML).
 // `serve` (WEB-SERVER) runs one task per connection on the task reactor:
 // it reads and parses each request with `std.http1`, keeps the connection
-// alive, and stops gracefully when its task is cancelled.
+// alive, and stops gracefully when its task is cancelled. `serve_threads`
+// (WEB-MULTICORE) runs one such server per OS thread.
 
 use std.http1;
 use std.http1.Field;
@@ -511,11 +512,14 @@ pub struct Config {
     /// How long the rest of a started request may take to arrive, and how
     /// long each response may take to send.
     pub request_ms: i64,
+    /// The backlog of the listeners `serve_threads` opens for its threads.
+    pub backlog: i64,
 }
 
-/// `http1.limits()`, 5 s idle, 30 s per request and response.
+/// `http1.limits()`, 5 s idle, 30 s per request and response, a backlog of
+/// 1024.
 pub fn config() -> Config ! {} {
-    Config { limits: http1.limits(), idle_ms: 5000, request_ms: 30000 }
+    Config { limits: http1.limits(), idle_ms: 5000, request_ms: 30000, backlog: 1024 }
 }
 
 /// What reading a request produced.
@@ -761,4 +765,105 @@ pub fn serve(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! 
         Result.Err(code) => if code == sys.ECANCELED() { Result.Ok(()) } else { Result.Err(code) },
         Result.Ok(_) => Result.Ok(()),
     }
+}
+
+// ---- One server per thread (WEB-MULTICORE) --------------------------------
+
+/// Stop every thread of `serve_threads`: they wait on the read end of a pipe
+/// that nobody reads, so after one byte it stays readable for all of them.
+fn raise_stop(signal: i64) -> Unit ! {io, alloc, panic} {
+    let _ = sys.write(signal, &Bytes.from("!"), 0, -1);
+}
+
+/// Keep the first error any thread met.
+fn first_error(errors: &[Atomic], code: i64) -> Unit ! {panic} {
+    let _ = Atomic.compare_exchange(errors, 0, 0, code);
+}
+
+/// One thread's server: `serve` in a task until the stop signal, or until
+/// the calling task is cancelled; either way, and when its own `serve`
+/// ends, every thread stops. A panic outside the handlers (they have their
+/// own catch) stops the other threads too before it goes on, so no thread
+/// waits forever at the scope's end.
+fn serve_part(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}, config: Config, stop: i64, signal: i64, errors: &[Atomic]) -> Unit ! {io, alloc, panic, suspend} {
+    let ran = Task.catch(fn() -> Unit ! {io, alloc, panic, suspend} {
+        let server = Task.spawn(fn() -> Unit ! {io, alloc, panic, suspend} {
+            match serve(listener, handler, config) {
+                Result.Err(code) => first_error(errors, code),
+                Result.Ok(_) => {},
+            }
+            raise_stop(signal);
+        });
+        loop {
+            match sys.wait_ready(stop, sys.POLLIN(), -1) {
+                Result.Ok(_) => { break; },
+                // ECANCELED: the calling task was cancelled.
+                Result.Err(code) => { if code != sys.EINTR() { break; } },
+            }
+        }
+        raise_stop(signal);
+        Task.cancel(&server);
+        let _ = Task.join(server);
+    });
+    match ran {
+        Result.Ok(_) => {},
+        Result.Err(_) => { raise_stop(signal); panic() },
+    }
+}
+
+/// Serve on `threads` OS threads, each with its own scheduler, reactor and
+/// listener: `listener` (opened with `reuse_port`) serves on the calling
+/// thread, and `threads - 1` more listeners on `host` and the same port
+/// serve on new threads; the kernel spreads connections over them
+/// (SO_REUSEPORT), and a connection stays on the thread that accepted it.
+/// `handler` and `config` are as for `serve`. Cancelling the calling task
+/// stops every thread gracefully, as `serve` stops; so does an accept error
+/// on any thread, which is then returned. EINVAL unless 1 <= threads <= 1024.
+pub fn serve_threads(listener: net.Listener, host: &Bytes, threads: i64, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}, config: Config) -> Result<Unit, i64> ! {io, alloc, panic, suspend} {
+    if threads < 1 || threads > 1024 {
+        let _ = net.close_listener(listener);
+        return Result.Err(22);
+    }
+    let port = match net.local_port(&listener) {
+        Result.Ok(port) => port,
+        Result.Err(code) => {
+            let _ = net.close_listener(listener);
+            return Result.Err(code);
+        },
+    };
+    let ends = match sys.pipe() {
+        Result.Ok(ends) => ends,
+        Result.Err(code) => {
+            let _ = net.close_listener(listener);
+            return Result.Err(code);
+        },
+    };
+    let stop = ends & 4294967295;
+    let signal = ends >> 32;
+    let mut cells: Vec<Atomic> = Vec.with_capacity(1);
+    cells = Vec.push(cells, Atomic.new(0));
+    let errors: &[Atomic] = &cells[..];
+    Thread.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+        let mut i = 1;
+        while i < threads {
+            match net.listen(host, port, config.backlog, true) {
+                Result.Ok(extra) => {
+                    Thread.spawn(fn() -> Unit ! {io, alloc, panic, suspend} {
+                        serve_part(extra, handler, config, stop, signal, errors)
+                    });
+                },
+                Result.Err(code) => {
+                    first_error(errors, code);
+                    raise_stop(signal);
+                    break;
+                },
+            }
+            i = i + 1;
+        }
+        serve_part(listener, handler, config, stop, signal, errors);
+    });
+    let _ = sys.close(stop);
+    let _ = sys.close(signal);
+    let code = Atomic.load(errors, 0);
+    if code == 0 { Result.Ok(()) } else { Result.Err(code) }
 }

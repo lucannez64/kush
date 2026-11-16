@@ -224,6 +224,40 @@ tasks cannot cross threads, so instead of work stealing every thread runs
 its own scheduler and reactor (THREAD-TASKS) with its own `SO_REUSEPORT`
 listener. A connection lives and dies on one thread.
 
+Implemented as `web.serve_threads(listener, host, threads, handler,
+config)` (2026-11-16):
+
+```kush
+let host = Bytes.from("0.0.0.0");
+match net.listen(&host, 8080, 1024, true) { // true: reuse_port
+    Result.Ok(listener) => web.serve_threads(listener, &host, 8, app, web.config()),
+    Result.Err(code) => Result.Err(code),
+}
+```
+
+`listener` must be opened with `reuse_port`. It serves on the calling
+thread; `serve_threads` opens `threads - 1` more listeners on `host` and
+the same port (backlog `config.backlog`, 1024 by default) and serves each
+on a new OS thread, with `web.serve`. The kernel spreads connections over
+the listeners, and a connection stays on the thread that accepted it.
+`handler` is a plain `fn`, so every thread can call it; it runs on
+whichever thread accepted the connection.
+
+Stopping works as for `serve`: cancelling the task that called
+`serve_threads` stops every thread gracefully, and `serve_threads`
+returns `Ok(())` once all of them finished. Threads are never cancelled,
+so the stop travels through a pipe that every thread waits on and
+nobody reads: whoever stops first writes one byte, which leaves the pipe
+readable for all of them. That is the calling thread when its task is
+cancelled, or any thread whose `serve` ends with an accept error (then
+returned, the first one met) or whose server code panics outside a
+handler (the panic then goes on, at that thread's join). A thread that
+cannot open its listener stops the others the same way.
+
+Tests: `crates/kush/tests/web_server.rs` (three threads in the evaluator
+and natively, then a native server on four threads under 32 concurrent
+Rust clients).
+
 ## HTTP/1.1 [WEB-HTTP-PARSE]
 
 A parser over a borrowed byte view, with no I/O: request line, headers,

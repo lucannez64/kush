@@ -565,3 +565,118 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
     assert_eq!(status, 0);
     assert!(String::from_utf8(output).unwrap().ends_with("hi|\n0\n-1\n"));
 }
+
+/// WEB-MULTICORE: `web.serve_threads` runs one server per OS thread, each
+/// with its own reactor and SO_REUSEPORT listener. Cancelling the calling
+/// task stops every thread, and every listener is closed.
+const THREADED: &str = r#"
+fn shared_listener() -> net.Listener ! {io, alloc, panic} {
+    match net.listen(&Bytes.from("127.0.0.1"), 0, 64, true) {
+        Result.Ok(listener) => listener,
+        Result.Err(code) => { print_i64(-code); panic() },
+    }
+}
+
+fn main() -> i64 ! {io, alloc, panic, suspend} {
+    match web.serve_threads(shared_listener(), &Bytes.from("127.0.0.1"), 0, app, web.config()) {
+        Result.Ok(_) => print_i64(0),
+        Result.Err(code) => print_i64(code),
+    }
+    let server_socket = shared_listener();
+    let port = port_of(&server_socket);
+    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+            match web.serve_threads(server_socket, &Bytes.from("127.0.0.1"), 3, app, web.config()) {
+                Result.Ok(_) => 0,
+                Result.Err(code) => code,
+            }
+        });
+        let client = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+            let mut i = 0;
+            while i < 6 {
+                exchange(port, &Bytes.from("POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"));
+                i = i + 1;
+            }
+            0
+        });
+        show(Task.join(client));
+        Task.cancel(&server);
+        show(Task.join(server));
+    });
+    // No thread's listener is left open: the connection fails (refused,
+    // or under heavy load another error), it is never accepted.
+    match net.connect(&Bytes.from("127.0.0.1"), port, 1000) {
+        Result.Ok(conn) => { print_i64(-1); let _ = net.close(conn); },
+        Result.Err(code) => print_i64(if code != 0 { 1 } else { 0 }),
+    }
+    0
+}
+"#;
+
+#[test]
+fn serve_threads_serves_on_every_thread_and_stops_them_all() {
+    let echo = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok|\n";
+    both(
+        &format!("{APP}{THREADED}"),
+        // The client's result, then the cancelled server's (-1), then the
+        // refused connection.
+        &format!("22\n{}0\n-1\n1\n", echo.repeat(6)),
+    );
+}
+
+#[test]
+fn a_native_threaded_server_serves_concurrent_rust_clients() {
+    let main = r#"
+fn main() -> i64 ! {io, alloc, panic, suspend} {
+    let server_socket = match net.listen(&Bytes.from("127.0.0.1"), 0, 64, true) {
+        Result.Ok(listener) => listener,
+        Result.Err(code) => { return code; },
+    };
+    print_i64(port_of(&server_socket));
+    match web.serve_threads(server_socket, &Bytes.from("127.0.0.1"), 4, app, web.config()) {
+        Result.Ok(_) => 0,
+        Result.Err(code) => code,
+    }
+}
+"#;
+    let (_scratch, binary) = build(&format!("{APP}{main}"));
+    let mut child = Command::new(&binary).stdout(Stdio::piped()).spawn().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    lines.read_line(&mut line).unwrap();
+    let port: u16 = line.trim().parse().unwrap();
+    let workers: Vec<_> = (0..32)
+        .map(|worker| {
+            std::thread::spawn(move || {
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                let mut request = Vec::new();
+                for i in 0..5 {
+                    let body = format!("w{worker}r{i}");
+                    let close = if i == 4 { "Connection: close\r\n" } else { "" };
+                    request.extend_from_slice(
+                        format!(
+                            "POST /echo HTTP/1.1\r\nHost: x\r\n{close}Content-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                }
+                stream.write_all(&request).unwrap();
+                let mut reply = String::new();
+                stream.read_to_string(&mut reply).unwrap();
+                for i in 0..5 {
+                    assert!(reply.contains(&format!("\r\n\r\nw{worker}r{i}")), "{reply}");
+                }
+                reply.matches("HTTP/1.1 200 OK").count()
+            })
+        })
+        .collect();
+    let answered: usize = workers.into_iter().map(|worker| worker.join().unwrap()).sum();
+    // The calling thread and three more serve.
+    let threads = std::fs::read_dir(format!("/proc/{}/task", child.id())).unwrap().count();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(answered, 160);
+    assert!(threads >= 4, "{threads} threads");
+}
