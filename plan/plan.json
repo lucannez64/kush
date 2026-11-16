@@ -7147,10 +7147,26 @@
       "deps": [
         "WEB-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Percent decoding, path segments, query strings and application/x-www-form-urlencoded, rejecting invalid UTF-8 and overlong input.",
-      "commit": null,
-      "log": []
+      "commit": "6b8d661661b3c71d4a4ef729a5fe357c7c851b76",
+      "log": [
+        {
+          "time": "2026-11-17 00:22:24",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-17 00:27:15",
+          "who": "agent",
+          "text": "Implemented std.url with bounded percent/path/query/form decoding, strict UTF-8, packed containers and indexed copy accessors. Evaluator/native parity and allocation balance tests pass; web_core and web_http1 regression tests pass (6 tests total)."
+        },
+        {
+          "time": "2026-11-17 00:27:15",
+          "who": "agent",
+          "text": "Verified evaluator/native parity, malformed inputs, input limits, request integration and cleanup; web core and HTTP parser regression tests pass."
+        }
+      ]
     },
     {
       "id": "WEB-JSON-FIELDS",
