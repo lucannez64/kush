@@ -16,6 +16,7 @@ fn quote_is_structured_and_retains_its_signature_and_spans() {
     let expr = tail(source);
     let (form, body) = expr.staging().unwrap();
     assert_eq!(form, StagingForm::Quote);
+    assert!(source[body.span.start..body.span.end].starts_with("fn("));
     assert_eq!(
         &source[expr.span.start..expr.span.end],
         "quote fn(x: i64) -> i64 ! {panic} { x + 1 }"
@@ -135,7 +136,7 @@ fn staging_operands_and_nested_quotes_obey_the_parser_budget() {
 }
 
 #[test]
-fn unelaborated_quotes_fail_closed_instead_of_executing_as_closures() {
+fn quote_construction_requires_its_generation_effects() {
     let program = kush::program::load_source(
         "staging.kush",
         "fn main() -> Unit ! {alloc} { quote fn() -> Unit ! {} {} }",
@@ -143,9 +144,7 @@ fn unelaborated_quotes_fail_closed_instead_of_executing_as_closures() {
     .unwrap();
     let error = kush::executable::check_program(&program).err().unwrap();
     assert!(
-        error
-            .message
-            .contains("staging form has not been elaborated"),
+        error.message.contains("requires effects {panic}"),
         "{}",
         error.message
     );
@@ -256,4 +255,307 @@ fn quote_statement_ends_before_a_new_line_starting_with_parens() {
         block.tail.as_ref().unwrap().kind,
         ExprKind::Integer(_)
     ));
+}
+
+fn checked(source: &str) -> Result<kush::executable::Executable, String> {
+    let program =
+        kush::program::load_source("code-types.kush", source).map_err(|(_, e)| e.message)?;
+    kush::executable::check_program(&program).map_err(|e| program.sources.render(&e))
+}
+
+#[test]
+fn code_types_are_opaque_affine_values_with_a_static_callable_signature() {
+    checked("fn consume(code: Code<fn(i64) -> i64 ! {panic}>) -> Unit ! {} {} fn main() -> Unit ! {} {}")
+        .unwrap();
+    let error = checked("fn twice(code: Code<fn() -> Unit ! {}>) -> Unit ! {} { let first = code; let second = code; } fn main() -> Unit ! {} {}")
+        .err().unwrap();
+    assert!(error.contains("moved"), "{error}");
+    assert!(checked("fn forge(bytes: Bytes) -> Code<fn() -> Unit ! {}> ! {} { bytes } fn main() -> Unit ! {} {}")
+        .is_err());
+    assert!(checked("fn forge(bytes: Bytes) -> Code<fn() -> Unit ! {}> ! {} { (bytes,) } fn main() -> Unit ! {} {}")
+        .is_err());
+}
+
+#[test]
+fn code_types_preserve_latent_effects_and_reject_non_reusable_signatures() {
+    for signature in [
+        "i64",
+        "once fn() -> Unit ! {}",
+        "linear once fn() -> Unit ! {}",
+    ] {
+        let source = format!(
+            "fn bad(code: Code<{signature}>) -> Unit ! {{}} {{}} fn main() -> Unit ! {{}} {{}}"
+        );
+        let error = checked(&source).err().unwrap();
+        assert!(error.contains("reusable fn"), "{error}");
+    }
+    let error = checked("fn strip(code: Code<fn() -> Unit ! {io}>) -> Code<fn() -> Unit ! {}> ! {} { code } fn main() -> Unit ! {} {}")
+        .err().unwrap();
+    assert!(error.contains("Code"), "{error}");
+    assert!(checked("fn wrong(code: Code<fn(i64) -> i64 ! {}>) -> Code<fn(Bool) -> i64 ! {}> ! {} { code } fn main() -> Unit ! {} {}")
+        .is_err());
+}
+
+#[test]
+fn code_signature_arguments_infer_through_generic_helpers() {
+    checked("fn identity<F>(code: Code<F>) -> Code<F> ! {} { code } fn relay(code: Code<fn(i64) -> i64 ! {panic}>) -> Code<fn(i64) -> i64 ! {panic}> ! {} { identity(code) } fn main() -> Unit ! {} {}")
+        .unwrap();
+}
+
+#[test]
+fn constructing_a_checked_quote_does_not_execute_its_body_and_releases_storage() {
+    let program = checked("fn main() -> Unit ! {alloc, panic, io} { let code = quote fn() -> Unit ! {io, panic} { print_i64(99) }; let cloned = Code.clone(&code); print_i64(7) }")
+        .unwrap();
+    let mut output = Vec::new();
+    let (status, stats) = program.evaluate_with_stats(&mut output).unwrap();
+    assert_eq!(status, 0);
+    assert_eq!(output, b"7\n");
+    assert_eq!(stats.allocations, stats.deallocations);
+    assert!(stats.allocations > 0);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("quote");
+        kush::native::build(&program, &binary).unwrap();
+        let output = std::process::Command::new(binary).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"7\n");
+    }
+}
+
+#[test]
+fn every_quotation_body_is_checked_before_it_can_execute() {
+    assert!(checked("fn make() -> Code<fn() -> i64 ! {}> ! {alloc, panic} { quote fn() -> i64 ! {} { true } } fn main() -> Unit ! {} {}")
+        .is_err());
+    assert!(checked("fn make() -> Code<fn() -> Unit ! {}> ! {alloc, panic} { quote fn() -> Unit ! {} { print_i64(1) } } fn main() -> Unit ! {} {}")
+        .is_err());
+    checked("fn make() -> Code<fn() -> Unit ! {io, panic}> ! {alloc, panic} { quote fn() -> Unit ! {io, panic} { print_i64(1) } } fn main() -> Unit ! {} {}")
+        .unwrap();
+}
+
+#[test]
+fn staged_declarations_run_checked_generators_and_publish_native_functions() {
+    let program = checked(
+        r#"
+fn choose(n: i64) -> Code<fn(i64) -> i64 ! {panic}> ! {alloc, panic} {
+    let mut left = n;
+    while left > 1 { left = left - 1; }
+    if left == 1 { quote fn(x: i64) -> i64 ! {panic} { x + 1 } }
+    else { quote fn(x: i64) -> i64 ! {panic} { x - 1 } }
+}
+#[staged] fn increment(x: i64) -> i64 ! {panic} = choose(3);
+fn main() -> i64 ! {panic} { increment(41) }
+"#,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    assert_eq!(program.evaluate(&mut output).unwrap(), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("staged");
+        kush::native::build(&program, &binary).unwrap();
+        let output = std::process::Command::new(binary).output().unwrap();
+        assert_eq!(output.status.code(), Some(42));
+    }
+}
+
+#[test]
+fn compile_time_generation_rejects_host_effects_and_dependency_cycles() {
+    let error = checked("fn make() -> Code<fn() -> i64 ! {}> ! {alloc, panic, io} { print_i64(1); quote fn() -> i64 ! {} { 1 } } #[staged] fn value() -> i64 ! {} = make(); fn main() -> i64 ! {} { value() }").err().unwrap();
+    assert!(error.contains("effects"), "{error}");
+    let error = checked("fn make() -> Code<fn() -> i64 ! {}> ! {alloc, panic} { value(); quote fn() -> i64 ! {} { 1 } } #[staged] fn value() -> i64 ! {} = make(); fn main() -> i64 ! {} { value() }").err().unwrap();
+    assert!(error.contains("cyclic staged"), "{error}");
+}
+
+#[test]
+fn lifted_scalars_specialize_a_template_independently_for_each_declaration() {
+    let program = checked(
+        r#"
+fn add(n: i64) -> Code<fn(i64) -> i64 ! {panic}> ! {alloc, panic} {
+    quote fn(x: i64) -> i64 ! {panic} { x + lift(n * 2) }
+}
+#[staged] fn first(x: i64) -> i64 ! {panic} = add(3);
+#[staged] fn second(x: i64) -> i64 ! {panic} = add(7);
+fn main() -> i64 ! {panic} { first(10) + second(10) }
+"#,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    assert_eq!(program.evaluate(&mut output).unwrap(), 40);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("lifted");
+        kush::native::build(&program, &binary).unwrap();
+        assert_eq!(
+            std::process::Command::new(binary).status().unwrap().code(),
+            Some(40)
+        );
+    }
+}
+
+#[test]
+fn recursive_generators_compose_typed_fragments_hygienically() {
+    let program = checked(
+        r#"
+fn power(n: i64) -> Code<fn(i64) -> i64 ! {panic}> ! {alloc, panic} {
+    if n == 0 { quote fn(x: i64) -> i64 ! {panic} { 1 } }
+    else {
+        let smaller = power(n - 1);
+        quote fn(x: i64) -> i64 ! {panic} { x * splice(smaller)(x) }
+    }
+}
+#[staged] fn cube(x: i64) -> i64 ! {panic} = power(3);
+#[staged] fn square(x: i64) -> i64 ! {panic} = power(2);
+fn main() -> i64 ! {panic} { cube(3) + square(4) }
+"#,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    assert_eq!(program.evaluate(&mut output).unwrap(), 43);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("power");
+        kush::native::build(&program, &binary).unwrap();
+        assert_eq!(
+            std::process::Command::new(binary).status().unwrap().code(),
+            Some(43)
+        );
+    }
+}
+
+#[test]
+fn owned_text_and_float_lifts_preserve_values_and_independent_storage() {
+    let program = checked(r#"
+fn blob(value: Bytes) -> Code<fn() -> Bytes ! {alloc, panic}> ! {alloc, panic} {
+    quote fn() -> Bytes ! {alloc, panic} { lift(value) }
+}
+fn text(value: String) -> Code<fn() -> String ! {alloc, panic}> ! {alloc, panic} {
+    quote fn() -> String ! {alloc, panic} { lift(value) }
+}
+fn number(value: f64) -> Code<fn() -> f64 ! {}> ! {alloc, panic} {
+    quote fn() -> f64 ! {} { lift(value) }
+}
+#[staged] fn bytes() -> Bytes ! {alloc, panic} = blob(Bytes.from("abc"));
+#[staged] fn string() -> String ! {alloc, panic} = text("héllo");
+#[staged] fn floating() -> f64 ! {} = number(1.5);
+fn main() -> i64 ! {alloc, panic} {
+    let first = bytes();
+    let second = bytes();
+    let third = string();
+    if Bytes.len(&first) + Bytes.len(&second) + String.len(&third) == 12 && floating() == 1.5 { 42 } else { 0 }
+}
+"#).unwrap();
+    let mut output = Vec::new();
+    let (result, stats) = program.evaluate_with_stats(&mut output).unwrap();
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, stats.deallocations);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        for backend in [
+            kush::native::Backend::Cranelift,
+            kush::native::Backend::Llvm,
+        ] {
+            let binary = scratch.path().join(format!("lifted-{backend:?}"));
+            let options = kush::native::CodegenOptions {
+                backend,
+                ..Default::default()
+            };
+            kush::native::build_with_codegen(
+                &program,
+                &binary,
+                false,
+                &Default::default(),
+                options,
+            )
+            .unwrap();
+            assert_eq!(
+                std::process::Command::new(binary).status().unwrap().code(),
+                Some(42)
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_stages_lift_from_the_immediately_enclosing_level() {
+    let program = checked(
+        r#"
+fn stage(n: i64) -> Code<fn(i64) -> Code<fn() -> i64 ! {panic}> ! {alloc, panic}> ! {alloc, panic} {
+    quote fn(x: i64) -> Code<fn() -> i64 ! {panic}> ! {alloc, panic} {
+        quote fn() -> i64 ! {panic} { lift(x) + lift(lift(n)) }
+    }
+}
+#[staged] fn first(x: i64) -> Code<fn() -> i64 ! {panic}> ! {alloc, panic} = stage(5);
+#[staged] fn second() -> i64 ! {panic} = first(37);
+fn main() -> i64 ! {panic} { second() }
+"#,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    assert_eq!(program.evaluate(&mut output).unwrap(), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("nested");
+        kush::native::build(&program, &binary).unwrap();
+        assert_eq!(
+            std::process::Command::new(binary).status().unwrap().code(),
+            Some(42)
+        );
+    }
+}
+
+#[test]
+fn splice_types_ownership_and_owned_lift_effects_are_checked() {
+    for source in [
+        "fn bad(code: Code<fn() -> Bool ! {}>) -> Code<fn() -> i64 ! {}> ! {alloc, panic} { quote fn() -> i64 ! {} { splice(code)() } } fn main() -> Unit ! {} {}",
+        "fn bad(code: Code<fn() -> i64 ! {}>) -> Code<fn() -> i64 ! {panic}> ! {alloc, panic} { quote fn() -> i64 ! {panic} { splice(code)() + splice(code)() } } fn main() -> Unit ! {} {}",
+        "fn bad(bytes: Bytes) -> Code<fn() -> Bytes ! {}> ! {alloc, panic} { quote fn() -> Bytes ! {} { lift(bytes) } } fn main() -> Unit ! {} {}",
+        "fn bad(code: Code<fn() -> Unit ! {}>) -> i64 ! {} { code.unknown } fn main() -> Unit ! {} {}",
+    ] {
+        assert!(checked(source).is_err(), "accepted {source}");
+    }
+    checked("fn good(code: Code<fn() -> i64 ! {}>) -> Code<fn() -> i64 ! {panic}> ! {alloc, panic} { quote fn() -> i64 ! {panic} { splice(Code.clone(&code))() + splice(Code.clone(&code))() } } fn main() -> Unit ! {} {}")
+        .unwrap();
+}
+
+#[test]
+fn generation_panics_and_resource_exhaustion_are_compile_diagnostics() {
+    let error = checked("fn make() -> Code<fn() -> Unit ! {}> ! {alloc, panic} { panic() } #[staged] fn target() -> Unit ! {} = make(); fn main() -> Unit ! {} {}")
+        .err().unwrap();
+    assert!(error.contains("panic"), "{error}");
+    let error = checked("fn make() -> Code<fn() -> Unit ! {}> ! {alloc, panic} { while true {} quote fn() -> Unit ! {} {} } #[staged] fn target() -> Unit ! {} = make(); fn main() -> Unit ! {} {}")
+        .err().unwrap();
+    assert!(error.contains("budget"), "{error}");
+    let error = checked("fn make() -> Code<fn() -> Unit ! {}> ! {alloc, panic} { let a = Bytes.with_capacity(16777216); let b = Bytes.with_capacity(16777216); let c = Bytes.with_capacity(16777216); let d = Bytes.with_capacity(16777216); let e = Bytes.with_capacity(16777216); quote fn() -> Unit ! {} {} } #[staged] fn target() -> Unit ! {} = make(); fn main() -> Unit ! {} {}")
+        .err().unwrap();
+    assert!(error.contains("allocation budget"), "{error}");
+}
+
+#[test]
+fn power_example_runs_without_a_runtime_generator_call() {
+    let program = checked(include_str!("../../../examples/staging-power.kush")).unwrap();
+    let mut output = Vec::new();
+    assert_eq!(program.evaluate(&mut output).unwrap(), 0);
+    assert_eq!(output, b"27\n16\n");
+}
+
+#[test]
+fn specialization_keeps_erased_parameter_contracts() {
+    let program = checked(
+        r#"
+fn make(n: i64) -> Code<fn(i64 @[0]) -> i64 ! {}> ! {alloc, panic} {
+    quote fn(x: i64 @[0]) -> i64 ! {} { lift(n) }
+}
+#[staged] fn value(x: i64 @[0]) -> i64 ! {} = make(42);
+fn main() -> i64 ! {} { value(999) }
+"#,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    assert_eq!(program.evaluate(&mut output).unwrap(), 42);
 }

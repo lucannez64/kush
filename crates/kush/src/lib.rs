@@ -39,6 +39,7 @@ mod row_laws_tests;
 mod runtime_types;
 pub mod source;
 mod suspend;
+mod staging;
 pub mod timing;
 mod variance;
 

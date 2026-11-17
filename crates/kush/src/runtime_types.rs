@@ -1495,6 +1495,75 @@ impl<'a> Types<'a> {
     /// Intern a checked callable signature. The `once` flag is part of the
     /// identity because it changes representation (one word vs two) and the
     /// callable usage contract.
+    /// Intern the opaque, affine owner of a template with this callable type.
+    /// Its single owned buffer lets existing aggregate cleanup release a
+    /// template on ordinary returns and while unwinding.
+    pub fn code_type(&mut self, callable: Type, span: Span) -> Result<Type> {
+        if !matches!(callable, Type::Fn(_)) {
+            return Err(Diagnostic::new(
+                span,
+                "Code requires a reusable fn(...) signature; once and linear callables are not supported",
+            ));
+        }
+        let definition = self
+            .resolution
+            .bindings
+            .iter()
+            .position(|binding| binding.kind == BindingKind::Builtin && binding.name == "Code")
+            .expect("Code builtin is registered by name resolution");
+        let key = (definition, vec![callable], Vec::new(), Vec::new());
+        if let Some(index) = self.cache.get(&key) {
+            return Ok(Type::Enum(*index));
+        }
+        if self.enums.len() >= 256 {
+            return Err(Diagnostic::new(span, "Code layout budget exhausted"));
+        }
+        let index = self.enums.len();
+        self.enums.push(Enum {
+            definition,
+            name: format!("Code<{}>", self.name(callable)),
+            arguments: vec![callable],
+            consts: Vec::new(),
+            lifetimes: Vec::new(),
+            variants: vec![Variant {
+                name: "$template".into(),
+                fields: vec![Type::Bytes],
+                tuple: false,
+                names: vec!["$graph".into()],
+            }],
+            words: 1,
+            result: None,
+            record: true,
+            field_lifetimes: vec![None],
+            borrowed: false,
+            mutable_borrow: false,
+            linear: false,
+            array: None,
+            dynamic_array: None,
+            runtime_length: None,
+            tuple: false,
+            structural: false,
+            foreign: None,
+        });
+        self.cache.insert(key, index);
+        Ok(Type::Enum(index))
+    }
+
+    /// Callable signature carried by an opaque Code owner, if any.
+    pub fn code_signature(&self, ty: Type) -> Option<usize> {
+        let Type::Enum(index) = ty else {
+            return None;
+        };
+        let layout = &self.enums[index];
+        let binding = self.resolution.bindings.get(layout.definition)?;
+        if binding.kind != BindingKind::Builtin || binding.name != "Code" {
+            return None;
+        }
+        match layout.arguments.first()? {
+            Type::Fn(signature) => Some(*signature),
+            _ => None,
+        }
+    }
     /// Intern a callable type that may carry a slice borrow contract and a
     /// static result-transfer contract.
     #[allow(clippy::too_many_arguments)]
@@ -3361,6 +3430,17 @@ impl<'a> Types<'a> {
                     arguments[1],
                 )?;
                 return self.dynamic_array(element, capacity, ty.span);
+            }
+            // A code value owns its serialized template graph. Its callable
+            // argument is static identity, not a callable stored in the graph.
+            // Keep it nominal and opaque: a tuple containing Bytes must not
+            // be usable as code, nor may differing latent rows become equal.
+            if b.kind == BindingKind::Builtin && b.name == "Code" {
+                if !lifetime_arguments.is_empty() || arguments.len() != 1 {
+                    return Err(Diagnostic::new(ty.span, "Code expects one closed callable type"));
+                }
+                let callable = self.lower(arguments[0], substitution, depth + 1)?;
+                return self.code_type(callable, ty.span);
             }
             // THREAD-CHANNELS: `Channel<T>` of plain data (scalars and
             // records of scalars), which crosses threads by copying words.

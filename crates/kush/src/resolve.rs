@@ -183,7 +183,7 @@ pub fn resolve_staged_program(program: &Program) -> Result<Resolution> {
     }).collect::<Vec<_>>();
     let mut resolver = Resolver::new();
     resolver.staged = true;
-    for name in ["Code", "Code.clone", "Code.compile"] {
+    for name in ["Code.clone", "Code.compile"] {
         let id = resolver.add(name.into(), BindingKind::Builtin, Span::default(), None);
         resolver.builtins.insert(name.into(), id);
     }
@@ -332,6 +332,7 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "OS",
     "OS.strerror",
     "Bytes",
+    "Code",
     "Bytes.from",
     "Bytes.with_capacity",
     "Bytes.try_with_capacity",

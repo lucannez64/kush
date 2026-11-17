@@ -27,6 +27,38 @@ const TASK_STACK_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_EVAL_FUEL: usize = 10_000_000;
 
 impl Executable {
+    /// Evaluate a checked, parameterless generation entry without host access.
+    /// The returned graph is copied out before destroying its owning value.
+    pub(crate) fn evaluate_staged_code(&self, entry: usize) -> Result<Vec<u8>> {
+        let heap = SharedHeap::new();
+        let stats = StatsHandle::new(0);
+        let mut evaluator = Evaluator {
+            program: self, input: io::empty(), output: io::sink(),
+            fuel: 1_000_000, generation: true, depth: 0,
+            heap: heap.clone(), stats: stats.clone(), task: None,
+            dynamic_handlers: vec![], kstack: vec![], kstack_epoch: 0,
+            abort_scopes: vec![], next_activation: 0, pending_abort: None,
+            try_budget: None, host: Arc::new(Host::empty()),
+        };
+        let value = evaluator.call(entry, vec![])?;
+        let bytes = match &value {
+            Value::Enum { fields, .. } if fields.len() == 1 => match fields[0] {
+                Value::Owned(id) => heap.with(id, |value| match value {
+                    Value::Buffer { data, .. } => Some(data.clone()),
+                    _ => None,
+                }).flatten(),
+                _ => None,
+            },
+            _ => None,
+        }.ok_or_else(|| Diagnostic::new(self.functions[entry].span,
+            "a staged generator must return an owned Code value"))?;
+        evaluator.drop_value(value)?;
+        if heap.len() != 0 || stats.snapshot().allocations != stats.snapshot().deallocations {
+            return Err(Diagnostic::new(self.functions[entry].span,
+                "internal ownership error: generator left live allocations"));
+        }
+        Ok(bytes)
+    }
     /// Whether a function reachable from the entry obtains the standard
     /// input handle. Only then does a task program buffer standard input up
     /// front (to its end). Reachability matters: `std.io.stdin()` exists in
@@ -169,6 +201,7 @@ impl Executable {
             input,
             output,
             fuel: self.eval_fuel,
+            generation: false,
             depth: 0,
             heap: heap.clone(),
             stats: stats.clone(),
@@ -407,6 +440,7 @@ impl Executable {
                     input: source,
                     output: sink,
                     fuel: self.eval_fuel,
+                    generation: false,
                     depth: 0,
                     heap,
                     stats,
@@ -467,6 +501,7 @@ impl Executable {
             input: source.clone(),
             output: sink.clone(),
             fuel: self.eval_fuel,
+            generation: false,
             depth: 0,
             heap: heap.clone(),
             stats: stats.clone(),
@@ -1008,6 +1043,20 @@ impl SharedHeap {
     }
     fn len(&self) -> usize {
         self.0.lock().unwrap().map.len()
+    }
+    fn storage_bytes(&self) -> usize {
+        fn size(value: &Value) -> usize {
+            let dynamic = match value {
+                Value::Buffer { capacity, .. } => *capacity,
+                Value::Vector { capacity, items, .. } => capacity
+                    .saturating_mul(std::mem::size_of::<Value>())
+                    .saturating_add(items.iter().map(size).sum::<usize>()),
+                Value::Enum { fields, .. } => fields.iter().map(size).sum(),
+                _ => 0,
+            };
+            std::mem::size_of::<Value>().saturating_add(dynamic)
+        }
+        self.0.lock().unwrap().map.values().map(size).sum()
     }
 }
 #[derive(Debug)]
@@ -1564,6 +1613,7 @@ struct Evaluator<'a, R: Read, W: Write> {
     input: R,
     output: W,
     fuel: usize,
+    generation: bool,
     depth: usize,
     heap: SharedHeap,
     stats: StatsHandle,
@@ -7032,6 +7082,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
     }
     fn expr(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Flow> {
+        if self.generation && (self.heap.len() > 1024 || self.heap.storage_bytes() > 64 * 1024 * 1024) {
+            return Err(Diagnostic::new(expr.span, "compile-time generator allocation budget exhausted"));
+        }
         if self.depth >= 128 {
             return Err(Diagnostic::new(
                 expr.span,

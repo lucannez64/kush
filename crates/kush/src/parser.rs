@@ -2017,11 +2017,12 @@ impl Parser {
             Kind::Ident(word) if word == "quote" && self.tokens.get(self.pos + 1)
                 .is_some_and(|t| t.kind == Kind::Fn) => {
                 self.bump();
+                let lambda_start = self.current().span;
                 self.stage += 1;
                 let lambda = self.nested(|p| p.lambda());
                 self.stage -= 1;
                 let span = self.since(start);
-                let value = Node::new(ExprKind::Lambda(Box::new(lambda?)), span);
+                let value = Node::new(ExprKind::Lambda(Box::new(lambda?)), self.since(lambda_start));
                 return Ok(StagingForm::Quote.expression(value, span));
             }
             Kind::Ident(word) if self.stage > 0 && (word == "splice" || word == "lift")

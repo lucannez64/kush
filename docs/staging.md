@@ -215,6 +215,15 @@ earlier; module references retain the existing visibility checks. This
 entry point resolves names only: it does not certify executable types,
 ownership, generated code or safe compilation.
 
-Ordinary executable checking deliberately rejects unelaborated quotations.
-Code typing, generator evaluation, AOT materialization and runtime compilation
-remain unfinished. STAGING and STAGING-RUNTIME remain open in the plan.
+Executable checking now admits checked Code<F> values, explicit graph cloning,
+quotes with scalar/owned-text lifts and typed splices, and nested quotation
+levels. Staged declarations evaluate generators with a restricted effect row
+and materialize ordinary checked native functions. Generation supports branches,
+loops and recursion; the recursive power example runs in the evaluator and
+Cranelift, while owned text and float lifting also have LLVM parity coverage.
+
+This is still an incomplete implementation of the full design. Generic
+quotation validation, some staged signature forms and nested owning callable
+templates need further work. Runtime compilation has not been implemented.
+STAGING and STAGING-RUNTIME remain open. Detailed current constraints and the
+runtime implementation direction are in [the working notes](staging-runtime-notes.md).

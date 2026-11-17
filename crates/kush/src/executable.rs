@@ -5523,11 +5523,21 @@ fn checked_exports(
 }
 
 pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
+    if let Some(prepared) = crate::staging::prepare(program)? {
+        let executable = check_program_unstaged(&prepared.program, false)?;
+        let mut executable = crate::staging::materialize(executable, prepared)?;
+        crate::suspend::lower(&mut executable)?;
+        return Ok(executable);
+    }
+    check_program_unstaged(program, true)
+}
+
+fn check_program_unstaged(program: &crate::program::Program, lower_suspensions: bool) -> Result<Executable> {
     let injected = inject_allocator_protocol(program)?;
     let program = &injected;
     let module = &program.module;
     reject_stored_capabilities(module)?;
-    let mut resolution = resolve::resolve_program(program)?;
+    let mut resolution = resolve::resolve_staged_program(program)?;
     // Default trait methods inherited by an impl need one synthetic function
     // binding per (impl, method) pair. Allocate them before `Types` borrows the
     // resolver table: the table cannot be mutated once type lowering holds it.
@@ -6040,6 +6050,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         }
         functions.checking = index;
         let mut checker = Checker {
+            quote_holes: BTreeMap::new(),
+            quote_splices: BTreeMap::new(),
             lambda_holes: BTreeMap::new(),
             lambda_hint: None,
             required_effects: std::cell::Cell::new(0),
@@ -6438,7 +6450,9 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     crate::suspend::mark_abort_calls(&mut executable)?;
     crate::ownership::check(&mut executable)?;
     crate::grades::check(&executable)?;
-    crate::suspend::lower(&mut executable)?;
+    if lower_suspensions {
+        crate::suspend::lower(&mut executable)?;
+    }
     Ok(executable)
 }
 /// A span-insensitive key for the simple expression forms admitted in erased
@@ -13130,6 +13144,10 @@ struct HandlerScope {
 }
 
 struct Checker<'a, 't> {
+    /// Explicit quotation holes, keyed by original source occurrence. During
+    /// template checking their slots are remapped to captured parameters.
+    quote_holes: BTreeMap<(usize, usize), usize>,
+    quote_splices: BTreeMap<(usize, usize), (usize, usize)>,
     types: &'t mut Types<'a>,
     resolution: &'a Resolution,
     functions: &'t mut Functions<'a>,
@@ -22811,6 +22829,41 @@ impl Checker<'_, '_> {
     ) -> Result<Expr> {
         self.nested(expr.span, |c| {
             let span = expr.span;
+            if let Some((form, value)) = expr.staging() {
+                return match form {
+                    ast::StagingForm::Quote => c.quote(value, expected, span),
+                    ast::StagingForm::Lift if c.quote_holes.contains_key(&(span.start, span.end)) => {
+                        let slot = c.quote_holes[&(span.start, span.end)];
+                        let ty = c.locals[slot].ty;
+                        let value = if matches!(ty, Type::Bytes | Type::String) {
+                            c.require(ALLOC | PANIC, span)?;
+                            let reference = Expr { kind: ExprKind::Borrow(slot),
+                                ty: Type::Ref(c.types.pointer(ty)), span, resource: None };
+                            // A String's checked bytes remain valid UTF-8 when
+                            // copied. Both owning text types use buffer storage.
+                            Expr { kind: ExprKind::Call(Target::Bytes(BytesOp::Copy), vec![reference]),
+                                ty, span, resource: None }
+                        } else {
+                            Expr { kind: ExprKind::Local(slot), ty, span, resource: None }
+                        };
+                        match expected { Some(ty) => c.coerce(value, ty, span), None => Ok(value) }
+                    }
+                    ast::StagingForm::Splice if c.quote_splices.contains_key(&(span.start, span.end)) => {
+                        let (function, signature) = c.quote_splices[&(span.start, span.end)];
+                        let value = Expr { kind: ExprKind::FnValue { function, captures: vec![] },
+                            ty: Type::Fn(signature), span, resource: None };
+                        match expected { Some(ty) => c.coerce(value, ty, span), None => Ok(value) }
+                    }
+                    _ => Err(Diagnostic::new(span,
+                        "this staging operation has not been elaborated yet")),
+                };
+            }
+            if let ast::ExprKind::Call { callee, arguments } = &expr.kind
+                && c.resolution.reference(callee.span).is_some_and(|id|
+                    c.resolution.bindings[id].kind == BindingKind::Builtin
+                        && c.resolution.bindings[id].name == "Code.clone") {
+                return c.clone_code(arguments, expected, span);
+            }
             if let Some(id) = c.logical_data_root(expr)
                 && (c.logical.data.contains_key(&id)
                     || c.logical.constructors.contains_key(&id))
@@ -25391,6 +25444,602 @@ impl Checker<'_, '_> {
     /// lambda capturing affine owned storage is an owning once-consuming
     /// closure. Capturing a linear `@[1]`/`#[linear]` obligation produces a
     /// `linear once fn` value whose environment must be consumed by a call.
+    fn splice_placeholder(&mut self, signature: usize, span: Span) -> Result<usize> {
+        let f = self.types.function_types[signature].clone();
+        let locals = f
+            .parameters
+            .iter()
+            .map(|ty| Local {
+                ty: *ty,
+                mutable: false,
+                linear: false,
+                pinned: false,
+                grade: None,
+                span,
+            })
+            .collect::<Vec<_>>();
+        let body = Block {
+            statements: vec![],
+            tail: None,
+            ty: Type::Unit,
+        };
+        let never = Expr {
+            kind: ExprKind::Loop(body),
+            ty: Type::Never,
+            span,
+            resource: None,
+        };
+        let (local_borrowed, local_copyable) = self.local_classes(&locals);
+        let function = Function {
+            name: "splice placeholder".into(),
+            parameters: f.parameters.len(),
+            closure: None,
+            capture_refs: vec![],
+            capture_writes: vec![],
+            locals,
+            result: f.result,
+            body: Block {
+                statements: vec![],
+                tail: Some(Box::new(never)),
+                ty: Type::Never,
+            },
+            span,
+            resources: vec![],
+            local_resources: vec![],
+            parameter_grades: f.parameter_grades.clone(),
+            result_grade: f.result_grade,
+            parameter_lifetimes: f.borrows.parameters.clone(),
+            result_lifetime: f.borrows.result.clone(),
+            lifetime_bounds: f.borrows.bounds.clone(),
+            declared_lifetimes: BTreeSet::new(),
+            index_relations: BTreeSet::new(),
+            parameter_slots: None,
+            local_borrowed,
+            local_copyable,
+            capability_parameters: vec![],
+            shared_environment: false,
+        };
+        let signature = Signature {
+            call_contract: None,
+            binding: usize::MAX,
+            name: function.name.clone(),
+            parameters: f.parameters,
+            result: f.result,
+            effects: f.effects,
+            span,
+            substitution: BTreeMap::new(),
+            consts: BTreeMap::new(),
+            grades: BTreeMap::new(),
+            effect_arguments: BTreeMap::new(),
+            origin: None,
+            parameter_grades: f.parameter_grades,
+            result_grade: f.result_grade,
+            parameter_lifetimes: f.borrows.parameters,
+            result_lifetime: f.borrows.result,
+            lifetime_bounds: f.borrows.bounds,
+            self_type: None,
+            default_trait: None,
+            associated_consts: BTreeMap::new(),
+        };
+        self.functions.add_synthetic(signature, function)
+    }
+
+    fn stage_emit_byte(buffer: usize, byte: Expr, statements: &mut Vec<Statement>, span: Span) {
+        let buffer_value = Expr {
+            kind: ExprKind::Local(buffer),
+            ty: Type::Bytes,
+            span,
+            resource: None,
+        };
+        let pushed = Expr {
+            kind: ExprKind::Call(Target::Bytes(BytesOp::Push), vec![buffer_value, byte]),
+            ty: Type::Bytes,
+            span,
+            resource: None,
+        };
+        statements.push(Statement::Expr(Expr {
+            kind: ExprKind::Assign(buffer, Box::new(pushed)),
+            ty: Type::Unit,
+            span,
+            resource: None,
+        }));
+    }
+
+    fn stage_emit_word(buffer: usize, word: Expr, statements: &mut Vec<Statement>, span: Span) {
+        for shift in (0..64).step_by(8) {
+            let constant = |n| Expr {
+                kind: ExprKind::Constant(n),
+                ty: Type::I64,
+                span,
+                resource: None,
+            };
+            let shifted = Expr {
+                kind: ExprKind::Binary(
+                    Kind::Shr,
+                    Box::new(word.clone()),
+                    Box::new(constant(shift)),
+                ),
+                ty: Type::I64,
+                span,
+                resource: None,
+            };
+            let byte = Expr {
+                kind: ExprKind::Binary(Kind::Amp, Box::new(shifted), Box::new(constant(255))),
+                ty: Type::I64,
+                span,
+                resource: None,
+            };
+            Self::stage_emit_byte(buffer, byte, statements, span);
+        }
+    }
+
+    fn stage_emit_code(
+        &mut self,
+        buffer: usize,
+        capture: &Expr,
+        stub: usize,
+        statements: &mut Vec<Statement>,
+        span: Span,
+    ) -> Result<()> {
+        let constant = |n| Expr {
+            kind: ExprKind::Constant(n),
+            ty: Type::I64,
+            span,
+            resource: None,
+        };
+        Self::stage_emit_word(buffer, constant(stub as i64), statements, span);
+        let ExprKind::Local(slot) = capture.kind else {
+            return Err(Diagnostic::new(
+                span,
+                "a code splice must name a checked captured owner",
+            ));
+        };
+        let Type::Enum(layout) = capture.ty else {
+            unreachable!()
+        };
+        let field = Expr {
+            kind: ExprKind::Project(
+                Box::new(Expr {
+                    kind: ExprKind::Peek(slot),
+                    ty: capture.ty,
+                    span,
+                    resource: None,
+                }),
+                self.types.enums[layout].tag_words(),
+            ),
+            ty: Type::Bytes,
+            span,
+            resource: None,
+        };
+        let reference_ty = Type::Ref(self.types.pointer(Type::Bytes));
+        let reference = Expr {
+            kind: ExprKind::BorrowPlace(Box::new(field)),
+            ty: reference_ty,
+            span,
+            resource: None,
+        };
+        self.stage_emit_blob(buffer, reference, statements, span)
+    }
+
+    fn stage_emit_blob(
+        &mut self,
+        buffer: usize,
+        reference: Expr,
+        statements: &mut Vec<Statement>,
+        span: Span,
+    ) -> Result<()> {
+        let constant = |n| Expr {
+            kind: ExprKind::Constant(n),
+            ty: Type::I64,
+            span,
+            resource: None,
+        };
+        let reference_ty = reference.ty;
+        let reference_slot = self.fresh_local(span, reference_ty)?;
+        statements.push(Statement::Let(reference_slot, reference));
+        let reference = || Expr {
+            kind: ExprKind::Local(reference_slot),
+            ty: reference_ty,
+            span,
+            resource: None,
+        };
+        let length = Expr {
+            kind: ExprKind::Call(Target::Bytes(BytesOp::Len), vec![reference()]),
+            ty: Type::I64,
+            span,
+            resource: None,
+        };
+        let length_slot = self.fresh_local(span, Type::I64)?;
+        statements.push(Statement::Let(length_slot, length));
+        let length = || Expr {
+            kind: ExprKind::Local(length_slot),
+            ty: Type::I64,
+            span,
+            resource: None,
+        };
+        Self::stage_emit_word(buffer, length(), statements, span);
+        let index = self.fresh_local(span, Type::I64)?;
+        self.locals[index].mutable = true;
+        statements.push(Statement::Let(index, constant(0)));
+        let index_value = || Expr {
+            kind: ExprKind::Local(index),
+            ty: Type::I64,
+            span,
+            resource: None,
+        };
+        let byte = Expr {
+            kind: ExprKind::Call(
+                Target::Bytes(BytesOp::Get),
+                vec![reference(), index_value()],
+            ),
+            ty: Type::I64,
+            span,
+            resource: None,
+        };
+        let mut body = Vec::new();
+        Self::stage_emit_byte(buffer, byte, &mut body, span);
+        let next = Expr {
+            kind: ExprKind::Binary(Kind::Plus, Box::new(index_value()), Box::new(constant(1))),
+            ty: Type::I64,
+            span,
+            resource: None,
+        };
+        body.push(Statement::Expr(Expr {
+            kind: ExprKind::Assign(index, Box::new(next)),
+            ty: Type::Unit,
+            span,
+            resource: None,
+        }));
+        let condition = Expr {
+            kind: ExprKind::Binary(Kind::Lt, Box::new(index_value()), Box::new(length())),
+            ty: Type::Bool,
+            span,
+            resource: None,
+        };
+        statements.push(Statement::Expr(Expr {
+            kind: ExprKind::While(
+                Box::new(condition),
+                Block {
+                    statements: body,
+                    tail: None,
+                    ty: Type::Unit,
+                },
+            ),
+            ty: Type::Unit,
+            span,
+            resource: None,
+        }));
+        Ok(())
+    }
+
+    fn clone_code(
+        &mut self,
+        arguments: &[ast::Expr],
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        if arguments.len() != 1 {
+            return Err(Diagnostic::new(
+                span,
+                "Code.clone expects one shared code reference",
+            ));
+        }
+        self.require(ALLOC | PANIC, span)?;
+        let reference = self.expr(&arguments[0])?;
+        let Type::Ref(pointer) = reference.ty else {
+            return Err(Diagnostic::new(span, "Code.clone expects &Code<fn(...)>"));
+        };
+        let ty = self.types.pointees[pointer];
+        if self.types.code_signature(ty).is_none() {
+            return Err(Diagnostic::new(span, "Code.clone expects &Code<fn(...)>"));
+        }
+        let Type::Enum(enum_id) = ty else {
+            unreachable!()
+        };
+        let reference_ty = reference.ty;
+        let slot = self.fresh_local(span, reference_ty)?;
+        let statements = vec![Statement::Let(slot, reference)];
+        let reference = Expr {
+            kind: ExprKind::Peek(slot),
+            ty: reference_ty,
+            span,
+            resource: None,
+        };
+        let field = Expr {
+            kind: ExprKind::Project(Box::new(reference), self.types.enums[enum_id].tag_words()),
+            ty: Type::Bytes,
+            span,
+            resource: None,
+        };
+        let borrowed = Expr {
+            kind: ExprKind::BorrowPlace(Box::new(field)),
+            ty: Type::Ref(self.types.pointer(Type::Bytes)),
+            span,
+            resource: None,
+        };
+        let bytes = Expr {
+            kind: ExprKind::Call(Target::Bytes(BytesOp::Copy), vec![borrowed]),
+            ty: Type::Bytes,
+            span,
+            resource: None,
+        };
+        let code = Expr {
+            kind: ExprKind::Construct {
+                enum_id,
+                tag: 0,
+                fields: vec![bytes],
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        let code = Self::after(statements, code);
+        match expected {
+            Some(expected) => self.coerce(code, expected, span),
+            None => Ok(code),
+        }
+    }
+
+    /// Check a quotation using the ordinary callable checker. The body is
+    /// retained as a checked template function; constructing code serializes
+    /// its identity rather than evaluating or returning a closure.
+    fn quote(&mut self, value: &ast::Expr, expected: Option<Type>, span: Span) -> Result<Expr> {
+        let ast::ExprKind::Lambda(lambda) = &value.kind else {
+            return Err(Diagnostic::new(
+                span,
+                "a quotation requires a callable body",
+            ));
+        };
+        self.require(ALLOC | PANIC, span)?;
+        let mut statements = Vec::new();
+        let mut holes = BTreeMap::new();
+        let mut splices = BTreeMap::new();
+        let mut nested_callable = false;
+        let mut pending = vec![(value, 1usize)];
+        while let Some((expression, stage)) = pending.pop() {
+            nested_callable |= stage == 1
+                && !std::ptr::eq(expression, value)
+                && matches!(expression.kind, ast::ExprKind::Lambda(_));
+            if let Some((form, operand)) = expression.staging() {
+                match form {
+                    ast::StagingForm::Quote => {
+                        pending.push((operand, stage + 1));
+                        continue;
+                    }
+                    ast::StagingForm::Lift | ast::StagingForm::Splice if stage > 1 => {
+                        pending.push((operand, stage - 1));
+                        continue;
+                    }
+                    ast::StagingForm::Lift => {
+                        let lifted = self.expr(operand)?;
+                        if !is_live_scalar(lifted.ty)
+                            && !matches!(lifted.ty, Type::Bytes | Type::String)
+                        {
+                            return Err(Diagnostic::new(
+                                expression.span,
+                                "lifting owned values is not implemented yet",
+                            ));
+                        }
+                        let slot = self.fresh_local(expression.span, lifted.ty)?;
+                        holes.insert((expression.span.start, expression.span.end), slot);
+                        statements.push(Statement::Let(slot, lifted));
+                        continue;
+                    }
+                    ast::StagingForm::Splice => {
+                        let code = self.expr(operand)?;
+                        let signature = self.types.code_signature(code.ty).ok_or_else(|| {
+                            Diagnostic::new(expression.span, "splice expects Code<fn(...)>")
+                        })?;
+                        let stub = self.splice_placeholder(signature, expression.span)?;
+                        let slot = self.fresh_local(expression.span, code.ty)?;
+                        let key = (expression.span.start, expression.span.end);
+                        holes.insert(key, slot);
+                        splices.insert(key, (stub, signature));
+                        statements.push(Statement::Let(slot, code));
+                        continue;
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            expression.span,
+                            "invalid quotation stage form",
+                        ));
+                    }
+                }
+            }
+            let mut children = Vec::new();
+            ast_children(expression, &mut |child| children.push(child));
+            pending.extend(children.into_iter().rev().map(|child| (child, stage)));
+        }
+        if nested_callable
+            && (!splices.is_empty()
+                || holes
+                    .values()
+                    .any(|slot| matches!(self.locals[*slot].ty, Type::Bytes | Type::String)))
+        {
+            return Err(Diagnostic::new(
+                span,
+                "code splices in nested callable templates are not implemented yet",
+            ));
+        }
+        let expected_callable = match expected {
+            Some(ty) => Some(Type::Fn(self.types.code_signature(ty).ok_or_else(
+                || {
+                    Diagnostic::new(
+                        span,
+                        "a quotation produces Code<fn(...)>, not an ordinary callable",
+                    )
+                },
+            )?)),
+            None => None,
+        };
+        let expected_callable = match expected_callable {
+            Some(Type::Fn(signature)) if !holes.is_empty() => {
+                let f = self.types.function_types[signature].clone();
+                Some(Type::Once(self.types.function_type_with(
+                    f.parameters,
+                    f.result,
+                    f.effects,
+                    f.parameter_grades,
+                    f.result_grade,
+                    true,
+                    false,
+                    f.borrows,
+                )))
+            }
+            other => other,
+        };
+        let hole_slots = holes.clone();
+        let saved_holes = std::mem::replace(&mut self.quote_holes, holes);
+        let saved_splices = std::mem::replace(&mut self.quote_splices, splices.clone());
+        let callable = self.lambda(lambda, span, expected_callable, false);
+        self.quote_holes = saved_holes;
+        self.quote_splices = saved_splices;
+        let callable = callable?;
+        let ExprKind::FnValue { function, captures } = &callable.kind else {
+            return Err(Diagnostic::new(
+                span,
+                "a quoted template must be a closed callable",
+            ));
+        };
+        if captures.iter().any(|c| {
+            !is_live_scalar(c.ty)
+                && !matches!(c.ty, Type::Bytes | Type::String)
+                && self.types.code_signature(c.ty).is_none()
+        }) {
+            return Err(Diagnostic::new(
+                span,
+                "a quoted capture must currently be a scalar",
+            ));
+        }
+        let signature = match callable.ty {
+            Type::Fn(signature) => signature,
+            Type::Once(signature) => {
+                let f = self.types.function_types[signature].clone();
+                self.types.function_type_with(
+                    f.parameters,
+                    f.result,
+                    f.effects,
+                    f.parameter_grades,
+                    f.result_grade,
+                    false,
+                    false,
+                    f.borrows,
+                )
+            }
+            _ => return Err(Diagnostic::new(span, "invalid quoted callable signature")),
+        };
+        let ty = self.types.code_type(Type::Fn(signature), span)?;
+        let Type::Enum(enum_id) = ty else {
+            unreachable!()
+        };
+        let composed = !splices.is_empty()
+            || captures
+                .iter()
+                .any(|c| matches!(c.ty, Type::Bytes | Type::String));
+        let mut encoded = if captures.is_empty() {
+            b"KUSHCD01"
+        } else if composed {
+            b"KUSHCD03"
+        } else {
+            b"KUSHCD02"
+        }
+        .to_vec();
+        encoded.extend_from_slice(&(*function as u64).to_le_bytes());
+        if !captures.is_empty() {
+            encoded.extend_from_slice(&(captures.len() as u64).to_le_bytes());
+        }
+        let mut bytes = Expr {
+            kind: ExprKind::BytesLiteral(encoded),
+            ty: Type::Bytes,
+            span,
+            resource: None,
+        };
+        if !captures.is_empty() {
+            let slot = self.fresh_local(span, Type::Bytes)?;
+            self.locals[slot].mutable = true;
+            statements.push(Statement::Let(slot, bytes));
+            for capture in captures {
+                if matches!(capture.ty, Type::Bytes | Type::String) {
+                    let ExprKind::Local(capture_slot) = capture.kind else {
+                        unreachable!()
+                    };
+                    let tag = Expr {
+                        kind: ExprKind::Constant(2),
+                        ty: Type::I64,
+                        span,
+                        resource: None,
+                    };
+                    Self::stage_emit_byte(slot, tag, &mut statements, span);
+                    let reference = Expr {
+                        kind: ExprKind::Borrow(capture_slot),
+                        ty: Type::Ref(self.types.pointer(capture.ty)),
+                        span,
+                        resource: None,
+                    };
+                    self.stage_emit_blob(slot, reference, &mut statements, span)?;
+                } else if self.types.code_signature(capture.ty).is_some() {
+                    let ExprKind::Local(capture_slot) = capture.kind else {
+                        unreachable!()
+                    };
+                    let key = hole_slots
+                        .iter()
+                        .find(|(_, value)| **value == capture_slot)
+                        .map(|(key, _)| key)
+                        .expect("captured code has a splice hole");
+                    let stub = splices[key].0;
+                    let tag = Expr {
+                        kind: ExprKind::Constant(1),
+                        ty: Type::I64,
+                        span,
+                        resource: None,
+                    };
+                    Self::stage_emit_byte(slot, tag, &mut statements, span);
+                    self.stage_emit_code(slot, capture, stub, &mut statements, span)?;
+                } else {
+                    if composed {
+                        let tag = Expr {
+                            kind: ExprKind::Constant(0),
+                            ty: Type::I64,
+                            span,
+                            resource: None,
+                        };
+                        Self::stage_emit_byte(slot, tag, &mut statements, span);
+                    }
+                    // Local scalar representations are word bits, not an
+                    // arithmetic cast. Lift expressions have already run once.
+                    let raw = if capture.ty == Type::Unit {
+                        ExprKind::Constant(0)
+                    } else {
+                        capture.kind.clone()
+                    };
+                    let raw = Expr {
+                        kind: raw,
+                        ty: Type::I64,
+                        span,
+                        resource: None,
+                    };
+                    Self::stage_emit_word(slot, raw, &mut statements, span);
+                }
+            }
+            bytes = Expr {
+                kind: ExprKind::Local(slot),
+                ty: Type::Bytes,
+                span,
+                resource: None,
+            };
+        }
+        let code = Expr {
+            kind: ExprKind::Construct {
+                enum_id,
+                tag: 0,
+                fields: vec![bytes],
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        Ok(Self::after(statements, code))
+    }
     fn lambda(
         &mut self,
         lambda: &ast::Lambda,
@@ -26006,6 +26655,9 @@ impl Checker<'_, '_> {
         // scalar capture is writable inside the body; whether it actually is
         // written decides the shared/exclusive loan and proof invalidation.
         let capture_body_mutable = capture_refs.clone();
+        let saved_quote_holes = self.quote_holes.clone();
+        self.quote_holes = self.quote_holes.iter().filter_map(|(span, slot)|
+            captures.iter().position(|capture| capture == slot).map(|index| (*span, index))).collect();
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_capabilities = std::mem::take(&mut self.capability_slots);
         let saved_passable = std::mem::take(&mut self.capability_passable);
@@ -26141,6 +26793,7 @@ impl Checker<'_, '_> {
         self.branch_tail = saved_branch_tail;
         let locals = std::mem::take(&mut self.locals);
         self.locals = saved_locals;
+        self.quote_holes = saved_quote_holes;
         self.capability_slots = saved_capabilities;
         self.capability_passable = saved_passable;
         self.capability_resumable = saved_resumable;
@@ -26849,6 +27502,28 @@ impl Checker<'_, '_> {
     /// every occurrence to its exact binder, so filtering by the current slot
     /// map removes lambda parameters, lambda locals, and type/grade binders.
     fn lambda_captures(&self, lambda: &ast::Lambda) -> Vec<usize> {
+        if !self.quote_holes.is_empty() {
+            fn visit(c: &Checker<'_, '_>, expr: &ast::Expr, slots: &mut BTreeSet<usize>) {
+                if let Some(slot) = c.quote_holes.get(&(expr.span.start, expr.span.end)) {
+                    slots.insert(*slot);
+                    return;
+                }
+                if let Some(id) = c.resolution.reference(expr.span)
+                    && let Some(slot) = c.slots.get(&id) {
+                    slots.insert(*slot);
+                }
+                ast_children(expr, &mut |child| visit(c, child, slots));
+            }
+            let mut slots = BTreeSet::new();
+            for statement in &lambda.body.statements {
+                match statement {
+                    ast::Statement::Let { value, .. } | ast::Statement::Expr(value) =>
+                        visit(self, value, &mut slots),
+                }
+            }
+            if let Some(tail) = &lambda.body.tail { visit(self, tail, &mut slots); }
+            return slots.into_iter().collect();
+        }
         let mut ids = BTreeSet::new();
         collect_lambda_refs(self.resolution, &lambda.body, &mut ids);
         ids.iter()
@@ -30977,6 +31652,13 @@ impl Checker<'_, '_> {
                 }
                 let b = &self.resolution.bindings[id];
                 match (b.kind, b.name.as_str(), actual) {
+                    (BindingKind::Builtin, "Code", Type::Enum(layout))
+                        if arguments.len() == 1 && self.types.enums[layout].definition == id =>
+                    {
+                        let signature = self.types.enums[layout].arguments[0];
+                        self.unify(arguments[0], signature, type_vars, const_vars,
+                            effect_vars, subst, span)?;
+                    }
                     (BindingKind::Builtin, "Box", Type::Box(p))
                     | (BindingKind::Builtin, "Vec", Type::Vec(p))
                         if arguments.len() == 1 =>

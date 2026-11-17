@@ -1,0 +1,24 @@
+// Typed staging: the generator runs during compilation. The native cube and
+// square functions receive ordinary integers and need no runtime compiler.
+// Output: 27, then 16.
+fn power(n: i64) -> Code<fn(i64) -> i64 ! {panic}> ! {alloc, panic} {
+    if n == 0 {
+        quote fn(x: i64) -> i64 ! {panic} { 1 }
+    } else {
+        let smaller = power(n - 1);
+        quote fn(x: i64) -> i64 ! {panic} {
+            x * splice(smaller)(x)
+        }
+    }
+}
+
+#[staged]
+fn cube(x: i64) -> i64 ! {panic} = power(3);
+
+#[staged]
+fn square(x: i64) -> i64 ! {panic} = power(2);
+
+fn main() -> Unit ! {io, panic} {
+    print_i64(cube(3));
+    print_i64(square(4));
+}
