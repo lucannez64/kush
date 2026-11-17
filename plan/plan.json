@@ -5923,6 +5923,16 @@
           "time": "2026-11-17 00:51:05",
           "who": "agent",
           "text": "Approved design recorded; implemented structured staging syntax and stage-indexed name resolution. Full scripts/test-all.sh gate: 2039 passed, 3 skipped, 534.446s test runtime with two workers; approximately 55s compilation. Code typing, generator evaluation, AOT materialization and runtime JIT are not implemented."
+        },
+        {
+          "time": "2026-11-17 02:55:25",
+          "who": "agent",
+          "text": "Compile-time core implemented and targeted tests passing; added docs/staging-runtime-notes.md with remaining generic/signature/allocator restrictions and a native template-linking JIT direction. Overall completion goal stays active; no parent node closed."
+        },
+        {
+          "time": "2026-11-17 03:34:00",
+          "who": "agent",
+          "text": "Full core gate passed (2054/2054, 3 skipped); broader generic validation, additional staged signature forms, nested owning callable support, editor grammar and runtime JIT remain. Overall autonomous completion goal remains active."
         }
       ]
     },
@@ -8195,10 +8205,16 @@
       "deps": [
         "STAGING-SCOPES"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Check generators and every template before execution; include effect rows, callable multiplicity, affine code ownership and typed lift/splice holes. Ordinary executable checking must remain strict.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-17 01:25:04",
+          "who": "agent",
+          "text": "Resume full approved staging implementation: Code callable types, typed quote holes, ownership and effect validation."
+        }
+      ]
     },
     {
       "id": "STAGING-EVAL",
@@ -8208,10 +8224,16 @@
       "deps": [
         "STAGING-TYPES"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Use restricted reference evaluation for branches, loops and recursion, typed substitution, lifting, code cloning, deterministic limits, cleanup and diagnostics.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-17 02:55:25",
+          "who": "agent",
+          "text": "Core generator evaluation now supports branches, loops, recursion, scalar/text lifts, graph cloning and nested stages. Resource diagnostics tested; broader allocator and generic validation remain."
+        }
+      ]
     },
     {
       "id": "STAGING-AOT",
@@ -8221,10 +8243,16 @@
       "deps": [
         "STAGING-EVAL"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Order dependencies, recheck materialized functions, preserve source provenance and module references, test evaluator/Cranelift/LLVM parity and a specialized interpreter.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-17 02:55:25",
+          "who": "agent",
+          "text": "Core staged declarations and graph materialization now run; per-stage abort/ownership/grade checking and backend parity are tested. Signature restrictions and generic validation remain."
+        }
+      ]
     },
     {
       "id": "STAGING-JIT",
@@ -8238,6 +8266,35 @@
       "desc": "Share native lowering, checked relocation and symbol resolution, W^X publication, owner-bound callables, evaluator parity, failure cleanup and runtime-input specialization.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "STAGING-COMPILE-TIME-CORE",
+      "title": "Checked code graphs and compile-time staging core",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "STAGING-SCOPES"
+      ],
+      "status": "done",
+      "desc": "Opaque affine Code<F>, explicit clone, typed quote/lift/splice, scalar and owned text capture, recursive and nested generators, bounded generation, staged declaration ordering, materialization and evaluator/Cranelift/LLVM parity. Does not close universal generic validation or runtime JIT.",
+      "commit": "a52d788479088c53c68a23330123e8db417dea1a",
+      "log": [
+        {
+          "time": "2026-11-17 02:55:25",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-17 03:34:00",
+          "who": "agent",
+          "text": "Verified 28 targeted staging tests and full scripts/test-all.sh gate: 2054 passed, 3 skipped, 551.781s test runtime with two workers. Includes opaque affine Code<F>, clone, typed lifts/splices, recursive and nested generation, owned text/float parity (LLVM included), erased argument contracts, fuel/memory/panic/cycle diagnostics and power example. Full gate found and fixed quoted-lambda source span stripping regression; focused lambda corpus passes (24 inferred, 4 annotation requests)."
+        },
+        {
+          "time": "2026-11-17 03:34:00",
+          "who": "agent",
+          "text": "Full gate: 2054 passed, 3 skipped. Compile-time core and example verified; parent staging and runtime nodes intentionally remain open."
+        }
+      ]
     }
   ]
 }
