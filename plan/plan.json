@@ -8265,7 +8265,28 @@
       "status": "todo",
       "desc": "Share native lowering, checked relocation and symbol resolution, W^X publication, owner-bound callables, evaluator parity, failure cleanup and runtime-input specialization.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-17 05:20:39",
+          "who": "agent",
+          "text": "Worktree: checked CompiledCode owner API and reference runtime calls implemented; native recipe/relocation table emitter wired. Native runtime still returns ENOTSUP; executable-memory linker and failure/W^X tests remain. No completion claim."
+        },
+        {
+          "time": "2026-11-19 00:58:06",
+          "who": "agent",
+          "text": "Linux x86-64 Cranelift runtime linker runs recursive splices and runtime-input specialization. Targeted tests passed for W^X, publication failure, allocation refusal, owned lifts, and panic cleanup. Runtime splice calls are restricted to immediate calls; remaining validation stays open."
+        },
+        {
+          "time": "2026-11-19 01:05:38",
+          "who": "agent",
+          "text": "39 staging tests passed, including nested compile/call/drop, aggregate and erased argument ABI, owner-independent borrowed results, and mmap/mprotect fault injection. Full compiler gate running. Generic template validation and remaining runtime coverage keep the parent nodes open."
+        },
+        {
+          "time": "2026-11-19 01:12:07",
+          "who": "agent",
+          "text": "Runtime linker checkpoint 4b06694. Full regression run passed 2062 tests with 3 skipped. The final source also passed all 40 staging tests, including the late checked-template registry and generator sandbox checks. Keep the node open for relocation failure, concurrency, suspension, and performance validation."
+        }
+      ]
     },
     {
       "id": "STAGING-COMPILE-TIME-CORE",
