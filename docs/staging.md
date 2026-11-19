@@ -222,8 +222,15 @@ and materialize ordinary checked native functions. Generation supports branches,
 loops and recursion; the recursive power example runs in the evaluator and
 Cranelift, while owned text and float lifting also have LLVM parity coverage.
 
-This is still an incomplete implementation of the full design. Generic
-quotation validation, some staged signature forms and nested owning callable
-templates need further work. Runtime compilation has not been implemented.
+The reference evaluator and Linux x86-64 Cranelift executables support
+`Code.compile` and `Code.call`. The native runtime links checked machine-code
+templates with graph constants and splice targets. Each compiled owner
+releases its executable mapping when dropped. Compile-time generators
+cannot invoke the runtime compiler. Runtime splices must be
+immediately called in their own quotation. LLVM runtime compilation reports
+`ENOTSUP`.
+
+Generic quotation validation, some staged signature forms and nested owning
+callable templates need further work.
 STAGING and STAGING-RUNTIME remain open. Detailed current constraints and the
 runtime implementation direction are in [the working notes](staging-runtime-notes.md).

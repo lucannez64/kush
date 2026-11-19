@@ -61,82 +61,39 @@ committing these changes.
   coverage, including private-module splices and exact grade transfer.
 - Remove compile-time-only generation work from final native artifacts without
   discarding template identities still needed by runtime code construction.
-- Update Tree-sitter/editor grammar support for staged declarations and quote
-  syntax. Parser lambda spans now start at fn, not quote, so tools that edit
-  lambda annotations preserve their surrounding stage boundary.
-- Runtime Code.compile and owner-bound calls are NOT implemented yet. Do not
-  close STAGING-RUNTIME or STAGING-JIT.
+- The Tree-sitter query highlights contextual `quote fn` and the existing
+  attribute rule covers `#[staged]`. The parser's lambda span begins at
+  `fn` so annotation edits preserve the quotation boundary.
+- Runtime `Code.compile` / `Code.call` have a checked interface and reference
+  evaluator implementation in the current worktree. `CompiledCode<F>` is an
+  affine opaque owner; calls hold its borrow through argument evaluation.
+  Evaluator artifacts retain a checked program snapshot and share the caller's
+  heap, allocation budget, I/O and task control state. Newly instantiated
+  functions are ownership/grade checked without re-elaborating existing bodies.
+  Callable-containing results are conservatively rejected to prevent artifact
+  addresses escaping their owner; review dynamic-object/allocator results too.
+- The Linux x86-64 Cranelift backend emits checked machine-code recipes and
+  relocation metadata. The runtime copies code and lifted values into bounded
+  RW storage, links the splice targets and symbols, then publishes the entry
+  after changing the populated pages to RX. Tests cover independent recursive
+  splices, specialization from standard input, lifted buffer copies, owner
+  cleanup during panic unwinding, allocation refusal, mapping failure and
+  permission failure.
+- Runtime splices currently require immediate calls in the quotation because
+  first-class functions cannot express the compiled owner's lifetime. LLVM
+  runtime compilation returns ENOTSUP. The compiler registers checked
+  quotation templates by function identity. Pruning unreachable recipes,
+  auditing additional relocation cases and validating concurrent use remain
+  open. LLVM AOT staging has independent coverage.
 
-## Runtime implementation direction to evaluate
+## Runtime follow-up
 
-An in-process native linker for checked template machine code can reuse the
-existing native backend without embedding a subprocess compiler or an IR
-interpreter in the resulting program. Source quotations provide the finite
-native template schemas; runtime generators build arbitrary graphs of those
-schemas and runtime constant values.
-
-1. Add a nominal, opaque compiled-code owner carrying F. Its native
-   representation owns executable storage and has exactly-once release;
-   the evaluator owns an instantiated checked-program snapshot.
-2. `Code.compile(code)` consumes its graph and returns a fallible compiled
-   owner. `Code.call(&owner, args...)` retains the owner borrow for the whole
-   call and checks F's arguments, effects, grades and mutation summaries.
-   Do not expose a standalone function pointer. Initially reject callable or
-   borrowed results that could escape the owner's lifetime unless their
-   provenance is represented correctly.
-3. Prepare native recipe functions from the checked template IR. Runtime
-   parameters retain F's ABI; captured scalar/text values are immutable
-   artifact data references; splice placeholders become relocations to
-   compiled child fragments. Emit actual native template bodies, not a
-   closure trampoline or a per-call graph interpreter.
-4. Capture native bytes and relocations from Cranelift compilation. The
-   current backend uses PIC. Handle its call, data/GOT and absolute
-   relocation forms explicitly; return unsupported errors for other forms.
-   `CodeModule::define_function` and the loop around `context.func` compilation
-   are the likely integration points. Symbol addresses can be emitted in an
-   object data table, retaining access to local Kush function symbols without
-   exporting them all as C APIs.
-5. Allocate a bounded, contiguous artifact writable and non-executable;
-   copy code/data, resolve relocations (including near thunks for far function
-   calls), then publish only after changing to read/execute. Never map RWX.
-   Keep constants and every child fragment alive under the same owner.
-6. The reference evaluator may instantiate and interpret the same typed graph
-   as the semantic oracle. Native runtime compilation must generate executable
-   memory in process and must not spawn cc/kush/clang or invoke the evaluator.
-7. Test runtime-input specialization, repeated compile/call/drop, sharing and
-   suspension where supported, unwinding, owner escape rejection, mapping
-   permissions, and allocation/relocation/mprotect failure cleanup. A test C
-   shim can override mmap/mprotect/munmap via ordinary link objects to observe
-   publication and inject failures without changing the public API.
-
-This direction still needs implementation and verification. It must preserve
-normal ABI/ownership semantics for aggregate parameters/results; do not mark
-it done for a scalar-only demonstration.
-
-### Runtime details worth retaining
-
-- A Code.call intrinsic should keep the borrowed compiled owner as a direct
-  argument until the actual call. Loading an unowned Fn pointer in an earlier
-  callee subexpression could let argument evaluation drop the owner before
-  invocation. Do not introduce that lifetime gap.
-- The native backend currently sets is_pic=true. Recipes need explicit GOT/data
-  handling as well as call relocations. Far calls can use nearby r11 jump
-  thunks without disturbing System V argument registers; far data references
-  require copied constant data or GOT slots, not executable jump thunks.
-- A compiler-emitted symbol-address table can reference local object functions
-  and data while itself having an exported name. Keep module FuncId/DataId
-  distinct from the executable function indices stored in graph bytes.
-- Scalar captures can become immutable artifact data loads. Text captures need
-  borrowed buffer-handle slots plus immutable buffer storage; generated uses
-  still copy them into new owning buffers. Verify the actual runtime buffer
-  header layout before implementing this.
-- The whole graph and any placeholder-dependent helper copies should belong
-  to one artifact. Resolve child-fragment calls directly within that artifact.
-  Existing named helpers may remain references to binary-lifetime symbols.
-- A runtime result containing a callable or borrowed artifact storage must not
-  outlive the compiled owner. Reject such results until provenance is modeled;
-  owning data and independently serialized Code graphs can be returned safely.
-- A reference-evaluator artifact may own a checked executable snapshot. Use
-  erased Read/Write trait-object types for nested evaluator calls, otherwise
-  repeatedly nesting generic &mut R/&mut W types can cause infinite Rust
-  monomorphization. Share heap/statistics/host access and preserve fuel limits.
+- Cover nonzero exact usage contracts across the compiled call ABI. Tests
+  cover scalar and aggregate values, grade-zero arguments, owning buffer
+  returns and a view whose lifetime is tied to a call argument.
+- The nested runtime test repeatedly compiles, calls and drops both stages.
+  Add a relocation failure probe, concurrent compilation, and suspension
+  coverage before closing runtime staging.
+- Audit code graph schema discovery and symbol relocation against all forms
+  emitted by the native backend. Unrecognized relocations fail compilation.
+- Benchmark compilation latency, generated image sizes and steady-state calls.

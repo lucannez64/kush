@@ -19,6 +19,10 @@ type Result<T> = std::result::Result<T, Diagnostic>;
 /// a reference parameter. It is checker-only and never names a record field.
 use crate::runtime_types::CONTAINER_LEAF;
 pub(crate) fn check(program: &mut Executable) -> Result<()> {
+    check_generated(program, 0)
+}
+
+pub(crate) fn check_generated(program: &mut Executable, from: usize) -> Result<()> {
     let mut owned = vec![false; program.enums.len()];
     let mut linear = program.enums.iter().map(|e| e.linear).collect::<Vec<_>>();
     // Layout and dynamic-object linearity feed each other: a record may hold
@@ -269,6 +273,9 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
         .collect::<Vec<_>>();
     let foreign_functions = program.foreign_functions.clone();
     for (function_index, function) in program.functions.iter_mut().enumerate() {
+        if function_index < from {
+            continue;
+        }
         // A foreign declaration has a checked inert body but no source
         // operations. Its parameters are consumed by the trusted C contract;
         // Kush still checks every call site's ownership.

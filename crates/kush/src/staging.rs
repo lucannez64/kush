@@ -4,6 +4,62 @@ use crate::{Diagnostic, Span, ast, executable as ex, program::Program};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Result<T> = std::result::Result<T, Diagnostic>;
+pub(crate) const UNSUPPORTED_RUNTIME_TEMPLATE: &str =
+    "runtime splice must be called immediately in its quotation";
+
+/// Reference-evaluator artifact. The snapshot keeps generated function identities
+/// and their checked layouts alive until the compiled owner is released.
+#[derive(Debug)]
+pub(crate) struct CompiledArtifact {
+    pub program: std::sync::Arc<ex::Executable>,
+    pub entry: usize,
+}
+
+pub(crate) fn runtime_compile(program: &ex::Executable, graph: &[u8]) -> Result<CompiledArtifact> {
+    let mut program = program.clone();
+    let from = program.functions.len();
+    let entry = instantiate(&mut program, graph, 0, true)?;
+    crate::ownership::check_generated(&mut program, from)?;
+    crate::grades::check_generated(&program, from)?;
+    Ok(CompiledArtifact {
+        program: std::sync::Arc::new(program),
+        entry,
+    })
+}
+
+/// A splice address belongs to the artifact. Until the type system carries
+/// that lifetime on first-class function values, runtime splices can only
+/// appear as immediate callees within their own quotation.
+pub(crate) fn runtime_template_supported(program: &ex::Executable, root: usize) -> bool {
+    let mut pending = vec![root];
+    let mut seen = BTreeSet::new();
+    while let Some(index) = pending.pop() {
+        if !seen.insert(index) {
+            continue;
+        }
+        let mut immediate = BTreeSet::new();
+        each_expression(&program.functions[index], |e| {
+            if let ex::ExprKind::CallIndirect { callee, .. } = &e.kind {
+                immediate.insert(std::ptr::from_ref(callee.as_ref()));
+            }
+        });
+        let mut supported = true;
+        each_expression(&program.functions[index], |e| match e.kind {
+            ex::ExprKind::FnValue { function, .. }
+                if program.functions[function].name == "splice placeholder" =>
+            {
+                supported &= index == root && immediate.contains(&std::ptr::from_ref(e));
+            }
+            ex::ExprKind::Call(ex::Target::Function(function), _)
+            | ex::ExprKind::FnValue { function, .. } => pending.push(function),
+            _ => {}
+        });
+        if !supported {
+            return false;
+        }
+    }
+    true
+}
 
 pub(crate) struct Prepared {
     pub program: Program,
@@ -217,6 +273,12 @@ fn generation_dependencies(program: &ex::Executable, root: usize) -> Result<BTre
                 | ex::ExprKind::FnValue {
                     function: index, ..
                 } => pending.push(*index),
+                ex::ExprKind::Call(ex::Target::StageCompile(_) | ex::Target::StageEntry(_), _) => {
+                    return Err(Diagnostic::new(
+                        expression.span,
+                        "runtime compilation is unavailable during compile-time generation",
+                    ));
+                }
                 ex::ExprKind::Call(
                     ex::Target::Io(..)
                     | ex::Target::Host(..)
@@ -285,7 +347,7 @@ fn finish(
         }
     }
     let encoded = program.evaluate_staged_code(init)?;
-    let instance = instantiate(program, &encoded, 0)?;
+    let instance = instantiate(program, &encoded, 0, false)?;
     let source = &program.functions[instance];
     let original = program.functions[target].clone();
     if source.parameters != original.parameters
@@ -364,7 +426,12 @@ fn append_function(program: &mut ex::Executable, function: ex::Function) -> Resu
     Ok(index)
 }
 
-fn instantiate(program: &mut ex::Executable, encoded: &[u8], depth: usize) -> Result<usize> {
+fn instantiate(
+    program: &mut ex::Executable,
+    encoded: &[u8],
+    depth: usize,
+    runtime: bool,
+) -> Result<usize> {
     if depth >= 128 || encoded.len() > 16 * 1024 * 1024 {
         return Err(Diagnostic::new(
             Span::default(),
@@ -384,9 +451,12 @@ fn instantiate(program: &mut ex::Executable, encoded: &[u8], depth: usize) -> Re
     }
     let source_index = usize::try_from(reader.word()?)
         .ok()
-        .filter(|id| *id < program.functions.len())
+        .filter(|id| program.stage_templates.contains(id))
         .ok_or_else(|| Diagnostic::new(Span::default(), "invalid template identity"))?;
     let source = program.functions[source_index].clone();
+    if runtime && !runtime_template_supported(program, source_index) {
+        return Err(Diagnostic::new(source.span, UNSUPPORTED_RUNTIME_TEMPLATE));
+    }
     let captures = source.closure.unwrap_or(0);
     if captures == 0 {
         if reader.at != encoded.len() {
@@ -425,7 +495,7 @@ fn instantiate(program: &mut ex::Executable, encoded: &[u8], depth: usize) -> Re
                 {
                     return Err(Diagnostic::new(source.span, "invalid splice placeholder"));
                 }
-                let nested = instantiate(program, &bytes, depth + 1)?;
+                let nested = instantiate(program, &bytes, depth + 1, runtime)?;
                 let ex::Type::Enum(layout) = local.ty else {
                     return Err(Diagnostic::new(source.span, "splice capture is not code"));
                 };

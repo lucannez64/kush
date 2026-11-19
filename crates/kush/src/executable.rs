@@ -272,8 +272,11 @@ pub(crate) struct AllocatorContextSpec {
     pub(crate) free: usize,
     pub(crate) grow: usize,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Executable {
+    /// Function indices emitted by checked quotations. Opaque graph bytes
+    /// may name only these templates, never arbitrary executable functions.
+    pub(crate) stage_templates: BTreeSet<usize>,
     pub(crate) functions: Vec<Function>,
     /// Step budget of the reference evaluator (per task); see `set_eval_fuel`.
     pub(crate) eval_fuel: usize,
@@ -590,6 +593,10 @@ struct MethodArguments {
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Target {
+    /// Consumes an owned code graph and returns a fallible compiled owner.
+    StageCompile(ResultShape),
+    /// Private load of an owner-bound entry; emitted only inside Code.call.
+    StageEntry(usize),
     Io(IoOp, Option<ResultShape>),
     /// Checked host operation (filesystem, environment, clock, process, or
     /// network). Every operation returns `Result<T, i64>`; error payloads are
@@ -5036,6 +5043,7 @@ type WitnessLifetimes = (
 /// Function instances. A monomorphic function has one instance; a generic
 /// function gets one per distinct list of type arguments that is used.
 struct Functions<'a> {
+    stage_templates: BTreeSet<usize>,
     declared: BTreeMap<BindingId, Declared<'a>>,
     /// `where len >= N` clauses of struct fields, by struct and field name.
     field_lengths: BTreeMap<BindingId, BTreeMap<String, &'a ast::Expr>>,
@@ -5571,6 +5579,7 @@ fn check_program_unstaged(program: &crate::program::Program, lower_suspensions: 
         }
     }
     let mut functions = Functions {
+        stage_templates: BTreeSet::new(),
         declared: BTreeMap::new(),
         field_lengths,
         bounds_proved: 0,
@@ -6388,6 +6397,7 @@ fn check_program_unstaged(program: &crate::program::Program, lower_suspensions: 
         })
         .collect();
     let mut executable = Executable {
+        stage_templates: functions.stage_templates,
         gpu_functions,
         simd_functions,
         unwind_functions,
@@ -22864,6 +22874,15 @@ impl Checker<'_, '_> {
                         && c.resolution.bindings[id].name == "Code.clone") {
                 return c.clone_code(arguments, expected, span);
             }
+            if let ast::ExprKind::Call { callee, arguments } = &expr.kind
+                && let Some(id) = c.resolution.reference(callee.span)
+                && c.resolution.bindings[id].kind == BindingKind::Builtin {
+                match c.resolution.bindings[id].name.as_str() {
+                    "Code.compile" => return c.compile_code(arguments, expected, span),
+                    "Code.call" => return c.call_code(arguments, expected, span),
+                    _ => {},
+                }
+            }
             if let Some(id) = c.logical_data_root(expr)
                 && (c.logical.data.contains_key(&id)
                     || c.logical.constructors.contains_key(&id))
@@ -25712,6 +25731,71 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
+    fn compile_code(&mut self, arguments: &[ast::Expr], expected: Option<Type>, span: Span) -> Result<Expr> {
+        if arguments.len() != 1 {
+            return Err(Diagnostic::new(span, "Code.compile expects one owned code graph"));
+        }
+        self.require(ALLOC, span)?;
+        let code = self.expr(&arguments[0])?;
+        let signature = self.types.code_signature(code.ty).ok_or_else(||
+            Diagnostic::new(span, "Code.compile expects an owned Code<fn(...)> value"))?;
+        // An ordinary Fn return cannot express an artifact-owner lifetime.
+        // Admit owning data and serialized Code results, but do not publish
+        // unowned callable addresses through an otherwise owned result.
+        let mut pending = vec![self.types.function_types[signature].result];
+        let mut seen = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            if !seen.insert(ty) { continue; }
+            match ty {
+                Type::Fn(_) | Type::Once(_) | Type::Multi(_) => return Err(Diagnostic::new(span,
+                    "a compiled callable cannot return an unowned callable that could escape its artifact owner")),
+                Type::Enum(index) | Type::Variants(index, _) => {
+                    pending.extend(self.types.enums[index].variants.iter().flat_map(|v| v.fields.iter()).copied());
+                }
+                Type::Box(pointer) | Type::Vec(pointer) | Type::Ref(pointer) | Type::RefMut(pointer)
+                | Type::Slice(pointer) | Type::SliceMut(pointer) => pending.push(self.types.pointees[pointer]),
+                Type::Union(index) => pending.extend(self.types.unions[index].members.iter().copied()),
+                _ => {},
+            }
+        }
+        let owner = self.types.compiled_code_type(Type::Fn(signature), span)?;
+        let (ty, shape) = self.types.result_type(owner, Type::I64, span)?;
+        let value = Expr { kind: ExprKind::Call(Target::StageCompile(shape), vec![code]),
+            ty, span, resource: None };
+        match expected { Some(ty) => self.coerce(value, ty, span), None => Ok(value) }
+    }
+
+    fn call_code(&mut self, arguments: &[ast::Expr], expected: Option<Type>, span: Span) -> Result<Expr> {
+        let Some(owner) = arguments.first() else {
+            return Err(Diagnostic::new(span, "Code.call expects a borrowed compiled owner and its arguments"));
+        };
+        let owner = self.expr(owner)?;
+        let Type::Ref(pointer) = owner.ty else {
+            return Err(Diagnostic::new(span, "Code.call expects &CompiledCode<fn(...)>"));
+        };
+        let signature = self.types.compiled_code_signature(self.types.pointees[pointer])
+            .ok_or_else(|| Diagnostic::new(span, "Code.call expects &CompiledCode<fn(...)>"))?;
+        let owner_ty = owner.ty;
+        let owner_slot = self.fresh_local(span, owner_ty)?;
+        let mut statements = vec![Statement::Let(owner_slot, owner)];
+        let owner = Expr { kind: ExprKind::Local(owner_slot), ty: owner_ty, span, resource: None };
+        let entry = Expr { kind: ExprKind::Call(Target::StageEntry(signature), vec![owner]),
+            ty: Type::Fn(signature), span, resource: None };
+        let mut call = self.indirect_call_checked(entry, &arguments[1..], None, span)?;
+        let ExprKind::CallIndirect { arguments, .. } = &mut call.kind else { unreachable!() };
+        // Coerced arguments are evaluated before the pure entry load. The
+        // owner's reference is used after all of them, so its loan cannot end
+        // while an argument could move/drop the compiled artifact.
+        for argument in arguments {
+            let slot = self.fresh_local(argument.span, argument.ty)?;
+            let value = Expr { kind: ExprKind::Local(slot), ty: argument.ty,
+                span: argument.span, resource: None };
+            statements.push(Statement::Let(slot, std::mem::replace(argument, value)));
+        }
+        let value = Self::after(statements, call);
+        match expected { Some(ty) => self.coerce(value, ty, span), None => Ok(value) }
+    }
+
     fn clone_code(
         &mut self,
         arguments: &[ast::Expr],
@@ -25901,6 +25985,7 @@ impl Checker<'_, '_> {
                 "a quoted template must be a closed callable",
             ));
         };
+        self.functions.stage_templates.insert(*function);
         if captures.iter().any(|c| {
             !is_live_scalar(c.ty)
                 && !matches!(c.ty, Type::Bytes | Type::String)
@@ -31652,7 +31737,7 @@ impl Checker<'_, '_> {
                 }
                 let b = &self.resolution.bindings[id];
                 match (b.kind, b.name.as_str(), actual) {
-                    (BindingKind::Builtin, "Code", Type::Enum(layout))
+                    (BindingKind::Builtin, "Code" | "CompiledCode", Type::Enum(layout))
                         if arguments.len() == 1 && self.types.enums[layout].definition == id =>
                     {
                         let signature = self.types.enums[layout].arguments[0];

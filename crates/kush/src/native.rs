@@ -33,6 +33,7 @@ use std::{
 mod deferred;
 mod llvm;
 mod runtime_cache;
+mod staging;
 /// Every native stack slot is word aligned (`1 << 3` bytes). References to
 /// locals point into these slots, so with the runtime's allocation contract
 /// (`KUSH_POINTER_ALIGN` in the C runtime) every `Box`, `&T` and `&mut T` is a
@@ -3024,6 +3025,214 @@ uint64_t kush_vec_restride(uint64_t handle, int64_t source_width, int64_t target
 /* Stackful cooperative tasks. One OS thread; strict handoff. */
 #include <ucontext.h>
 #include <sys/mman.h>
+/* These tables are emitted by native/staging.rs. Graph bytes never supply
+   machine code, relocation offsets, or native symbol addresses. */
+typedef struct {
+    uint64_t offset, kind, target_kind, target;
+    int64_t addend;
+    uintptr_t address;
+} KushStageReloc;
+typedef struct {
+    uint64_t id, size;
+    const unsigned char *code;
+    uint64_t reloc_count;
+    const KushStageReloc *relocs;
+    uintptr_t original;
+} KushStageBody;
+typedef struct { uint64_t schema, body, captures; } KushStageSchema;
+typedef struct {
+    uint64_t body_count, schema_count;
+    const KushStageBody *bodies;
+    const KushStageSchema *schemas;
+    uint64_t function_count;
+    const uint64_t *functions;
+} KushStageImage;
+extern const KushStageImage kush_stage_image __attribute__((weak));
+#define KUSH_STAGE_LIMIT (64u * 1024u * 1024u)
+typedef struct { unsigned char *base; size_t used; int error; } KushStageLink;
+typedef struct { const unsigned char *next; size_t left; } KushStageReader;
+typedef struct { uint64_t value, stub; uintptr_t entry; } KushStageCapture;
+
+static const unsigned char *kush_stage_take(KushStageReader *r, uint64_t size) {
+    if (size > r->left) return NULL;
+    const unsigned char *bytes = r->next;
+    r->next += size;
+    r->left -= size;
+    return bytes;
+}
+static int kush_stage_word(KushStageReader *r, uint64_t *value) {
+    const unsigned char *bytes = kush_stage_take(r, 8);
+    if (bytes == NULL) return 0;
+    memcpy(value, bytes, 8);
+    return 1;
+}
+static unsigned char *kush_stage_space(KushStageLink *link, uint64_t size) {
+    size_t at = (link->used + 15) & ~(size_t)15;
+    if (at > KUSH_STAGE_LIMIT || size > KUSH_STAGE_LIMIT - at) {
+        link->error = E2BIG;
+        return NULL;
+    }
+    link->used = at + size;
+    return link->base + at;
+}
+static int kush_stage_patch(KushStageLink *link, const KushStageBody *body,
+                            unsigned char *code, const KushStageCapture *captures,
+                            size_t count, uint64_t *constants) {
+    for (size_t i = 0; i < body->reloc_count; ++i) {
+        const KushStageReloc *rel = &body->relocs[i];
+        uintptr_t target = rel->address;
+        switch (rel->target_kind) {
+        case 0:
+            if (rel->target == body->id) target = (uintptr_t)code;
+            for (size_t j = 0; j < count; ++j)
+                if (captures[j].entry && captures[j].stub == rel->target)
+                    target = captures[j].entry;
+            break;
+        case 1:
+            break;
+        case 2:
+            if (rel->target != body->id || rel->address >= body->size) return 0;
+            target = (uintptr_t)code + rel->address;
+            break;
+        case 3:
+            if ((rel->target >> 32) != body->id || (uint32_t)rel->target >= count) return 0;
+            target = (uintptr_t)&constants[(uint32_t)rel->target];
+            break;
+        default:
+            return 0;
+        }
+        size_t width = rel->kind == 0 ? 8 : 4;
+        if (rel->offset > body->size || width > body->size - rel->offset) return 0;
+        unsigned char *site = code + rel->offset;
+        if (rel->kind == 0) {
+            target += rel->addend;
+            memcpy(site, &target, 8);
+            continue;
+        }
+        if (rel->kind == 3) {
+            unsigned char *slot = kush_stage_space(link, 8);
+            if (slot == NULL) return 0;
+            memcpy(slot, &target, 8);
+            target = (uintptr_t)slot;
+        }
+        int64_t distance = (int64_t)(target + rel->addend - (uintptr_t)site);
+        if (rel->kind == 2 && (distance < INT32_MIN || distance > INT32_MAX)) {
+            unsigned char *thunk = kush_stage_space(link, 13);
+            if (thunk == NULL) return 0;
+            /* movabs r11, target; jmp r11. r11 is caller-saved. */
+            thunk[0] = 0x49; thunk[1] = 0xbb;
+            memcpy(thunk + 2, &target, 8);
+            thunk[10] = 0x41; thunk[11] = 0xff; thunk[12] = 0xe3;
+            distance = (int64_t)((uintptr_t)thunk + rel->addend - (uintptr_t)site);
+        }
+        if (rel->kind > 3 || distance < INT32_MIN || distance > INT32_MAX) return 0;
+        int32_t displacement = (int32_t)distance;
+        memcpy(site, &displacement, 4);
+    }
+    return 1;
+}
+
+static uintptr_t kush_stage_node(KushStageLink *link, KushStageReader reader, unsigned depth) {
+    const KushStageImage *image = &kush_stage_image;
+    if (depth >= 128) { link->error = E2BIG; return 0; }
+    const unsigned char *magic = kush_stage_take(&reader, 8);
+    uint64_t id, count = 0;
+    if (magic == NULL || memcmp(magic, "KUSHCD0", 7) != 0 ||
+        magic[7] < '1' || magic[7] > '3' || !kush_stage_word(&reader, &id) ||
+        (magic[7] != '1' && !kush_stage_word(&reader, &count))) return 0;
+    const KushStageSchema *schema = NULL;
+    for (size_t i = 0; i < image->schema_count; ++i)
+        if (image->schemas[i].schema == id) { schema = &image->schemas[i]; break; }
+    if (schema == NULL || count != schema->captures || count > reader.left) return 0;
+    const KushStageBody *body = NULL;
+    for (size_t i = 0; i < image->body_count; ++i)
+        if (image->bodies[i].id == schema->body) { body = &image->bodies[i]; break; }
+    if (body == NULL) return 0;
+    KushStageCapture *captures = count ? calloc((size_t)count, sizeof(*captures)) : NULL;
+    if (count && captures == NULL) { link->error = ENOMEM; return 0; }
+    uintptr_t result = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const unsigned char *tag = magic[7] == '3' ? kush_stage_take(&reader, 1) : NULL;
+        if (magic[7] == '3' && tag == NULL) goto done;
+        if (tag == NULL || *tag == 0) {
+            if (!kush_stage_word(&reader, &captures[i].value)) goto done;
+        } else if (*tag == 1 || *tag == 2) {
+            uint64_t stub = 0, size;
+            if ((*tag == 1 && (!kush_stage_word(&reader, &stub) || stub >= image->function_count)) ||
+                !kush_stage_word(&reader, &size)) goto done;
+            const unsigned char *bytes = kush_stage_take(&reader, size);
+            if (bytes == NULL) goto done;
+            if (*tag == 1) {
+                captures[i].stub = image->functions[stub];
+                captures[i].entry = kush_stage_node(link, (KushStageReader){bytes, size}, depth + 1);
+                if (captures[i].entry == 0) goto done;
+            } else {
+                KushBytes *literal = (KushBytes *)kush_stage_space(link, sizeof(*literal) + size);
+                if (literal == NULL) goto done;
+                literal->length = literal->capacity = size;
+                memcpy(literal->data, bytes, size);
+                captures[i].value = (uintptr_t)literal;
+            }
+        } else goto done;
+    }
+    if (reader.left != 0) goto done;
+    uint64_t *constants = (uint64_t *)kush_stage_space(link, count * 8);
+    unsigned char *code = kush_stage_space(link, body->size);
+    if (constants == NULL || code == NULL) goto done;
+    for (size_t i = 0; i < count; ++i) constants[i] = captures[i].value;
+    memcpy(code, body->code, body->size);
+    if (kush_stage_patch(link, body, code, captures, count, constants)) result = (uintptr_t)code;
+done:
+    free(captures);
+    return result;
+}
+
+typedef struct {
+    void *mapping;
+    uint64_t mapping_size;
+    void *entry;
+} KushStageCompiled;
+uint64_t kush_stage_release(uint64_t handle) {
+    KushStageCompiled *owner = (KushStageCompiled *)(uintptr_t)handle;
+    if (owner->mapping != NULL) munmap(owner->mapping, (size_t)owner->mapping_size);
+    kush_free(handle);
+    return 0;
+}
+uint64_t kush_stage_compile(uint64_t graph, uint64_t *owner) {
+    *owner = 0;
+    const KushBytes *buffer = (const KushBytes *)(uintptr_t)graph;
+    int status = ENOTSUP;
+    if (&kush_stage_image == NULL) goto done;
+    status = E2BIG;
+    if (buffer->length > 16u * 1024u * 1024u) goto done;
+    uint64_t handle = kush_try_alloc(sizeof(KushStageCompiled));
+    status = ENOMEM;
+    if (handle == 0) goto done;
+    KushStageCompiled *compiled = (KushStageCompiled *)(uintptr_t)handle;
+    compiled->mapping = mmap(NULL, KUSH_STAGE_LIMIT, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    compiled->mapping_size = KUSH_STAGE_LIMIT;
+    if (compiled->mapping == MAP_FAILED) {
+        status = errno;
+        kush_free(handle);
+        goto done;
+    }
+    KushStageLink link = {compiled->mapping, 0, ENOTSUP};
+    uintptr_t entry = kush_stage_node(&link, (KushStageReader){buffer->data, buffer->length}, 0);
+    status = link.error;
+    if (entry) {
+        __builtin___clear_cache((char *)link.base, (char *)link.base + link.used);
+        if (mprotect(link.base, link.used, PROT_READ | PROT_EXEC) == 0) {
+            compiled->entry = (void *)entry;
+            *owner = handle;
+            status = 0;
+        } else status = errno;
+    }
+    if (status != 0) kush_stage_release(handle);
+done:
+    kush_bytes_free(graph);
+    return (uint64_t)status;
+}
 /* Task slots are reused: a handle is the slot plus one in its low 32 bits and
    the slot's generation in its high 32 bits, so a handle to a joined task
    never names the task that later takes its slot. A scope lists only its
@@ -5155,6 +5364,8 @@ struct CodeModule {
     failure: Option<Diagnostic>,
     /// Functions referred to by the bodies defined so far.
     referenced: std::collections::BTreeSet<FuncId>,
+    stage_bodies: BTreeMap<FuncId, staging::Body>,
+    stage_recipes: std::collections::BTreeSet<FuncId>,
 }
 impl Module for CodeModule {
     fn isa(&self) -> &dyn cranelift_codegen::isa::TargetIsa {
@@ -5205,9 +5416,19 @@ impl Module for CodeModule {
             }
         }
         let Some(llvm) = &mut self.llvm else {
-            return self
+            let result = self
                 .object
                 .define_function_with_control_plane(func, ctx, ctrl_plane);
+            if result.is_ok() && self.stage_recipes.contains(&func) {
+                let compiled = ctx.compiled_code().unwrap();
+                self.stage_bodies.insert(func, staging::Body {
+                    bytes: compiled.buffer.data().to_vec(),
+                    relocs: compiled.buffer.relocs().iter().map(|relocation|
+                        cranelift_module::ModuleReloc::from_mach_reloc(relocation, &ctx.func, func)
+                    ).collect(),
+                });
+            }
+            return result;
         };
         // Same acceptance rule as the Cranelift backend: only verified IR.
         cranelift_codegen::verify_function(&ctx.func, self.object.isa()).map_err(|errors| {
@@ -5267,6 +5488,9 @@ fn lower(
     llvm: Option<(llvm::RuntimeInterface, Split)>,
     library: bool,
 ) -> Result<Lowered> {
+    let staged = staging::prepare(program);
+    let recipes = staged.as_ref().map(|p| p.recipes.clone()).unwrap_or_default();
+    let program = staged.as_ref().map_or(program, |p| &p.program);
     let split = llvm.as_ref().map_or(Split::WHOLE, |(_, split)| *split);
     let llvm = llvm.map(|(interface, _)| interface);
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
@@ -5308,13 +5532,21 @@ fn lower(
         llvm: llvm.map(llvm::LlvmModule::new),
         failure: None,
         referenced: std::collections::BTreeSet::new(),
+        stage_bodies: BTreeMap::new(),
+        stage_recipes: Default::default(),
     };
+    let capture_data = staging::capture_data(&mut module, &recipes)?;
     let mut print_sig = module.make_signature();
     print_sig.params.push(AbiParam::new(I64));
     print_sig.returns.push(AbiParam::new(I64));
     let print = module
         .declare_function("kush_print_i64", Linkage::Import, &print_sig)
         .map_err(error)?;
+    let mut stage_compile_sig = module.make_signature();
+    stage_compile_sig.params.extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    stage_compile_sig.returns.push(AbiParam::new(I64));
+    let stage_compile = module.declare_function("kush_stage_compile", Linkage::Import,
+        &stage_compile_sig).map_err(error)?;
     let print_u64 = module
         .declare_function("kush_print_u64", Linkage::Import, &print_sig)
         .map_err(error)?;
@@ -6040,6 +6272,7 @@ fn lower(
         }
         ids.push(id);
     }
+    module.stage_recipes.extend(recipes.keys().map(|&index| ids[index]));
     // Lower only what the program can reach. Every reference to a function,
     // whether a call, a function value or a closure, goes through a
     // declaration in the referring body, and `CodeModule` records those as
@@ -6063,6 +6296,7 @@ fn lower(
     } else {
         vec![entry]
     };
+    pending.extend(recipes.keys().copied());
     // NATIVE-INLINE: bodies are built first and defined after, so a
     // caller can absorb any small reachable callee.
     let mut bodies: Vec<Option<ir::Function>> = vec![None; program.functions.len()];
@@ -6120,6 +6354,7 @@ fn lower(
             program,
             codegen,
             print,
+            stage_compile,
             print_u64,
             print_f64,
             print_f32,
@@ -6310,6 +6545,17 @@ fn lower(
             offset = 1;
         }
         let captures = f.closure.unwrap_or(0);
+        if let Some(&(_, count)) = recipes.get(&index) {
+            for slot in 0..count {
+                let id = capture_data[&(index, slot)];
+                let global = g.module.declare_data_in_func(id, g.builder.func);
+                let address = g.builder.ins().symbol_value(I64, global);
+                let value = g.builder.ins().load(I64, ir::MemFlagsData::new(), address, 0);
+                g.assign(slot, &[value]);
+                // Captures borrow immutable artifact storage. They are not
+                // activated as resources owned by an individual invocation.
+            }
+        }
         if f.closure.is_some() {
             let environment = g.builder.block_params(entry)[offset];
             offset += 1;
@@ -6394,7 +6640,7 @@ fn lower(
     }
     // NATIVE-INLINE (Cranelift only): every reachable body is built, so a
     // caller can absorb any small callee; then each function is defined.
-    let inline_calls = codegen.inline_calls && module.llvm.is_none();
+    let inline_calls = codegen.inline_calls && module.llvm.is_none() && staged.is_none();
     let by_id = ids
         .iter()
         .enumerate()
@@ -6428,6 +6674,15 @@ fn lower(
         };
         let mut context = module.make_context();
         context.func = body;
+        if module.stage_recipes.contains(&ids[index]) && module.llvm.is_none() {
+            // The copied body may live more than 2 GiB from the AOT image.
+            // The runtime linker gives these references nearby GOT entries.
+            for (_, global) in context.func.global_values.iter_mut() {
+                if let ir::GlobalValueData::Symbol { colocated, .. } = global {
+                    *colocated = false;
+                }
+            }
+        }
         let dump_clif = CLIF_DUMP.with(|dump| dump.borrow().is_some());
         if inline_calls {
             let bodies = inline_bodies_for(&mut context.func, index, &candidates, &by_id);
@@ -6495,6 +6750,9 @@ fn lower(
     }
     if let Some(failure) = module.failure {
         return Err(failure);
+    }
+    if staged.is_some() && module.llvm.is_none() {
+        staging::emit(&mut module, &ids, &recipes, &capture_data)?;
     }
     match module.llvm {
         Some(llvm) => Ok(Lowered::Llvm(
@@ -8140,6 +8398,7 @@ struct Generator<'a, 'b> {
     pending_pushes: Vec<(usize, usize)>,
     push_shadow: Option<(Variable, Variable)>,
     print: FuncId,
+    stage_compile: FuncId,
     print_u64: FuncId,
     print_f64: FuncId,
     print_f32: FuncId,
@@ -12179,6 +12438,23 @@ impl Generator<'_, '_> {
                     Target::Panic => {
                         self.abort();
                         return None;
+                    }
+                    Target::StageCompile(shape) => {
+                        let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                            ir::StackSlotKind::ExplicitSlot, 8, STACK_SLOT_ALIGN_SHIFT));
+                        let pointer = self.builder.ins().stack_addr(I64, slot, 0);
+                        let status = self.runtime_call(self.stage_compile, &[values[0], pointer]);
+                        let owner = self.builder.ins().load(I64, ir::MemFlagsData::new(), pointer, 0);
+                        let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+                        let ok = self.encode_variant(expr.ty, shape.ok_tag, &[owner]);
+                        let err = self.encode_variant(expr.ty, shape.err_tag, &[status]);
+                        return Some(ok.into_iter().zip(err).map(|(ok, err)|
+                            self.builder.ins().select(success, ok, err)).collect());
+                    }
+                    Target::StageEntry(signature) => {
+                        debug_assert_eq!(expr.ty, Type::Fn(*signature));
+                        let owner = self.builder.ins().load(I64, ir::MemFlagsData::new(), values[0], 0);
+                        self.builder.ins().load(I64, ir::MemFlagsData::new(), owner, 16)
                     }
                     // GPU-SUBSET: `#[gpu]` bodies are compiled for the CPU
                     // only as unreachable code; no CPU call reaches them.

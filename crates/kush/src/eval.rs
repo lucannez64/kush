@@ -1192,6 +1192,8 @@ struct SliceValue {
 }
 #[derive(Debug, Clone)]
 enum Value {
+    Compiled(Arc<crate::staging::CompiledArtifact>),
+    CompiledCallable(Arc<crate::staging::CompiledArtifact>),
     Scalar(i64),
     Enum {
         tag: usize,
@@ -1666,6 +1668,44 @@ macro_rules! place_value {
     };
 }
 impl<R: Read, W: Write> Evaluator<'_, R, W> {
+    fn call_compiled(
+        &mut self,
+        artifact: &crate::staging::CompiledArtifact,
+        arguments: Vec<Value>,
+    ) -> Result<Value> {
+        // Share the task's heap and dynamic control state. A compiled call is
+        // an ordinary call in this task, including when it unwinds.
+        let mut child = Evaluator {
+            program: &artifact.program,
+            input: &mut self.input as &mut dyn Read,
+            output: &mut self.output as &mut dyn Write,
+            fuel: self.fuel,
+            generation: self.generation,
+            depth: self.depth,
+            heap: self.heap.clone(),
+            stats: self.stats.clone(),
+            task: self.task.take(),
+            dynamic_handlers: std::mem::take(&mut self.dynamic_handlers),
+            kstack: std::mem::take(&mut self.kstack),
+            kstack_epoch: self.kstack_epoch,
+            abort_scopes: std::mem::take(&mut self.abort_scopes),
+            next_activation: self.next_activation,
+            pending_abort: self.pending_abort.take(),
+            try_budget: self.try_budget.clone(),
+            host: self.host.clone(),
+        };
+        let result = child.call(artifact.entry, arguments);
+        self.fuel = child.fuel;
+        self.task = child.task.take();
+        self.dynamic_handlers = std::mem::take(&mut child.dynamic_handlers);
+        self.kstack = std::mem::take(&mut child.kstack);
+        self.kstack_epoch = child.kstack_epoch;
+        self.abort_scopes = std::mem::take(&mut child.abort_scopes);
+        self.next_activation = child.next_activation;
+        self.pending_abort = child.pending_abort.take();
+        result
+    }
+
     fn allocate(&mut self, payload: Value) -> Value {
         let id = self.heap.allocate(payload);
         self.stats.allocation();
@@ -7540,6 +7580,57 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     self.consume(arg, frame);
                 }
                 match target {
+                    Target::StageCompile(_) if self.generation => {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "runtime compilation is unavailable during compile-time generation",
+                        ));
+                    }
+                    Target::StageCompile(shape) => {
+                        let graph = match &values[0] {
+                            Value::Enum { fields, .. } => match fields.first() {
+                                Some(Value::Owned(id)) => self.heap.with(*id, |v| match v {
+                                    Value::Buffer { data, .. } => Some(data.clone()),
+                                    _ => None,
+                                }).flatten(),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        self.drop_value(values.remove(0))?;
+                        if !self.try_charge() {
+                            self.host_result(*shape, 12, Value::Scalar(0))
+                        } else {
+                            let graph = graph.ok_or_else(|| Diagnostic::new(expr.span,
+                                "internal error: compile needs an owned code graph"))?;
+                            match crate::staging::runtime_compile(self.program, &graph) {
+                                Ok(artifact) => {
+                                    let owner = self.allocate(Value::Compiled(Arc::new(artifact)));
+                                    let owner = Value::Enum { tag: 0, fields: vec![owner] };
+                                    self.host_result(*shape, 0, owner)
+                                }
+                                Err(error) => {
+                                    let status = if error.message == crate::staging::UNSUPPORTED_RUNTIME_TEMPLATE {
+                                        95
+                                    } else {
+                                        22
+                                    };
+                                    self.host_result(*shape, status, Value::Scalar(0))
+                                }
+                            }
+                        }
+                    }
+                    Target::StageEntry(signature) => {
+                        debug_assert_eq!(expr.ty, Type::Fn(*signature));
+                        let owner = self.reference_read(&values[0], args[0].ty)
+                            .ok_or_else(|| Diagnostic::new(expr.span, "invalid compiled owner reference"))?;
+                        let Value::Enum { fields, .. } = owner else { unreachable!() };
+                        let Value::Owned(id) = fields[0] else { unreachable!() };
+                        let Some(Value::Compiled(artifact)) = self.heap.get(id) else {
+                            return Err(Diagnostic::new(expr.span, "dangling compiled owner"));
+                        };
+                        Value::CompiledCallable(artifact)
+                    }
                     // THREAD-CHANNELS: a channel is a heap queue (`items`),
                     // its capacity, and the closed flag kept in `usable`.
                     Target::ChannelNew => {
@@ -7875,6 +7966,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.consume(callee, frame);
                 for argument in arguments {
                     self.consume(argument, frame);
+                }
+                if let Value::CompiledCallable(artifact) = &callable {
+                    let Type::Fn(signature) = callee.ty else { unreachable!() };
+                    let signature = &self.program.function_types[signature];
+                    let values = values.into_iter().enumerate()
+                        .filter(|(i, _)| !signature.parameter_erased(*i))
+                        .map(|(_, value)| value).collect();
+                    return self.call_compiled(artifact, values).map(Flow::Value);
                 }
                 if let Value::Token {
                     function,

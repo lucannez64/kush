@@ -68,7 +68,7 @@ pub(crate) struct Variant {
     /// Field names for records; empty for enum variants.
     pub names: Vec<String>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Enum {
     pub definition: BindingId,
     pub name: String,
@@ -1499,6 +1499,14 @@ impl<'a> Types<'a> {
     /// Its single owned buffer lets existing aggregate cleanup release a
     /// template on ordinary returns and while unwinding.
     pub fn code_type(&mut self, callable: Type, span: Span) -> Result<Type> {
+        self.opaque_code_type(callable, "Code", false, span)
+    }
+
+    pub fn compiled_code_type(&mut self, callable: Type, span: Span) -> Result<Type> {
+        self.opaque_code_type(callable, "CompiledCode", true, span)
+    }
+
+    fn opaque_code_type(&mut self, callable: Type, name: &str, compiled: bool, span: Span) -> Result<Type> {
         if !matches!(callable, Type::Fn(_)) {
             return Err(Diagnostic::new(
                 span,
@@ -1509,7 +1517,7 @@ impl<'a> Types<'a> {
             .resolution
             .bindings
             .iter()
-            .position(|binding| binding.kind == BindingKind::Builtin && binding.name == "Code")
+            .position(|binding| binding.kind == BindingKind::Builtin && binding.name == name)
             .expect("Code builtin is registered by name resolution");
         let key = (definition, vec![callable], Vec::new(), Vec::new());
         if let Some(index) = self.cache.get(&key) {
@@ -1521,13 +1529,13 @@ impl<'a> Types<'a> {
         let index = self.enums.len();
         self.enums.push(Enum {
             definition,
-            name: format!("Code<{}>", self.name(callable)),
+            name: format!("{name}<{}>", self.name(callable)),
             arguments: vec![callable],
             consts: Vec::new(),
             lifetimes: Vec::new(),
             variants: vec![Variant {
                 name: "$template".into(),
-                fields: vec![Type::Bytes],
+                fields: vec![if compiled { Type::I64 } else { Type::Bytes }],
                 tuple: false,
                 names: vec!["$graph".into()],
             }],
@@ -1543,7 +1551,7 @@ impl<'a> Types<'a> {
             runtime_length: None,
             tuple: false,
             structural: false,
-            foreign: None,
+            foreign: compiled.then(|| ForeignResource { release: "kush_stage_release".into() }),
         });
         self.cache.insert(key, index);
         Ok(Type::Enum(index))
@@ -1551,12 +1559,20 @@ impl<'a> Types<'a> {
 
     /// Callable signature carried by an opaque Code owner, if any.
     pub fn code_signature(&self, ty: Type) -> Option<usize> {
+        self.opaque_code_signature(ty, "Code")
+    }
+
+    pub fn compiled_code_signature(&self, ty: Type) -> Option<usize> {
+        self.opaque_code_signature(ty, "CompiledCode")
+    }
+
+    fn opaque_code_signature(&self, ty: Type, name: &str) -> Option<usize> {
         let Type::Enum(index) = ty else {
             return None;
         };
         let layout = &self.enums[index];
         let binding = self.resolution.bindings.get(layout.definition)?;
-        if binding.kind != BindingKind::Builtin || binding.name != "Code" {
+        if binding.kind != BindingKind::Builtin || binding.name != name {
             return None;
         }
         match layout.arguments.first()? {
@@ -3435,12 +3451,13 @@ impl<'a> Types<'a> {
             // argument is static identity, not a callable stored in the graph.
             // Keep it nominal and opaque: a tuple containing Bytes must not
             // be usable as code, nor may differing latent rows become equal.
-            if b.kind == BindingKind::Builtin && b.name == "Code" {
+            if b.kind == BindingKind::Builtin && matches!(b.name.as_str(), "Code" | "CompiledCode") {
                 if !lifetime_arguments.is_empty() || arguments.len() != 1 {
                     return Err(Diagnostic::new(ty.span, "Code expects one closed callable type"));
                 }
                 let callable = self.lower(arguments[0], substitution, depth + 1)?;
-                return self.code_type(callable, ty.span);
+                return if b.name == "CompiledCode" { self.compiled_code_type(callable, ty.span) }
+                    else { self.code_type(callable, ty.span) };
             }
             // THREAD-CHANNELS: `Channel<T>` of plain data (scalars and
             // records of scalars), which crosses threads by copying words.

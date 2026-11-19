@@ -942,7 +942,11 @@ pub(crate) fn evaluate(
 
 /// Check exact-use obligations for every function after ownership elaboration.
 pub(crate) fn check(program: &Executable) -> Result<()> {
-    for function in &program.functions {
+    check_generated(program, 0)
+}
+
+pub(crate) fn check_generated(program: &Executable, from: usize) -> Result<()> {
+    for function in &program.functions[from..] {
         Checker::new(program, function).run()?;
     }
     Ok(())

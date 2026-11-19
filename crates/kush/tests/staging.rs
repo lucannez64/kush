@@ -264,6 +264,415 @@ fn checked(source: &str) -> Result<kush::executable::Executable, String> {
 }
 
 #[test]
+fn runtime_compilation_specializes_independent_owners_and_releases_them() {
+    let source = r#"
+use std.result.Result;
+fn power(n: i64) -> Code<fn(i64) -> i64 ! {panic}> ! {alloc, panic} {
+    if n == 0 { quote fn(x: i64) -> i64 ! {panic} { 1 } }
+    else {
+        let smaller = power(n - 1);
+        quote fn(x: i64) -> i64 ! {panic} { x * splice(smaller)(x) }
+    }
+}
+fn main() -> i64 ! {alloc, panic} {
+    let cube = match Code.compile(power(3)) {
+        Result.Ok(owner) => owner, Result.Err(e) => return -e,
+    };
+    let square = match Code.compile(power(2)) {
+        Result.Ok(owner) => owner, Result.Err(e) => return -e,
+    };
+    Code.call(&cube, 3) + Code.call(&square, 4) + Code.call(&cube, 2)
+}
+"#;
+    let exe = checked(source).unwrap();
+    let (result, stats) = exe.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(result, 51);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result(&exe, 51);
+}
+
+fn assert_native_result(exe: &kush::executable::Executable, expected: i32) {
+    assert_native_result_with_budget(exe, expected, None);
+}
+
+fn assert_native_result_with_budget(
+    exe: &kush::executable::Executable,
+    expected: i32,
+    budget: Option<&str>,
+) {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("runtime-staging");
+        kush::native::build(exe, &binary).unwrap();
+        let mut command = std::process::Command::new(binary);
+        command.env_remove("KUSH_ALLOC_FAIL_AFTER");
+        if let Some(budget) = budget {
+            command.env("KUSH_ALLOC_FAIL_AFTER", budget);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(expected), "{output:?}");
+    }
+}
+
+#[test]
+fn compiled_owner_is_borrowed_during_argument_evaluation() {
+    let source = r#"
+use std.result.Result;
+fn main() -> i64 ! {alloc, panic} {
+    let owner = match Code.compile(quote fn(x: i64) -> i64 ! {} { x }) {
+        Result.Ok(owner) => owner, Result.Err(e) => return e,
+    };
+    Code.call(&owner, { drop(owner); 4 })
+}
+"#;
+    let error = checked(source).unwrap_err();
+    assert!(error.contains("cannot move or drop an owner"), "{error}");
+}
+
+#[test]
+fn runtime_compile_failure_consumes_its_graph() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+fn main() -> i64 ! {alloc, panic} {
+    match Code.compile(quote fn() -> i64 ! {} { 42 }) {
+        Result.Ok(owner) => Code.call(&owner), Result.Err(e) => e,
+    }
+}
+"#,
+    )
+    .unwrap();
+    let (result, stats) = exe.evaluate_with_alloc_budget(&mut Vec::new(), 0).unwrap();
+    assert_eq!(result, 12);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result_with_budget(&exe, 12, Some("0"));
+    assert_native_result(&exe, 42);
+}
+
+#[test]
+fn runtime_compilation_copies_lifted_storage_and_returns_owned_results() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+fn make(text: Bytes) -> Code<fn() -> Bytes ! {alloc, panic}> ! {alloc, panic} {
+    quote fn() -> Bytes ! {alloc, panic} { lift(text) }
+}
+
+fn main() -> i64 ! {alloc, panic} {
+    let owner = match Code.compile(make(Bytes.from("hello"))) {
+        Result.Ok(owner) => owner, Result.Err(e) => return -e,
+    };
+    let first = Code.call(&owner);
+    let second = Code.call(&owner);
+    drop(owner);
+    Bytes.len(&first) + Bytes.len(&second)
+}
+"#,
+    )
+    .unwrap();
+    let (result, stats) = exe.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(result, 10);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result(&exe, 10);
+}
+
+#[test]
+fn runtime_compilation_relocates_static_data_and_loads_scalar_holes() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+fn make(n: i64) -> Code<fn() -> i64 ! {alloc, panic}> ! {alloc, panic} {
+    quote fn() -> i64 ! {alloc, panic} {
+        let data = Bytes.from("static data");
+        Bytes.len(&data) + lift(n)
+    }
+}
+fn main() -> i64 ! {io, alloc, panic} {
+    let input = match IO.read_line(IO.stdin(), Bytes.with_capacity(32)) {
+        Result.Ok(bytes) => bytes, Result.Err(e) => return -e,
+    };
+    let owner = match Code.compile(make(Bytes.len(&input))) {
+        Result.Ok(owner) => owner, Result.Err(e) => return -e,
+    };
+    Code.call(&owner)
+}
+"#,
+    )
+    .unwrap();
+    let input = b"runtime input";
+    let expected = 11 + input.len() as i32;
+    assert_eq!(
+        exe.evaluate_with_io(&mut input.as_slice(), &mut Vec::new())
+            .unwrap(),
+        i64::from(expected),
+    );
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("runtime-input");
+        let input_path = scratch.path().join("input");
+        std::fs::write(&input_path, input).unwrap();
+        kush::native::build(&exe, &binary).unwrap();
+        let output = std::process::Command::new(binary)
+            .stdin(std::fs::File::open(input_path).unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected), "{output:?}");
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn runtime_publication_enforces_wx_and_releases_a_failed_mapping() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+fn main() -> i64 ! {alloc, panic} {
+    match Code.compile(quote fn() -> i64 ! {} { 42 }) {
+        Result.Ok(owner) => Code.call(&owner), Result.Err(e) => e,
+    }
+}
+"#,
+    )
+    .unwrap();
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let binary = scratch.path().join("staged");
+    let source = scratch.path().join("mapping-probe.c");
+    let preload = scratch.path().join("mapping-probe.so");
+    std::fs::write(
+        &source,
+        r#"
+#define _GNU_SOURCE
+#include <assert.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+static void *stage;
+static int attempted, published, released;
+
+void *mmap(void *address, size_t size, int prot, int flags, int fd, off_t offset) {
+    assert((prot & (PROT_WRITE | PROT_EXEC)) != (PROT_WRITE | PROT_EXEC));
+    if (size == 64u * 1024u * 1024u) {
+        assert(!attempted && prot == (PROT_READ | PROT_WRITE));
+        attempted = 1;
+        if (getenv("KUSH_TEST_REJECT_MAPPING")) { errno = ENOMEM; return MAP_FAILED; }
+    }
+    void *result = (void *)syscall(SYS_mmap, address, size, prot, flags, fd, offset);
+    if (size == 64u * 1024u * 1024u && result != MAP_FAILED) {
+        stage = result;
+    }
+    return result;
+}
+int mprotect(void *address, size_t size, int prot) {
+    assert((prot & (PROT_WRITE | PROT_EXEC)) != (PROT_WRITE | PROT_EXEC));
+    if (address == stage) {
+        assert(!published && !released && prot == (PROT_READ | PROT_EXEC));
+        published = 1;
+        if (getenv("KUSH_TEST_REJECT_PUBLICATION")) { errno = EACCES; return -1; }
+    }
+    return (int)syscall(SYS_mprotect, address, size, prot);
+}
+int munmap(void *address, size_t size) {
+    if (address == stage) {
+        assert(published && !released && size == 64u * 1024u * 1024u);
+        released = 1;
+    }
+    return (int)syscall(SYS_munmap, address, size);
+}
+__attribute__((destructor)) static void verify_release(void) {
+    assert(attempted == 1);
+    if (getenv("KUSH_TEST_REJECT_MAPPING")) assert(!stage && !published && !released);
+    else assert(stage && published == 1 && released == 1);
+}
+"#,
+    )
+    .unwrap();
+    let compile = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&preload)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(compile.status.success(), "{compile:?}");
+    kush::native::build(&exe, &binary).unwrap();
+    for (failure, expected) in [
+        (None, 42),
+        (Some("KUSH_TEST_REJECT_PUBLICATION"), 13),
+        (Some("KUSH_TEST_REJECT_MAPPING"), 12),
+    ] {
+        let mut command = std::process::Command::new(&binary);
+        command
+            .env("LD_PRELOAD", &preload)
+            .env_remove("KUSH_TEST_REJECT_PUBLICATION")
+            .env_remove("KUSH_TEST_REJECT_MAPPING")
+            .env_remove("KUSH_ALLOC_FAIL_AFTER");
+        if let Some(failure) = failure {
+            command.env(failure, "1");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(expected), "{output:?}");
+    }
+}
+
+#[test]
+fn compiled_calls_preserve_aggregate_and_erased_parameter_abis() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+struct Pair { a: i64, b: i64 }
+fn shifted(n: i64) -> Code<fn(Pair, i64 @[0]) -> Pair ! {panic}> ! {alloc, panic} {
+    quote fn(p: Pair, unused: i64 @[0]) -> Pair ! {panic} {
+        Pair { a: p.a + lift(n), b: p.b }
+    }
+}
+fn main() -> i64 ! {alloc, panic} {
+    let owner = match Code.compile(shifted(10)) {
+        Result.Ok(owner) => owner, Result.Err(e) => return -e,
+    };
+    let p = Code.call(&owner, Pair { a: 12, b: 20 }, 99);
+    p.a + p.b
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(exe.evaluate(&mut Vec::new()).unwrap(), 42);
+    assert_native_result(&exe, 42);
+}
+
+#[test]
+fn repeated_runtime_stages_can_drop_the_previous_owner_before_compilation() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+fn outer(n: i64) -> Code<fn(i64) -> Code<fn() -> i64 ! {panic}> ! {alloc, panic}> ! {alloc, panic} {
+    quote fn(x: i64) -> Code<fn() -> i64 ! {panic}> ! {alloc, panic} {
+        quote fn() -> i64 ! {panic} { lift(x) + lift(lift(n)) }
+    }
+}
+fn main() -> i64 ! {alloc, panic} {
+    let mut sum = 0;
+    let mut i = 0;
+    while i < 7 {
+        let first = match Code.compile(outer(i)) {
+            Result.Ok(owner) => owner, Result.Err(e) => return -e,
+        };
+        let graph = Code.call(&first, 3);
+        drop(first);
+        let second = match Code.compile(graph) {
+            Result.Ok(owner) => owner, Result.Err(e) => return -e,
+        };
+        sum = sum + Code.call(&second);
+        i = i + 1;
+    }
+    sum
+}
+"#,
+    )
+    .unwrap();
+    let (result, stats) = exe.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result(&exe, 42);
+}
+
+#[test]
+fn compiled_call_may_return_a_view_borrowed_from_its_argument() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+fn main() -> i64 ! {alloc, panic} {
+    let owner = match Code.compile(quote fn(xs: &[i64]) -> &[i64] ! {} { xs }) {
+        Result.Ok(owner) => owner, Result.Err(e) => return -e,
+    };
+    let xs: [i64; 1] = [42];
+    let view = Code.call(&owner, &xs[..]);
+    drop(owner);
+    view[0]
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(exe.evaluate(&mut Vec::new()).unwrap(), 42);
+    assert_native_result(&exe, 42);
+}
+
+#[test]
+fn a_panic_during_compiled_execution_releases_its_owner() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+use std.task.Panic;
+fn main() -> i64 ! {alloc, panic, suspend} {
+    match Task.catch(fn() -> i64 ! {alloc, panic} {
+        let owner = match Code.compile(quote fn() -> i64 ! {panic} { panic() }) {
+            Result.Ok(owner) => owner, Result.Err(e) => return -e,
+        };
+        Code.call(&owner)
+    }) {
+        Result.Ok(value) => value,
+        Result.Err(_) => 42,
+    }
+}
+"#,
+    )
+    .unwrap();
+    let (result, stats) = exe.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result(&exe, 42);
+}
+
+#[test]
+fn runtime_compilation_rejects_splice_addresses_that_can_outlive_the_owner() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+fn main() -> i64 ! {alloc, panic} {
+    let fragment = quote fn() -> i64 ! {} { 42 };
+    let composed = quote fn() -> i64 ! {} {
+        let f = splice(fragment);
+        f()
+    };
+    match Code.compile(composed) {
+        Result.Ok(owner) => Code.call(&owner), Result.Err(e) => e,
+    }
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(exe.evaluate(&mut Vec::new()).unwrap(), 95);
+    assert_native_result(&exe, 95);
+}
+
+#[test]
+fn compile_time_generators_cannot_invoke_the_runtime_compiler() {
+    let error = checked(
+        r#"
+use std.result.Result;
+fn generate() -> Code<fn() -> i64 ! {}> ! {alloc, panic} {
+    let graph = quote fn() -> i64 ! {} { 41 };
+    let owner = match Code.compile(graph) {
+        Result.Ok(owner) => owner, Result.Err(_) => panic(),
+    };
+    let value = Code.call(&owner);
+    quote fn() -> i64 ! {} { lift(value) }
+}
+#[staged] fn answer() -> i64 ! {} = generate();
+fn main() -> i64 ! {} { answer() }
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("runtime compilation is unavailable"),
+        "{error}"
+    );
+}
+
+#[test]
 fn code_types_are_opaque_affine_values_with_a_static_callable_signature() {
     checked("fn consume(code: Code<fn(i64) -> i64 ! {panic}>) -> Unit ! {} {} fn main() -> Unit ! {} {}")
         .unwrap();
