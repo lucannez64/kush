@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 type Result<T> = std::result::Result<T, Diagnostic>;
 pub(crate) const UNSUPPORTED_RUNTIME_TEMPLATE: &str =
     "runtime splice must be called immediately in its quotation";
+pub(crate) const INITIALIZER_PREFIX: &str = "$staging_init_";
 
 /// Check a generic result against directly known return types without choosing
 /// a type argument. A substitution can make distinct types equal in one
@@ -215,11 +216,11 @@ pub(crate) fn runtime_template_supported(program: &ex::Executable, root: usize) 
 
 pub(crate) struct Prepared {
     pub program: Program,
-    entries: Vec<Entry>,
+    pub entries: Vec<Entry>,
 }
-struct Entry {
-    target: Span,
-    initializer: Span,
+pub(crate) struct Entry {
+    pub target: Span,
+    pub initializer: Span,
 }
 
 pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
@@ -249,8 +250,7 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
                         "#[staged] needs a function",
                     ));
                 };
-                if !function.generics.is_empty()
-                    || !function.ensures.is_empty()
+                if !function.ensures.is_empty()
                     || function.parameters.iter().any(|p| {
                         // A plain callable may shrink a mutable vector. The
                         // staged declaration would promise it preserves len.
@@ -263,7 +263,7 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
                 {
                     return Err(Diagnostic::new(
                         declaration.item.span,
-                        "staged declarations with generics, ensures, or mutable length refinements are not supported yet",
+                        "staged declarations with ensures or mutable length refinements are not supported yet",
                     ));
                 }
                 let generator = function
@@ -322,9 +322,9 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
                     .collect();
                 let initializer = ast::Function {
                     total: false,
-                    name: format!("$staging_init_{}", entries.len()),
+                    name: format!("{INITIALIZER_PREFIX}{}", entries.len()),
                     lifetimes: vec![],
-                    generics: vec![],
+                    generics: function.generics.clone(),
                     parameters: vec![],
                     result,
                     effects,
@@ -377,22 +377,8 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
 
 pub(crate) fn materialize(
     mut program: ex::Executable,
-    prepared: Prepared,
+    initializers: BTreeMap<usize, usize>,
 ) -> Result<ex::Executable> {
-    let mut initializers = BTreeMap::new();
-    for entry in prepared.entries {
-        let target = program
-            .functions
-            .iter()
-            .position(|f| f.span == entry.target)
-            .ok_or_else(|| Diagnostic::new(entry.target, "missing staged target"))?;
-        let init = program
-            .functions
-            .iter()
-            .position(|f| f.span == entry.initializer)
-            .ok_or_else(|| Diagnostic::new(entry.target, "missing staged initializer"))?;
-        initializers.insert(target, init);
-    }
     let mut active = BTreeSet::new();
     let mut complete = BTreeSet::new();
     for target in initializers.keys().copied() {

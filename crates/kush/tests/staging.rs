@@ -102,6 +102,8 @@ fn staged_attribute_and_initializer_must_match() {
         "#[staged] const x: i64 = 1;",
         "#[staged(1)] fn f() -> i64 ! {} = generator();",
         "#[staged] total fn f() -> i64 = generator();",
+        "export \"staged_f\" fn f() -> i64 ! {} = generator();",
+        "#[staged] export \"staged_f\" fn f() -> i64 ! {} { 1 }",
     ] {
         assert!(kush::parse(source).is_err(), "accepted {source}");
     }
@@ -1289,6 +1291,7 @@ fn specialization_keeps_erased_parameter_contracts() {
 fn make(n: i64) -> Code<fn(i64 @[0]) -> i64 ! {}> ! {alloc, panic} {
     quote fn(x: i64 @[0]) -> i64 ! {} { lift(n) }
 }
+
 #[staged] fn value(x: i64 @[0]) -> i64 ! {} = make(42);
 fn main() -> i64 ! {} { value(999) }
 "#,
@@ -1320,4 +1323,60 @@ fn main() -> i64 ! {alloc, panic} {
     let shorter = source.replace("[42]", "Vec.with_capacity(1)");
     let program = checked(&shorter).unwrap();
     assert!(program.evaluate(&mut Vec::new()).is_err());
+}
+
+#[test]
+fn each_generic_staged_target_gets_its_own_initializer() {
+    let program = checked(r#"
+fn identity<T: Type>() -> Code<fn(T) -> T ! {}> ! {alloc, panic} {
+    quote fn(x: T) -> T ! {} { x }
+}
+
+#[staged] fn first<T: Type>(x: T) -> T ! {} = identity::<T>();
+fn select<N: Nat>() -> Code<fn([i64; N]) -> i64 ! {panic}> ! {alloc, panic} {
+    let offset = first::<i64>(0);
+    quote fn(xs: [i64; N]) -> i64 ! {panic} { xs[0] + lift(offset) }
+}
+#[staged] fn second<N: Nat>(xs: [i64; N]) -> i64 ! {panic} = select::<N>();
+fn main() -> i64 ! {panic} {
+    if first::<Bool>(true) { second::<1>([20]) + second::<2>([22, 99]) } else { 0 }
+}
+"#).unwrap();
+    assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
+    assert_native_result(&program, 42);
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn staged_exports_link_as_ordinary_native_functions() {
+    let program = checked(r#"
+#[staged] export "staged_value" fn staged_value(x: i64) -> i64 ! {} =
+    quote fn(x: i64) -> i64 ! {} { x ^ 3 };
+"#).unwrap();
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let caller = scratch.path().join("caller.c");
+    std::fs::write(&caller, r#"
+#include <stdint.h>
+extern int64_t staged_value(int64_t x);
+int main(void) { return staged_value(41) != 42; }
+"#).unwrap();
+    for backend in [kush::native::Backend::Cranelift, kush::native::Backend::Llvm] {
+        let library = scratch.path().join(format!("libstaged-{backend:?}.a"));
+        let executable = scratch.path().join(format!("caller-{backend:?}"));
+        kush::native::build_library(
+            &program,
+            &library,
+            kush::native::CodegenOptions { backend, ..Default::default() },
+        ).unwrap();
+        let link = std::process::Command::new("cc")
+            .arg(&caller)
+            .arg(&library)
+            .arg("-lm")
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(link.status.success(), "{link:?}");
+        assert!(std::process::Command::new(executable).status().unwrap().success());
+    }
 }

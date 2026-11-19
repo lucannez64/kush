@@ -44,15 +44,19 @@ committing these changes.
 
 ## Checks and limits
 
-- Unused declarations parameterized solely by unconstrained types are checked in a
-  separate pass using distinct opaque affine types. Inference and ownership
-  check the whole body even when it is never called. Concrete instances keep
-  the ordinary checker. Trait-bound, grade, natural, and effect-polymorphic
-  quotations still need general abstract validation. Stage scope validation
+- Declarations parameterized solely by unconstrained types are checked in a
+  separate pass using distinct opaque affine types, even when all concrete
+  calls happen to select the same type. A lifted opaque value keeps its type
+  during quotation checking. Its representation is checked and encoded in
+  the concrete specialization. Trait-bound, grade, natural, and effect
+  binders still need general abstract validation. Stage scope validation
   covers every declaration.
-- Staged declarations keep erased proof and shared length preconditions at
-  call sites. Generic staged declarations, postconditions, and mutable length
-  refinements still require additional checking before they can be admitted.
+- Generic staged declarations specialize their initializers along with their
+  callable signatures. Initializers can request further stage specializations.
+  Staged declarations keep erased proof and shared length preconditions at
+  call sites. Postconditions and mutable length refinements still require
+  generated-body validation before they can be admitted.
+- Staged exports link through the ordinary native ABI on Cranelift and LLVM.
 - Ordinary nested closures take their own copies of lifted text in AOT and
   runtime templates. AOT also specializes splices inside nested closures.
 - Arenas and custom allocator contexts are explicitly rejected by the generator

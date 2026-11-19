@@ -278,19 +278,7 @@ impl Parser {
                 function.export = Some(symbol);
                 ItemKind::Function(function)
             } else if self.eat(&Kind::Fn) {
-                let staged = attributes.iter().any(|a| a.kind == "staged");
-                let function = self.function(total)?;
-                let definition = function.body.as_ref().and_then(|b| b.tail.as_deref())
-                    .and_then(Expr::staging).is_some_and(|(f, _)| f == StagingForm::Definition);
-                if staged != definition {
-                    return Err(Diagnostic::new(self.since(start),
-                        "a staged function requires '#[staged] fn name(...) -> T ! {...} = generator;"));
-                }
-                if staged && (total || attributes.iter().any(|a| a.kind == "staged" && a.argument.is_some())) {
-                    return Err(Diagnostic::new(self.since(start),
-                        "#[staged] takes no arguments and requires an executable function"));
-                }
-                ItemKind::Function(function)
+                ItemKind::Function(self.function(total)?)
             } else if self.eat(&Kind::Module) {
                 let path = self.path()?;
                 self.expect(&Kind::Semi, "';' after module path")?;
@@ -454,9 +442,26 @@ impl Parser {
                 }
                 return Err(self.error("expected a declaration; this frontend supports fn, const, struct, enum, type, module, and use"));
             };
-            if attributes.iter().any(|a| a.kind == "staged")
-                && !matches!(kind, ItemKind::Function(ref f) if !f.total && !f.constant && f.foreign.is_none() && f.export.is_none()) {
-                return Err(Diagnostic::new(self.since(start), "#[staged] applies only to an executable function definition"));
+            let staged = attributes.iter().any(|attribute| attribute.kind == "staged");
+            if staged
+                && (attributes
+                    .iter()
+                    .any(|attribute| attribute.kind == "staged" && attribute.argument.is_some())
+                    || !matches!(&kind, ItemKind::Function(f) if !f.total && !f.constant && f.foreign.is_none()))
+            {
+                return Err(Diagnostic::new(
+                    self.since(start),
+                    "#[staged] takes no arguments and requires an executable function definition",
+                ));
+            }
+            let definition = matches!(&kind, ItemKind::Function(f) if f.body.as_ref()
+                .and_then(|body| body.tail.as_deref()).and_then(Expr::staging)
+                .is_some_and(|(form, _)| form == StagingForm::Definition));
+            if staged != definition {
+                return Err(Diagnostic::new(
+                    self.since(start),
+                    "a staged function requires '#[staged] fn name(...) -> T ! {...} = generator;'",
+                ));
             }
             items.push(Declaration {
                 public,

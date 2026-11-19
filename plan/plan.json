@@ -5938,6 +5938,11 @@
           "time": "2026-11-19 19:50:13",
           "who": "agent",
           "text": "Two-worker full compiler gate passed: 2080 tests, 3 skipped in 912.505 seconds. The checkpoint keeps type, evaluation, AOT and runtime limitations open for follow-up."
+        },
+        {
+          "time": "2026-11-19 20:08:21",
+          "who": "agent",
+          "text": "The next two-worker full compiler gate passed all 2083 tests with 3 skipped in 856.370 seconds. The gate includes the same-type concrete alias regression, successful scalar lifting, generic staged initializers and native AOT exports. The two parent nodes remain open for constrained abstract checking and generated-body contracts."
         }
       ]
     },
@@ -8249,6 +8254,11 @@
           "time": "2026-11-19 19:30:50",
           "who": "agent",
           "text": "Type and ownership checking now covers unused generators with unconstrained type parameters through distinct opaque affine type identities. General abstract checking of trait, grade, natural and effect binders remains open."
+        },
+        {
+          "time": "2026-11-19 19:52:17",
+          "who": "agent",
+          "text": "Abstract validation now checks unconstrained type binders even for instantiated generators. The alias regression rejects U returned as T when all calls choose i64. The specialized scalar lift still passes. Trait, grade, natural and effect binders need abstract representations. The unused effect-row and array-length probes remain open."
         }
       ]
     },
@@ -8292,6 +8302,11 @@
           "time": "2026-11-19 19:30:51",
           "who": "agent",
           "text": "Added an interpreter specializer and verified generator bodies and graph bytes are absent from the native power executable. Added erased proof and shared length call contracts, owned text in nested closures, and nested AOT splices. Generic staged targets, postconditions and mutable length preservation remain open."
+        },
+        {
+          "time": "2026-11-19 19:52:17",
+          "who": "agent",
+          "text": "Generic staged declarations pair each target instance with a generator instance and follow dependencies discovered during initializer checking. Tested multiple type and natural specializations. Staged native exports link through Cranelift and LLVM. Generated postconditions and mutable length preservation remain open."
         }
       ]
     },

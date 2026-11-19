@@ -5532,19 +5532,21 @@ fn checked_exports(
 
 pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     if let Some(prepared) = crate::staging::prepare(program)? {
-        let executable = check_program_unstaged(&prepared.program, false, false)?;
-        let mut executable = crate::staging::materialize(executable, prepared)?;
+        let (executable, initializers) =
+            check_program_unstaged(&prepared.program, &prepared.entries, false, false)?;
+        let mut executable = crate::staging::materialize(executable, initializers)?;
         crate::suspend::lower(&mut executable)?;
         return Ok(executable);
     }
-    check_program_unstaged(program, true, false)
+    check_program_unstaged(program, &[], true, false).map(|(executable, _)| executable)
 }
 
 fn check_program_unstaged(
     source_program: &crate::program::Program,
+    stage_entries: &[crate::staging::Entry],
     lower_suspensions: bool,
     validate_generic_staging: bool,
-) -> Result<Executable> {
+) -> Result<(Executable, BTreeMap<usize, usize>)> {
     let injected = inject_allocator_protocol(source_program)?;
     let program = &injected;
     let module = &program.module;
@@ -5556,6 +5558,12 @@ fn check_program_unstaged(
     let default_bindings = collect_default_bindings(module, &mut resolution)?;
     crate::grades::validate_algebras(&mut resolution)?;
     let resolution = &resolution;
+    let mut initializer_bindings = BTreeMap::new();
+    for stage in stage_entries {
+        let target = resolution.declarations[&stage.target.start];
+        let initializer = resolution.declarations[&stage.initializer.start];
+        initializer_bindings.insert(target, initializer);
+    }
     // Total functions and aliases are erased and checked by the trusted kernel
     // before any executable body can cite them as proof evidence.
     let logical =
@@ -6096,9 +6104,46 @@ fn check_program_unstaged(
         // Use distinct type identities even when every actual specialization
         // chooses the same type for two parameters. The validation program
         // is discarded before materialization or backend lowering.
-        check_program_unstaged(source_program, false, true)?;
+        check_program_unstaged(source_program, stage_entries, false, true)?;
     }
-    while let Some(index) = functions.pending.pop() {
+    let mut initializers = BTreeMap::new();
+    loop {
+        let Some(index) = functions.pending.pop() else {
+            if initializer_bindings.is_empty() {
+                break;
+            }
+            // An initializer can itself request another staged specialization.
+            // Check every newly requested instance before evaluating any of them.
+            let pending = functions
+                .instances
+                .iter()
+                .filter_map(|(key, &target)| {
+                    let &initializer = initializer_bindings.get(&key.0)?;
+                    (!initializers.contains_key(&target))
+                        .then(|| (target, initializer, key.clone()))
+                })
+                .collect::<Vec<_>>();
+            if pending.is_empty() {
+                break;
+            }
+            for (target, initializer, (_, type_args, grade_args, const_args, effect_args, _)) in
+                pending
+            {
+                let instance = functions.instance(
+                    &mut types,
+                    resolution,
+                    initializer,
+                    type_args,
+                    grade_args,
+                    const_args,
+                    effect_args,
+                    None,
+                    Some(functions.signatures[target].span),
+                )?;
+                initializers.insert(target, instance);
+            }
+            continue;
+        };
         if functions.bodies[index].is_some() {
             continue;
         }
@@ -6525,7 +6570,7 @@ fn check_program_unstaged(
     if lower_suspensions {
         crate::suspend::lower(&mut executable)?;
     }
-    Ok(executable)
+    Ok((executable, initializers))
 }
 /// A span-insensitive key for the simple expression forms admitted in erased
 /// predicate parameters. Unsupported compound forms fall back to their debug

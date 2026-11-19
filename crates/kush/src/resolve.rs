@@ -1087,14 +1087,29 @@ impl Resolver {
         // Only executable functions and methods may constrain their effect-row
         // specialization. A total logical definition is erased from runtime IR,
         // so silently ignoring a constraint there would erase a checked promise.
-        self.generics(
-            &f.generics,
-            if f.total {
-                GenericContext::Unsupported("a total logical function")
-            } else {
-                GenericContext::Executable
-            },
-        )?;
+        if f.name.starts_with(crate::staging::INITIALIZER_PREFIX) {
+            // The initializer specializes with its staged target. Its
+            // callable type reuses the target's signature, so both scopes
+            // resolve cloned type uses to the same generic binding.
+            for generic in &f.generics {
+                let binding = self.result.binder(generic.span).ok_or_else(|| {
+                    Diagnostic::new(generic.span, "missing staged target generic binding")
+                })?;
+                self.scopes
+                    .last_mut()
+                    .expect("staged initializer scope")
+                    .insert(generic.name.clone(), binding);
+            }
+        } else {
+            self.generics(
+                &f.generics,
+                if f.total {
+                    GenericContext::Unsupported("a total logical function")
+                } else {
+                    GenericContext::Executable
+                },
+            )?;
+        }
         let staged_definition = f.body.as_ref().and_then(|b| b.tail.as_deref())
             .and_then(Expr::staging).is_some_and(|(form, _)| form == crate::ast::StagingForm::Definition);
         // The full signature is at the execution stage. Erased parameter
