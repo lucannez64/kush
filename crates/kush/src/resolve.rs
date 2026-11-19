@@ -1097,13 +1097,18 @@ impl Resolver {
         )?;
         let staged_definition = f.body.as_ref().and_then(|b| b.tail.as_deref())
             .and_then(Expr::staging).is_some_and(|(form, _)| form == crate::ast::StagingForm::Definition);
+        // The full signature is at the execution stage. Erased parameter
+        // predicates and result indices can refer to earlier parameters.
+        let signature_stage = self.stage;
+        if staged_definition {
+            self.stage += 1;
+        }
         for p in &f.parameters {
             self.ty(&p.ty)?;
             if let Some(length) = &p.min_length {
                 self.expr(length)?;
             }
-            let id = self.local(&p.name, BindingKind::Parameter, p.span, false)?;
-            if staged_definition { self.result.binding_stages.insert(id, self.stage + 1); }
+            self.local(&p.name, BindingKind::Parameter, p.span, false)?;
         }
         self.ty(&f.result)?;
         for effect in &f.effects {
@@ -1112,10 +1117,6 @@ impl Resolver {
         // Postconditions see the parameters, `result`, and their binders.
         // A staged declaration's parameters and postconditions describe the
         // generated function, while its initializer runs one stage earlier.
-        let signature_stage = self.stage;
-        if staged_definition {
-            self.stage += 1;
-        }
         for clause in &f.ensures {
             self.scoped(|r| {
                 r.local("result", BindingKind::Local, clause.result_span, true)?;

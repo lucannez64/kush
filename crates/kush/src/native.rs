@@ -5366,6 +5366,33 @@ struct CodeModule {
     referenced: std::collections::BTreeSet<FuncId>,
     stage_bodies: BTreeMap<FuncId, staging::Body>,
     stage_recipes: std::collections::BTreeSet<FuncId>,
+    literals: BTreeMap<Vec<u8>, DataId>,
+}
+impl CodeModule {
+    fn literal(&mut self, bytes: &[u8]) -> Result<DataId> {
+        if let Some(&id) = self.literals.get(bytes) {
+            return Ok(id);
+        }
+        // A generated literal can share its source span with both the
+        // quotation graph and other specializations. Intern the actual bytes.
+        let id = self
+            .declare_data(
+                &format!("kush_literal_{}", self.literals.len()),
+                Linkage::Local,
+                false,
+                false,
+            )
+            .map_err(error)?;
+        let mut desc = DataDescription::new();
+        desc.define(if bytes.is_empty() {
+            Box::new([0])
+        } else {
+            bytes.into()
+        });
+        self.define_data(id, &desc).map_err(error)?;
+        self.literals.insert(bytes.to_vec(), id);
+        Ok(id)
+    }
 }
 impl Module for CodeModule {
     fn isa(&self) -> &dyn cranelift_codegen::isa::TargetIsa {
@@ -5488,7 +5515,11 @@ fn lower(
     llvm: Option<(llvm::RuntimeInterface, Split)>,
     library: bool,
 ) -> Result<Lowered> {
-    let staged = staging::prepare(program);
+    let staged = if llvm.is_none() {
+        staging::prepare(program)
+    } else {
+        None
+    };
     let recipes = staged.as_ref().map(|p| p.recipes.clone()).unwrap_or_default();
     let program = staged.as_ref().map_or(program, |p| &p.program);
     let split = llvm.as_ref().map_or(Split::WHOLE, |(_, split)| *split);
@@ -5534,6 +5565,7 @@ fn lower(
         referenced: std::collections::BTreeSet::new(),
         stage_bodies: BTreeMap::new(),
         stage_recipes: Default::default(),
+        literals: BTreeMap::new(),
     };
     let capture_data = staging::capture_data(&mut module, &recipes)?;
     let mut print_sig = module.make_signature();
@@ -6150,32 +6182,6 @@ fn lower(
     let abort_word = module
         .declare_data("kush_abort_word", Linkage::Import, true, false)
         .map_err(error)?;
-    let mut literal_data = BTreeMap::new();
-    let mut literals = Vec::new();
-    for f in &program.functions {
-        collect_literals(&f.body, &mut literals);
-    }
-    for (index, (start, bytes)) in literals.into_iter().enumerate() {
-        let id = module
-            .declare_data(
-                &format!("kush_literal_{index}"),
-                Linkage::Local,
-                false,
-                false,
-            )
-            .map_err(error)?;
-        let mut desc = DataDescription::new();
-        desc.define(
-            if bytes.is_empty() {
-                vec![0]
-            } else {
-                bytes.to_vec()
-            }
-            .into_boxed_slice(),
-        );
-        module.define_data(id, &desc).map_err(error)?;
-        literal_data.insert(start, id);
-    }
     let (drops, closure_drops) = synthesize_drops(
         &mut module,
         program,
@@ -6412,7 +6418,6 @@ fn lower(
             str_writes: [str_ascii_upper, str_ascii_lower, str_set_scalar],
             vec_ops: &vec_ops,
             vec_element,
-            literal_data: &literal_data,
             abort_word,
             closure_drops: &closure_drops,
             task_spawn,
@@ -6676,11 +6681,15 @@ fn lower(
         context.func = body;
         if module.stage_recipes.contains(&ids[index]) && module.llvm.is_none() {
             // The copied body may live more than 2 GiB from the AOT image.
-            // The runtime linker gives these references nearby GOT entries.
+            // The runtime linker gives data and function addresses nearby GOT
+            // entries, including the body and drop glue of a nested closure.
             for (_, global) in context.func.global_values.iter_mut() {
                 if let ir::GlobalValueData::Symbol { colocated, .. } = global {
                     *colocated = false;
                 }
+            }
+            for (_, function) in context.func.dfg.ext_funcs.iter_mut() {
+                function.colocated = false;
             }
         }
         let dump_clif = CLIF_DUMP.with(|dump| dump.borrow().is_some());
@@ -7489,25 +7498,6 @@ fn foreign_abi_signature(
             .push(AbiParam::new(abi_value_type(foreign.result))),
     }
     sig
-}
-fn collect_literals<'a>(block: &'a ex::Block, out: &mut Vec<(usize, &'a [u8])>) {
-    for statement in &block.statements {
-        match statement {
-            ex::Statement::Let(_, value) | ex::Statement::Expr(value) => {
-                collect_expr_literals(value, out)
-            }
-            ex::Statement::Declare(_) => {}
-        }
-    }
-    if let Some(tail) = &block.tail {
-        collect_expr_literals(tail, out);
-    }
-}
-fn collect_expr_literals<'a>(expr: &'a Expr, out: &mut Vec<(usize, &'a [u8])>) {
-    if let ExprKind::BytesLiteral(bytes) = &expr.kind {
-        out.push((expr.span.start, bytes));
-    }
-    expr.for_each_child(&mut |child| collect_expr_literals(child, out));
 }
 fn emit_drop(
     builder: &mut FunctionBuilder<'_>,
@@ -8459,7 +8449,6 @@ struct Generator<'a, 'b> {
     /// Enclosing `AbortScope`s: label, the block receiving the payload, and
     /// the handler-stack depth at entry.
     aborts: Vec<AbortTarget>,
-    literal_data: &'b BTreeMap<usize, DataId>,
     /// The runtime's `kush_abort_word`.
     abort_word: DataId,
     allocate: FuncId,
@@ -10191,9 +10180,15 @@ impl Generator<'_, '_> {
                 return Some(self.builder.block_params(join).to_vec());
             }
             ExprKind::BytesLiteral(bytes) => {
-                let gv = self
-                    .module
-                    .declare_data_in_func(self.literal_data[&expr.span.start], self.builder.func);
+                let id = match self.module.literal(bytes) {
+                    Ok(id) => id,
+                    Err(diagnostic) => {
+                        self.module.failure.get_or_insert(diagnostic);
+                        self.abort();
+                        return None;
+                    }
+                };
+                let gv = self.module.declare_data_in_func(id, self.builder.func);
                 let address = self.builder.ins().symbol_value(I64, gv);
                 let length = self.constant(bytes.len() as i64);
                 self.runtime_call(self.bytes_from, &[address, length])

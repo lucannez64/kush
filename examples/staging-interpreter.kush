@@ -1,0 +1,57 @@
+// Specialize an accumulator interpreter for a fixed bytecode program.
+// Instructions 0 and 1 add or multiply by the following byte, respectively.
+fn interpret(code: &Bytes, input: i64) -> i64 ! {panic} {
+    let mut pc = 0;
+    let mut acc = input;
+    while pc < Bytes.len(code) {
+        let operation = Bytes.get(code, pc);
+        let operand = Bytes.get(code, pc + 1);
+        if operation == 0 { acc = acc + operand; }
+        else if operation == 1 { acc = acc * operand; }
+        else { panic(); }
+        pc = pc + 2;
+    }
+    acc
+}
+
+fn specialize(code: &Bytes, pc: i64) -> Code<fn(i64) -> i64 ! {panic}> ! {alloc, panic} {
+    if pc == Bytes.len(code) {
+        quote fn(acc: i64) -> i64 ! {panic} { acc }
+    } else {
+        let operation = Bytes.get(code, pc);
+        let operand = Bytes.get(code, pc + 1);
+        let rest = specialize(code, pc + 2);
+        if operation == 0 {
+            quote fn(acc: i64) -> i64 ! {panic} { splice(rest)(acc + lift(operand)) }
+        } else if operation == 1 {
+            quote fn(acc: i64) -> i64 ! {panic} { splice(rest)(acc * lift(operand)) }
+        } else {
+            panic()
+        }
+    }
+}
+
+fn bytecode() -> Bytes ! {alloc, panic} {
+    let code = Bytes.with_capacity(6);
+    let code = Bytes.push(Bytes.push(code, 0), 3);
+    let code = Bytes.push(Bytes.push(code, 1), 4);
+    Bytes.push(Bytes.push(code, 0), 2)
+}
+
+fn generate() -> Code<fn(i64) -> i64 ! {panic}> ! {alloc, panic} {
+    let program = bytecode();
+    specialize(&program, 0)
+}
+
+#[staged]
+fn run(input: i64) -> i64 ! {panic} = generate();
+
+fn main() -> i64 ! {alloc, panic} {
+    let program = bytecode();
+    let mut input = 0;
+    while input < 16 {
+        if run(input) != interpret(&program, input) { return 1; }
+        input = input + 1;
+    }
+    run(7)
+}

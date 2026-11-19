@@ -5933,6 +5933,11 @@
           "time": "2026-11-17 03:34:00",
           "who": "agent",
           "text": "Full core gate passed (2054/2054, 3 skipped); broader generic validation, additional staged signature forms, nested owning callable support, editor grammar and runtime JIT remain. Overall autonomous completion goal remains active."
+        },
+        {
+          "time": "2026-11-19 19:50:13",
+          "who": "agent",
+          "text": "Two-worker full compiler gate passed: 2080 tests, 3 skipped in 912.505 seconds. The checkpoint keeps type, evaluation, AOT and runtime limitations open for follow-up."
         }
       ]
     },
@@ -5945,10 +5950,21 @@
         "STAGING",
         "STAGING-JIT"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "In-process code generation; executable memory as a linear resource (writable or executable, never both). See docs/showcase-roadmap.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-19 19:19:55",
+          "who": "agent",
+          "text": "Validate native runtime acceptance and measure compile latency, linked image size and call cost."
+        },
+        {
+          "time": "2026-11-19 19:30:51",
+          "who": "agent",
+          "text": "Measured a 56-byte linked scalar specialization, median 112 microseconds for a generate/compile/call/drop iteration and median 4.9 nanoseconds for a call with a retained owner. Added supported targets and benchmark methodology to the staging notes."
+        }
+      ]
     },
     {
       "id": "GB-STAGED",
@@ -8213,6 +8229,26 @@
           "time": "2026-11-17 01:25:04",
           "who": "agent",
           "text": "Resume full approved staging implementation: Code callable types, typed quote holes, ownership and effect validation."
+        },
+        {
+          "time": "2026-11-19 18:53:44",
+          "who": "agent",
+          "text": "Eagerly check quotations in unused declarations when all generic binders are unconstrained and unreferenced. All 43 staging tests pass. Generic-dependent declarations still need abstract validation."
+        },
+        {
+          "time": "2026-11-19 18:58:54",
+          "who": "agent",
+          "text": "Added rigid return-type checks for unused generic-dependent quotations. Returning a distinct unconstrained type parameter or Bool/Char as T is rejected without selecting a specialization. Targeted regressions pass. General inference and ownership under abstract binders remain open."
+        },
+        {
+          "time": "2026-11-19 19:00:33",
+          "who": "agent",
+          "text": "Rigid generic quotation return checks now follow conditional tails and explicit returns, keeping nested callable returns in their own scope. General abstract quotation checking remains open."
+        },
+        {
+          "time": "2026-11-19 19:30:50",
+          "who": "agent",
+          "text": "Type and ownership checking now covers unused generators with unconstrained type parameters through distinct opaque affine type identities. General abstract checking of trait, grade, natural and effect binders remains open."
         }
       ]
     },
@@ -8251,6 +8287,11 @@
           "time": "2026-11-17 02:55:25",
           "who": "agent",
           "text": "Core staged declarations and graph materialization now run; per-stage abort/ownership/grade checking and backend parity are tested. Signature restrictions and generic validation remain."
+        },
+        {
+          "time": "2026-11-19 19:30:51",
+          "who": "agent",
+          "text": "Added an interpreter specializer and verified generator bodies and graph bytes are absent from the native power executable. Added erased proof and shared length call contracts, owned text in nested closures, and nested AOT splices. Generic staged targets, postconditions and mutable length preservation remain open."
         }
       ]
     },
@@ -8262,7 +8303,7 @@
       "deps": [
         "STAGING-AOT"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Share native lowering, checked relocation and symbol resolution, W^X publication, owner-bound callables, evaluator parity, failure cleanup and runtime-input specialization.",
       "commit": null,
       "log": [
@@ -8290,6 +8331,16 @@
           "time": "2026-11-19 18:50:35",
           "who": "agent",
           "text": "Checkpoint 6a4e387 adds evaluator and Linux x86-64 Cranelift coverage for independent threads repeatedly compiling, calling and dropping the same template with distinct captures, and a compiled call yielding while another task compiles and drops its own artifact. Evaluator allocation counts balance. All 42 staging tests passed. Full scripts/test-all.sh gate with two workers passed 2068 tests, 3 skipped, 861.121s. Relocation failure, cross-thread owner sharing, cancellation and performance validation remain open."
+        },
+        {
+          "time": "2026-11-19 19:19:55",
+          "who": "agent",
+          "text": "Verify runtime ownership, cancellation, relocation failure and target coverage against the approved staging design."
+        },
+        {
+          "time": "2026-11-19 19:30:51",
+          "who": "agent",
+          "text": "Verified cancellation cleanup, shared compiled owners, exact usage across the call ABI, and relocation failure before RX publication. Fixed native lowering of nested text captures and byte literals sharing a span."
         }
       ]
     },

@@ -230,7 +230,18 @@ cannot invoke the runtime compiler. Runtime splices must be
 immediately called in their own quotation. LLVM runtime compilation reports
 `ENOTSUP`.
 
-Generic quotation validation, some staged signature forms and nested owning
-callable templates need further work.
+Unused generators with unconstrained type parameters receive a separate type
+and ownership check with distinct opaque types. Erased proof parameters and
+shared length preconditions are checked at call sites of staged declarations.
+Nested closures can own copies of lifted text. Compile-time staging also
+specializes splices used inside nested closures.
+
+The [staged interpreter](../examples/staging-interpreter.kush) specializes a
+fixed bytecode program and compares the generated function against the
+interpreter across a range of inputs. The power example verifies that the
+native executable omits the generators and their serialized code graphs.
+
+Abstract checking of constrained generics, generic staged declarations,
+postconditions, and mutable length refinements need further work.
 STAGING and STAGING-RUNTIME remain open. Detailed current constraints and the
 runtime implementation direction are in [the working notes](staging-runtime-notes.md).

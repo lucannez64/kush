@@ -256,3 +256,66 @@ pub(super) fn emit(
     module.define_data(image, &image_data).map_err(error)?;
     Ok(())
 }
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_relocation_releases_the_unpublished_mapping() {
+        let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+        let source = scratch.path().join("staging-relocation.c");
+        let binary = scratch.path().join("staging-relocation");
+        let test = r#"
+#undef main
+#include <assert.h>
+int64_t kush_entry(void) { return 0; }
+
+static const unsigned char code[] = {0};
+/* An eight-byte relocation cannot fit in the one-byte body. */
+static const KushStageReloc reloc = {.kind = 0, .target_kind = 1};
+static const KushStageBody body = {.size = sizeof(code), .code = code, .reloc_count = 1, .relocs = &reloc};
+static const KushStageSchema schema = {0};
+const KushStageImage kush_stage_image = {.body_count = 1, .schema_count = 1, .bodies = &body, .schemas = &schema};
+
+static void *mapping;
+static unsigned releases;
+extern void *__real_mmap(void *, size_t, int, int, int, off_t);
+extern int __real_munmap(void *, size_t);
+void *__wrap_mmap(void *address, size_t size, int prot, int flags, int fd, off_t offset) {
+    assert(size == KUSH_STAGE_LIMIT && prot == (PROT_READ | PROT_WRITE));
+    mapping = __real_mmap(address, size, prot, flags, fd, offset);
+    assert(mapping != MAP_FAILED);
+    return mapping;
+}
+int __wrap_mprotect(void *address, size_t size, int prot) {
+    (void)address; (void)size; (void)prot;
+    assert(!"a failed relocation must never be published");
+    return -1;
+}
+int __wrap_munmap(void *address, size_t size) {
+    assert(address == mapping && size == KUSH_STAGE_LIMIT && releases++ == 0);
+    return __real_munmap(address, size);
+}
+int main(void) {
+    const unsigned char graph[16] = "KUSHCD01";
+    uint64_t owner = 1;
+    assert(kush_stage_compile(kush_bytes_from(graph, sizeof(graph)), &owner) == ENOTSUP);
+    assert(owner == 0 && releases == 1 && kush_live_allocations == 0);
+    return 0;
+}
+"#;
+        fs::write(&source, format!("#define main kush_original_main\n{RUNTIME}\n{test}")).unwrap();
+        let output = Command::new("cc")
+            .args(["-std=c11", "-O2", "-DKUSH_STATS=1", "-DKUSH_FUSION_COUNT=0"])
+            .args(["-Wl,--wrap=mmap,--wrap=mprotect,--wrap=munmap", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .arg("-lm")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let output = Command::new(&binary).env_remove("KUSH_ALLOC_FAIL_AFTER").output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+}

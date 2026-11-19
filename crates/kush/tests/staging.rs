@@ -206,7 +206,7 @@ fn stage_metadata_uses_distinct_binding_identities_for_shadowed_names() {
 #[test]
 fn stage_resolution_preserves_private_module_references_and_import_visibility() {
     let modules = kush::program::Memory(vec![("generator".into(),
-        "module generator; fn secret() -> i64 ! {} { 7 } pub fn make() -> Code<fn() -> i64 ! {}> ! {alloc} { quote fn() -> i64 ! {} { secret() } }".into())]);
+        "module generator; fn secret() -> i64 ! {} { 7 } pub fn make() -> Code<fn() -> i64 ! {}> ! {alloc, panic} { quote fn() -> i64 ! {} { secret() } }".into())]);
     let program = kush::program::load(
         "app.kush",
         "module app; use generator; fn secret() -> i64 ! {} { 99 } fn main() -> Unit ! {} {}",
@@ -229,6 +229,25 @@ fn stage_resolution_preserves_private_module_references_and_import_visibility() 
         .unwrap()
         .0;
     assert!(resolution.references.iter().any(|r| r.binding == secret));
+    let spliced = kush::program::load(
+        "app.kush",
+        r#"
+module app;
+use generator;
+fn secret() -> i64 ! {} { 99 }
+fn make() -> Code<fn() -> i64 ! {}> ! {alloc, panic} {
+    let fragment = generator.make();
+    quote fn() -> i64 ! {} { splice(fragment)() }
+}
+#[staged] fn compiled() -> i64 ! {} = make();
+fn main() -> i64 ! {} { compiled() }
+"#,
+        &modules,
+    )
+    .unwrap();
+    let spliced = kush::executable::check_program(&spliced).unwrap();
+    assert_eq!(spliced.evaluate(&mut Vec::new()).unwrap(), 7);
+    assert_native_result(&spliced, 7);
     let private = kush::program::load(
         "app.kush",
         "module app; use generator; fn main() -> i64 ! {} { generator.secret() }",
@@ -544,6 +563,38 @@ fn main() -> i64 ! {alloc, panic} {
 }
 
 #[test]
+fn compiled_calls_preserve_exact_parameter_usage() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+fn main() -> i64 ! {alloc, panic} {
+    let code = quote fn(x: i64 @[1]) -> i64 ! {} { x };
+    match Code.compile(code) {
+        Result.Ok(owner) => Code.call(&owner, 42),
+        Result.Err(e) => e,
+    }
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(exe.evaluate(&mut Vec::new()).unwrap(), 42);
+    assert_native_result(&exe, 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let options = kush::native::CodegenOptions {
+            backend: kush::native::Backend::Llvm,
+            ..Default::default()
+        };
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("no-runtime-recipes");
+        kush::native::build_with_codegen(&exe, &binary, false, &Default::default(), options)
+            .unwrap();
+        let output = std::process::Command::new(binary).output().unwrap();
+        assert_eq!(output.status.code(), Some(95), "{output:?}");
+    }
+}
+
+#[test]
 fn repeated_runtime_stages_can_drop_the_previous_owner_before_compilation() {
     let exe = checked(
         r#"
@@ -662,6 +713,70 @@ fn main() -> i64 ! {alloc, panic, suspend} {
             TaskExit.Cancelled => -2,
         }
     })
+}
+"#,
+    )
+    .unwrap();
+    let (result, stats) = exe.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result(&exe, 42);
+}
+
+#[test]
+fn cancelling_a_suspended_compiled_call_releases_its_owner() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+enum TaskExit<T> { Completed(T), Cancelled }
+fn main() -> i64 ! {alloc, panic, suspend} {
+    Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        let child = Task.spawn(fn() -> i64 ! {alloc, panic, suspend} {
+            let owner = match Code.compile(quote fn() -> i64 ! {suspend} {
+                while !Task.yield() {}
+                0
+            }) {
+                Result.Ok(owner) => owner, Result.Err(e) => return -e,
+            };
+            Code.call(&owner)
+        });
+        Task.yield();
+        Task.cancel(&child);
+        match Task.join(child) {
+            TaskExit.Completed(result) => result,
+            TaskExit.Cancelled => 42,
+        }
+    })
+}
+"#,
+    )
+    .unwrap();
+    let (result, stats) = exe.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result(&exe, 42);
+}
+
+#[test]
+fn threads_can_call_the_same_compiled_owner_through_shared_borrows() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+fn main() -> i64 ! {alloc, panic} {
+    let delta = 10;
+    let owner = match Code.compile(quote fn(x: i64) -> i64 ! {panic} { x + lift(delta) }) {
+        Result.Ok(owner) => owner, Result.Err(e) => return -e,
+    };
+    let owners: Vec<CompiledCode<fn(i64) -> i64 ! {panic}>> = Vec.with_capacity(1);
+    let owners = Vec.push(owners, owner);
+    let view = &owners[..];
+    let total = Thread.scope(fn() -> i64 ! {alloc, panic} {
+        let first = Thread.spawn(fn() -> i64 ! {panic} { Code.call(&view[0], 7) });
+        let second = Thread.spawn(fn() -> i64 ! {panic} { Code.call(&view[0], 15) });
+        Thread.join(first) + Thread.join(second)
+    });
+    drop(owners);
+    total
 }
 "#,
     )
@@ -802,6 +917,65 @@ fn constructing_a_checked_quote_does_not_execute_its_body_and_releases_storage()
         assert!(output.status.success());
         assert_eq!(output.stdout, b"7\n");
     }
+}
+
+#[test]
+fn unused_generic_declarations_still_check_type_independent_quotes() {
+    let source = r#"
+fn unused<T: Type>() -> Code<fn() -> i64 ! {}> ! {alloc, panic} {
+    quote fn() -> i64 ! {} { true }
+}
+fn main() -> i64 ! {} { 42 }
+"#;
+    let error = checked(source).unwrap_err();
+    assert!(error.contains("type mismatch"), "{error}");
+    let valid = checked(&source.replace("{ true }", "{ 1 }")).unwrap();
+    assert_eq!(valid.evaluate(&mut Vec::new()).unwrap(), 42);
+}
+
+#[test]
+fn unused_generic_quotes_check_rigid_return_types() {
+    let source = r#"
+fn unused<T: Type, U: Type>() -> Code<fn(T, U) -> T ! {}> ! {alloc, panic} {
+    quote fn(x: T, y: U) -> T ! {} { x }
+}
+fn main() -> i64 ! {} { 42 }
+"#;
+    checked(source).unwrap();
+    for wrong in ["y", "true", "if true { x } else { y }", "return y;"] {
+        let error = checked(&source.replace("{ x }", &format!("{{ {wrong} }}"))).unwrap_err();
+        assert!(error.contains("for every specialization"), "{error}");
+    }
+}
+
+#[test]
+fn unused_generic_quotes_check_inferred_types_and_moves() {
+    let source = r#"
+fn unused<T: Type, U: Type>() -> Code<fn(T, U) -> T ! {}> ! {alloc, panic} {
+    quote fn(x: T, y: U) -> T ! {} { let result = x; result }
+}
+fn main() -> i64 ! {} { 42 }
+"#;
+    checked(source).unwrap();
+    let wrong_type = source.replace("let result = x", "let result = y");
+    let error = checked(&wrong_type).unwrap_err();
+    assert!(error.contains("type mismatch"), "{error}");
+    let moved = source.replace("; result", "; x");
+    let error = checked(&moved).unwrap_err();
+    assert!(error.contains("moved"), "{error}");
+}
+
+#[test]
+fn generic_generators_can_lift_a_concrete_scalar_specialization() {
+    let program = checked(r#"
+fn specialize<T: Type>(value: T) -> Code<fn() -> T ! {}> ! {alloc, panic} {
+    quote fn() -> T ! {} { lift(value) }
+}
+#[staged] fn first() -> i64 ! {} = specialize(42);
+fn main() -> i64 ! {} { first() }
+"#).unwrap();
+    assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
+    assert_native_result(&program, 42);
 }
 
 #[test]
@@ -991,6 +1165,50 @@ fn main() -> i64 ! {panic} { second() }
 }
 
 #[test]
+fn nested_closures_own_lifted_text_independently() {
+    let program = checked(r#"
+use std.result.Result;
+fn specialize(text: Bytes) -> Code<fn() -> i64 ! {alloc, panic}> ! {alloc, panic} {
+    quote fn() -> i64 ! {alloc, panic} {
+        let read = fn() -> i64 ! {alloc, panic} {
+            let copy = lift(text);
+            Bytes.get(&copy, 0)
+        };
+        read()
+    }
+}
+#[staged] fn aot() -> i64 ! {alloc, panic} = specialize(Bytes.from("*"));
+fn main() -> i64 ! {alloc, panic} {
+    let owner = match Code.compile(specialize(Bytes.from("*"))) {
+        Result.Ok(owner) => owner, Result.Err(e) => return e,
+    };
+    if aot() == 42 && Code.call(&owner) == 42 { Code.call(&owner) } else { 1 }
+}
+"#).unwrap();
+    let (result, stats) = program.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result(&program, 42);
+}
+
+#[test]
+fn aot_splices_are_specialized_inside_nested_closures() {
+    let program = checked(r#"
+fn specialize(fragment: Code<fn() -> i64 ! {}>) -> Code<fn() -> i64 ! {}> ! {alloc, panic} {
+    quote fn() -> i64 ! {} {
+        let inner = fn() -> i64 ! {} { splice(fragment)() };
+        inner()
+    }
+}
+#[staged] fn first() -> i64 ! {} = specialize(quote fn() -> i64 ! {} { 20 });
+#[staged] fn second() -> i64 ! {} = specialize(quote fn() -> i64 ! {} { 22 });
+fn main() -> i64 ! {panic} { first() + second() }
+"#).unwrap();
+    assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
+    assert_native_result(&program, 42);
+}
+
+#[test]
 fn splice_types_ownership_and_owned_lift_effects_are_checked() {
     for source in [
         "fn bad(code: Code<fn() -> Bool ! {}>) -> Code<fn() -> i64 ! {}> ! {alloc, panic} { quote fn() -> i64 ! {} { splice(code)() } } fn main() -> Unit ! {} {}",
@@ -1023,6 +1241,30 @@ fn power_example_runs_without_a_runtime_generator_call() {
     let mut output = Vec::new();
     assert_eq!(program.evaluate(&mut output).unwrap(), 0);
     assert_eq!(output, b"27\n16\n");
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("staging-power");
+        let ir = kush::native::build_with_clif(&program, &binary).unwrap();
+        assert!(ir.contains("; cube\n") && ir.contains("; square\n"), "{ir}");
+        assert!(!ir.contains("; power\n") && !ir.contains("$staging_init"), "{ir}");
+        let executable = std::fs::read(&binary).unwrap();
+        assert!(!executable.windows(8).any(|bytes| {
+            matches!(bytes, b"KUSHCD01" | b"KUSHCD02" | b"KUSHCD03")
+        }));
+        let native = std::process::Command::new(binary).output().unwrap();
+        assert!(native.status.success(), "{native:?}");
+        assert_eq!(native.stdout, output);
+    }
+}
+
+#[test]
+fn specialized_bytecode_matches_the_interpreter() {
+    let program = checked(include_str!("../../../examples/staging-interpreter.kush")).unwrap();
+    let (result, stats) = program.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result(&program, 42);
 }
 
 #[test]
@@ -1039,4 +1281,28 @@ fn main() -> i64 ! {} { value(999) }
     .unwrap();
     let mut output = Vec::new();
     assert_eq!(program.evaluate(&mut output).unwrap(), 42);
+}
+
+#[test]
+fn staged_declarations_keep_call_site_proof_and_shared_length_contracts() {
+    let source = r#"
+#[staged]
+fn positive(x: i64, erased evidence: { 0 < x }) -> i64 ! {} =
+    quote fn(x: i64) -> i64 ! {} { x };
+#[staged]
+fn head(v: &Vec<i64> where len >= 1) -> i64 ! {panic} =
+    quote fn(v: &Vec<i64>) -> i64 ! {panic} { v[0] };
+fn main() -> i64 ! {alloc, panic} {
+    let v: Vec<i64> = [42];
+    positive(1, _) + head(&v) - 1
+}
+"#;
+    let program = checked(source).unwrap();
+    assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
+    assert_native_result(&program, 42);
+    let error = checked(&source.replace("positive(1, _)", "positive(0, _)")).unwrap_err();
+    assert!(error.contains("cannot prove"), "{error}");
+    let shorter = source.replace("[42]", "Vec.with_capacity(1)");
+    let program = checked(&shorter).unwrap();
+    assert!(program.evaluate(&mut Vec::new()).is_err());
 }

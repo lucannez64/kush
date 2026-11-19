@@ -7,6 +7,158 @@ type Result<T> = std::result::Result<T, Diagnostic>;
 pub(crate) const UNSUPPORTED_RUNTIME_TEMPLATE: &str =
     "runtime splice must be called immediately in its quotation";
 
+/// Check a generic result against directly known return types without choosing
+/// a type argument. A substitution can make distinct types equal in one
+/// specialization, but cannot justify returning one as the other universally.
+/// Leave expressions that need inference to the normal instance checker.
+pub(crate) fn check_generic_quote_results(
+    function: &ast::Function,
+    resolution: &crate::resolve::Resolution,
+) -> Result<()> {
+    use crate::resolve::BindingKind;
+    let rigid: BTreeSet<_> = function
+        .generics
+        .iter()
+        .filter(|generic| {
+            generic.bound.as_ref().is_none_or(|bound| {
+                resolution.reference(bound.span).is_some_and(|id| {
+                    let binding = &resolution.bindings[id];
+                    binding.kind == BindingKind::Builtin && binding.name == "Type"
+                })
+            })
+        })
+        .filter_map(|generic| resolution.binder(generic.span))
+        .collect();
+    if rigid.is_empty() {
+        return Ok(());
+    }
+    fn named(ty: &ast::Type, resolution: &crate::resolve::Resolution) -> Option<usize> {
+        match &ty.kind {
+            ast::TypeKind::Named { arguments, .. } if arguments.is_empty() => {
+                resolution.reference(ty.span)
+            }
+            _ => None,
+        }
+    }
+    fn visit(
+        expr: &ast::Expr,
+        rigid: &BTreeSet<usize>,
+        resolution: &crate::resolve::Resolution,
+    ) -> Result<()> {
+        if let Some((ast::StagingForm::Quote, operand)) = expr.staging()
+            && let ast::ExprKind::Lambda(lambda) = &operand.kind
+            && let Some(expected) = named(&lambda.result, resolution)
+            && rigid.contains(&expected)
+        {
+            let check = |tail: &ast::Expr| {
+                let actual = match &tail.kind {
+                    ast::ExprKind::Name(_) => resolution.reference(tail.span).and_then(|id| {
+                        lambda
+                            .parameters
+                            .iter()
+                            .find(|p| resolution.binder(p.span) == Some(id))
+                            .and_then(|p| named(&p.ty, resolution))
+                            .filter(|id| rigid.contains(id))
+                            .map(|id| (Some(id), resolution.bindings[id].name.as_str()))
+                    }),
+                    ast::ExprKind::Bool(_) => Some((None, "Bool")),
+                    ast::ExprKind::Char(_) => Some((None, "Char")),
+                    _ => None,
+                };
+                if let Some((actual_id, actual)) = actual
+                    && actual_id != Some(expected)
+                {
+                    let expected = &resolution.bindings[expected].name;
+                    return Err(Diagnostic::new(
+                        tail.span,
+                        format!(
+                            "quotation must return generic type '{expected}' for every specialization, found '{actual}'",
+                        ),
+                    ));
+                }
+                Ok(())
+            };
+            check_quote_result_paths(&lambda.body, &check)?;
+        }
+        let mut result = Ok(());
+        ex::ast_children(expr, &mut |child| {
+            if result.is_ok() {
+                result = visit(child, rigid, resolution);
+            }
+        });
+        result
+    }
+    if let Some(body) = &function.body {
+        for statement in &body.statements {
+            match statement {
+                ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+                    visit(value, &rigid, resolution)?;
+                }
+            }
+        }
+        if let Some(tail) = &body.tail {
+            visit(tail, &rigid, resolution)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_quote_result_paths(
+    body: &ast::Block,
+    check: &impl Fn(&ast::Expr) -> Result<()>,
+) -> Result<()> {
+    fn tail(expr: &ast::Expr, check: &impl Fn(&ast::Expr) -> Result<()>) -> Result<()> {
+        match &expr.kind {
+            ast::ExprKind::If {
+                then, otherwise, ..
+            } => {
+                if let Some(expr) = then.tail.as_deref() {
+                    tail(expr, check)?;
+                }
+                if let Some(expr) = otherwise.as_deref() {
+                    tail(expr, check)?;
+                }
+                Ok(())
+            }
+            ast::ExprKind::Block(block) => {
+                if let Some(expr) = block.tail.as_deref() {
+                    tail(expr, check)?;
+                }
+                Ok(())
+            }
+            _ => check(expr),
+        }
+    }
+    fn returns(expr: &ast::Expr, check: &impl Fn(&ast::Expr) -> Result<()>) -> Result<()> {
+        // Returns in a nested callable belong to that callable.
+        if matches!(expr.kind, ast::ExprKind::Lambda(_)) || expr.staging().is_some() {
+            return Ok(());
+        }
+        if let ast::ExprKind::Return(Some(value)) = &expr.kind {
+            tail(value, check)?;
+        }
+        let mut result = Ok(());
+        ex::ast_children(expr, &mut |child| {
+            if result.is_ok() {
+                result = returns(child, check);
+            }
+        });
+        result
+    }
+    for statement in &body.statements {
+        match statement {
+            ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+                returns(value, check)?;
+            }
+        }
+    }
+    if let Some(expr) = body.tail.as_deref() {
+        tail(expr, check)?;
+        returns(expr, check)?;
+    }
+    Ok(())
+}
+
 /// Reference-evaluator artifact. The snapshot keeps generated function identities
 /// and their checked layouts alive until the compiled owner is released.
 #[derive(Debug)]
@@ -99,14 +251,19 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
                 };
                 if !function.generics.is_empty()
                     || !function.ensures.is_empty()
-                    || function
-                        .parameters
-                        .iter()
-                        .any(|p| p.erased || p.min_length.is_some())
+                    || function.parameters.iter().any(|p| {
+                        // A plain callable may shrink a mutable vector. The
+                        // staged declaration would promise it preserves len.
+                        p.min_length.is_some()
+                            && !matches!(
+                                ex::split_grade(&p.ty).0.kind,
+                                ast::TypeKind::Borrow { mutable: false, .. }
+                            )
+                    })
                 {
                     return Err(Diagnostic::new(
                         declaration.item.span,
-                        "staged declarations with generics, ensures, erased or length-refined parameters are not supported yet",
+                        "staged declarations with generics, ensures, or mutable length refinements are not supported yet",
                     ));
                 }
                 let generator = function
@@ -128,6 +285,7 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
                         parameters: function
                             .parameters
                             .iter()
+                            .filter(|p| !p.erased)
                             .map(|p| ast::TypeParameter {
                                 name: None,
                                 ty: p.ty.clone(),

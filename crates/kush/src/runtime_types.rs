@@ -1506,6 +1506,39 @@ impl<'a> Types<'a> {
         self.opaque_code_type(callable, "CompiledCode", true, span)
     }
 
+    /// An unconstructible nominal type used only while validating a generic
+    /// quotation. Give each binder its own identity and no copy permission.
+    pub(crate) fn staging_type_parameter(&mut self, binding: BindingId) -> Type {
+        let index = self.enums.len();
+        self.enums.push(Enum {
+            definition: binding,
+            name: self.resolution.bindings[binding].name.clone(),
+            arguments: vec![],
+            consts: vec![],
+            lifetimes: vec![],
+            variants: vec![Variant {
+                name: "$opaque".into(),
+                fields: vec![Type::Bytes],
+                tuple: false,
+                names: vec!["$opaque".into()],
+            }],
+            words: 1,
+            result: None,
+            record: true,
+            field_lifetimes: vec![None],
+            borrowed: false,
+            mutable_borrow: false,
+            linear: false,
+            array: None,
+            dynamic_array: None,
+            runtime_length: None,
+            tuple: false,
+            structural: false,
+            foreign: None,
+        });
+        Type::Enum(index)
+    }
+
     fn opaque_code_type(&mut self, callable: Type, name: &str, compiled: bool, span: Span) -> Result<Type> {
         if !matches!(callable, Type::Fn(_)) {
             return Err(Diagnostic::new(

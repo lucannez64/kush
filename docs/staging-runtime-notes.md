@@ -42,25 +42,28 @@ independent scalar specializations, nested stages and owned text/float lifting.
 The owned-text test also checks LLVM. The whole compiler gate must pass before
 committing these changes.
 
-## Remaining correctness work
+## Checks and limits
 
-- Universal validation of unused generic quotation templates; current generic
-  instantiations use the ordinary lazy monomorphization checker, while stage
-  scope validation covers even uninstantiated definitions. Do not claim all
-  generic templates are checked yet.
-- Staged declarations currently reject generics, ensures, erased proof parameters
-  and length-refined parameters explicitly; remove these restrictions only
-  with correct checking and negative regressions. Ordinary grade-zero runtime
-  parameters are supported and forwarded as Erased values by specialization.
-- Nested ordinary callable templates with owned captures/splices currently
-  produce an explicit unsupported diagnostic. Nested quotation stages work.
+- Unused declarations parameterized solely by unconstrained types are checked in a
+  separate pass using distinct opaque affine types. Inference and ownership
+  check the whole body even when it is never called. Concrete instances keep
+  the ordinary checker. Trait-bound, grade, natural, and effect-polymorphic
+  quotations still need general abstract validation. Stage scope validation
+  covers every declaration.
+- Staged declarations keep erased proof and shared length preconditions at
+  call sites. Generic staged declarations, postconditions, and mutable length
+  refinements still require additional checking before they can be admitted.
+- Ordinary nested closures take their own copies of lifted text in AOT and
+  runtime templates. AOT also specializes splices inside nested closures.
 - Arenas and custom allocator contexts are explicitly rejected by the generator
   sandbox until their storage is accounted for. Current heap accounting covers
   ordinary heap-backed buffers/vectors/boxes.
-- Add fuel, memory, panic, effect, affine reuse, bad-hole and hygiene regression
-  coverage, including private-module splices and exact grade transfer.
-- Remove compile-time-only generation work from final native artifacts without
-  discarding template identities still needed by runtime code construction.
+- Regressions cover fuel and memory exhaustion, panic, effect rejection,
+  affine reuse, ill-typed holes, private-module splices and exact grade transfer.
+- Native lowering interns byte constants by content as it reaches each body.
+  The native power example contains neither the generating functions nor
+  their serialized graphs. The mixed AOT and runtime test checks that two
+  literals sharing a source span keep their distinct values.
 - The Tree-sitter query highlights contextual `quote fn` and the existing
   attribute rule covers `#[staged]`. The parser's lambda span begins at
   `fn` so annotation edits preserve the quotation boundary.
@@ -71,7 +74,8 @@ committing these changes.
   heap, allocation budget, I/O and task control state. Newly instantiated
   functions are ownership/grade checked without re-elaborating existing bodies.
   Callable-containing results are conservatively rejected to prevent artifact
-  addresses escaping their owner; review dynamic-object/allocator results too.
+  addresses escaping their owner. The check includes opaque dynamic objects
+  and allocator contexts and follows references and containers.
 - The Linux x86-64 Cranelift backend emits checked machine-code recipes and
   relocation metadata. The runtime copies code and lifted values into bounded
   RW storage, links the splice targets and symbols, then publishes the entry
@@ -82,21 +86,32 @@ committing these changes.
 - Runtime splices currently require immediate calls in the quotation because
   first-class functions cannot express the compiled owner's lifetime. LLVM
   runtime compilation returns ENOTSUP. The compiler registers checked
-  quotation templates by function identity. Pruning unreachable recipes,
-  auditing additional relocation cases and validating concurrent use remain
-  open. LLVM AOT staging has independent coverage.
+  quotation templates by function identity. Pruning unreachable recipes
+  in mixed AOT and JIT programs remains open. LLVM AOT staging has independent
+  coverage.
 
-## Runtime follow-up
+## Runtime validation
 
-- Cover nonzero exact usage contracts across the compiled call ABI. Tests
-  cover scalar and aggregate values, grade-zero arguments, owning buffer
-  returns and a view whose lifetime is tied to a call argument.
+- Tests cover scalar and aggregate values, grade-zero and exactly-once
+  arguments, owning buffer returns, and a view tied to a call argument.
 - The nested runtime test repeatedly compiles, calls and drops both stages.
   Independent OS threads repeatedly compile the same checked template with
   separate scalar captures and owners. A suspended compiled call resumes
   after another task compiles, calls and drops its own artifact. These cases
-  have evaluator and Cranelift coverage. Cross-thread owner sharing, cancellation
-  of suspended compiled calls, and relocation failure still need coverage.
+  have evaluator and Cranelift coverage, as do immutable sharing of a single
+  compiled owner through a borrowed slice and cancellation of a suspended call.
+- A native runtime fault test supplies an out-of-bounds relocation and verifies
+  that linking returns ENOTSUP, never publishes executable pages, and releases
+  both the mapping and the remaining allocations.
 - Audit code graph schema discovery and symbol relocation against all forms
   emitted by the native backend. Unrecognized relocations fail compilation.
-- Benchmark compilation latency, generated image sizes and steady-state calls.
+
+## Runtime measurements
+
+An optimized Cranelift build on the Ryzen 5 PRO 5675U specialized a function
+that XORs its input with a lifted scalar. Across five runs, the median of
+2,000 generate/compile/call/drop iterations was about 112 µs per iteration.
+The median of one million calls through one retained owner, including the loop
+and checksum, was about 4.9 ns per call. A separate run observed 56 bytes of
+linked code, constants, and relocation slots passed to `mprotect` before page
+rounding.

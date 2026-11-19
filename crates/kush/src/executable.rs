@@ -2395,7 +2395,7 @@ fn validate_foreign_function(
     Ok(())
 }
 /// Split `T @[grade]` into the type and its grade expression.
-fn split_grade(ty: &ast::Type) -> (&ast::Type, Option<&ast::Type>) {
+pub(crate) fn split_grade(ty: &ast::Type) -> (&ast::Type, Option<&ast::Type>) {
     grades::split(ty)
 }
 /// Whether a name is a bare C symbol. Foreign declarations and resource release
@@ -5532,16 +5532,20 @@ fn checked_exports(
 
 pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     if let Some(prepared) = crate::staging::prepare(program)? {
-        let executable = check_program_unstaged(&prepared.program, false)?;
+        let executable = check_program_unstaged(&prepared.program, false, None)?;
         let mut executable = crate::staging::materialize(executable, prepared)?;
         crate::suspend::lower(&mut executable)?;
         return Ok(executable);
     }
-    check_program_unstaged(program, true)
+    check_program_unstaged(program, true, None)
 }
 
-fn check_program_unstaged(program: &crate::program::Program, lower_suspensions: bool) -> Result<Executable> {
-    let injected = inject_allocator_protocol(program)?;
+fn check_program_unstaged(
+    source_program: &crate::program::Program,
+    lower_suspensions: bool,
+    validate_generic_staging: Option<&BTreeSet<BindingId>>,
+) -> Result<Executable> {
+    let injected = inject_allocator_protocol(source_program)?;
     let program = &injected;
     let module = &program.module;
     reject_stored_capabilities(module)?;
@@ -6036,6 +6040,62 @@ fn check_program_unstaged(program: &crate::program::Program, lower_suspensions: 
         )?;
     }
     let mut entry = None;
+    for declared in functions.declared.values() {
+        crate::staging::check_generic_quote_results(declared.ast, resolution)?;
+    }
+    let staged_generics = functions
+        .declared
+        .iter()
+        .filter_map(|(&binding, declared)| {
+            let function = declared.ast;
+            if declared.impl_template.is_some()
+                || function.generics.is_empty()
+                || !function.body.as_ref().is_some_and(block_contains_quote)
+            {
+                return None;
+            }
+            let parameters = function
+                .generics
+                .iter()
+                .map(|generic| {
+                    let unrestricted = generic.bound.as_ref().is_none_or(|bound| {
+                        resolution.reference(bound.span).is_some_and(|id| {
+                            let binding = &resolution.bindings[id];
+                            binding.kind == BindingKind::Builtin && binding.name == "Type"
+                        })
+                    });
+                    if unrestricted {
+                        resolution.binder(generic.span)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some((binding, parameters))
+        })
+        .collect::<Vec<_>>();
+    if let Some(validate) = validate_generic_staging {
+        for (binding, parameters) in &staged_generics {
+            if !validate.contains(binding) {
+                continue;
+            }
+            let arguments = parameters
+                .iter()
+                .map(|&id| types.staging_type_parameter(id))
+                .collect();
+            functions.instance(
+                &mut types,
+                resolution,
+                *binding,
+                arguments,
+                vec![],
+                vec![],
+                vec![],
+                None,
+                None,
+            )?;
+        }
+    }
     while let Some(index) = functions.pending.pop() {
         if functions.bodies[index].is_some() {
             continue;
@@ -6291,6 +6351,17 @@ fn check_program_unstaged(program: &crate::program::Program, lower_suspensions: 
             shared_environment: false,
         });
     }
+    if validate_generic_staging.is_none() {
+        let unused = staged_generics
+            .into_iter()
+            .map(|(binding, _)| binding)
+            .filter(|binding| !functions.instance_counts.contains_key(binding))
+            .collect::<BTreeSet<_>>();
+        if !unused.is_empty() {
+            // Keep the validation-only instances and layouts out of the executable.
+            check_program_unstaged(source_program, false, Some(&unused))?;
+        }
+    }
     // Re-check every proof certificate without the search that produced it.
     if let Some(bad) = functions
         .certificates
@@ -6310,7 +6381,7 @@ fn check_program_unstaged(program: &crate::program::Program, lower_suspensions: 
     // source types while bodies are still being checked.
     let automatic = automatic_fusion(&types, &mut functions);
     functions.fusions += automatic;
-    if std::env::var_os("KUSH_PROOF_REPORT").is_some() {
+    if validate_generic_staging.is_none() && std::env::var_os("KUSH_PROOF_REPORT").is_some() {
         eprintln!(
             "proof report: {} element accesses proved in bounds (no runtime check), {} checked at run time",
             functions.bounds_proved, functions.bounds_checked
@@ -13056,6 +13127,12 @@ enum LambdaRow {
 struct LambdaInference {
     result_from_body: bool,
     row: LambdaRow,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LambdaContext {
+    Ordinary,
+    TaskScope,
+    Quotation,
 }
 /// Types a call or a binding's first use supplies for an unannotated
 /// lambda's parameters and result (I-LAMBDA-INFER).
@@ -22847,12 +22924,7 @@ impl Checker<'_, '_> {
                         let ty = c.locals[slot].ty;
                         let value = if matches!(ty, Type::Bytes | Type::String) {
                             c.require(ALLOC | PANIC, span)?;
-                            let reference = Expr { kind: ExprKind::Borrow(slot),
-                                ty: Type::Ref(c.types.pointer(ty)), span, resource: None };
-                            // A String's checked bytes remain valid UTF-8 when
-                            // copied. Both owning text types use buffer storage.
-                            Expr { kind: ExprKind::Call(Target::Bytes(BytesOp::Copy), vec![reference]),
-                                ty, span, resource: None }
+                            c.copy_lifted_text(slot, span)
                         } else {
                             Expr { kind: ExprKind::Local(slot), ty, span, resource: None }
                         };
@@ -22924,7 +22996,7 @@ impl Checker<'_, '_> {
                 return c.construct(expr, None, expected, span);
             }
             if let ast::ExprKind::Lambda(lambda) = &expr.kind {
-                return c.lambda(lambda, span, expected, false);
+                return c.lambda(lambda, span, expected, LambdaContext::Ordinary);
             }
             if matches!(
                 expr.kind,
@@ -25742,21 +25814,11 @@ impl Checker<'_, '_> {
         // An ordinary Fn return cannot express an artifact-owner lifetime.
         // Admit owning data and serialized Code results, but do not publish
         // unowned callable addresses through an otherwise owned result.
-        let mut pending = vec![self.types.function_types[signature].result];
-        let mut seen = BTreeSet::new();
-        while let Some(ty) = pending.pop() {
-            if !seen.insert(ty) { continue; }
-            match ty {
-                Type::Fn(_) | Type::Once(_) | Type::Multi(_) => return Err(Diagnostic::new(span,
-                    "a compiled callable cannot return an unowned callable that could escape its artifact owner")),
-                Type::Enum(index) | Type::Variants(index, _) => {
-                    pending.extend(self.types.enums[index].variants.iter().flat_map(|v| v.fields.iter()).copied());
-                }
-                Type::Box(pointer) | Type::Vec(pointer) | Type::Ref(pointer) | Type::RefMut(pointer)
-                | Type::Slice(pointer) | Type::SliceMut(pointer) => pending.push(self.types.pointees[pointer]),
-                Type::Union(index) => pending.extend(self.types.unions[index].members.iter().copied()),
-                _ => {},
-            }
+        if self.contains_callable(self.types.function_types[signature].result) {
+            return Err(Diagnostic::new(
+                span,
+                "a compiled callable cannot return a value that may carry an unowned callable outside its artifact owner",
+            ));
         }
         let owner = self.types.compiled_code_type(Type::Fn(signature), span)?;
         let (ty, shape) = self.types.result_type(owner, Type::I64, span)?;
@@ -25878,12 +25940,8 @@ impl Checker<'_, '_> {
         let mut statements = Vec::new();
         let mut holes = BTreeMap::new();
         let mut splices = BTreeMap::new();
-        let mut nested_callable = false;
         let mut pending = vec![(value, 1usize)];
         while let Some((expression, stage)) = pending.pop() {
-            nested_callable |= stage == 1
-                && !std::ptr::eq(expression, value)
-                && matches!(expression.kind, ast::ExprKind::Lambda(_));
             if let Some((form, operand)) = expression.staging() {
                 match form {
                     ast::StagingForm::Quote => {
@@ -25934,17 +25992,6 @@ impl Checker<'_, '_> {
             ast_children(expression, &mut |child| children.push(child));
             pending.extend(children.into_iter().rev().map(|child| (child, stage)));
         }
-        if nested_callable
-            && (!splices.is_empty()
-                || holes
-                    .values()
-                    .any(|slot| matches!(self.locals[*slot].ty, Type::Bytes | Type::String)))
-        {
-            return Err(Diagnostic::new(
-                span,
-                "code splices in nested callable templates are not implemented yet",
-            ));
-        }
         let expected_callable = match expected {
             Some(ty) => Some(Type::Fn(self.types.code_signature(ty).ok_or_else(
                 || {
@@ -25975,7 +26022,7 @@ impl Checker<'_, '_> {
         let hole_slots = holes.clone();
         let saved_holes = std::mem::replace(&mut self.quote_holes, holes);
         let saved_splices = std::mem::replace(&mut self.quote_splices, splices.clone());
-        let callable = self.lambda(lambda, span, expected_callable, false);
+        let callable = self.lambda(lambda, span, expected_callable, LambdaContext::Quotation);
         self.quote_holes = saved_holes;
         self.quote_splices = saved_splices;
         let callable = callable?;
@@ -26125,14 +26172,34 @@ impl Checker<'_, '_> {
         };
         Ok(Self::after(statements, code))
     }
+    fn copy_lifted_text(&mut self, slot: usize, span: Span) -> Expr {
+        let ty = self.locals[slot].ty;
+        let reference = Expr {
+            kind: ExprKind::Borrow(slot),
+            ty: Type::Ref(self.types.pointer(ty)),
+            span,
+            resource: None,
+        };
+        // Both text types use the buffer layout, so copying a checked String
+        // this way preserves its UTF-8 invariant.
+        Expr {
+            kind: ExprKind::Call(Target::Bytes(BytesOp::Copy), vec![reference]),
+            ty,
+            span,
+            resource: None,
+        }
+    }
+
     fn lambda(
         &mut self,
         lambda: &ast::Lambda,
         span: Span,
         expected: Option<Type>,
-        scope_root: bool,
+        context: LambdaContext,
     ) -> Result<Expr> {
-        let captures = self.lambda_captures(lambda);
+        let scope_root = context == LambdaContext::TaskScope;
+        let quotation = context == LambdaContext::Quotation;
+        let captures = self.lambda_captures(lambda, quotation);
         // EFF-CAP-LAMBDA: a lambda may capture a capability whose handler
         // runs in place. The closure is then a scoped borrow of it, checked
         // like a borrowed-capture closure (ownership and suspension rules).
@@ -26729,11 +26796,23 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         let capture_exprs = captures
             .iter()
-            .map(|slot| Expr {
-                kind: ExprKind::Local(*slot),
-                ty: self.locals[*slot].ty,
-                span: self.locals[*slot].span,
-                resource: None,
+            .map(|&slot| {
+                let local = self.locals[slot];
+                // Each closure owns its copy. The template's constant stays
+                // available after this closure has been called or dropped.
+                if !quotation
+                    && matches!(local.ty, Type::Bytes | Type::String)
+                    && self.quote_holes.values().any(|hole| *hole == slot)
+                {
+                    self.copy_lifted_text(slot, local.span)
+                } else {
+                    Expr {
+                        kind: ExprKind::Local(slot),
+                        ty: local.ty,
+                        span: local.span,
+                        resource: None,
+                    }
+                }
             })
             .collect::<Vec<_>>();
         // Check the lambda body in a fresh function context. A by-reference
@@ -27586,10 +27665,21 @@ impl Checker<'_, '_> {
     /// Outer local slots referenced by a lambda body. Resolution already maps
     /// every occurrence to its exact binder, so filtering by the current slot
     /// map removes lambda parameters, lambda locals, and type/grade binders.
-    fn lambda_captures(&self, lambda: &ast::Lambda) -> Vec<usize> {
-        if !self.quote_holes.is_empty() {
-            fn visit(c: &Checker<'_, '_>, expr: &ast::Expr, slots: &mut BTreeSet<usize>) {
-                if let Some(slot) = c.quote_holes.get(&(expr.span.start, expr.span.end)) {
+    fn lambda_captures(&self, lambda: &ast::Lambda, quotation: bool) -> Vec<usize> {
+        if !self.quote_holes.is_empty() || !self.quote_splices.is_empty() {
+            fn visit(
+                c: &Checker<'_, '_>,
+                expr: &ast::Expr,
+                quotation: bool,
+                slots: &mut BTreeSet<usize>,
+            ) {
+                let key = (expr.span.start, expr.span.end);
+                // The quotation root serializes splice graphs. A nested
+                // callable only needs the placeholder's function identity.
+                if !quotation && c.quote_splices.contains_key(&key) {
+                    return;
+                }
+                if let Some(slot) = c.quote_holes.get(&key) {
                     slots.insert(*slot);
                     return;
                 }
@@ -27597,16 +27687,19 @@ impl Checker<'_, '_> {
                     && let Some(slot) = c.slots.get(&id) {
                     slots.insert(*slot);
                 }
-                ast_children(expr, &mut |child| visit(c, child, slots));
+                ast_children(expr, &mut |child| visit(c, child, quotation, slots));
             }
             let mut slots = BTreeSet::new();
             for statement in &lambda.body.statements {
                 match statement {
-                    ast::Statement::Let { value, .. } | ast::Statement::Expr(value) =>
-                        visit(self, value, &mut slots),
+                    ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+                        visit(self, value, quotation, &mut slots)
+                    }
                 }
             }
-            if let Some(tail) = &lambda.body.tail { visit(self, tail, &mut slots); }
+            if let Some(tail) = &lambda.body.tail {
+                visit(self, tail, quotation, &mut slots);
+            }
             return slots.into_iter().collect();
         }
         let mut ids = BTreeSet::new();
@@ -32715,7 +32808,7 @@ impl Checker<'_, '_> {
             let (declared, _) = split_grade(declared);
             if let ast::ExprKind::Lambda(lambda) = &value.kind
                 && lambda_has_holes(lambda)
-                && self.lambda_captures(lambda).is_empty()
+                && self.lambda_captures(lambda, false).is_empty()
                 && self.mentions(declared, &type_vars, &const_vars, &effect_vars, &subst)
             {
                 postponed.push((values.len(), declared, value));
@@ -33958,7 +34051,7 @@ impl Checker<'_, '_> {
                     ),
                 ));
             };
-            self.lambda(lambda, argument.span, None, true)?
+            self.lambda(lambda, argument.span, None, LambdaContext::TaskScope)?
         } else {
             let saved = self.scope_depth;
             self.scope_depth = 0;
@@ -40868,6 +40961,20 @@ fn block_passes_binding(resolution: &Resolution, block: &ast::Block, id: Binding
         .tail
         .as_deref()
         .is_some_and(|tail| expr(resolution, tail, id))
+}
+
+fn block_contains_quote(block: &ast::Block) -> bool {
+    fn contains_quote(expr: &ast::Expr) -> bool {
+        if matches!(expr.staging(), Some((ast::StagingForm::Quote, _))) {
+            return true;
+        }
+        let mut found = false;
+        ast_children(expr, &mut |child| found |= contains_quote(child));
+        found
+    }
+    block.statements.iter().any(|statement| match statement {
+        ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => contains_quote(value),
+    }) || block.tail.as_deref().is_some_and(contains_quote)
 }
 
 pub(crate) fn ast_children<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::Expr)) {
