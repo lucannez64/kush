@@ -5532,18 +5532,18 @@ fn checked_exports(
 
 pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     if let Some(prepared) = crate::staging::prepare(program)? {
-        let executable = check_program_unstaged(&prepared.program, false, None)?;
+        let executable = check_program_unstaged(&prepared.program, false, false)?;
         let mut executable = crate::staging::materialize(executable, prepared)?;
         crate::suspend::lower(&mut executable)?;
         return Ok(executable);
     }
-    check_program_unstaged(program, true, None)
+    check_program_unstaged(program, true, false)
 }
 
 fn check_program_unstaged(
     source_program: &crate::program::Program,
     lower_suspensions: bool,
-    validate_generic_staging: Option<&BTreeSet<BindingId>>,
+    validate_generic_staging: bool,
 ) -> Result<Executable> {
     let injected = inject_allocator_protocol(source_program)?;
     let program = &injected;
@@ -6074,11 +6074,8 @@ fn check_program_unstaged(
             Some((binding, parameters))
         })
         .collect::<Vec<_>>();
-    if let Some(validate) = validate_generic_staging {
-        for (binding, parameters) in &staged_generics {
-            if !validate.contains(binding) {
-                continue;
-            }
+    if validate_generic_staging {
+        for (binding, parameters) in staged_generics {
             let arguments = parameters
                 .iter()
                 .map(|&id| types.staging_type_parameter(id))
@@ -6086,7 +6083,7 @@ fn check_program_unstaged(
             functions.instance(
                 &mut types,
                 resolution,
-                *binding,
+                binding,
                 arguments,
                 vec![],
                 vec![],
@@ -6095,6 +6092,11 @@ fn check_program_unstaged(
                 None,
             )?;
         }
+    } else if !staged_generics.is_empty() {
+        // Use distinct type identities even when every actual specialization
+        // chooses the same type for two parameters. The validation program
+        // is discarded before materialization or backend lowering.
+        check_program_unstaged(source_program, false, true)?;
     }
     while let Some(index) = functions.pending.pop() {
         if functions.bodies[index].is_some() {
@@ -6351,17 +6353,6 @@ fn check_program_unstaged(
             shared_environment: false,
         });
     }
-    if validate_generic_staging.is_none() {
-        let unused = staged_generics
-            .into_iter()
-            .map(|(binding, _)| binding)
-            .filter(|binding| !functions.instance_counts.contains_key(binding))
-            .collect::<BTreeSet<_>>();
-        if !unused.is_empty() {
-            // Keep the validation-only instances and layouts out of the executable.
-            check_program_unstaged(source_program, false, Some(&unused))?;
-        }
-    }
     // Re-check every proof certificate without the search that produced it.
     if let Some(bad) = functions
         .certificates
@@ -6381,7 +6372,7 @@ fn check_program_unstaged(
     // source types while bodies are still being checked.
     let automatic = automatic_fusion(&types, &mut functions);
     functions.fusions += automatic;
-    if validate_generic_staging.is_none() && std::env::var_os("KUSH_PROOF_REPORT").is_some() {
+    if !validate_generic_staging && std::env::var_os("KUSH_PROOF_REPORT").is_some() {
         eprintln!(
             "proof report: {} element accesses proved in bounds (no runtime check), {} checked at run time",
             functions.bounds_proved, functions.bounds_checked
@@ -25956,6 +25947,7 @@ impl Checker<'_, '_> {
                         let lifted = self.expr(operand)?;
                         if !is_live_scalar(lifted.ty)
                             && !matches!(lifted.ty, Type::Bytes | Type::String)
+                            && !self.types.is_staging_type_parameter(lifted.ty)
                         {
                             return Err(Diagnostic::new(
                                 expression.span,
@@ -26037,6 +26029,7 @@ impl Checker<'_, '_> {
             !is_live_scalar(c.ty)
                 && !matches!(c.ty, Type::Bytes | Type::String)
                 && self.types.code_signature(c.ty).is_none()
+                && !self.types.is_staging_type_parameter(c.ty)
         }) {
             return Err(Diagnostic::new(
                 span,
@@ -26064,11 +26057,19 @@ impl Checker<'_, '_> {
         let Type::Enum(enum_id) = ty else {
             unreachable!()
         };
+        // A rigid lifted value has no serialization yet. Its hole still has
+        // the rigid type throughout callable checking and the capture is moved
+        // below. Only the concrete specialization can produce a real graph.
+        let abstract_capture = captures
+            .iter()
+            .any(|c| self.types.is_staging_type_parameter(c.ty));
         let composed = !splices.is_empty()
             || captures
                 .iter()
                 .any(|c| matches!(c.ty, Type::Bytes | Type::String));
-        let mut encoded = if captures.is_empty() {
+        let mut encoded = if abstract_capture {
+            &b""[..]
+        } else if captures.is_empty() {
             b"KUSHCD01"
         } else if composed {
             b"KUSHCD03"
@@ -26076,9 +26077,11 @@ impl Checker<'_, '_> {
             b"KUSHCD02"
         }
         .to_vec();
-        encoded.extend_from_slice(&(*function as u64).to_le_bytes());
-        if !captures.is_empty() {
-            encoded.extend_from_slice(&(captures.len() as u64).to_le_bytes());
+        if !abstract_capture {
+            encoded.extend_from_slice(&(*function as u64).to_le_bytes());
+            if !captures.is_empty() {
+                encoded.extend_from_slice(&(captures.len() as u64).to_le_bytes());
+            }
         }
         let mut bytes = Expr {
             kind: ExprKind::BytesLiteral(encoded),
@@ -26086,7 +26089,9 @@ impl Checker<'_, '_> {
             span,
             resource: None,
         };
-        if !captures.is_empty() {
+        if abstract_capture {
+            statements.extend(captures.iter().cloned().map(Statement::Expr));
+        } else if !captures.is_empty() {
             let slot = self.fresh_local(span, Type::Bytes)?;
             self.locals[slot].mutable = true;
             statements.push(Statement::Let(slot, bytes));

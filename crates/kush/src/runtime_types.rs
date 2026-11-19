@@ -1539,6 +1539,12 @@ impl<'a> Types<'a> {
         Type::Enum(index)
     }
 
+    pub(crate) fn is_staging_type_parameter(&self, ty: Type) -> bool {
+        matches!(ty, Type::Enum(index)
+            if self.resolution.bindings.get(self.enums[index].definition)
+                .is_some_and(|binding| binding.kind == BindingKind::Generic))
+    }
+
     fn opaque_code_type(&mut self, callable: Type, name: &str, compiled: bool, span: Span) -> Result<Type> {
         if !matches!(callable, Type::Fn(_)) {
             return Err(Diagnostic::new(

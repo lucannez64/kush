@@ -966,6 +966,21 @@ fn main() -> i64 ! {} { 42 }
 }
 
 #[test]
+fn generic_quotation_aliases_are_checked_even_if_specializations_agree() {
+    let source = r#"
+fn make<T: Type, U: Type>() -> Code<fn(T, U) -> T ! {}> ! {alloc, panic} {
+    quote fn(x: T, y: U) -> T ! {} { let result = y; result }
+}
+#[staged] fn choose(x: i64, y: i64) -> i64 ! {} = make::<i64, i64>();
+fn main() -> i64 ! {} { choose(11, 31) }
+"#;
+    let error = checked(source).unwrap_err();
+    assert!(error.contains("type mismatch"), "{error}");
+    let valid = checked(&source.replace("let result = y", "let result = x")).unwrap();
+    assert_eq!(valid.evaluate(&mut Vec::new()).unwrap(), 11);
+}
+
+#[test]
 fn generic_generators_can_lift_a_concrete_scalar_specialization() {
     let program = checked(r#"
 fn specialize<T: Type>(value: T) -> Code<fn() -> T ! {}> ! {alloc, panic} {
