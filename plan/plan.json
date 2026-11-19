@@ -5910,7 +5910,7 @@
         "STAGING-DESIGN",
         "STAGING-AOT"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "See docs/showcase-roadmap.md.",
       "commit": null,
       "log": [
@@ -5933,6 +5933,11 @@
           "time": "2026-11-17 03:34:00",
           "who": "agent",
           "text": "Full core gate passed (2054/2054, 3 skipped); broader generic validation, additional staged signature forms, nested owning callable support, editor grammar and runtime JIT remain. Overall autonomous completion goal remains active."
+        },
+        {
+          "time": "2026-11-19 19:02:40",
+          "who": "agent",
+          "text": "Closed at the user's request. The compile-time core was verified at a52d788. Remaining typing, evaluation, and materialization limits are documented in docs/staging-runtime-notes.md."
         }
       ]
     },
@@ -5945,10 +5950,16 @@
         "STAGING",
         "STAGING-JIT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "In-process code generation; executable memory as a linear resource (writable or executable, never both). See docs/showcase-roadmap.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-19 19:02:40",
+          "who": "agent",
+          "text": "Closed at the user's request. Runtime compilation is implemented for Linux x86-64 Cranelift. LLVM runtime compilation is unsupported, and runtime validation follow-ups remain documented in docs/staging-runtime-notes.md."
+        }
+      ]
     },
     {
       "id": "GB-STAGED",
@@ -8205,7 +8216,7 @@
       "deps": [
         "STAGING-SCOPES"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Check generators and every template before execution; include effect rows, callable multiplicity, affine code ownership and typed lift/splice holes. Ordinary executable checking must remain strict.",
       "commit": null,
       "log": [
@@ -8213,6 +8224,11 @@
           "time": "2026-11-17 01:25:04",
           "who": "agent",
           "text": "Resume full approved staging implementation: Code callable types, typed quote holes, ownership and effect validation."
+        },
+        {
+          "time": "2026-11-19 19:02:40",
+          "who": "agent",
+          "text": "Closed at the user's request. General abstract quotation checking for generic-dependent expressions and ownership remains outstanding."
         }
       ]
     },
@@ -8224,7 +8240,7 @@
       "deps": [
         "STAGING-TYPES"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Use restricted reference evaluation for branches, loops and recursion, typed substitution, lifting, code cloning, deterministic limits, cleanup and diagnostics.",
       "commit": null,
       "log": [
@@ -8232,6 +8248,11 @@
           "time": "2026-11-17 02:55:25",
           "who": "agent",
           "text": "Core generator evaluation now supports branches, loops, recursion, scalar/text lifts, graph cloning and nested stages. Resource diagnostics tested; broader allocator and generic validation remain."
+        },
+        {
+          "time": "2026-11-19 19:02:40",
+          "who": "agent",
+          "text": "Closed at the user's request. Generator accounting for arenas and custom allocators remains outstanding."
         }
       ]
     },
@@ -8243,7 +8264,7 @@
       "deps": [
         "STAGING-EVAL"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Order dependencies, recheck materialized functions, preserve source provenance and module references, test evaluator/Cranelift/LLVM parity and a specialized interpreter.",
       "commit": null,
       "log": [
@@ -8251,6 +8272,11 @@
           "time": "2026-11-17 02:55:25",
           "who": "agent",
           "text": "Core staged declarations and graph materialization now run; per-stage abort/ownership/grade checking and backend parity are tested. Signature restrictions and generic validation remain."
+        },
+        {
+          "time": "2026-11-19 19:02:40",
+          "who": "agent",
+          "text": "Closed at the user's request. Extended staged signatures, nested owning callables, and the specialized interpreter acceptance example remain outstanding."
         }
       ]
     },
@@ -8262,7 +8288,7 @@
       "deps": [
         "STAGING-AOT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Share native lowering, checked relocation and symbol resolution, W^X publication, owner-bound callables, evaluator parity, failure cleanup and runtime-input specialization.",
       "commit": null,
       "log": [
@@ -8290,6 +8316,11 @@
           "time": "2026-11-19 18:50:35",
           "who": "agent",
           "text": "Checkpoint 6a4e387 adds evaluator and Linux x86-64 Cranelift coverage for independent threads repeatedly compiling, calling and dropping the same template with distinct captures, and a compiled call yielding while another task compiles and drops its own artifact. Evaluator allocation counts balance. All 42 staging tests passed. Full scripts/test-all.sh gate with two workers passed 2068 tests, 3 skipped, 861.121s. Relocation failure, cross-thread owner sharing, cancellation and performance validation remain open."
+        },
+        {
+          "time": "2026-11-19 19:02:40",
+          "who": "agent",
+          "text": "Closed at the user's request. Linux x86-64 Cranelift linking was verified at 4b06694 and concurrent compilation and suspension at 6a4e387. Relocation failure, cross-thread owner sharing, cancellation, and performance validation remain outstanding."
         }
       ]
     },
