@@ -92,8 +92,11 @@ committing these changes.
   cover scalar and aggregate values, grade-zero arguments, owning buffer
   returns and a view whose lifetime is tied to a call argument.
 - The nested runtime test repeatedly compiles, calls and drops both stages.
-  Add a relocation failure probe, concurrent compilation, and suspension
-  coverage before closing runtime staging.
+  Independent OS threads repeatedly compile the same checked template with
+  separate scalar captures and owners. A suspended compiled call resumes
+  after another task compiles, calls and drops its own artifact. These cases
+  have evaluator and Cranelift coverage. Cross-thread owner sharing, cancellation
+  of suspended compiled calls, and relocation failure still need coverage.
 - Audit code graph schema discovery and symbol relocation against all forms
   emitted by the native backend. Unrecognized relocations fail compilation.
 - Benchmark compilation latency, generated image sizes and steady-state calls.

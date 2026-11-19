@@ -601,6 +601,78 @@ fn main() -> i64 ! {alloc, panic} {
 }
 
 #[test]
+fn independent_threads_compile_and_drop_the_same_template() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+fn run(n: i64) -> i64 ! {alloc, panic} {
+    let mut i = 0;
+    while i < 64 {
+        let owner = match Code.compile(quote fn() -> i64 ! {panic} { lift(n) + lift(i) }) {
+            Result.Ok(owner) => owner, Result.Err(e) => return -e,
+        };
+        if Code.call(&owner) != n + i { return -1; }
+        drop(owner);
+        i = i + 1;
+    }
+    n
+}
+fn main() -> i64 ! {alloc, panic} {
+    Thread.scope(fn() -> i64 ! {alloc, panic} {
+        let a = Thread.spawn(fn() -> i64 ! {alloc, panic} { run(10) });
+        let b = Thread.spawn(fn() -> i64 ! {alloc, panic} { run(12) });
+        let c = Thread.spawn(fn() -> i64 ! {alloc, panic} { run(20) });
+        Thread.join(a) + Thread.join(b) + Thread.join(c)
+    })
+}
+"#,
+    )
+    .unwrap();
+    let (result, stats) = exe.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result(&exe, 42);
+}
+
+#[test]
+fn compiled_calls_resume_after_yielding_to_another_task() {
+    let exe = checked(
+        r#"
+use std.result.Result;
+enum TaskExit<T> { Completed(T), Cancelled }
+fn main() -> i64 ! {alloc, panic, suspend} {
+    Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        let child = Task.spawn(fn() -> i64 ! {alloc, panic, suspend} {
+            let owner = match Code.compile(quote fn() -> i64 ! {suspend} {
+                if Task.yield() { return -1; }
+                20
+            }) {
+                Result.Ok(owner) => owner, Result.Err(e) => return -e,
+            };
+            Code.call(&owner)
+        });
+        Task.yield();
+        let other = match Code.compile(quote fn() -> i64 ! {} { 22 }) {
+            Result.Ok(owner) => owner, Result.Err(e) => return -e,
+        };
+        let value = Code.call(&other);
+        drop(other);
+        match Task.join(child) {
+            TaskExit.Completed(result) => result + value,
+            TaskExit.Cancelled => -2,
+        }
+    })
+}
+"#,
+    )
+    .unwrap();
+    let (result, stats) = exe.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    assert_native_result(&exe, 42);
+}
+
+#[test]
 fn a_panic_during_compiled_execution_releases_its_owner() {
     let exe = checked(
         r#"
