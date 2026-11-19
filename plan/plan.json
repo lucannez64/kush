@@ -8285,6 +8285,11 @@
           "time": "2026-11-19 01:12:07",
           "who": "agent",
           "text": "Runtime linker checkpoint 4b06694. Full regression run passed 2062 tests with 3 skipped. The final source also passed all 40 staging tests, including the late checked-template registry and generator sandbox checks. Keep the node open for relocation failure, concurrency, suspension, and performance validation."
+        },
+        {
+          "time": "2026-11-19 18:50:35",
+          "who": "agent",
+          "text": "Checkpoint 6a4e387 adds evaluator and Linux x86-64 Cranelift coverage for independent threads repeatedly compiling, calling and dropping the same template with distinct captures, and a compiled call yielding while another task compiles and drops its own artifact. Evaluator allocation counts balance. All 42 staging tests passed. Full scripts/test-all.sh gate with two workers passed 2068 tests, 3 skipped, 861.121s. Relocation failure, cross-thread owner sharing, cancellation and performance validation remain open."
         }
       ]
     },
