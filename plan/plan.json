@@ -8464,6 +8464,30 @@
           "text": "done 98143a1"
         }
       ]
+    },
+    {
+      "id": "STD-NET-UDP-ROUTE-SOURCE",
+      "title": "std.net.udp_route_source",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "STD-NET-UDP-SEND"
+      ],
+      "status": "done",
+      "desc": "Local source address of the route to a UDP destination, without sending: connect_to and local_address stubs, native and evaluator.",
+      "commit": "0944387",
+      "log": [
+        {
+          "time": "2026-11-24 00:56:56",
+          "who": "agent",
+          "text": "std_net_udp: 127.0.0.1, loopback broadcast and ::1 named, nothing sent, port 0 EINVAL, both backends. Full gate: 2088 passed, 3 skipped."
+        },
+        {
+          "time": "2026-11-24 00:56:56",
+          "who": "agent",
+          "text": "done 0944387"
+        }
+      ]
     }
   ]
 }
