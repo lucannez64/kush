@@ -8416,6 +8416,30 @@
           "text": "done b76a62b"
         }
       ]
+    },
+    {
+      "id": "STD-NET-UDP-BROADCAST",
+      "title": "std.net.udp_broadcast",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "STD-NET-UDP-SEND"
+      ],
+      "status": "done",
+      "desc": "udp_send with SO_BROADCAST set, for LAN broadcast addresses; evaluator maps it to UdpSocket::set_broadcast.",
+      "commit": "cdff3bc",
+      "log": [
+        {
+          "time": "2026-11-23 15:46:55",
+          "who": "agent",
+          "text": "std_net_udp: udp_broadcast delivers on both backends. Full gate: 2086 passed, 3 skipped."
+        },
+        {
+          "time": "2026-11-23 15:46:55",
+          "who": "agent",
+          "text": "done cdff3bc"
+        }
+      ]
     }
   ]
 }
