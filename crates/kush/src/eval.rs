@@ -696,6 +696,12 @@ struct FileTable {
     sockets: BTreeMap<i64, TcpStream>,
     /// Address lists from `kush_sys_resolve`.
     addresses: BTreeMap<i64, Vec<std::net::SocketAddr>>,
+    /// The address lists that came from `kush_sys_resolve_udp`, whose
+    /// `kush_sys_socket` is a datagram socket.
+    datagram_lists: BTreeSet<i64>,
+    /// UDP sockets from `kush_sys_socket`, bound to an ephemeral port of
+    /// the address's family (Rust's std has no unbound socket).
+    datagrams: BTreeMap<i64, std::net::UdpSocket>,
     /// WEB-NET: sockets from `kush_sys_socket` that do not listen yet, with
     /// the address `kush_sys_bind` gave them. Rust's std has no unbound
     /// socket, so `kush_sys_listen` binds and listens in one step.
@@ -4968,6 +4974,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 } else if table.open.remove(&fd).is_some()
                     || table.pipes.remove(&fd).is_some()
                     || table.sockets.remove(&fd).is_some()
+                    || table.datagrams.remove(&fd).is_some()
                     || table.unbound.remove(&fd).is_some()
                     || table.listeners.remove(&fd).is_some()
                 {
@@ -5360,7 +5367,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     (9, 0)
                 }
             }
-            "kush_sys_resolve" => {
+            "kush_sys_resolve" | "kush_sys_resolve_udp" => {
                 let host = self.borrowed_bytes(&args[0]).ok_or_else(internal)?;
                 let port = args[1].scalar();
                 let resolved = match std::str::from_utf8(&host) {
@@ -5377,12 +5384,17 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         let mut table = self.host.files.lock().unwrap();
                         let handle = table.handle();
                         table.addresses.insert(handle, addresses);
+                        if symbol == "kush_sys_resolve_udp" {
+                            table.datagram_lists.insert(handle);
+                        }
                         (0, handle)
                     }
                 }
             }
             "kush_sys_resolve_free" => {
-                self.host.files.lock().unwrap().addresses.remove(&args[0].scalar());
+                let mut table = self.host.files.lock().unwrap();
+                table.addresses.remove(&args[0].scalar());
+                table.datagram_lists.remove(&args[0].scalar());
                 (0, 0)
             }
             "kush_sys_connect" => {
@@ -5444,14 +5456,40 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             "kush_sys_socket" => {
                 let (list, index) = (args[0].scalar(), args[1].scalar());
                 let mut table = self.host.files.lock().unwrap();
-                match table.addresses.get(&list).map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i))) {
+                match table.addresses.get(&list).map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied())) {
                     None => (9, 0),
                     Some(None) => (2, 0),
+                    Some(Some(address)) if table.datagram_lists.contains(&list) => {
+                        let local: std::net::SocketAddr = if address.is_ipv4() {
+                            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+                        } else {
+                            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+                        };
+                        match std::net::UdpSocket::bind(local) {
+                            Ok(socket) => {
+                                let handle = table.handle();
+                                table.datagrams.insert(handle, socket);
+                                (0, handle)
+                            }
+                            Err(error) => code(Err(error)),
+                        }
+                    }
                     Some(Some(_)) => {
                         let handle = table.handle();
                         table.unbound.insert(handle, None);
                         (0, handle)
                     }
+                }
+            }
+            "kush_sys_sendto" => {
+                let data = self.borrowed_bytes(&args[1]).ok_or_else(internal)?;
+                let (fd, list, index) = (args[0].scalar(), args[2].scalar(), args[3].scalar());
+                let table = self.host.files.lock().unwrap();
+                let address = table.addresses.get(&list).map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied()));
+                match (table.datagrams.get(&fd), address) {
+                    (None, _) | (_, None) => (9, 0),
+                    (_, Some(None)) => (2, 0),
+                    (Some(socket), Some(Some(address))) => code(socket.send_to(&data, address).map(|count| count as i64)),
                 }
             }
             "kush_sys_setsockopt" => {

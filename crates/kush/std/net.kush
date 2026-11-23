@@ -9,7 +9,7 @@ module std.net;
 // the task reactor (WEB-REACTOR): waiting for a connection, data or room to
 // write suspends only the calling task, so one thread serves many
 // connections. Outside `Task.scope` they still work, `main` being the only
-// task.
+// task. `udp_send` sends one UDP datagram and blocks the thread.
 
 use std.result.Result;
 use std.sys;
@@ -279,6 +279,67 @@ pub fn listen(host: &Bytes, port: i64, backlog: i64, reuse_port: Bool) -> Result
                         let _ = sys.close(fd);
                         last = code;
                     },
+                }
+            },
+        }
+        index = Int.wrapping_add::<i64>(index, 1);
+    }
+}
+
+/// One `sendto` of all of `data`, retrying EINTR and waiting while the
+/// socket is full: the count sent, or the errno.
+fn send_datagram(fd: i64, data: &Bytes, list: i64, index: i64) -> Result<i64, i64> ! {io} {
+    loop {
+        match sys.sendto(fd, data, list, index) {
+            Result.Ok(count) => { return Result.Ok(count); },
+            Result.Err(code) => {
+                if code == sys.EAGAIN() {
+                    match sys.poll(fd, sys.POLLOUT(), -1) {
+                        Result.Ok(_) => {},
+                        Result.Err(failed) => {
+                            if failed != sys.EINTR() { return Result.Err(failed); }
+                        },
+                    }
+                } else if code != sys.EINTR() {
+                    return Result.Err(code);
+                }
+            },
+        }
+    }
+}
+
+/// Send `data` as one UDP datagram to `host`:`port` (1..=65535), from a
+/// fresh socket, to the first address of `host` that takes it: the number
+/// of bytes sent, or the errno of the last address tried (EMSGSIZE (90)
+/// when `data` is too large for one datagram). UDP does not confirm
+/// delivery; success means only that the datagram left this host.
+pub fn udp_send(host: &Bytes, port: i64, data: &Bytes) -> Result<i64, i64> ! {io} {
+    if port < 1 || port > 65535 { return Result.Err(22); }
+    let list = match sys.resolve_udp(host, port) {
+        Result.Ok(list) => list,
+        Result.Err(code) => { return Result.Err(code); },
+    };
+    let mut last = 99; // EADDRNOTAVAIL
+    let mut index = 0;
+    loop {
+        match sys.socket(list, index) {
+            Result.Err(code) => {
+                if code == 2 {
+                    // The end of the list.
+                    let _ = sys.resolve_free(list);
+                    return Result.Err(last);
+                }
+                last = code;
+            },
+            Result.Ok(fd) => {
+                let sent = send_datagram(fd, data, list, index);
+                let _ = sys.close(fd);
+                match sent {
+                    Result.Ok(count) => {
+                        let _ = sys.resolve_free(list);
+                        return Result.Ok(count);
+                    },
+                    Result.Err(code) => { last = code; },
                 }
             },
         }

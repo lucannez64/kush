@@ -2758,9 +2758,8 @@ int64_t kush_sys_poll(int64_t fd, int64_t events, int64_t timeout_ms, int64_t *o
     *out = ready == 0 ? 0 : (int64_t)(unsigned short)waiting.revents;
     return 0;
 }
-/* getaddrinfo(3) for a TCP connection to host:port; the list is the handle
-   for kush_sys_connect and must be freed with kush_sys_resolve_free. */
-int64_t kush_sys_resolve(const uint8_t *host, int64_t host_len, int64_t port, int64_t *out) {
+static int64_t kush_sys_resolve_type(const uint8_t *host, int64_t host_len, int64_t port, int socktype,
+                                     int64_t *out) {
     if (port < 0 || port > 65535) return EINVAL;
     int code = 0;
     char *text = kush_sys_path(host, host_len, &code);
@@ -2774,7 +2773,7 @@ int64_t kush_sys_resolve(const uint8_t *host, int64_t host_len, int64_t port, in
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_socktype = socktype;
     struct addrinfo *addresses = NULL;
     int resolved = getaddrinfo(text, service, &hints, &addresses);
     free(text);
@@ -2784,6 +2783,16 @@ int64_t kush_sys_resolve(const uint8_t *host, int64_t host_len, int64_t port, in
     }
     *out = (int64_t)(uintptr_t)addresses;
     return 0;
+}
+/* getaddrinfo(3) for a TCP connection to host:port; the list is the handle
+   for kush_sys_connect and must be freed with kush_sys_resolve_free. */
+int64_t kush_sys_resolve(const uint8_t *host, int64_t host_len, int64_t port, int64_t *out) {
+    return kush_sys_resolve_type(host, host_len, port, SOCK_STREAM, out);
+}
+/* getaddrinfo(3) for UDP: kush_sys_socket makes datagram sockets from this
+   list, and kush_sys_sendto sends to its addresses. */
+int64_t kush_sys_resolve_udp(const uint8_t *host, int64_t host_len, int64_t port, int64_t *out) {
+    return kush_sys_resolve_type(host, host_len, port, SOCK_DGRAM, out);
 }
 int64_t kush_sys_resolve_free(int64_t list) {
     freeaddrinfo((struct addrinfo *)(uintptr_t)list);
@@ -2828,13 +2837,27 @@ static struct addrinfo *kush_sys_address(int64_t list, int64_t index) {
     for (int64_t i = 0; address != NULL && i < index; ++i) address = address->ai_next;
     return index < 0 ? NULL : address;
 }
-/* A blocking TCP socket of the family of address `index`. */
+/* A blocking socket of the family and type of address `index`: TCP for a
+   kush_sys_resolve list, UDP for a kush_sys_resolve_udp one. */
 int64_t kush_sys_socket(int64_t list, int64_t index, int64_t *out) {
     struct addrinfo *address = kush_sys_address(list, index);
     if (address == NULL) return ENOENT;
     int fd = socket(address->ai_family, address->ai_socktype | SOCK_CLOEXEC, address->ai_protocol);
     if (fd < 0) return errno;
     *out = fd;
+    return 0;
+}
+/* One nonblocking sendto(2) of all of `data` to address `index` of a
+   resolved list (ENOENT past its end; EAGAIN when the socket is full, no
+   SIGPIPE): the count sent. A datagram is never sent in part. */
+int64_t kush_sys_sendto(int64_t fd, const uint8_t *data, int64_t length, int64_t list, int64_t index,
+                        int64_t *out) {
+    struct addrinfo *address = kush_sys_address(list, index);
+    if (address == NULL) return ENOENT;
+    ssize_t sent = sendto((int)fd, data, (size_t)length, MSG_NOSIGNAL | MSG_DONTWAIT, address->ai_addr,
+                          address->ai_addrlen);
+    if (sent < 0) return errno;
+    *out = (int64_t)sent;
     return 0;
 }
 /* setsockopt(2) with an int value. */

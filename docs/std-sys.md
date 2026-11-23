@@ -140,6 +140,20 @@ the next `accept`. Tests: `crates/kush/tests/web_net.rs` (a server and a
 client in one program on both backends, a native server answering a Rust
 client, SO_REUSEPORT natively, linearity).
 
+### UDP
+
+`net.udp_send(host, port, data)` sends `data` as one datagram from a fresh
+socket to the first address of `host` that takes it, and returns the byte
+count or the errno (EMSGSIZE for a datagram too large). Its stubs are
+`resolve_udp` (getaddrinfo with SOCK_DGRAM; `socket` takes the type from the
+list, so the same stub makes the datagram socket) and `sendto` (one
+nonblocking sendto to an address of the list). The EINTR retry, the wait on
+EAGAIN, the address loop and the close are Kush code. In the evaluator,
+`socket` on a `resolve_udp` list binds a Rust `UdpSocket` to an ephemeral
+port of the address's family. There is no receive side yet. Tests:
+`crates/kush/tests/std_net_udp.rs` (IPv4 and IPv6 loopback and the error
+cases, both backends).
+
 Not yet: the `IO.*`, `FS.*`, `ENV.*`, `TIME.*`, `OS.*`, `PROC.*` and `NET.*`
 builtins still exist next to their std modules; removal is
 HOST-BUILTINS-REMOVE. Tests: `crates/kush/tests/std_proc_net.rs` (each
