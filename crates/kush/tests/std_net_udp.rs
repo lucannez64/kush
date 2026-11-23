@@ -189,3 +189,48 @@ fn udp_send6_reports_the_ipv6_address_it_used_on_both_backends() {
     receiver.set_nonblocking(true).unwrap();
     assert!(receiver.recv(&mut [0u8; 8]).is_err(), "the IPv4 literal must not be sent");
 }
+
+#[test]
+fn udp_route_source_names_the_local_address_without_sending_on_both_backends() {
+    // A listener on the probed port: the probe must not send to it.
+    let listener = UdpSocket::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let ipv6 = UdpSocket::bind("[::1]:0").is_ok();
+    let mut targets = vec!["127.0.0.1", "127.255.255.255"];
+    if ipv6 {
+        targets.push("::1");
+    }
+    let calls: String = targets
+        .iter()
+        .map(|host| format!("    route(&Bytes.from(\"{host}\"), {port});\n"))
+        .collect();
+    let source = format!(
+        r#"
+use std.io;
+use std.net;
+use std.result.Result;
+
+fn route(host: &Bytes, port: i64) -> Unit ! {{io, alloc, panic}} {{
+    match net.udp_route_source(host, port, Bytes.with_capacity(64)) {{
+        Result.Ok(address) => {{
+            let line = Bytes.push(address, 10);
+            let _ = io.write(io.stdout(), &line);
+        }},
+        Result.Err(code) => print_i64(-code),
+    }}
+}}
+
+fn main() -> i64 ! {{io, alloc, panic}} {{
+{calls}    route(&Bytes.from("127.0.0.1"), 0);
+    0
+}}
+"#
+    );
+    // 127.255.255.255 is loopback's broadcast address: connecting to it
+    // needs SO_BROADCAST, and its route leaves from 127.0.0.1.
+    let expected = if ipv6 { "127.0.0.1\n127.0.0.1\n::1\n-22\n" } else { "127.0.0.1\n127.0.0.1\n-22\n" };
+    assert_eq!(reference(&source), expected, "reference");
+    assert_eq!(native(&source), expected, "native");
+    listener.set_nonblocking(true).unwrap();
+    assert!(listener.recv(&mut [0u8; 8]).is_err(), "a route probe must not send");
+}

@@ -146,6 +146,14 @@ pub foreign "kush_sys_socket" fn socket(list: i64, index: i64) -> Result<i64, i6
 /// past the end of the list, EFBIG (27) when the text does not fit its
 /// capacity (46 bytes always fit).
 pub foreign "kush_sys_address_text" fn address_text(list: i64, index: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io};
+/// One connect(2) of the socket `fd` to address `index` of a resolved list
+/// (ENOENT past its end). For a UDP socket it only picks the peer and the
+/// route; nothing is sent.
+pub foreign "kush_sys_connect_to" fn connect_to(fd: i64, list: i64, index: i64) -> Result<Unit, i64> ! {io};
+/// Append the local address of socket `fd` as text, without the port
+/// (getsockname). The buffer is freed on failure; EFBIG (27) when the text
+/// does not fit its capacity (46 bytes always fit).
+pub foreign "kush_sys_local_address" fn local_address(fd: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io};
 /// One sendto(2) of all of `data` as one datagram to address `index` of a
 /// resolved list (ENOENT past its end). Never blocks (EAGAIN when the socket
 /// is full) and never raises SIGPIPE. Returns the count sent.

@@ -159,7 +159,14 @@ the address it used, as text, to the `address` buffer. Its stubs are
 `resolve_udp6` (getaddrinfo with AF_INET6 and no AI_V4MAPPED, so a name
 without an AAAA record or an IPv4 literal is EINVAL; the evaluator filters
 Rust's results to IPv6) and `address_text` (inet_ntop into an owned buffer,
-freed on failure, like `strerror`). There is no receive side yet. Tests:
+freed on failure, like `strerror`). `net.udp_route_source(host, port,
+address)` sends nothing: it connects a UDP socket (with SO_BROADCAST, which
+Linux requires to connect to a broadcast address) and appends the local
+address the route leaves from, so a program can tell which network it is
+on. Its stubs are `connect_to` (one connect(2) of an existing socket) and
+`local_address` (getsockname and inet_ntop into an owned buffer). In the
+evaluator `connect_to` works on UDP sockets only (EOPNOTSUPP on an unbound
+TCP socket, which Rust's std cannot connect). There is no receive side yet. Tests:
 `crates/kush/tests/std_net_udp.rs` (IPv4 and IPv6 loopback and the error
 cases, both backends).
 

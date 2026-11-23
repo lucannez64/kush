@@ -5515,6 +5515,46 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.heap.insert(id, Value::Buffer { data, capacity });
                 return Ok(self.host_result(shape, 0, Value::Owned(id)));
             }
+            "kush_sys_connect_to" => {
+                let (fd, list, index) = (args[0].scalar(), args[1].scalar(), args[2].scalar());
+                let table = self.host.files.lock().unwrap();
+                let address = table.addresses.get(&list).map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied()));
+                match (table.datagrams.get(&fd), address) {
+                    (_, None) => (9, 0),
+                    (_, Some(None)) => (2, 0),
+                    (Some(socket), Some(Some(address))) => code(socket.connect(address).map(|()| 0)),
+                    // Rust's std cannot connect an unbound TCP socket.
+                    (None, _) if table.unbound.contains_key(&fd) => (95, 0), // EOPNOTSUPP
+                    (None, _) => (9, 0),
+                }
+            }
+            "kush_sys_local_address" => {
+                let (id, mut data, capacity) = self.take_buffer(&args[1]).ok_or_else(internal)?;
+                let fd = args[0].scalar();
+                let local = {
+                    let table = self.host.files.lock().unwrap();
+                    if let Some(socket) = table.datagrams.get(&fd) {
+                        Some(socket.local_addr())
+                    } else if let Some(socket) = table.sockets.get(&fd) {
+                        Some(socket.local_addr())
+                    } else {
+                        table.listeners.get(&fd).map(std::net::TcpListener::local_addr)
+                    }
+                };
+                let status = match local {
+                    None => 9,
+                    Some(Err(error)) => io_error_code(&error),
+                    Some(Ok(address)) => {
+                        Self::append_bounded(&mut data, capacity, address.ip().to_string().as_bytes()).unwrap_or(0)
+                    }
+                };
+                if status != 0 {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                return Ok(self.host_result(shape, 0, Value::Owned(id)));
+            }
             "kush_sys_sendto" => {
                 let data = self.borrowed_bytes(&args[1]).ok_or_else(internal)?;
                 let (fd, list, index) = (args[0].scalar(), args[2].scalar(), args[3].scalar());

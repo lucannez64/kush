@@ -2884,6 +2884,36 @@ int64_t kush_sys_address_text(int64_t list, int64_t index, uint64_t buffer_handl
     }
     return kush_sys_append_owned(buffer_handle, text, out);
 }
+/* One connect(2) of an existing socket to address `index` of a resolved
+   list (ENOENT past its end). For a UDP socket it only picks the peer and
+   the route; nothing is sent. */
+int64_t kush_sys_connect_to(int64_t fd, int64_t list, int64_t index) {
+    struct addrinfo *address = kush_sys_address(list, index);
+    if (address == NULL) return ENOENT;
+    return connect((int)fd, address->ai_addr, address->ai_addrlen) != 0 ? errno : 0;
+}
+/* Append the socket's local address as text (getsockname, inet_ntop, no
+   port) to the owned buffer, which is freed on failure. */
+int64_t kush_sys_local_address(int64_t fd, uint64_t buffer_handle, uint64_t *out) {
+    struct sockaddr_storage address;
+    socklen_t length = sizeof(address);
+    char text[INET6_ADDRSTRLEN];
+    const void *ip = NULL;
+    if (getsockname((int)fd, (struct sockaddr *)&address, &length) != 0) {
+        int failure = errno;
+        kush_bytes_free(buffer_handle);
+        return failure;
+    }
+    if (address.ss_family == AF_INET) ip = &((struct sockaddr_in *)&address)->sin_addr;
+    else if (address.ss_family == AF_INET6) ip = &((struct sockaddr_in6 *)&address)->sin6_addr;
+    else { kush_bytes_free(buffer_handle); return EAFNOSUPPORT; }
+    if (inet_ntop(address.ss_family, ip, text, sizeof(text)) == NULL) {
+        int failure = errno;
+        kush_bytes_free(buffer_handle);
+        return failure;
+    }
+    return kush_sys_append_owned(buffer_handle, text, out);
+}
 /* setsockopt(2) with an int value. */
 int64_t kush_sys_setsockopt(int64_t fd, int64_t level, int64_t name, int64_t value) {
     if (value < INT32_MIN || value > INT32_MAX) return EINVAL;

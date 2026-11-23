@@ -10,7 +10,8 @@ module std.net;
 // write suspends only the calling task, so one thread serves many
 // connections. Outside `Task.scope` they still work, `main` being the only
 // task. `udp_send`, `udp_broadcast` and `udp_send6` send one UDP datagram
-// and block the thread.
+// and block the thread; `udp_route_source` tells which local address they
+// would send from.
 
 use std.result.Result;
 use std.sys;
@@ -409,6 +410,71 @@ fn address_used(list: i64, sent: Result<i64, i64>, address: Bytes) -> Result<Byt
         Result.Err(code) => {
             drop(address);
             Result.Err(code)
+        },
+    }
+}
+
+/// The local address this host would send UDP datagrams to `host`:`port`
+/// (1..=65535) from, as text appended to `address`: the source address of
+/// the route, such as the Wi-Fi address for a LAN broadcast. Nothing is
+/// sent. The socket gets SO_BROADCAST first, since Linux refuses to connect
+/// to a broadcast address without it. On failure the buffer is freed and
+/// the errno of the last address tried comes back (ENETUNREACH (101) when
+/// no route leads there). Give it a capacity of at least 46 bytes.
+pub fn udp_route_source(host: &Bytes, port: i64, address: Bytes) -> Result<Bytes, i64> ! {io} {
+    if port < 1 || port > 65535 {
+        drop(address);
+        return Result.Err(22);
+    }
+    let list = match sys.resolve_udp(host, port) {
+        Result.Ok(list) => list,
+        Result.Err(code) => {
+            drop(address);
+            return Result.Err(code);
+        },
+    };
+    let result = route_source_from(list, address);
+    let _ = sys.resolve_free(list);
+    result
+}
+
+/// `udp_route_source` over a resolved list: the first address that a UDP
+/// socket can connect to.
+fn route_source_from(list: i64, address: Bytes) -> Result<Bytes, i64> ! {io} {
+    let mut last = 99; // EADDRNOTAVAIL
+    let mut index = 0;
+    loop {
+        match sys.socket(list, index) {
+            Result.Err(code) => {
+                if code == 2 {
+                    // The end of the list.
+                    drop(address);
+                    return Result.Err(last);
+                }
+                last = code;
+            },
+            Result.Ok(fd) => {
+                let connected = connect_broadcast(fd, list, index);
+                if connected == 0 {
+                    let result = sys.local_address(fd, address);
+                    let _ = sys.close(fd);
+                    return result;
+                }
+                let _ = sys.close(fd);
+                last = connected;
+            },
+        }
+        index = Int.wrapping_add::<i64>(index, 1);
+    }
+}
+
+/// Set SO_BROADCAST, then connect: 0, or the errno.
+fn connect_broadcast(fd: i64, list: i64, index: i64) -> i64 ! {io} {
+    match sys.setsockopt(fd, sys.SOL_SOCKET(), sys.SO_BROADCAST(), 1) {
+        Result.Err(code) => code,
+        Result.Ok(_) => match sys.connect_to(fd, list, index) {
+            Result.Ok(_) => 0,
+            Result.Err(code) => code,
         },
     }
 }
