@@ -72,6 +72,7 @@ const RUNTIME: &str = r#"
 #include <time.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -2758,8 +2759,8 @@ int64_t kush_sys_poll(int64_t fd, int64_t events, int64_t timeout_ms, int64_t *o
     *out = ready == 0 ? 0 : (int64_t)(unsigned short)waiting.revents;
     return 0;
 }
-static int64_t kush_sys_resolve_type(const uint8_t *host, int64_t host_len, int64_t port, int socktype,
-                                     int64_t *out) {
+static int64_t kush_sys_resolve_type(const uint8_t *host, int64_t host_len, int64_t port, int family,
+                                     int socktype, int64_t *out) {
     if (port < 0 || port > 65535) return EINVAL;
     int code = 0;
     char *text = kush_sys_path(host, host_len, &code);
@@ -2772,7 +2773,7 @@ static int64_t kush_sys_resolve_type(const uint8_t *host, int64_t host_len, int6
     (void)snprintf(service, sizeof(service), "%lld", (long long)port);
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
+    hints.ai_family = family;
     hints.ai_socktype = socktype;
     struct addrinfo *addresses = NULL;
     int resolved = getaddrinfo(text, service, &hints, &addresses);
@@ -2787,12 +2788,17 @@ static int64_t kush_sys_resolve_type(const uint8_t *host, int64_t host_len, int6
 /* getaddrinfo(3) for a TCP connection to host:port; the list is the handle
    for kush_sys_connect and must be freed with kush_sys_resolve_free. */
 int64_t kush_sys_resolve(const uint8_t *host, int64_t host_len, int64_t port, int64_t *out) {
-    return kush_sys_resolve_type(host, host_len, port, SOCK_STREAM, out);
+    return kush_sys_resolve_type(host, host_len, port, AF_UNSPEC, SOCK_STREAM, out);
 }
 /* getaddrinfo(3) for UDP: kush_sys_socket makes datagram sockets from this
    list, and kush_sys_sendto sends to its addresses. */
 int64_t kush_sys_resolve_udp(const uint8_t *host, int64_t host_len, int64_t port, int64_t *out) {
-    return kush_sys_resolve_type(host, host_len, port, SOCK_DGRAM, out);
+    return kush_sys_resolve_type(host, host_len, port, AF_UNSPEC, SOCK_DGRAM, out);
+}
+/* kush_sys_resolve_udp for IPv6 only: no IPv4-mapped addresses, so a name
+   with no AAAA record is an error. */
+int64_t kush_sys_resolve_udp6(const uint8_t *host, int64_t host_len, int64_t port, int64_t *out) {
+    return kush_sys_resolve_type(host, host_len, port, AF_INET6, SOCK_DGRAM, out);
 }
 int64_t kush_sys_resolve_free(int64_t list) {
     freeaddrinfo((struct addrinfo *)(uintptr_t)list);
@@ -2859,6 +2865,24 @@ int64_t kush_sys_sendto(int64_t fd, const uint8_t *data, int64_t length, int64_t
     if (sent < 0) return errno;
     *out = (int64_t)sent;
     return 0;
+}
+/* Append address `index` of a resolved list as text (inet_ntop, without
+   the port) to the owned buffer, which is freed on failure: ENOENT past the
+   end of the list, EFBIG when the text does not fit. */
+int64_t kush_sys_address_text(int64_t list, int64_t index, uint64_t buffer_handle, uint64_t *out) {
+    struct addrinfo *address = kush_sys_address(list, index);
+    if (address == NULL) { kush_bytes_free(buffer_handle); return ENOENT; }
+    char text[INET6_ADDRSTRLEN];
+    const void *ip = NULL;
+    if (address->ai_family == AF_INET) ip = &((struct sockaddr_in *)address->ai_addr)->sin_addr;
+    else if (address->ai_family == AF_INET6) ip = &((struct sockaddr_in6 *)address->ai_addr)->sin6_addr;
+    else { kush_bytes_free(buffer_handle); return EAFNOSUPPORT; }
+    if (inet_ntop(address->ai_family, ip, text, sizeof(text)) == NULL) {
+        int failure = errno;
+        kush_bytes_free(buffer_handle);
+        return failure;
+    }
+    return kush_sys_append_owned(buffer_handle, text, out);
 }
 /* setsockopt(2) with an int value. */
 int64_t kush_sys_setsockopt(int64_t fd, int64_t level, int64_t name, int64_t value) {

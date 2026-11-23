@@ -5367,13 +5367,20 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     (9, 0)
                 }
             }
-            "kush_sys_resolve" | "kush_sys_resolve_udp" => {
+            "kush_sys_resolve" | "kush_sys_resolve_udp" | "kush_sys_resolve_udp6" => {
                 let host = self.borrowed_bytes(&args[0]).ok_or_else(internal)?;
                 let port = args[1].scalar();
                 let resolved = match std::str::from_utf8(&host) {
                     _ if !(0..=65535).contains(&port) || host.contains(&0) => Err(22),
                     Err(_) => Err(22),
                     Ok(host) => match (host, port as u16).to_socket_addrs() {
+                        // IPv6 only, like getaddrinfo with AF_INET6 and no
+                        // AI_V4MAPPED: nothing left is EINVAL, as natively.
+                        Ok(addresses) if symbol == "kush_sys_resolve_udp6" => {
+                            Some(addresses.filter(std::net::SocketAddr::is_ipv6).collect::<Vec<_>>())
+                                .filter(|addresses| !addresses.is_empty())
+                                .ok_or(22)
+                        }
                         Ok(addresses) => Ok(addresses.collect::<Vec<_>>()),
                         Err(error) => Err(error.raw_os_error().filter(|code| *code > 0).map_or(22, i64::from)),
                     },
@@ -5384,7 +5391,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         let mut table = self.host.files.lock().unwrap();
                         let handle = table.handle();
                         table.addresses.insert(handle, addresses);
-                        if symbol == "kush_sys_resolve_udp" {
+                        if symbol != "kush_sys_resolve" {
                             table.datagram_lists.insert(handle);
                         }
                         (0, handle)
@@ -5480,6 +5487,33 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         (0, handle)
                     }
                 }
+            }
+            "kush_sys_address_text" => {
+                // Append the address's IP as text to the owned buffer, which
+                // is freed on failure, like kush_sys_strerror.
+                let (id, mut data, capacity) = self.take_buffer(&args[2]).ok_or_else(internal)?;
+                let (list, index) = (args[0].scalar(), args[1].scalar());
+                let address = self
+                    .host
+                    .files
+                    .lock()
+                    .unwrap()
+                    .addresses
+                    .get(&list)
+                    .map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied()));
+                let status = match address {
+                    None => 9,
+                    Some(None) => 2,
+                    Some(Some(address)) => {
+                        Self::append_bounded(&mut data, capacity, address.ip().to_string().as_bytes()).unwrap_or(0)
+                    }
+                };
+                if status != 0 {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                return Ok(self.host_result(shape, 0, Value::Owned(id)));
             }
             "kush_sys_sendto" => {
                 let data = self.borrowed_bytes(&args[1]).ok_or_else(internal)?;

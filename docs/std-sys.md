@@ -154,7 +154,12 @@ port of the address's family. `net.udp_broadcast` is the same with
 SO_BROADCAST set on the socket first (`setsockopt`; the evaluator maps it to
 `UdpSocket::set_broadcast`), which Linux requires before sending to a
 broadcast address such as 192.168.1.255; `udp_send` gets EACCES there.
-There is no receive side yet. Tests:
+`net.udp_send6(host, port, data, address)` sends over IPv6 only and appends
+the address it used, as text, to the `address` buffer. Its stubs are
+`resolve_udp6` (getaddrinfo with AF_INET6 and no AI_V4MAPPED, so a name
+without an AAAA record or an IPv4 literal is EINVAL; the evaluator filters
+Rust's results to IPv6) and `address_text` (inet_ntop into an owned buffer,
+freed on failure, like `strerror`). There is no receive side yet. Tests:
 `crates/kush/tests/std_net_udp.rs` (IPv4 and IPv6 loopback and the error
 cases, both backends).
 

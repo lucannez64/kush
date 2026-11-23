@@ -114,6 +114,9 @@ pub foreign "kush_sys_resolve_free" fn resolve_free(list: i64) -> Result<Unit, i
 /// from this list and `sendto` sends to its addresses; free it with
 /// `resolve_free`.
 pub foreign "kush_sys_resolve_udp" fn resolve_udp(host: &Bytes, port: i64) -> Result<i64, i64> ! {io};
+/// `resolve_udp` for IPv6 addresses only, without IPv4-mapped ones: a name
+/// with no AAAA record is an error.
+pub foreign "kush_sys_resolve_udp6" fn resolve_udp6(host: &Bytes, port: i64) -> Result<i64, i64> ! {io};
 /// Connect a new socket to address `index` of a resolved list, waiting up to
 /// `timeout_ms` (-1 forever; 0 only takes an immediate connection, else
 /// ETIMEDOUT). ENOENT (2) past the end of the list. The socket is in
@@ -138,6 +141,11 @@ pub fn TCP_NODELAY() -> i64 ! {} { 1 }
 /// (ENOENT past its end), close-on-exec: TCP for a `resolve` list, UDP for
 /// a `resolve_udp` one.
 pub foreign "kush_sys_socket" fn socket(list: i64, index: i64) -> Result<i64, i64> ! {io};
+/// Append address `index` of a resolved list as text, without the port
+/// ("2001:db8::1", "192.0.2.1"). The buffer is freed on failure: ENOENT (2)
+/// past the end of the list, EFBIG (27) when the text does not fit its
+/// capacity (46 bytes always fit).
+pub foreign "kush_sys_address_text" fn address_text(list: i64, index: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io};
 /// One sendto(2) of all of `data` as one datagram to address `index` of a
 /// resolved list (ENOENT past its end). Never blocks (EAGAIN when the socket
 /// is full) and never raises SIGPIPE. Returns the count sent.

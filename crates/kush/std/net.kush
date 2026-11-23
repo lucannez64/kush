@@ -9,8 +9,8 @@ module std.net;
 // the task reactor (WEB-REACTOR): waiting for a connection, data or room to
 // write suspends only the calling task, so one thread serves many
 // connections. Outside `Task.scope` they still work, `main` being the only
-// task. `udp_send` and `udp_broadcast` send one UDP datagram and block the
-// thread.
+// task. `udp_send`, `udp_broadcast` and `udp_send6` send one UDP datagram
+// and block the thread.
 
 use std.result.Result;
 use std.sys;
@@ -339,16 +339,26 @@ fn udp_send_from(host: &Bytes, port: i64, data: &Bytes, broadcast: Bool) -> Resu
         Result.Ok(list) => list,
         Result.Err(code) => { return Result.Err(code); },
     };
+    let sent = send_to_list(list, data, broadcast);
+    let _ = sys.resolve_free(list);
+    match sent {
+        // A datagram is sent whole or not at all.
+        Result.Ok(_) => Result.Ok(Bytes.len(data)),
+        Result.Err(code) => Result.Err(code),
+    }
+}
+
+/// Send `data` from a fresh socket to the first address of a resolved list
+/// that takes it: that address's index, or the errno of the last address
+/// tried. The list stays allocated.
+fn send_to_list(list: i64, data: &Bytes, broadcast: Bool) -> Result<i64, i64> ! {io} {
     let mut last = 99; // EADDRNOTAVAIL
     let mut index = 0;
     loop {
         match sys.socket(list, index) {
             Result.Err(code) => {
-                if code == 2 {
-                    // The end of the list.
-                    let _ = sys.resolve_free(list);
-                    return Result.Err(last);
-                }
+                // ENOENT: the end of the list.
+                if code == 2 { return Result.Err(last); }
                 last = code;
             },
             Result.Ok(fd) => {
@@ -359,15 +369,47 @@ fn udp_send_from(host: &Bytes, port: i64, data: &Bytes, broadcast: Bool) -> Resu
                 };
                 let _ = sys.close(fd);
                 match sent {
-                    Result.Ok(count) => {
-                        let _ = sys.resolve_free(list);
-                        return Result.Ok(count);
-                    },
+                    Result.Ok(_) => { return Result.Ok(index); },
                     Result.Err(code) => { last = code; },
                 }
             },
         }
         index = Int.wrapping_add::<i64>(index, 1);
+    }
+}
+
+/// `udp_send` over IPv6 only: `host` must have an IPv6 address (a AAAA
+/// record or an IPv6 literal; IPv4 addresses are not mapped), else the
+/// resolver's errno. On success the IPv6 address used, as text, is appended
+/// to `address` and the buffer comes back; on failure it is freed. Give it
+/// a capacity of at least 46 bytes, or the text may not fit (EFBIG (27),
+/// although the datagram was sent).
+pub fn udp_send6(host: &Bytes, port: i64, data: &Bytes, address: Bytes) -> Result<Bytes, i64> ! {io} {
+    if port < 1 || port > 65535 {
+        drop(address);
+        return Result.Err(22);
+    }
+    let list = match sys.resolve_udp6(host, port) {
+        Result.Ok(list) => list,
+        Result.Err(code) => {
+            drop(address);
+            return Result.Err(code);
+        },
+    };
+    let result = address_used(list, send_to_list(list, data, false), address);
+    let _ = sys.resolve_free(list);
+    result
+}
+
+/// The text of the address `sent` went to, appended to `address`, or the
+/// errno of the send (freeing the buffer).
+fn address_used(list: i64, sent: Result<i64, i64>, address: Bytes) -> Result<Bytes, i64> ! {io} {
+    match sent {
+        Result.Ok(index) => sys.address_text(list, index, address),
+        Result.Err(code) => {
+            drop(address);
+            Result.Err(code)
+        },
     }
 }
 

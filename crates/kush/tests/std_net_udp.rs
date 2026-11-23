@@ -142,3 +142,50 @@ fn main() -> i64 ! {io, alloc, panic} {
     assert_eq!(reference(source), expected);
     assert_eq!(native(source), expected);
 }
+
+/// A program that sends `xyz` with `net.udp_send6` to each `(host, port)`
+/// and prints the address used, or minus the errno.
+fn sender6(targets: &[(&str, u16)]) -> String {
+    let calls: String = targets
+        .iter()
+        .map(|(host, port)| format!("    send6(&Bytes.from(\"{host}\"), {port});\n"))
+        .collect();
+    format!(
+        r#"
+use std.io;
+use std.net;
+use std.result.Result;
+
+fn send6(host: &Bytes, port: i64) -> Unit ! {{io, alloc, panic}} {{
+    match net.udp_send6(host, port, &Bytes.from("xyz"), Bytes.with_capacity(64)) {{
+        Result.Ok(address) => {{
+            let line = Bytes.push(address, 10);
+            let _ = io.write(io.stdout(), &line);
+        }},
+        Result.Err(code) => print_i64(-code),
+    }}
+}}
+
+fn main() -> i64 ! {{io, alloc, panic}} {{
+{calls}    0
+}}
+"#
+    )
+}
+
+#[test]
+fn udp_send6_reports_the_ipv6_address_it_used_on_both_backends() {
+    let Ok(receiver) = UdpSocket::bind("[::1]:0") else {
+        return; // A host without IPv6 loopback.
+    };
+    receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let port = receiver.local_addr().unwrap().port();
+    // An IPv4 literal has no IPv6 address: EINVAL, nothing sent.
+    let source = sender6(&[("::1", port), ("127.0.0.1", port)]);
+    for (backend, output) in [("reference", reference(&source)), ("native", native(&source))] {
+        assert_eq!(output, "::1\n-22\n", "{backend}");
+        assert_eq!(receive(&receiver), b"xyz", "{backend}");
+    }
+    receiver.set_nonblocking(true).unwrap();
+    assert!(receiver.recv(&mut [0u8; 8]).is_err(), "the IPv4 literal must not be sent");
+}
