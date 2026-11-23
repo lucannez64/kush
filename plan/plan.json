@@ -8440,6 +8440,30 @@
           "text": "done cdff3bc"
         }
       ]
+    },
+    {
+      "id": "STD-NET-UDP-SEND6",
+      "title": "std.net.udp_send6",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "STD-NET-UDP-SEND"
+      ],
+      "status": "done",
+      "desc": "IPv6-only UDP send that returns the address used: resolve_udp6 and address_text stubs, native and evaluator.",
+      "commit": "98143a1",
+      "log": [
+        {
+          "time": "2026-11-23 19:14:46",
+          "who": "agent",
+          "text": "std_net_udp: ::1 reported and delivered, IPv4 literal EINVAL, both backends. Full gate: 2087 passed, 3 skipped."
+        },
+        {
+          "time": "2026-11-23 19:14:46",
+          "who": "agent",
+          "text": "done 98143a1"
+        }
+      ]
     }
   ]
 }
