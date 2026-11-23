@@ -8387,6 +8387,35 @@
           "text": "Full gate: 2054 passed, 3 skipped. Compile-time core and example verified; parent staging and runtime nodes intentionally remain open."
         }
       ]
+    },
+    {
+      "id": "STD-NET-UDP-SEND",
+      "title": "std.net.udp_send",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "STD-PROC-NET-IN-KUSH"
+      ],
+      "status": "done",
+      "desc": "Send one UDP datagram from Kush: resolve_udp and sendto stubs (native and evaluator), net.udp_send loop, tests on both backends.",
+      "commit": "b76a62b",
+      "log": [
+        {
+          "time": "2026-11-23 14:23:36",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-23 14:38:33",
+          "who": "agent",
+          "text": "net.udp_send over resolve_udp and sendto stubs, native and evaluator. std_net_udp: IPv4/IPv6 loopback delivery and EINVAL/EMSGSIZE on both backends. Full gate: 2085 passed, 3 skipped."
+        },
+        {
+          "time": "2026-11-23 14:38:33",
+          "who": "agent",
+          "text": "done b76a62b"
+        }
+      ]
     }
   ]
 }
