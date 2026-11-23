@@ -5504,7 +5504,17 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         Some(socket) => code(socket.set_nodelay(value != 0).map(|()| 0)),
                         None => (9, 0),
                     },
-                    _ if table.unbound.contains_key(&fd) || table.sockets.contains_key(&fd) || table.listeners.contains_key(&fd) => (92, 0), // ENOPROTOOPT
+                    // SO_BROADCAST on a UDP socket.
+                    (1, 6) if table.datagrams.contains_key(&fd) => {
+                        code(table.datagrams[&fd].set_broadcast(value != 0).map(|()| 0))
+                    }
+                    _ if table.unbound.contains_key(&fd)
+                        || table.sockets.contains_key(&fd)
+                        || table.datagrams.contains_key(&fd)
+                        || table.listeners.contains_key(&fd) =>
+                    {
+                        (92, 0) // ENOPROTOOPT
+                    }
                     _ => (9, 0),
                 }
             }

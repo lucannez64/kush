@@ -150,7 +150,11 @@ list, so the same stub makes the datagram socket) and `sendto` (one
 nonblocking sendto to an address of the list). The EINTR retry, the wait on
 EAGAIN, the address loop and the close are Kush code. In the evaluator,
 `socket` on a `resolve_udp` list binds a Rust `UdpSocket` to an ephemeral
-port of the address's family. There is no receive side yet. Tests:
+port of the address's family. `net.udp_broadcast` is the same with
+SO_BROADCAST set on the socket first (`setsockopt`; the evaluator maps it to
+`UdpSocket::set_broadcast`), which Linux requires before sending to a
+broadcast address such as 192.168.1.255; `udp_send` gets EACCES there.
+There is no receive side yet. Tests:
 `crates/kush/tests/std_net_udp.rs` (IPv4 and IPv6 loopback and the error
 cases, both backends).
 

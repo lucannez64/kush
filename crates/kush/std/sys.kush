@@ -130,6 +130,7 @@ pub foreign "kush_sys_shutdown" fn shutdown(fd: i64, how: i64) -> Result<Unit, i
 pub fn SOL_SOCKET() -> i64 ! {} { 1 }
 pub fn SO_REUSEADDR() -> i64 ! {} { 2 }
 pub fn SO_REUSEPORT() -> i64 ! {} { 15 }
+pub fn SO_BROADCAST() -> i64 ! {} { 6 }
 pub fn IPPROTO_TCP() -> i64 ! {} { 6 }
 pub fn TCP_NODELAY() -> i64 ! {} { 1 }
 

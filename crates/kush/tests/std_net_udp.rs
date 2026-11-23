@@ -36,8 +36,9 @@ fn native(source: &str) -> String {
 }
 
 /// A program that sends a Wake-on-LAN style packet (6 x 0xFF, then a MAC 16
-/// times) to `host`:`port` and prints the count or minus the errno.
-fn sender(host: &str, port: u16) -> String {
+/// times) to `host`:`port` with `net.<function>` and prints the count or
+/// minus the errno.
+fn sender(function: &str, host: &str, port: u16) -> String {
     format!(
         r#"
 use std.net;
@@ -57,7 +58,7 @@ fn main() -> i64 ! {{io, alloc, panic}} {{
         packet = Bytes.push(packet, 4);
         n = n + 1;
     }}
-    match net.udp_send(&Bytes.from("{host}"), {port}, &packet) {{
+    match net.{function}(&Bytes.from("{host}"), {port}, &packet) {{
         Result.Ok(count) => print_i64(count),
         Result.Err(code) => print_i64(-code),
     }}
@@ -91,12 +92,26 @@ fn udp_send_delivers_one_datagram_on_both_backends() {
             Err(error) => panic!("{error}"),
         };
         receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let source = sender(host, receiver.local_addr().unwrap().port());
+        let source = sender("udp_send", host, receiver.local_addr().unwrap().port());
         assert_eq!(reference(&source).trim(), "102", "{host} reference");
         assert_eq!(receive(&receiver), expected_packet(), "{host} reference");
         assert_eq!(native(&source).trim(), "102", "{host} native");
         assert_eq!(receive(&receiver), expected_packet(), "{host} native");
     }
+}
+
+#[test]
+fn udp_broadcast_sets_so_broadcast_and_sends_on_both_backends() {
+    // A real broadcast would leave this host, so the test sends to loopback:
+    // what it checks is that setting SO_BROADCAST succeeds on both backends
+    // and the datagram still arrives intact.
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let source = sender("udp_broadcast", "127.0.0.1", receiver.local_addr().unwrap().port());
+    assert_eq!(reference(&source).trim(), "102", "reference");
+    assert_eq!(receive(&receiver), expected_packet(), "reference");
+    assert_eq!(native(&source).trim(), "102", "native");
+    assert_eq!(receive(&receiver), expected_packet(), "native");
 }
 
 #[test]

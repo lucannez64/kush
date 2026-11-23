@@ -9,7 +9,8 @@ module std.net;
 // the task reactor (WEB-REACTOR): waiting for a connection, data or room to
 // write suspends only the calling task, so one thread serves many
 // connections. Outside `Task.scope` they still work, `main` being the only
-// task. `udp_send` sends one UDP datagram and blocks the thread.
+// task. `udp_send` and `udp_broadcast` send one UDP datagram and block the
+// thread.
 
 use std.result.Result;
 use std.sys;
@@ -311,9 +312,28 @@ fn send_datagram(fd: i64, data: &Bytes, list: i64, index: i64) -> Result<i64, i6
 /// Send `data` as one UDP datagram to `host`:`port` (1..=65535), from a
 /// fresh socket, to the first address of `host` that takes it: the number
 /// of bytes sent, or the errno of the last address tried (EMSGSIZE (90)
-/// when `data` is too large for one datagram). UDP does not confirm
-/// delivery; success means only that the datagram left this host.
+/// when `data` is too large for one datagram, EACCES (13) for a broadcast
+/// address; see `udp_broadcast`). UDP does not confirm delivery; success
+/// means only that the datagram left this host.
 pub fn udp_send(host: &Bytes, port: i64, data: &Bytes) -> Result<i64, i64> ! {io} {
+    udp_send_from(host, port, data, false)
+}
+
+/// `udp_send` from a socket with SO_BROADCAST set, so `host` may be a
+/// broadcast address such as 255.255.255.255 or a subnet's (192.168.1.255).
+pub fn udp_broadcast(host: &Bytes, port: i64, data: &Bytes) -> Result<i64, i64> ! {io} {
+    udp_send_from(host, port, data, true)
+}
+
+/// `send_datagram` after setting SO_BROADCAST on the socket.
+fn send_broadcast(fd: i64, data: &Bytes, list: i64, index: i64) -> Result<i64, i64> ! {io} {
+    match sys.setsockopt(fd, sys.SOL_SOCKET(), sys.SO_BROADCAST(), 1) {
+        Result.Ok(_) => send_datagram(fd, data, list, index),
+        Result.Err(code) => Result.Err(code),
+    }
+}
+
+fn udp_send_from(host: &Bytes, port: i64, data: &Bytes, broadcast: Bool) -> Result<i64, i64> ! {io} {
     if port < 1 || port > 65535 { return Result.Err(22); }
     let list = match sys.resolve_udp(host, port) {
         Result.Ok(list) => list,
@@ -332,7 +352,11 @@ pub fn udp_send(host: &Bytes, port: i64, data: &Bytes) -> Result<i64, i64> ! {io
                 last = code;
             },
             Result.Ok(fd) => {
-                let sent = send_datagram(fd, data, list, index);
+                let sent = if broadcast {
+                    send_broadcast(fd, data, list, index)
+                } else {
+                    send_datagram(fd, data, list, index)
+                };
                 let _ = sys.close(fd);
                 match sent {
                     Result.Ok(count) => {
