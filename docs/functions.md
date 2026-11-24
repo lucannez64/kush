@@ -97,11 +97,11 @@ fn twice<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
   transitively: a polymorphic caller cannot hide an effect required by a
   callee. A function value inferred from an expected arrow type also infers a
   single row variable from that arrow's effect row.
-- `#[noalloc]` remains a specialization-independent contract. A `#[noalloc]`
-  function may take and call non-allocating function values, but its own effect
-  row may not contain an unconstrained row variable, because that variable
-  could later be specialized with `alloc`. Concrete effect rows and checked
-  adapters enforce the same rule for `nosuspend`/allocation boundaries. An
+- A row without `alloc` is a specialization-independent contract. Such a
+  function may take and call non-allocating function values; a row variable in
+  it must exclude `alloc` (`e: Effects - alloc`), because it could otherwise be
+  specialized with `alloc`. Concrete effect rows and checked
+  adapters enforce the same rule for `suspend` and allocation boundaries. An
   effect variable used only inside a parameter arrow cannot make a body
   allocate: calling it requires the instantiated row, so an `alloc`
   instantiation fails the body check unless the function's own row exposes it.
@@ -349,9 +349,9 @@ fn main() -> i64 ! {alloc} {
   transferred. Ungraded and `@[many]` copyable captures remain allowed.
 
 Creating a capturing closure allocates its environment and therefore requires
-`alloc` and `panic`. A `#[noalloc]` function rejects capturing closures and
+`alloc`. A function whose row lacks `alloc` rejects capturing closures and
 capturing adapters. Pure function pointers and noncapturing adapters allocate
-nothing and remain legal in `noalloc` code.
+nothing and remain legal in a row without `alloc`.
 
 A linear callee must also be consumed when evaluating a call. An argument that
 returns, propagates `?`, or exits an enclosing loop before the call happens
@@ -396,7 +396,7 @@ never a function-pointer cast:
 
 - **Static pure source:** a noncapturing adapter applies the existing `Inject`
   or `Repack` coercions to arguments and the result. It allocates nothing and
-  is legal under `#[noalloc]`.
+  is legal in a row without `alloc`.
 - **Static pure source used as `once fn`:** a no-allocation thunk ignores the
   null once-environment and directly calls the source.
 - **Dynamic `once fn` source:** a once-consuming capturing adapter owns the
@@ -457,13 +457,13 @@ converted by the same checked rules.
   callable union alternatives, active-alternative once cleanup, and a
   linear-once closure.
 - `crates/kush/tests/functions.rs` covers effect and grade variance, effect
-  inference/specialization and category separation, `noalloc` higher-order
+  inference/specialization and category separation, allocation-free higher-order
   contracts, callable union normalization/injection/repacking/narrowing,
   scoped borrowed-capture rejection/acceptance, canonical arrow equivalences, linear-once consumption and laundering
   failures, parameter and result union repacking, generic specialized values,
   indirect recursion, aggregate and owned arguments/results, early exits and
   partial arguments, captured owners, use-after-move, wrong signatures,
-  pure/`noalloc` violations, erased-evidence rejection, and native/reference
+  pure/allocation violations, erased-evidence rejection, and native/reference
   agreement.
 - `crates/kush/tests/grades.rs` covers copyable `@[1]` capture transfer and
   rejection of exact `@[0]`/`@[n>1]` captures.

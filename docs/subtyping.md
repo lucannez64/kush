@@ -570,9 +570,9 @@ ignored affine payloads are dropped.
   prevents a view from escaping its owner's lexical scope through a union.
   Slice construction and lifetime checking are otherwise unchanged; the
   existing `&[T]` rules still apply.
-- Union coercions allocate nothing, so they are legal under `#[noalloc]`.
+- Union coercions allocate nothing, so they are legal in a row without `alloc`.
   Owning-union construction that calls `Box.new`, `Vec.push`, or `Bytes.from`
-  still carries the existing `alloc`/`panic` effects.
+  still carries the existing `alloc` effect.
 
 ## Explicit boundary
 
@@ -590,7 +590,7 @@ Implemented and tested:
 - arrow subtyping for named function values, explicit generic specializations,
   noncapturing lambdas, effect-polymorphic arrows, affine once closures, and
   linear-once closures, including union parameter/result repacking through
-  checked adapters and pure/noalloc rejection of allocating adapters;
+  checked adapters and pure-row rejection of allocating adapters;
 - callable heterogeneous union alternatives, including coherent normalization,
   injection, union-to-union repacking, type-pattern narrowing, and
   active-alternative cleanup of uncalled once environments;

@@ -96,9 +96,9 @@ let owner: Box<[i64; 2]> = Box.reuse_grow(owner, [20, 22]);
 - If the new payload fits the existing allocation, the allocation is kept and
   no allocator call occurs. If it is wider, storage may grow and **move**.
 - The operation requires `{alloc}`. A growth is an allocating fallback
-  and can abort on allocation failure. `#[noalloc]` rejects the operation from
-  its source signature; there is no hidden allocating fallback in `Box.reuse`
-  or under `#[noalloc]`.
+  and can abort on allocation failure. a row without `alloc` rejects the operation
+  from its source signature; there is no hidden allocating fallback in `Box.reuse`
+  or in a row without `alloc`.
 - The old affine payload is destroyed exactly once after both arguments are
   evaluated and before the new payload is written. A linear old payload is
   rejected; an owning payload that may carry a propagated binding obligation is
@@ -139,7 +139,7 @@ the same logical vector with a possibly wider element type:
 - The callbacks keep the ordinary in-place contract: noncapturing `fn` values,
   matching parameter layouts, non-erased parameters/results, and effect rows
   required by the enclosing function. The operation additionally requires
-  `{alloc}` and is rejected under `#[noalloc]`.
+  `{alloc}` and is rejected in a row without `alloc`.
 - If the retained physical allocation already covers `capacity * width(U)`
   bytes, the allocation is reused. Otherwise infallible storage growth happens
   once and may move the block. Allocation/deallocation counters stay unchanged;

@@ -246,7 +246,7 @@ such as `{ 0 >= 1 }` is proved where the facts are contradictory (PROVE-CONST).
 Tests: `crates/kush/tests/scalar_proofs.rs`.
 
 **Overflow checks (OVERFLOW-ELIDE).** Integer `+`, `-` and `*` (by a
-constant) are checked at run time and need the `panic` effect, unless the
+constant) are checked at run time and may panic, unless the
 facts at that point prove the exact result lies in the type's range. Then
 the checker records the certificate, the operation needs no `panic`, and
 both backends emit a plain machine add/sub/mul (`IntOp::Unchecked`); its

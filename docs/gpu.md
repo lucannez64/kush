@@ -51,7 +51,7 @@ the native backend compiles them as unreachable CPU code.
 > entry reaches them, and they stay callable from CPU code. See
 > [Helper functions](#helper-functions-decision-6).
 
-`#[gpu]` joins `#[noalloc]`, `#[nosuspend]` and `#[test]` in the function
+`#[gpu]` joins `#[test]` and `#[fuzz]` in the function
 attribute list (`executable.rs`). The checker rejects, with an exact
 diagnostic, anything outside this subset:
 
@@ -283,8 +283,8 @@ Why not keep explicit coloring everywhere:
   `noalloc` is defined: it forbids allocation "on every reachable path,
   including transitive calls" (`spec-v0.1.md`).
 
-Why `#[noalloc]` and `#[nosuspend]` keep their current form: they never had
-this problem. Allocation and suspension are effects, so they are part of every
+Why `#[noalloc]` and `#[nosuspend]` were different (they were later removed
+as redundant with the row, FND-ROWS-ATTRS): they never had this problem. Allocation and suspension are effects, so they are part of every
 function's signature. The attribute checks only the function's own effect row
 (`executable.rs`, function declaration checks): no fixed `alloc`/`suspend`,
 and no row variable that could be specialized with it. The body goes through

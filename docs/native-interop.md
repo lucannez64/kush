@@ -311,8 +311,8 @@ cargo-manifests = ["adapters/rust-adapter/Cargo.toml"]
 
 Only `io` is mandatory on foreign imports. Additional `alloc`, `panic`, or
 `suspend` effects are author-declared and checked at Kush call sites; Kush
-cannot inspect the external implementation to verify them. A `#[noalloc]` or
-`#[nosuspend]` caller therefore relies on the imported contract, not on a proof
+cannot inspect the external implementation to verify them. A caller whose row
+lacks `alloc` or `suspend` therefore relies on the imported contract, not on a proof
 about C/Rust code. Blocking OS work and cooperative task suspension are distinct.
 Foreign release hooks are trusted cleanup and their internal effects are not
 inferred from Rust `Drop`; they must not unwind across the ABI or retain a

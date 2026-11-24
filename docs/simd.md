@@ -175,26 +175,6 @@ reports every feature; `KUSH_CPU_DISABLE=sha,avx2,ssse3,sse41` clears
 features on both backends. Tests: `crates/kush/tests/simd_cpu.rs` (native
 detection against `/proc/cpuinfo`).
 
-### Review fixes (SIMD-REVIEW, 2026-11-15)
-
-An independent review (Codex) found two defects, both fixed:
-
-- **A root file could stand in for std.** The loader registered the root's
-  declared path before resolving imports, so a root named `module
-  std.cpu;` was what the real `std.x86` imported: it could declare a public
-  `Sha` and reach the SHA instructions with no CPUID check. A root named
-  `std.x86` had its functions taken for the intrinsics. The loader now
-  rejects a root under `std`, and the intrinsic table also skips the root
-  unit. Test: `a_root_module_cannot_stand_in_for_std`.
-- **The feature cache was a data race.** Two threads asking for a token
-  first could read and write the cached bits at once; the accesses are now
-  atomic.
-
-The review found nothing else in lane order, endianness, signed
-arithmetic, shift bounds, the 256-bit halves, shuffles, the LLVM vector
-translation, the SHA round sequences, CPUID/XGETBV gating, or associated
-functions and `Self`.
-
 ## x86 intrinsics [SIMD-X86-SHA]
 
 `x86.sha256rnds2`, `x86.sha256msg1`, `x86.sha256msg2`, `x86.sha1rnds4`

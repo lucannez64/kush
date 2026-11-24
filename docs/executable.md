@@ -111,7 +111,7 @@ The executable checker supports:
   capability-ancestry sub-view reborrows, exclusive mutable slice views,
   lifetime-parameterized records with shared or exclusive slice fields and
   checked mixed owning metadata, deterministic
-  cleanup, and `noalloc`/`nosuspend` function contracts;
+  cleanup, and rows without `alloc` or `suspend` as function contracts;
   see [ownership.md](ownership.md), [lifetimes.md](lifetimes.md),
   [borrowed records](borrowed-records.md), and [bytes.md](bytes.md).
 
@@ -148,8 +148,7 @@ runtime-sized `[T; n]` layouts (the separate `DynArray<T, capacity>`
 subset is documented in [dynamic-arrays.md](dynamic-arrays.md)), direct mutable/owning
 record field moves, linear or stream/callable/union metadata in mixed records,
 general lifetime inference beyond signature elision,
-traits, arbitrary FFI, and attributes
-other than `noalloc`/`nosuspend` are not implemented in this subset. Structured
+traits and arbitrary FFI are not implemented in this subset. Structured
 tasks and cooperative cancellation are described in [async.md](async.md).
 Floating-point values are implemented for one-word `f32`/`f64` arithmetic,
 comparisons, explicit conversions, printing, and aggregate/callable storage; see
@@ -171,8 +170,8 @@ Width overflow, division/remainder by zero, signed minimum divided/remaindered b
 `-1`, and negating signed minimum abort rather than wrap. Checks remain present in
 native development builds. The reference evaluator reports the corresponding
 source diagnostic. Directly negated valid constants are already known safe;
-other arithmetic operations conservatively require `panic`, even for expressions
-such as `1 + 2`. Constant proofs/check elimination are future work.
+other arithmetic operations keep a run-time overflow check, even for
+expressions such as `1 + 2`. Constant proofs/check elimination are future work.
 
 Executable rows currently accept `alloc`, `io`, and `panic`, without arguments or
 duplicates. Each operation must fit the enclosing function's declared row. Calls

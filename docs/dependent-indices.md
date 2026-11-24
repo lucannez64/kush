@@ -17,10 +17,8 @@ A generic parameter bounded by `Nat` is a compile-time natural parameter, not a
 runtime type and not a usage grade:
 
 ```rust
-#[noalloc]
 fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
 
-#[noalloc]
 fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {} { xs[N - 1] }
 ```
 
@@ -105,9 +103,9 @@ An array index is lowered in one of two ways:
 
 1. If the index expression is in the compile-time fragment above, it is
    evaluated, bounds-checked against the array length, and projected directly.
-   No runtime check and no `panic` effect are needed.
+   No runtime check is needed.
 2. Otherwise it is a genuinely runtime index. It lowers to the existing
-   whole-array view plus a checked element read, requires the `panic` effect,
+   whole-array view plus a checked element read, may panic,
    and is checked at run time in both the reference evaluator and native code.
 
 The compiler does not evaluate runtime or effectful code to decide an index.
@@ -123,7 +121,6 @@ Natural parameters may appear in generic record and enum fields:
 ```rust
 struct Buffer<N: Nat> { data: [i64; N] }
 
-#[noalloc]
 fn head<N: Nat>(b: Buffer<N>) -> i64 ! {} { b.data[0] }
 
 let buffer: Buffer<3> = Buffer { data: [20, 22, 0] };

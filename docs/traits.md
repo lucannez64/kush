@@ -851,8 +851,7 @@ erase proof obligations, or drop a lifetime relationship. An inherited default
 does not need this comparison: it *is* the trait signature, materialized with
 `Self` and the trait arguments substituted. Ordinary body
 checking then applies the same rules as a free function: effects must be
-declared, integer arithmetic needs `panic`, `Bytes`/`String` construction needs
-`alloc, panic`, erased parameters are discharged in source order, and ownership
+declared, `Bytes`/`String` construction needs `alloc`, erased parameters are discharged in source order, and ownership
 cleanup is deterministic.
 
 ## Receivers and borrowing boundary

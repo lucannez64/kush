@@ -305,7 +305,7 @@ remaining arithmetic, comparisons, and unary negation are Cranelift
 floating-point instructions. In particular:
 
 - `1.0 / 0.0` is `inf`, `-1.0 / 0.0` is `-inf`, and `0.0 / 0.0` is `NaN`;
-  float arithmetic has no `panic` effect and never traps on these inputs.
+  float arithmetic never traps on these inputs.
 - Overflow yields an infinity; rounding is round-to-nearest, ties to even.
 - `-` performs IEEE negation, so it preserves signed zero and flips the sign of
   a NaN. `-0.0 == 0.0` is true; printing distinguishes `-0` from `0`.
@@ -430,7 +430,7 @@ empty views, nested subviews, negative/reversed/out-of-bounds and non-scalar
 byte offsets, scalar indexing, zero program allocations for borrowed
 operations, owner release after the last view use (including nested views),
 loops and branches, elided/explicit/outlives helper returns, later-argument
-owner loans, `#[noalloc]`/`#[nosuspend]` reads, and rejection of every
+owner loans, reads in rows without `alloc` or `suspend`, and rejection of every
 documented escape position. Native/reference differential tests cover finite
 values, subnormals, signed zero, infinities, NaN, f32 rounding, aggregate and
 callable storage, shortest round-trip printing, and integer conversion

@@ -99,8 +99,8 @@ normal panic behavior.
 
 This is a whole-document parser, not a streaming parser. There is no JSON
 Pointer, schema validation, object lookup API, numeric conversion or pretty
-printing yet. Parsing and serialization allocate; lexical helpers use checked
-`#[noalloc]` contracts, but the complete parser is not allocation-free.
+printing yet. Parsing and serialization allocate; lexical helpers have rows
+without `alloc`, but the complete parser is not allocation-free.
 
 
 ## Validation

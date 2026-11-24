@@ -22,3 +22,4 @@ remaining work is tracked in `plan/plan.json`.
 | [working-gates.md](working-gates.md) | The gate procedure used while remote builds existed |
 | [remote-builds.md](remote-builds.md) | Remote checks on Boat, which is no longer available |
 | [validation-records.md](validation-records.md) | Test counts, gate runs and review notes moved out of design documents |
+| [review-records.md](review-records.md) | Review narratives moved out of design documents |

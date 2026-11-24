@@ -66,8 +66,8 @@ The literal's element count becomes the runtime length, and its static count
 must not exceed the capacity; a longer literal is a compile-time diagnostic.
 The literal is checked as the same construction sequence as `new` followed by
 one `push` per element. Because the count is statically bounded, every reused
-push guard is unreachable, so a literal does not require the `panic` effect and
-cannot overflow at run time. Owning elements are accepted and a partially
+push guard is unreachable, so a literal cannot panic or overflow at run
+time. Owning elements are accepted and a partially
 constructed literal is destroyed as an owning prefix if element evaluation
 fails. Elements follow the same non-borrow, non-linear, non-task rule as
 `DynArray<T, capacity>` itself.
@@ -99,7 +99,7 @@ let b: &[i64] = &a[..];
 The descriptor's length is the runtime length word, not the capacity; native
 lowering points at the pinned inline storage and reads the live length. An
 explicit range is checked against the runtime length in both backends and
-requires `panic`; the unchecked `&a[..]` form always covers exactly the live
+may panic; the unchecked `&a[..]` form always covers exactly the live
 prefix. Ownership treats the view like any other slice view: the owner cannot be
 moved, dropped, assigned, pushed, set, popped, or read while the view is live,
 and a view cannot escape the owner's lexical scope. Releasing the view at the
@@ -273,15 +273,15 @@ Semantics:
   first `n` slots; the capacity comes from the expected type or from
   `Array.fill::<T, C>(n, value)`. When the facts in scope prove
   `0 <= n && n <= C`, construction has no check and needs no effect. Otherwise
-  it checks the bound at run time and requires `panic`. A contextual literal
+  it checks the bound at run time and may panic. A contextual literal
   `[e1, ..., ek]` builds a runtime-length array only when the facts prove
   `n == k`; there is no runtime fallback for literals. Literal elements may
   own resources.
 - **Drop.** Exactly the `DynArray` rule: the first `n` slots are destroyed
   once, and slots past the length are never read or dropped.
 - **Indexing.** `a[i]` copies a copyable element. When the facts prove
-  `0 <= i && i < n`, the read is proof-based and needs no `panic` effect;
-  otherwise it is a checked read that requires `panic`, like dynamic indexing
+  `0 <= i && i < n`, the read is proof-based and has no check;
+  otherwise it is a checked read that may panic, like dynamic indexing
   of `[T; N]`. The array may be a local or behind a `&` or `&mut` reference.
   Facts about a local stop applying once `&mut` of it is taken, since writes
   through the reference are invisible to the solver. Native code keeps its bounds trap on the proved path as a
@@ -405,50 +405,3 @@ out-of-bounds reads and writes, runtime view bounds, mutable-view aliasing
 rejections, field-view aliasing/write-back, owner moves/drops while a view is
 live, pattern fallthrough/exhaustiveness/owning-element rejections, and layout
 rejection.
-
-## Review
-
-An independent review of the runtime-length array, pattern, slice-element
-place, and field-view work found two soundness holes and five smaller issues.
-All are fixed, and each has a regression test (`review_*` in
-`crates/kush/tests/advanced_types_effects.rs`):
-
-1. A write through a `&mut Record` parameter (`*h = ...`, `h.field = ...`)
-   was accepted while a view, element reference, or borrowed-pattern binding
-   derived from `h` was live, which could free a matched box. Such writes now
-   wait for the derived borrow's last use.
-2. A local whose address was taken by `&mut` kept its arithmetic facts (for
-   example a loop counter's `0 <= i`), so `Slice.at` could read outside the
-   slice. Such a local now leaves the fact system, and `&mut x` in a loop body
-   counts as a write of unknown direction.
-3. A borrowed match used directly as an outer arm's result was falsely
-   rejected; its scrutinee loan now ends with the match.
-4. A reference returned from one `split_at_mut` side conflicted with an
-   element reference into the other side; call results now keep the side.
-5. Diagnostics and limits: two length binders with one name are named apart in
-   a mismatch, a literal argument for a runtime-length parameter gets the
-   length-proof message, `[..rest]` alone is exhaustive, and `a[i]` works
-   through `&mut [T; n <= C]`.
-
-A second independent review covered the extensions (generic, method, trait,
-and nested signatures, and exclusive patterns) over five rounds plus a
-focused re-check, with local builds. It found seven soundness bugs, each
-fixed with a regression test in `crates/kush/tests/runtime_length_extensions.rs`:
-
-1. A recursive call whose type argument named the function's own length
-   binder (`go::<[i64; n <= 4]>` inside `go`) gave a value of the outer
-   length the inner activation's type. Such instances are rejected; the check
-   also covers inherited trait defaults, whose per-impl copy has its own
-   binding, and binders inside `dyn` trait arguments.
-2. Rebinding a signature type at a call could change its layout: union
-   members merged (`f(k, k, ...)` on `[i64; n <= 4] | [i64; m <= 4]`),
-   swapped positions, absorbed a width subtype, or merged inside a generic
-   record or enum. The rebuilt type must now be isomorphic to the callee's.
-3. A type alias expanding to `dyn Tr<[i64; n <= 4]>` hid the binder from
-   call-site substitution, so the callee's binder leaked into the caller's
-   type. Binder walks now see `dyn` arguments, and such calls are rejected.
-
-Smaller results: recursive calls forwarding their own binder were briefly
-falsely rejected by an intermediate fix and are accepted again, and a guard
-that writes through an exclusive binding does not change what later arms
-test (documented).

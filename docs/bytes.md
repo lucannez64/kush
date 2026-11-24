@@ -47,7 +47,6 @@ saturating at the native representable limit. Existing bytes are preserved.
 These checks remain enabled in native builds.
 
 ```rust
-#[noalloc]
 fn append(buffer: Bytes, byte: i64) -> Bytes ! {} {
     Bytes.push_reserved(buffer, byte)
 }
@@ -63,7 +62,7 @@ fn main() -> Unit ! {alloc, io} {
 }
 ```
 
-`push_reserved` is permitted inside `#[noalloc]`; `push` conservatively requires
+`push_reserved` is permitted in a row without `alloc`; `push` conservatively requires
 `alloc` even when the caller has enough capacity. Capacity proofs and bounds-check
 elimination are not implemented. Destruction and borrowing do not allocate or
 suspend. These contracts cover the closed executable operation set, not arbitrary

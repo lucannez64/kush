@@ -47,14 +47,14 @@ Run `cargo run -p kush -- run examples/slices.kush`.
   type and backing storage. Sub-slices are flattened, not nested handles.
 - `Slice.len(view)` returns the number of elements for shared and mutable views.
 - `Slice.get(view, index)` and `view[index]` copy one element after a runtime
-  bounds check. They require the `panic` effect.
+  bounds check. They may panic.
 - `Slice.try_get(view, index)` copies one element and returns the conventional
   `Option<T>` (`None` for a negative, empty, or out-of-bounds index, including
   `i64::MAX`; `Some(value)` otherwise). It has no effects of its own: it never
   panics, allocates, or suspends. The view and index expressions are still
   evaluated normally, so their effects are preserved.
 - `Slice.set(view, index, value)` writes a copyable element through an exclusive
-  `&mut [T]` view after a runtime bounds check. It requires `panic` and rejects a
+  `&mut [T]` view after a runtime bounds check. It may panic and rejects a
   shared `&[T]` view.
 - `let (left, right) = Slice.split_at_mut(view, mid);` creates two checked,
   disjoint exclusive siblings over `[0, mid)` and `[mid, len)`. The pair is a
@@ -65,8 +65,8 @@ Run `cargo run -p kush -- run examples/slices.kush`.
   `{ 0 <= index && index < Slice.len(view) }`; the arithmetic solver proves it
   from contextual facts, and the discharged certificate is re-checked.
 - Dynamic indexing of an inline array, `array[index]`, lowers to a whole-array
-  view plus a checked element read. It requires `panic`. A constant in-range
-  index is still projected at compile time and does not need `panic`.
+  view plus a checked element read. It may panic. A constant in-range
+  index is still projected at compile time and cannot panic.
 - `Slice.len(...)` may appear in erased propositions. As with `Bytes.len` and
   `Vec.len`, the term is tied to the slice-view local and its fact version.
 
@@ -94,14 +94,14 @@ and `Vec<T>` use the element's private word width as their stride.
   the effects of its view and index arguments.
 - `Slice.get`, `Slice.set`, `Slice.split_at_mut`, `view[index]`, dynamic
   `array[index]`, and a range whose bounds are not compile-time constants
-  require `panic`.
+  may panic.
 - `&array[..]` and compile-time-valid constant array ranges are checked while
   compiling and need no `panic`.
 - Out-of-bounds checks are real: the reference evaluator returns a `panic:`
   diagnostic and native code aborts. `Slice.at` is only for a proved bound; an
   internal failure there is a compiler bug.
-- Construction and element reads allocate nothing. A `#[noalloc]` function may
-  take `&[T]` or `&mut [T]`, call the slice operations, sub-slice views, and
+- Construction and element reads allocate nothing. A function whose row lacks
+  `alloc` may take `&[T]` or `&mut [T]`, call the slice operations, sub-slice views, and
   return a view tied to a parameter lifetime.
 
 ## Ownership and lifetime boundary

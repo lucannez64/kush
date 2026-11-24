@@ -33,7 +33,7 @@ let owner: Box<i64> = Box.reuse(owner, current + 1);
 - If the new payload's inline layout is wider than the old payload's, checking
   fails. The safe direction is `width(U) <= width(T)`; a narrower payload simply
   uses fewer words of the existing storage.
-- `Box.reuse` has no `alloc` effect. It is legal under `#[noalloc]` when the
+- `Box.reuse` has no `alloc` effect. It is legal in a row without `alloc` when the
   argument expressions themselves do not allocate, and `Box.reuse` cannot hide
   an allocation that the source did not declare.
 - The old payload must be affine. If it carries a `#[linear]` obligation,
@@ -76,7 +76,7 @@ It acquires no heap storage. The callable is a first-class value:
   callable once per element and cannot duplicate an owning callable.
 - The callback's effect row is required by the enclosing function. An
   allocating callback therefore makes `map_in_place` require `alloc`, and a
-  `#[noalloc]` function rejects it. The contract is checked from the source
+  function whose row lacks `alloc` rejects it. The contract is checked from the source
   types and effects, never inferred from whether a later optimization fires.
 - Parameter grades remain part of the callback signature. For example a
   `fn(i64 @[2])` callback still promises to observe each copyable element twice.
@@ -162,7 +162,7 @@ A program that aborts, traps, or diverges may not print the line.
 
 These counters are tooling observations about one execution. They are not
 language effects, resource contracts, or proof evidence, and they do not make
-`noalloc` depend on an optimization succeeding. The Rust host allocations used
+a row without `alloc` depend on an optimization succeeding. The Rust host allocations used
 by the compiler and reference interpreter are separate from the generated
 program's allocation model.
 
@@ -205,7 +205,7 @@ implemented or guaranteed here:
 
 General functional updates may still allocate. A guaranteed in-place operation
 must use one of these explicit APIs and satisfy their preconditions; there is no
-hidden allocating fallback under `#[noalloc]`.
+hidden allocating fallback in a row without `alloc`.
 
 ## Additional memory operations
 

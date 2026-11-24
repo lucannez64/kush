@@ -95,7 +95,6 @@ and requires exactly one consumption there. See
 ## Borrows, lifetimes, and exclusive slice views
 
 ```rust
-#[noalloc]
 fn inspect(value: &Box<i64>) -> i64 ! {} {
     Box.read(value)
 }
@@ -197,7 +196,6 @@ when returned from a helper. No payload ownership is copied by a borrow.
 ```rust
 enum List { Nil, Cons(i64, Box<List>) }
 
-#[noalloc]
 fn sum(list: List) -> i64 ! {} {
     match list {
         List.Nil => 0,
@@ -259,18 +257,16 @@ memory model.
 
 ## Checked resource contracts
 
-Executable functions may use `#[noalloc]` and `#[nosuspend]`.
+The effect row is the resource contract (the former `#[noalloc]` and
+`#[nosuspend]` attributes were removed by FND-ROWS-ATTRS).
 
-- `noalloc` rejects a declared `alloc` effect, and effect checking rejects any
-  allocating operation/call in its body. Taking and destroying owned data are
-  allowed, including generated cleanup.
-- `nosuspend` rejects a declared `suspend` effect, every reachable suspending
-  call or callback, and an unconstrained effect-row variable in its signature
-  (because specialization could add `suspend`). It is checked statically,
-  independently of optimization. [Synchronous standard-stream I/O](stdio.md) is
+- A row without `alloc` rejects any allocating operation or call in the body.
+  Taking and destroying owned data are allowed, including generated cleanup.
+- A row without `suspend` rejects every reachable suspending call or callback;
+  a row variable must exclude it (`e: Effects - suspend`), since
+  specialization could add it. [Synchronous standard-stream I/O](stdio.md) is
   allowed and can block; see [structured async](async.md) for task suspension.
 
-Both apply to functions, not enum declarations. Other attributes remain rejected.
 These checks are independent of optimization and apply to Cranelift development
 builds. They are contracts for this closed operation set, not an implementation of
 polymorphic effects, arbitrary allocator/FFI contracts, or real-time guarantees.

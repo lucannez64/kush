@@ -494,7 +494,7 @@ matching parameter lifetime. The receiver may be
 a mutable slice-view local or an explicit `&mut owner[..]` /
 `&mut parent[..]` reborrow. The midpoint is evaluated exactly once, then checked
 as `0 <= mid <= Slice.len(receiver)`; the two views are exactly `[0, mid)` and
-`[mid, len)`. A bad midpoint panics under the `panic` effect.
+`[mid, len)`. A bad midpoint panics.
 
 The split is checked provenance, not an unchecked range claim. Both children
 record the same split group and opposite sides. A descendant inherits its
@@ -638,8 +638,8 @@ replacing its owner, or creating another view of the owner in those arguments.
 
 `Bytes` remains a byte buffer: `&mut bytes[..]` has type `&mut [i64]`, and
 `Slice.set` writes the low byte of each value. Values outside `0..=255` panic.
-`Slice.get`/`Slice.set` bounds checks need the `panic` effect; `Slice.try_get`
-returns `Option<T>` and needs no `panic` effect.
+`Slice.get`/`Slice.set` bounds checks may panic; `Slice.try_get` returns
+`Option<T>` and cannot panic.
 
 ## Lifetime-aware callable types
 
@@ -717,9 +717,9 @@ A shared or exclusive slice is still the private four-word
   arguments add no representation. See
   [borrowed and mixed records](borrowed-records.md).
 
-`#[noalloc]` functions may take either kind of view, derive children, split a
+Functions whose row lacks `alloc` may take either kind of view, derive children, split a
 mutable view, call the slice operations, and return shared or exclusive slices
-tied to their parameters. A `#[nosuspend]` function may hold and return views; it
+tied to their parameters. A function whose row lacks `suspend` may hold and return views; it
 simply cannot suspend while doing so.
 
 ## Task suspension

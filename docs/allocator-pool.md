@@ -130,7 +130,7 @@ stable one-line interface never changes by default and non-stats builds are
 byte-identical under any environment.
 
 Pooling does not reuse reference allocation IDs, does not change whether an
-operation has the `alloc` effect, and does not relax `#[noalloc]`: those are
+operation has the `alloc` effect, and does not relax a row without `alloc`: those are
 checked from source and effects, not from allocator behavior. `Box.reuse` and
 in-place vector transforms keep their existing "same allocation" guarantees.
 
@@ -162,7 +162,7 @@ counting and fallible operations use separate non-aborting runtime entry points.
 - buffer growth from pooled to unpooled storage with content preservation,
   including a logical growth that fits inside the retained class;
 - `Vec.clear`, `Vec.reserve`, and `Bytes.push_reserved` integration, including
-  the `#[noalloc]` contract;
+  rows without `alloc`;
 - task result blocks served from the same header-aware path;
 - nested owner cleanup and checked overflow rejection; and
 - per-class burst retention, the independent 1 MiB global cap, and a full drain at exit;

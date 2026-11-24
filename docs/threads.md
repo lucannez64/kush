@@ -82,7 +82,7 @@ view `&[Atomic]` (a shared view is enough, since every operation is atomic).
 
 Every operation is sequentially consistent (Cranelift `atomic_load`,
 `atomic_store`, `atomic_rmw`, `atomic_cas`) and bounds-checked like
-`Slice.get` (it needs `panic`). An `Atomic` is affine and never copied:
+`Slice.get` (it may panic). An `Atomic` is affine and never copied:
 `Slice.get`, `Vec.get`, indexing and copies are rejected, so a cell is never
 read with a plain load that could race with an atomic write; it owns nothing,
 so dropping one is free. The prover never treats an atomic's value as known.

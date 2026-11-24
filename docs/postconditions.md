@@ -129,28 +129,6 @@ tag, or a variant payload offset. A path term carries its type's range
 invalidates its paths; field writes only happen through `&mut` references,
 which already make the local opaque to the prover.
 
-## Soundness review (2026-11-06)
-
-An adversarial review found false facts reaching code that ran; each is now
-rejected and has a regression test (`review_regressions_for_postconditions`):
-
-- a unit result returned implicitly (no tail, or an `if` without `else` in
-  return position) is now a return point;
-- a `Bool` goal is never weakened: an unknown part of `a && f(x)` makes the
-  postcondition unstatable instead of dropping `f(x)`;
-- a branch join drops the aliases of locals replaced on either path, and a
-  loop drops the facts and aliases of every local it reassigns (not only
-  scalars);
-- any exclusive borrow (`&mut x`, `&mut x.field`, a `&mut self` method
-  receiver, a mutable slice) makes its root local opaque to the facts, and a
-  reference is never a value root, so writes through `&mut` cannot leave stale
-  facts;
-- a dropped hypothesis is skipped instead of being recorded as `false`;
-- a foreign `Bool` result is normalised to 0 or 1 natively, matching the
-  range the prover assumes;
-- `IntOp::Unchecked` wraps like the machine operation in the evaluator too,
-  so a wrong proof could never make the two backends disagree.
-
 ## Loop invariants
 
 A `while` loop may state what holds at every iteration:

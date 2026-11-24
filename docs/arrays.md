@@ -4,7 +4,6 @@
 array context must have exactly that many elements of the expected type.
 
 ```rust
-#[noalloc]
 fn pair() -> [i64; 2] ! {} { [20, 22] }
 
 fn main() -> i64 ! {} {
@@ -35,7 +34,7 @@ grammar, inference rules, symbolic lengths in generic data, and the alias
 interaction.
 
 Constant integer indexing is checked during compilation. A dynamic index
-`values[index]` lowers to a checked view read and requires the `panic` effect;
+`values[index]` lowers to a checked view read and may panic;
 it is bounds-checked at run time in both execution models. Either form copies
 the element, so owned or linear elements cannot be indexed. Move them through
 exact-length destructuring instead:

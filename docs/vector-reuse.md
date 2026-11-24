@@ -38,7 +38,7 @@ allocation** with length zero:
 - The vector allocation itself is not freed and no new allocation occurs.
   Clearing does not change the allocation/deallocation counters for the vector.
   Destroying owning elements increments their own deallocation counts normally.
-- `Vec.clear` has the empty effect row. It is legal under `#[noalloc]` when the
+- `Vec.clear` has the empty effect row. It is legal in a row without `alloc` when the
   receiver expression itself does not allocate. Element destruction is not an
   `alloc`, `io`, `panic`, or `suspend` event.
 - An empty vector is still evaluated and returned; it has no elements to drop.
@@ -71,8 +71,8 @@ capacity >= length + additional
 - A successful growth increments `buffer-growths` by one. Reallocation replaces
   storage and is not an allocation/deallocation pair; `allocations` and
   `deallocations` do not change.
-- `Vec.reserve` requires the `{alloc}` effects. A `#[noalloc]` function
-  rejects it from the source signature, independently of whether a particular
+- `Vec.reserve` requires the `{alloc}` effects. A function whose row
+  lacks `alloc` rejects it from the source signature, independently of whether a particular
   call would actually reallocate.
 - The receiver is consumed and returned, so the same ownership and borrow rules
   as `Vec.push` and `Vec.clear` apply: it must be an owned, unaliased vector
@@ -98,7 +98,7 @@ refusal return `Err`, without an implicit panic or a buffer-growth increment.
 
 Both arguments are evaluated once, left to right. Argument effects and early
 returns retain normal cleanup. The operation requires `{alloc}` even when a
-particular call fits, and is rejected under `#[noalloc]`. A live borrow still
+particular call fits, and is rejected in a row without `alloc`. A live borrow still
 prevents moving the receiver. A linear owner obligation transfers through the
 result; `clear`, `reserve`, and `try_reserve` cannot erase it.
 
@@ -145,7 +145,7 @@ Each callback is a reusable, noncapturing `fn(S) -> S'` value:
   callback values are evaluated, then zero elements are visited.
 - The callbacks' effects are required independently by the enclosing function.
   The effective requirement is the union of both effect rows. An allocating or
-  I/O-performing callback is visible to `#[noalloc]` and effect checking even
+  I/O-performing callback is visible to effect checking even
   when the vector is empty.
 - `once fn` and `linear once fn` callbacks are rejected: the operation may call
   each callback once per element, so an owning callable cannot be duplicated
@@ -242,8 +242,8 @@ The stable line and field meanings are unchanged:
   a `Box.reuse`; `map_chain_in_place` is not a compiler fusion.
 
 These counters remain tooling observations about one execution, not language
-effects, resource contracts, or proof evidence. `noalloc` is checked from the
-source effect rows, never from whether reserve happened to avoid a reallocation.
+effects, resource contracts, or proof evidence. The absence of `alloc` is checked from
+the source effect rows, never from whether reserve happened to avoid a reallocation.
 
 ## Explicit boundaries
 

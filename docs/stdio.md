@@ -54,8 +54,6 @@ bootstrap convenience, not a complete authority-isolation mechanism.
 ```rust
 enum Result<T,E> { Ok(T), Err(E) }
 
-#[noalloc]
-#[nosuspend]
 fn copy(input: Stdin, output: Stdout, buffer: Bytes) -> Result<Unit,i64> ! {io} {
     let bytes = IO.read_all(input, buffer)?;
     IO.write(output, &bytes)
@@ -70,9 +68,10 @@ fn main() -> i64 ! {io, alloc} {
 ```
 
 The caller allocates storage before calling `copy`. Neither I/O operation adds
-`alloc`, `panic`, or `suspend` to its declared effects. `noalloc` covers acquiring
+`alloc` or `suspend` to its declared effects. The `alloc` effect covers acquiring
 or growing program-owned storage; trusted allocator/libc internals are outside
-that guarantee. `nosuspend` means these operations do not yield to a scheduler.
+that guarantee. Leaving `suspend` out of the row means these operations do not yield to a
+scheduler.
 They **can block**, including while waiting for EOF. It is not a nonblocking or
 bounded-latency guarantee. There is no mandatory `async fn`/`await` syntax here;
 [structured async and cooperative cancellation](async.md) adds explicit task
@@ -188,6 +187,6 @@ by this operation rather than losing their consumption obligation.
 
 [stream-copy.kush](../examples/stream-copy.kush) copies stdin to stdout with a
 single 4096-byte allocation, irrespective of total input size. Its copy loop is
-checked `#[noalloc]` and `#[nosuspend]`. This is a foundation for incremental
+checked with a row that has neither `alloc` nor `suspend`. This is a foundation for incremental
 parsers and future file/stream abstractions; it does not implement nonblocking
 I/O or a streaming JSON parser.

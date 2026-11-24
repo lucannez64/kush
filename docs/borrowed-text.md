@@ -57,8 +57,8 @@ The namespace and method spellings lower to exactly the same checked range
 expression, evaluate the receiver once, and preserve evaluation order. Method
 syntax auto-borrows a direct `String` local exactly as `&s`; a temporary String
 receiver (`"abc".as_str()`) is rejected. `String.as_str` never panics;
-`String.substr` and `Str.substr` require the `panic` effect because their
-offsets are runtime values.
+`String.substr` and `Str.substr` may panic because their offsets are runtime
+values.
 
 ### Exact substring contract
 

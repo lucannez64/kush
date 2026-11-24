@@ -268,7 +268,7 @@ helper returns the descriptors and any owned fields.
 
 Creating, copying, destructuring, passing or dropping a borrowed record allocates
 no program storage. Constructing a `Box`, `Vec` or `Bytes` metadata field carries
-the usual `alloc`/`panic` effects; moving or dropping an already constructed
+the usual `alloc` effect; moving or dropping an already constructed
 record does not allocate. Inline-array owners are pinned exactly as with an
 ordinary slice view. Normal allocation diagnostics must balance on both the
 reference evaluator and native execution.

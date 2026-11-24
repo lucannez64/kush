@@ -153,7 +153,6 @@ and comments are colored; ordinary identifiers, punctuation, and effect
 markers are left to the client's fallback. Tokens use relative
 `deltaLine`/`deltaStart` positions in UTF-16 units.
 
-
 ## Formatting
 
 `textDocument/formatting` calls `project::format::format_source` and returns one
@@ -187,14 +186,3 @@ local definitions, imported module definitions, stale versions, Unicode
 columns, `didClose` clearing, JSON escaping, malformed input, unknown methods,
 projects nested in the workspace (entry, sibling module, test file and a second
 project), and the absence of disk mutations, `Kush.lock`, or a native `target/` directory.
-
-## Review corrections
-
-The initial advertised extra-arguments setting was removed because the server
-accepts only `kush lsp`. Open-document locations use the client's URI, and old
-published diagnostics under another URI alias are cleared. Canonicalization of
-existing parent directories keeps new unsaved paths stable when saved through
-a symlinked workspace. Unsaved entry module headers receive package-name
-validation even when the entry has later syntax errors, named-import navigation
-selects the declaration name, and hover/document symbols/semantic tokens were
-extracted from that same cursor probe.

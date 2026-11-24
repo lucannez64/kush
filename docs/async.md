@@ -250,12 +250,11 @@ behavior and ordinary finite-input tests.
 - `suspend` is a normal effect bit and composes by row union. It propagates
   through direct and indirect calls, function values, and effect-polymorphic
   rows.
-- `#[nosuspend]` rejects a declared `suspend` effect and rejects an
-  unconstrained effect-row variable in its signature, because that variable could
-  be specialized with `suspend`. It is a static whole-body contract, independent
-  of optimization.
+- A row without `suspend` is a static whole-body contract, independent of
+  optimization; a row variable in it must exclude `suspend`
+  (`e: Effects - suspend`), since it could otherwise be specialized with it.
 - `Task.spawn` transfers the owned once callable exactly once. Capturing
-  closures allocate their environment and require `alloc`/`panic`; noncapturing
+  closures allocate their environment and require `alloc`; noncapturing
   function pointers are adapted to the once ABI without allocation.
 - Task stacks and control blocks are charged as allocations in both backends;
   the native backend also charges each task result buffer. The reference backend

@@ -788,7 +788,7 @@ let q = &mut right[1];      // the opposite split side: no conflict
   rejected while a view, element reference, or borrowed-pattern binding
   derived from `r` is live, including when `r` is a reference parameter.
 - **Runtime checks.** The index is checked against the view's runtime length
-  when the reference is created, so the operation needs `panic`. A `&[i64]`
+  when the reference is created, so the operation may panic. A `&[i64]`
   over `Bytes` has byte-sized elements and no word-sized element address;
   creating an element reference into one panics in both backends.
 - **Representation.** Native code computes `data + index * stride` from the
@@ -834,19 +834,3 @@ let q = &mut right[1];      // the opposite split side: no conflict
   variance, or row variables.
 - The analysis remains path-insensitive and conservative. Both backends and
   the runtime are trusted implementation components.
-
-## Review fixes and scope slice results
-
-A slice returned from `Task.scope` retains the scope closure's capture-result
-provenance. Its original storage remains borrowed through the returned view's
-last use, and block-local storage cannot escape. Borrowed-record scope results
-and borrowed `TaskExit` values across function boundaries keep the same
-per-leaf provenance and are checked until their last use.
-
-A borrowed `TaskExit<T>` cannot be hidden in a closure/task environment: match
-it within the joining scope. Reading a stored reference for a field access is
-a reborrow, while passing it as a call argument retains the child loan through
-later argument evaluation. Multiple shared arguments are allowed; overlapping
-exclusive arguments, including two uses of one stored `&mut`, are rejected.
-These rules have dedicated native/reference and rejection regressions in
-`tests/borrowing_safety.rs`.

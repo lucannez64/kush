@@ -92,7 +92,7 @@ handle Fail: i64 -> Never with fn(code: i64) -> i64 ! {} { 0 - code } {
    carry the bit in their arrow rows, so indirect calls propagate it like
    direct calls.
 5. **Missing handler.** A dynamic abortive perform with no handler aborts the
-   program, as a missing handler does today (`panic` in the row).
+   program, as a missing handler does today.
 
 ### 3.3 Dynamic semantics
 
@@ -166,7 +166,7 @@ Tests: `crates/kush/tests/abortive_handlers.rs`; measurement:
 
 - A `handle` of a declared abortive operation also pushes a dynamic frame.
   `perform F(x)` with no enclosing abortive scope in its function becomes
-  `AbortPerform`: it needs `F` and `panic` in the row, finds the innermost
+  `AbortPerform`: it needs `F` in the row, finds the innermost
   frame for `F` (a missing one aborts the program), hands it the payload and
   leaves the function like `return`.
 - Before ownership, `suspend::mark_abort_calls` uses the existing fixpoint of
@@ -249,8 +249,8 @@ abortive operation (2026-11-06):
   token as `linear once fn(R) -> R ! {F}`. Its own row may contain only the
   operations its token names (it is still dynamically visible, so any other
   effect would be hidden from the rows of the functions that perform the
-  operation); it can only abort through the token, since a dynamic perform of
-  `F` would need `panic`.
+  operation); it can only abort through the token: a dynamic perform of `F`
+  from the handler itself would leave its token pending.
 - **Aborts out of resumable entries.** An abort in a resumable entry, or in a
   continuation built from one, leaves it like `return` without calling `k`.
   Points that were wrapped in an abort check are unwrapped when the entry is

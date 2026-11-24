@@ -25,8 +25,8 @@ compiles to that literal, in every backend. A value that refers to its own
 constant, directly or through others, is rejected.
 
 The value is checked where it is used, so its effects are the using function's:
-`const MASK: u8 = 1 << 3;` needs `panic` at each use, as the shift itself
-would.
+`const MASK: u8 = 1 << 3;` is checked at each use, as the shift itself
+would be.
 
 ## Element access on places
 
@@ -132,7 +132,7 @@ fn read(m: &Machine, address: u16) -> u8 ! {} {
 The promise is kept three ways:
 
 - **Construction checks it once.** Building the record checks the vector's
-  length (a `panic` if it is short), so the record literal needs `panic`.
+  length (a panic if it is short).
 - **Nothing can shorten the field.** `place.clear()` is rejected, and so is
   `&mut place`, since the borrower could shorten it. Elements are written with
   `place[i] = value`; `push`, `set` and `reserve` stay allowed, and
