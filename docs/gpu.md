@@ -283,6 +283,30 @@ Why not keep explicit coloring everywhere:
   `noalloc` is defined: it forbids allocation "on every reachable path,
   including transitive calls" (`spec-v0.1.md`).
 
+Why `#[noalloc]` and `#[nosuspend]` keep their current form: they never had
+this problem. Allocation and suspension are effects, so they are part of every
+function's signature. The attribute checks only the function's own effect row
+(`executable.rs`, function declaration checks): no fixed `alloc`/`suspend`,
+and no row variable that could be specialized with it. The body goes through
+the ordinary effect check, so a `#[noalloc]` function may call any function
+whose row lacks `alloc`, with or without the attribute, and `#[noalloc]`
+functions may be called from anywhere. GPU eligibility cannot work that way
+because it depends on the body (`i64` locals, recursion, closures, enums with
+payloads), which no signature shows. That leaves two choices: coloring, or
+checking the call graph. Decision 6 checks the call graph. In both designs the
+attribute on a non-entry function is a promise the author chooses to make,
+not a requirement placed on callers:
+
+| | Where the property is visible | Optional promise |
+| --- | --- | --- |
+| `noalloc`, `nosuspend` | the effect row in the signature | `#[noalloc]`, `#[nosuspend]` |
+| GPU helpers | only in the body; checked from each entry | `#[gpu]` on a non-entry |
+
+A library function whose row includes `alloc` even though your call never
+allocates (for example `Vec.push` with spare capacity) is not something to
+infer around: the row is its author's promise. The fix is a function with a
+narrower row, such as `push_reserved`.
+
 Limits: generics are still rejected in v1, and integer literals that default
 to `i64` are still errors, so most of `std` is not reachable from GPU code yet.
 The rule matters for small user and library helpers on `f32`, `i32`, `u32`
