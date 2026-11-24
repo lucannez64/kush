@@ -23,12 +23,12 @@ pub enum Outcome {
     Failed(i64),
 }
 
-fn close(fd: i64) -> Unit ! {io} {
+fn close(fd: i64) -> Unit {
     let _ = sys.close(fd);
 }
 
 /// pipe(2) with EINTR retried.
-fn pipe() -> Result<i64, i64> ! {io} {
+fn pipe() -> Result<i64, i64> {
     loop {
         match sys.pipe() {
             Result.Ok(ends) => { return Result.Ok(ends); },
@@ -40,7 +40,7 @@ fn pipe() -> Result<i64, i64> ! {io} {
 }
 
 /// Kill and reap the child.
-fn kill(pid: i64) -> Unit ! {io} {
+fn kill(pid: i64) -> Unit {
     let _ = sys.kill(pid, sys.SIGKILL());
     loop {
         match sys.wait(pid, 1) {

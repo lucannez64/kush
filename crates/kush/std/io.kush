@@ -52,7 +52,7 @@ pub fn read_all(input: Input, buffer: Bytes) -> Result<Bytes, i64> ! {io} {
 }
 
 /// Whether the last byte of `b` is a newline.
-fn ends_line(b: &Bytes) -> Bool ! {} {
+fn ends_line(b: &Bytes) -> Bool {
     let last = Int.wrapping_sub::<i64>(Bytes.len(b), 1);
     if last >= 0 && last < Bytes.len(b) { Bytes.at(b, last, _) == 10 } else { false }
 }

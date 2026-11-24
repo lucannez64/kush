@@ -14,7 +14,7 @@ pub const MAX_DEPTH: i64 = 8;
 
 /// Search with depths 1, 2, ... up to `MAX_DEPTH`; the proof and the depth
 /// it was found at, or `state.FAIL`.
-fn deepen(goal: i64) -> (i64, i64) ! {Goal, alloc} {
+fn deepen(goal: i64) -> (i64, i64) {
     let mut depth = 1;
     while depth <= MAX_DEPTH {
         let proof = handle Choose: i64 -> i64 as op with fn(

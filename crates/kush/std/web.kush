@@ -88,16 +88,16 @@ pub fn request_for(method: Method, target: &Bytes, body: Bytes) -> Request ! {al
 }
 
 /// The byte at `i` of `b`, or -1 outside it.
-fn byte(b: &Bytes, i: i64) -> i64 ! {} {
+fn byte(b: &Bytes, i: i64) -> i64 {
     if i >= 0 && i < Bytes.len(b) { Bytes.at(b, i, _) } else { -1 }
 }
 
-fn lower(c: i64) -> i64 ! {} {
+fn lower(c: i64) -> i64 {
     if c >= 65 && c <= 90 { c + 32 } else { c }
 }
 
 /// A copy of `b[start..end]`.
-fn slice(b: &Bytes, start: i64, end: i64) -> Bytes ! {alloc} {
+fn slice(b: &Bytes, start: i64, end: i64) -> Bytes {
     let length = if end > start { Int.wrapping_sub::<i64>(end, start) } else { 0 };
     let mut out = Bytes.with_capacity(length);
     let mut i = start;
@@ -227,7 +227,7 @@ pub struct Stream {
     timeout_ms: i64,
 }
 
-fn abandon(res: Responder) -> Unit ! {io, alloc, suspend} {
+fn abandon(res: Responder) -> Unit {
     match res {
         Responder { fd, head_only, keep_alive, chunked, timeout_ms } => {
             let none = Bytes.with_capacity(0);
@@ -237,14 +237,14 @@ fn abandon(res: Responder) -> Unit ! {io, alloc, suspend} {
     }
 }
 
-fn abandon_stream(stream: Stream) -> Unit ! {} {
+fn abandon_stream(stream: Stream) -> Unit {
     match stream {
         Stream { fd, head_only, raw, failed, timeout_ms } => (),
     }
 }
 
 /// The Responder for `request` on `conn` (for the server and `capture`).
-fn responder(conn: &net.Conn, request: &Request, timeout_ms: i64) -> Responder ! {} {
+fn responder(conn: &net.Conn, request: &Request, timeout_ms: i64) -> Responder {
     let head_only = match request.method { Method.Head => true, _ => false };
     Responder {
         fd: net.descriptor(conn),
@@ -256,7 +256,7 @@ fn responder(conn: &net.Conn, request: &Request, timeout_ms: i64) -> Responder !
 }
 
 /// Send all of `data` on the reactor within `timeout_ms`: whether it was.
-fn send(fd: i64, data: &Bytes, timeout_ms: i64) -> Bool ! {io, suspend} {
+fn send(fd: i64, data: &Bytes, timeout_ms: i64) -> Bool {
     let deadline = time.deadline_ms(timeout_ms);
     let length = Bytes.len(data);
     let mut sent = 0;
@@ -288,7 +288,7 @@ fn send(fd: i64, data: &Bytes, timeout_ms: i64) -> Bool ! {io, suspend} {
     true
 }
 
-fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
+fn append(out: Bytes, text: &Bytes) -> Bytes {
     let mut out = out;
     let n = Bytes.len(text);
     let mut i = 0;
@@ -301,7 +301,7 @@ fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
 
 /// Whether `value` may be a header value: no CR, LF, NUL or other control
 /// character but tab.
-fn valid_value(value: &Bytes) -> Bool ! {} {
+fn valid_value(value: &Bytes) -> Bool {
     let n = Bytes.len(value);
     let mut i = 0;
     while i < n {
@@ -313,7 +313,7 @@ fn valid_value(value: &Bytes) -> Bool ! {} {
 }
 
 /// Whether a response with `status` carries no body (1xx, 204, 304).
-fn bodiless(status: i64) -> Bool ! {} {
+fn bodiless(status: i64) -> Bool {
     status < 200 || status == 204 || status == 304
 }
 
@@ -321,7 +321,7 @@ fn bodiless(status: i64) -> Bool ! {} {
 /// empty, Content-Length (chunked when `length` is -1, neither when -2:
 /// the body ends with the connection), and Connection: close when the
 /// connection ends after it.
-fn head(status: i64, content_type: &Bytes, length: i64, keep_alive: Bool) -> Bytes ! {alloc} {
+fn head(status: i64, content_type: &Bytes, length: i64, keep_alive: Bool) -> Bytes {
     let mut out = http1.status_line(Bytes.with_capacity(128), status);
     if Bytes.len(content_type) > 0 {
         let name = Bytes.from("Content-Type: ");
@@ -535,13 +535,13 @@ enum Got {
     Refuse(i64),
 }
 
-fn min(a: i64, b: i64) -> i64 ! {} { if a < b { a } else { b } }
+fn min(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
 
 /// Read more into `buffer`, growing it up to `cap` bytes, within
 /// `timeout_ms`. A shielded read is not interrupted by cancellation. The
 /// buffer comes back longer, or unchanged when the peer closed; on failure
 /// (ETIMEDOUT 110, ECANCELED 125, EFBIG 27 at `cap`, ...) it is freed.
-fn receive(fd: i64, buffer: Bytes, cap: i64, timeout_ms: i64, shield: Bool) -> Result<Bytes, i64> ! {io, alloc, suspend} {
+fn receive(fd: i64, buffer: Bytes, cap: i64, timeout_ms: i64, shield: Bool) -> Result<Bytes, i64> {
     let mut buffer = buffer;
     let length = Bytes.len(&buffer);
     if length >= Bytes.capacity(&buffer) {
@@ -571,7 +571,7 @@ fn receive(fd: i64, buffer: Bytes, cap: i64, timeout_ms: i64, shield: Bool) -> R
 /// Read until a whole request head is in `buffer`. Waiting for the first
 /// byte uses the idle deadline and can be cancelled; the rest of a started
 /// head is shielded and uses the request deadline.
-fn read_head(fd: i64, buffer: Bytes, config: &Config) -> Got ! {io, alloc, suspend} {
+fn read_head(fd: i64, buffer: Bytes, config: &Config) -> Got {
     let mut buffer = buffer;
     let cap = Int.saturating_add::<i64>(config.limits.head, 1);
     loop {
@@ -599,7 +599,7 @@ fn read_head(fd: i64, buffer: Bytes, config: &Config) -> Got ! {io, alloc, suspe
 
 /// Read the body `head` declares (shielded, within the request deadline):
 /// the buffer, the decoded body, and the bytes the request used.
-fn read_body(fd: i64, buffer: Bytes, head: &http1.Head, config: &Config) -> Got ! {io, alloc, suspend} {
+fn read_body(fd: i64, buffer: Bytes, head: &http1.Head, config: &Config) -> Got {
     let mut buffer = buffer;
     let start = head.size;
     match head.framing {
@@ -655,7 +655,7 @@ fn read_body(fd: i64, buffer: Bytes, head: &http1.Head, config: &Config) -> Got 
 
 /// `buffer` without its first `from` bytes: what a pipelining client sent
 /// after the request just answered.
-fn rest(buffer: Bytes, from: i64) -> Bytes ! {alloc} {
+fn rest(buffer: Bytes, from: i64) -> Bytes {
     let mut out = Bytes.with_capacity(Bytes.capacity(&buffer));
     let n = Bytes.len(&buffer);
     let mut i = if from > 0 { from } else { 0 };
@@ -667,7 +667,7 @@ fn rest(buffer: Bytes, from: i64) -> Bytes ! {alloc} {
 }
 
 /// Answer `status` with an empty body and Connection: close.
-fn refuse(fd: i64, status: i64, timeout_ms: i64) -> Unit ! {io, alloc, suspend} {
+fn refuse(fd: i64, status: i64, timeout_ms: i64) -> Unit {
     let none = Bytes.with_capacity(0);
     let bytes = head(status, &none, 0, false);
     let _ = send(fd, &bytes, timeout_ms);
@@ -675,7 +675,7 @@ fn refuse(fd: i64, status: i64, timeout_ms: i64) -> Unit ! {io, alloc, suspend} 
 
 /// Serve the requests of one connection until it closes, it is not kept
 /// alive, or the server stops.
-fn connection(conn: net.Conn, handler: fn(&Request, Responder) -> Unit ! {io, alloc, suspend}, config: Config) -> Unit ! {io, alloc, suspend} {
+fn connection(conn: net.Conn, handler: fn(&Request, Responder) -> Unit ! {io, alloc, suspend}, config: Config) -> Unit {
     let fd = net.descriptor(&conn);
     let mut buffer = Bytes.with_capacity(4096);
     loop {
@@ -727,7 +727,7 @@ fn connection(conn: net.Conn, handler: fn(&Request, Responder) -> Unit ! {io, al
 
 /// Whether an accept error is worth retrying (out of descriptors or
 /// memory, a protocol error on one connection).
-fn transient(code: i64) -> Bool ! {} {
+fn transient(code: i64) -> Bool {
     code == 23 || code == 24 || code == 12 || code == 105 || code == 71
 }
 
@@ -771,12 +771,12 @@ pub fn serve(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! 
 
 /// Stop every thread of `serve_threads`: they wait on the read end of a pipe
 /// that nobody reads, so after one byte it stays readable for all of them.
-fn raise_stop(signal: i64) -> Unit ! {io, alloc} {
+fn raise_stop(signal: i64) -> Unit {
     let _ = sys.write(signal, &Bytes.from("!"), 0, -1);
 }
 
 /// Keep the first error any thread met.
-fn first_error(errors: &[Atomic], code: i64) -> Unit ! {} {
+fn first_error(errors: &[Atomic], code: i64) -> Unit {
     let _ = Atomic.compare_exchange(errors, 0, 0, code);
 }
 
@@ -785,7 +785,7 @@ fn first_error(errors: &[Atomic], code: i64) -> Unit ! {} {
 /// ends, every thread stops. A panic outside the handlers (they have their
 /// own catch) stops the other threads too before it goes on, so no thread
 /// waits forever at the scope's end.
-fn serve_part(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! {io, alloc, suspend}, config: Config, stop: i64, signal: i64, errors: &[Atomic]) -> Unit ! {io, alloc, suspend} {
+fn serve_part(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! {io, alloc, suspend}, config: Config, stop: i64, signal: i64, errors: &[Atomic]) -> Unit {
     let ran = Task.catch(fn() -> Unit ! {io, alloc, suspend} {
         let server = Task.spawn(fn() -> Unit ! {io, alloc, suspend} {
             match serve(listener, handler, config) {

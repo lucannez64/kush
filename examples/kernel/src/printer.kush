@@ -10,7 +10,7 @@ use kernel.reader.Item;
 use kernel.store.Store;
 use kernel.term;
 
-fn word(out: Bytes, value: &Bytes) -> Bytes ! {alloc} {
+fn word(out: Bytes, value: &Bytes) -> Bytes {
     let mut out = out;
     let mut i = 0;
     while i < value.len() {
@@ -20,18 +20,18 @@ fn word(out: Bytes, value: &Bytes) -> Bytes ! {alloc} {
     out
 }
 
-fn open(out: Bytes, tag: &Bytes) -> Bytes ! {alloc} {
+fn open(out: Bytes, tag: &Bytes) -> Bytes {
     word(out.push(40), tag)
 }
 
-fn space(out: Bytes) -> Bytes ! {alloc} { out.push(32) }
+fn space(out: Bytes) -> Bytes { out.push(32) }
 
-fn close(out: Bytes) -> Bytes ! {alloc} { out.push(41) }
+fn close(out: Bytes) -> Bytes { out.push(41) }
 
-fn number(out: Bytes, value: i64) -> Bytes ! {alloc} { text.format_i64_into(out, value) }
+fn number(out: Bytes, value: i64) -> Bytes { text.format_i64_into(out, value) }
 
 /// `(u i)` wrapped in `offset` successors.
-fn level_param_into(out: Bytes, index: i64, offset: i64) -> Bytes ! {alloc} {
+fn level_param_into(out: Bytes, index: i64, offset: i64) -> Bytes {
     let mut out = out;
     let mut k = 0;
     while k < offset {
@@ -72,7 +72,7 @@ pub fn level_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc} {
 }
 
 /// `(a b ...)` for a list of terms.
-fn terms_into(s: &Store, out: Bytes, list: i64) -> Bytes ! {alloc} {
+fn terms_into(s: &Store, out: Bytes, list: i64) -> Bytes {
     let mut out = out.push(40);
     let n = term.list_len(s, list);
     let mut i = 0;
@@ -85,7 +85,7 @@ fn terms_into(s: &Store, out: Bytes, list: i64) -> Bytes ! {alloc} {
 }
 
 /// `(tag f0 f1 ...)` printing the first `arity` fields as terms.
-fn form_into(s: &Store, out: Bytes, tag: &Bytes, id: i64, arity: i64) -> Bytes ! {alloc} {
+fn form_into(s: &Store, out: Bytes, tag: &Bytes, id: i64, arity: i64) -> Bytes {
     let mut out = open(out, tag);
     let mut k = 0;
     while k < arity {
@@ -157,7 +157,7 @@ pub fn term_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc} {
     close(word(space(open(out, &Bytes.from("bool"))), &value))
 }
 
-fn ctor_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc} {
+fn ctor_into(s: &Store, out: Bytes, id: i64) -> Bytes {
     let mut out = term.name_into(s, space(open(out, &Bytes.from("ctor"))), term.field(s, id, 0));
     out = terms_into(s, space(out), term.field(s, id, 1));
     out = terms_into(s, space(out), term.field(s, id, 2));
@@ -166,7 +166,7 @@ fn ctor_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc} {
 }
 
 /// ` (steps N)` when a declaration has its own step budget.
-fn steps_into(out: Bytes, steps: i64) -> Bytes ! {alloc} {
+fn steps_into(out: Bytes, steps: i64) -> Bytes {
     if steps < 0 { return out; }
     close(number(space(open(space(out), &Bytes.from("steps"))), steps))
 }

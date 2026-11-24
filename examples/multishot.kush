@@ -11,7 +11,7 @@ effect Choose: i64 -> i64;
 
 /// Whether a queen at `column` in row `row` is attacked by the queens of the
 /// rows above, most recent in the lowest three bits of `placed`.
-fn safe(placed: i64, row: i64, column: i64) -> Bool ! {} {
+fn safe(placed: i64, row: i64, column: i64) -> Bool {
     let mut ok = true;
     let mut distance = 1;
     let mut rest = placed;
@@ -27,7 +27,7 @@ fn safe(placed: i64, row: i64, column: i64) -> Bool ! {} {
 }
 
 /// The number of ways to finish the board from `row` on.
-fn place(op: cap multi Choose ! {}, n: i64, row: i64, placed: i64) -> i64 ! {} {
+fn place(op: cap multi Choose ! {}, n: i64, row: i64, placed: i64) -> i64 {
     if row == n {
         1
     } else {
@@ -42,7 +42,7 @@ fn place(op: cap multi Choose ! {}, n: i64, row: i64, placed: i64) -> i64 ! {} {
 
 /// Count the solutions of the `n`-queens puzzle: every choice is tried by
 /// resuming the same continuation once per column.
-fn solutions(n: i64) -> i64 ! {alloc} {
+fn solutions(n: i64) -> i64 {
     handle Choose: i64 -> i64 as op with fn(
         width: i64,
         resume: multi fn(i64) -> i64 ! {},

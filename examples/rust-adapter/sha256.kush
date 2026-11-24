@@ -11,7 +11,7 @@ module rust_adapter_example;
 use std.result.Result;
 use rust_adapter_example.sha256_adapter;
 
-fn write_line(text: &Bytes) -> Unit ! {io, alloc} {
+fn write_line(text: &Bytes) -> Unit {
     match IO.write(IO.stdout(), text) { Ok(_) => (), Err(_) => () };
     match IO.write(IO.stdout(), &Bytes.from("\n")) { Ok(_) => (), Err(_) => () }
 }

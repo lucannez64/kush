@@ -1,7 +1,7 @@
 // Owning task results transfer through an explicitly joined linear handle.
 use std.task.TaskExit;
 
-fn make() -> Box<i64> @[1] ! {alloc} { Box.new(42) }
+fn make() -> Box<i64> @[1] { Box.new(42) }
 
 fn main() -> i64 ! {alloc, suspend} {
     Task.scope(fn() -> i64 ! {alloc, suspend} {

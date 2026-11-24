@@ -8,11 +8,11 @@ struct Window<'a, T> {
     start: i64
 }
 
-fn window<'a>(view: &'a mut [i64]) -> Window<'a, i64> ! {} {
+fn window<'a>(view: &'a mut [i64]) -> Window<'a, i64> {
     Window { view: view, start: 2 }
 }
 
-fn tail<'a>(window: Window<'a, i64>) -> Window<'a, i64> ! {} {
+fn tail<'a>(window: Window<'a, i64>) -> Window<'a, i64> {
     let Window { view, start } = window;
     let child = &mut view[1..];
     Window { view: child, start: start + 1 }

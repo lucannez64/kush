@@ -9,13 +9,13 @@ use media.input.Button;
 use media.input.Event;
 use media.input.Key;
 
-fn pack(kind: i64, device: i64, code: i64, value: i64) -> i64 ! {} {
+fn pack(kind: i64, device: i64, code: i64, value: i64) -> i64 {
     let raw = if value < 0 { value + 65536 } else { value };
     kind + (device << 8) + (code << 16) + (raw << 48)
 }
 
 #[test]
-fn keys_decode_by_meaning() -> Unit ! {} {
+fn keys_decode_by_meaning() -> Unit {
     let up = match input.decode(pack(2, 0, 0x40000052, 0)) {
         Option.Some(Event.KeyDown(Key.Up)) => true,
         _ => false,
@@ -31,7 +31,7 @@ fn keys_decode_by_meaning() -> Unit ! {} {
 }
 
 #[test]
-fn gamepad_events_keep_device_and_signed_values() -> Unit ! {} {
+fn gamepad_events_keep_device_and_signed_values() -> Unit {
     let pressed = match input.decode(pack(4, 2, 13, 0)) {
         Option.Some(Event.ButtonDown(pad, Button.DpadLeft)) => pad == 2,
         _ => false,
@@ -47,7 +47,7 @@ fn gamepad_events_keep_device_and_signed_values() -> Unit ! {} {
 }
 
 #[test]
-fn samples_are_little_endian_and_clamped() -> Unit ! {io, alloc} {
+fn samples_are_little_endian_and_clamped() -> Unit {
     let mut out = Bytes.with_capacity(8);
     out = audio.push(out, -2);
     out = audio.push(out, 40000);

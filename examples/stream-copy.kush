@@ -1,7 +1,7 @@
 // Copy arbitrarily long stdin with one fixed-capacity allocation.
 use std.result.Result;
 
-fn copy(input: Stdin, output: Stdout, buffer: Bytes) -> Result<Unit, i64> ! {io} {
+fn copy(input: Stdin, output: Stdout, buffer: Bytes) -> Result<Unit, i64> {
     let mut buffer = buffer;
     loop {
         buffer = IO.read_chunk(input, Bytes.clear(buffer))?;

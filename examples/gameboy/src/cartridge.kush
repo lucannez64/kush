@@ -59,7 +59,7 @@ pub fn battery(rom: &Vec<u8>) -> Bool ! {} {
 }
 
 /// The battery RAM's first `size` bytes, or nothing without a battery.
-fn saved_bytes(ram: &Vec<u8>, size: i64, battery: Bool) -> Bytes ! {alloc} {
+fn saved_bytes(ram: &Vec<u8>, size: i64, battery: Bool) -> Bytes {
     if !battery { return Bytes.with_capacity(0); }
     let mut out = Bytes.with_capacity(size);
     let mut i = 0;
@@ -70,7 +70,7 @@ fn saved_bytes(ram: &Vec<u8>, size: i64, battery: Bool) -> Bytes ! {alloc} {
     out
 }
 
-fn restore_bytes(ram: &mut Vec<u8> where len >= 0x20000, size: i64, saved: &Bytes) -> Unit ! {} {
+fn restore_bytes(ram: &mut Vec<u8> where len >= 0x20000, size: i64, saved: &Bytes) -> Unit {
     let mut i = 0;
     while i < size && i < saved.len() && i < RAM_SPACE {
         ram[i] = Int.truncate(saved[i]);
@@ -130,13 +130,13 @@ pub fn zeroed(size: i64) -> Vec<u8> ! {alloc} {
 }
 
 /// The address within a 16 KiB ROM window.
-fn rom_offset(address: u16) -> i64 ! {} ensures { 0 <= result && result <= 0x3FFF } {
+fn rom_offset(address: u16) -> i64 ensures { 0 <= result && result <= 0x3FFF } {
     let at: i64 = Int.convert(address);
     at & 0x3FFF
 }
 
 /// The address within an 8 KiB RAM window.
-fn ram_offset(address: u16) -> i64 ! {} ensures { 0 <= result && result <= 0x1FFF } {
+fn ram_offset(address: u16) -> i64 ensures { 0 <= result && result <= 0x1FFF } {
     let at: i64 = Int.convert(address);
     at & 0x1FFF
 }

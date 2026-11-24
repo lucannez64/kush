@@ -46,7 +46,7 @@ impl ByteCount for Bytes {
 }
 
 /// A bounded helper calls the trait method on its concrete specialization.
-fn describe_via<T: Describe>(value: T) -> i64 ! {} {
+fn describe_via<T: Describe>(value: T) -> i64 {
     value.describe()
 }
 

@@ -23,14 +23,14 @@ use tactics.state;
 use tactics.state.State;
 use tactics.show;
 
-fn say(message: &Bytes) -> Unit ! {io} {
+fn say(message: &Bytes) -> Unit {
     match io.write(io.stdout(), message) {
         Result.Ok(_) => {},
         Result.Err(_) => {},
     }
 }
 
-fn line(label: &Bytes, value: Bytes) -> Unit ! {io, alloc} {
+fn line(label: &Bytes, value: Bytes) -> Unit {
     let mut out = Bytes.with_capacity(label.len() + value.len() + 1);
     let mut i = 0;
     while i < label.len() {
@@ -45,12 +45,12 @@ fn line(label: &Bytes, value: Bytes) -> Unit ! {io, alloc} {
     say(&out.push(10));
 }
 
-fn usage() -> i64 ! {io, alloc} {
+fn usage() -> i64 {
     say(&Bytes.from("usage: tactics [--kcore] FORMULA\n  e.g. tactics \"(A -> B) -> (B -> C) -> A -> C\"\n"));
     2
 }
 
-fn argument(i: i64) -> Result<Bytes, i64> ! {io, alloc} {
+fn argument(i: i64) -> Result<Bytes, i64> {
     env.arg(i, Bytes.with_capacity(4096))
 }
 
@@ -123,7 +123,7 @@ fn main() -> i64 ! {io, alloc} {
     }
 }
 
-fn put(out: Bytes, value: &Bytes) -> Bytes ! {alloc} {
+fn put(out: Bytes, value: &Bytes) -> Bytes {
     let mut out = out;
     let mut i = 0;
     while i < value.len() {

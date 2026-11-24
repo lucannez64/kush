@@ -16,12 +16,12 @@ pub struct File {
     fd: i64,
 }
 
-fn discard(file: File) -> Unit ! {io} {
+fn discard(file: File) -> Unit {
     let _ = close(file);
 }
 
 /// open(2) with EINTR retried.
-fn open_flags(path: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> ! {io} {
+fn open_flags(path: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> {
     loop {
         match sys.openat(path, flags, mode) {
             Result.Err(code) => {
@@ -32,7 +32,7 @@ fn open_flags(path: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> ! {io} {
     }
 }
 
-fn opened(path: &Bytes, flags: i64, mode: i64) -> Result<File, i64> ! {io} {
+fn opened(path: &Bytes, flags: i64, mode: i64) -> Result<File, i64> {
     match open_flags(path, flags, mode) {
         Result.Ok(fd) => Result.Ok(File { fd: fd }),
         Result.Err(code) => Result.Err(code),
@@ -111,7 +111,7 @@ pub fn write_at(file: &File, offset: i64, data: &Bytes) -> Result<i64, i64> ! {i
 }
 
 /// fsync(2) with EINTR retried.
-fn fsync_fd(fd: i64) -> Result<Unit, i64> ! {io} {
+fn fsync_fd(fd: i64) -> Result<Unit, i64> {
     loop {
         match sys.fsync(fd) {
             Result.Err(code) => {

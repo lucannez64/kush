@@ -32,7 +32,7 @@ pub struct Avx2 { held: Bool }
 /// sequence also needs.
 pub struct Sha { held: Bool }
 
-fn has(bit: i64) -> Bool ! {} {
+fn has(bit: i64) -> Bool {
     let bits = match sys.cpu_features() {
         Result.Ok(bits) => bits,
         Result.Err(_) => 0,

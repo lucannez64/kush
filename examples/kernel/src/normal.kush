@@ -35,13 +35,13 @@ use kernel.term;
 
 /// Charge the limb count of a numeral.
 
-fn charge_numeral(k: &mut Kernel, lit: i64) -> Result<Unit, i64> ! {} {
+fn charge_numeral(k: &mut Kernel, lit: i64) -> Result<Unit, i64> {
     let limbs = store.size(&k.store, term.field(&k.store, lit, 0)) - 1;
     engine.charge(k, if limbs < 1 { 1 } else { limbs })
 }
 
 /// `lit (n + 1)` for a numeral `lit n`.
-fn successor(k: &mut Kernel, lit: i64) -> Result<i64, i64> ! {alloc} {
+fn successor(k: &mut Kernel, lit: i64) -> Result<i64, i64> {
     charge_numeral(k, lit)?;
     let value = term.to_natural(&k.store, term.field(&k.store, lit, 0));
     let next = natural.successor(&value);
@@ -63,7 +63,7 @@ pub fn predecessor(k: &mut Kernel, lit: i64) -> Result<i64, i64> ! {alloc} {
 
 /// The value of a definition at the reference's levels, or -1 when the
 /// global does not unfold (a data family or constructor).
-fn unfold(k: &mut Kernel, global: i64) -> Result<i64, i64> ! {alloc} {
+fn unfold(k: &mut Kernel, global: i64) -> Result<i64, i64> {
     let name = term.field(&k.store, global, 0);
     let entry = engine.lookup(k, name);
     if entry < 0 { return Result.Err(error.UNKNOWN_GLOBAL); }
@@ -74,7 +74,7 @@ fn unfold(k: &mut Kernel, global: i64) -> Result<i64, i64> ! {alloc} {
 }
 
 /// `step n (NatElim motive zero step n)`.
-fn induction_step(k: &mut Kernel, elim: i64, n: i64) -> i64 ! {alloc} {
+fn induction_step(k: &mut Kernel, elim: i64, n: i64) -> i64 {
     let motive = term.field(&k.store, elim, 0);
     let zero_case = term.field(&k.store, elim, 1);
     let step = term.field(&k.store, elim, 2);
@@ -86,7 +86,7 @@ fn induction_step(k: &mut Kernel, elim: i64, n: i64) -> i64 ! {alloc} {
 /// One constructor step of `IndElim data motive branches scrutinee`, where
 /// `scrutinee` is already reduced; -1 when it is not a constructor of `data`
 /// applied to all its arguments (the elimination stays neutral).
-fn elim_step(k: &mut Kernel, elim: i64, scrutinee: i64) -> Result<i64, i64> ! {alloc} {
+fn elim_step(k: &mut Kernel, elim: i64, scrutinee: i64) -> Result<i64, i64> {
     let data = term.field(&k.store, elim, 0);
     let motive = term.field(&k.store, elim, 1);
     let branches = term.field(&k.store, elim, 2);
@@ -146,7 +146,7 @@ pub fn whnf(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
     result
 }
 
-fn whnf_step(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
+fn whnf_step(k: &mut Kernel, t: i64) -> Result<i64, i64> {
     let tag = term.tag(&k.store, t);
     if tag == term.GLOBAL {
         let value = unfold(k, t)?;
@@ -219,7 +219,7 @@ pub fn normal(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
     Result.Ok(value)
 }
 
-fn normal_list(k: &mut Kernel, list: i64) -> Result<i64, i64> ! {alloc} {
+fn normal_list(k: &mut Kernel, list: i64) -> Result<i64, i64> {
     let n = term.list_len(&k.store, list);
     let mut items: Vec<i64> = Vec.with_capacity(n);
     let mut i = 0;
@@ -233,7 +233,7 @@ fn normal_list(k: &mut Kernel, list: i64) -> Result<i64, i64> ! {alloc} {
 }
 
 /// Normalize fields `0..count` of `t` and rebuild it with the same tag.
-fn normal_fields(k: &mut Kernel, t: i64, count: i64) -> Result<i64, i64> ! {alloc} {
+fn normal_fields(k: &mut Kernel, t: i64, count: i64) -> Result<i64, i64> {
     let tag = term.tag(&k.store, t);
     let mut parts: Vec<i64> = Vec.with_capacity(count);
     let mut i = 0;
@@ -246,7 +246,7 @@ fn normal_fields(k: &mut Kernel, t: i64, count: i64) -> Result<i64, i64> ! {allo
     Result.Ok(rebuild(k, tag, &parts))
 }
 
-fn rebuild(k: &mut Kernel, tag: i64, p: &Vec<i64>) -> i64 ! {alloc} {
+fn rebuild(k: &mut Kernel, tag: i64, p: &Vec<i64>) -> i64 {
     let s = &mut k.store;
     if tag == term.PI { return term.pi(s, p[0], p[1]); }
     if tag == term.LAM { return term.lam(s, p[0], p[1]); }
@@ -258,7 +258,7 @@ fn rebuild(k: &mut Kernel, tag: i64, p: &Vec<i64>) -> i64 ! {alloc} {
     term.eqelim(s, p[0], p[1], p[2], p[3], p[4], p[5])
 }
 
-fn normal_step(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
+fn normal_step(k: &mut Kernel, t: i64) -> Result<i64, i64> {
     let tag = term.tag(&k.store, t);
     if tag == term.LIT {
         charge_numeral(k, t)?;

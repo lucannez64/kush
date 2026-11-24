@@ -1,7 +1,7 @@
 // Typed staging: the generator runs during compilation. The native cube and
 // square functions receive ordinary integers and need no runtime compiler.
 // Output: 27, then 16.
-fn power(n: i64) -> Code<fn(i64) -> i64 ! {}> ! {alloc} {
+fn power(n: i64) -> Code<fn(i64) -> i64 ! {}> {
     if n == 0 {
         quote fn(x: i64) -> i64 ! {} { 1 }
     } else {

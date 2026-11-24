@@ -4,19 +4,19 @@ use std.result.Result;
 use std.text;
 use todo_cli.store;
 
-fn unit_error(code: i64) -> Result<Unit, i64> ! {} {
+fn unit_error(code: i64) -> Result<Unit, i64> {
     Result.Err(code)
 }
 
-fn id_error(code: i64) -> Result<i64, i64> ! {} {
+fn id_error(code: i64) -> Result<i64, i64> {
     Result.Err(code)
 }
 
-fn write(bytes: &Bytes) -> Result<Unit, i64> ! {io} {
+fn write(bytes: &Bytes) -> Result<Unit, i64> {
     IO.write(IO.stdout(), bytes)
 }
 
-fn line(message: &Bytes) -> Result<Unit, i64> ! {io, alloc} {
+fn line(message: &Bytes) -> Result<Unit, i64> {
     let newline = Bytes.from("\n");
     let result = match write(message) {
         Result.Ok(_) => write(&newline),
@@ -26,7 +26,7 @@ fn line(message: &Bytes) -> Result<Unit, i64> ! {io, alloc} {
     result
 }
 
-fn usage() -> Result<Unit, i64> ! {io, alloc} {
+fn usage() -> Result<Unit, i64> {
     let help = Bytes.from("usage: todo [--file PATH] <command> [args]\n\ncommands:\n  add <title...>   add a task\n  list             list tasks\n  done <id>        mark a task complete (1-based line)\n  remove <id>      remove a task\n\nKUSH_TODO_FILE supplies the default path (todo.txt).\nData format: one <0|1>|<title> line per task; invalid files are rejected without being rewritten.\n");
     let result = write(&help);
     drop(help);
@@ -36,7 +36,7 @@ fn usage() -> Result<Unit, i64> ! {io, alloc} {
     }
 }
 
-fn invalid_file() -> Result<Unit, i64> ! {io, alloc} {
+fn invalid_file() -> Result<Unit, i64> {
     let message = Bytes.from("error: task file is invalid; no changes were made.");
     let result = line(&message);
     drop(message);
@@ -46,7 +46,7 @@ fn invalid_file() -> Result<Unit, i64> ! {io, alloc} {
     }
 }
 
-fn io_failure(code: i64) -> Result<Unit, i64> ! {io, alloc} {
+fn io_failure(code: i64) -> Result<Unit, i64> {
     let mut message = Bytes.with_capacity(32);
     let prefix = Bytes.from("error: host I/O failure ");
     message = append(message, &prefix);
@@ -60,7 +60,7 @@ fn io_failure(code: i64) -> Result<Unit, i64> ! {io, alloc} {
     }
 }
 
-fn append(out: Bytes, value: &Bytes) -> Bytes ! {alloc} {
+fn append(out: Bytes, value: &Bytes) -> Bytes {
     let mut out = out;
     let mut i = 0;
     while i < Bytes.len(value) {
@@ -70,7 +70,7 @@ fn append(out: Bytes, value: &Bytes) -> Bytes ! {alloc} {
     out
 }
 
-fn append_range(out: Bytes, value: &Bytes, start: i64, end: i64) -> Bytes ! {alloc} {
+fn append_range(out: Bytes, value: &Bytes, start: i64, end: i64) -> Bytes {
     let mut out = out;
     let mut i = start;
     while i < end {
@@ -80,7 +80,7 @@ fn append_range(out: Bytes, value: &Bytes, start: i64, end: i64) -> Bytes ! {all
     out
 }
 
-fn find_byte(value: &Bytes, byte: i64, start: i64) -> i64 ! {} {
+fn find_byte(value: &Bytes, byte: i64, start: i64) -> i64 {
     let n = Bytes.len(value);
     let mut at = start;
     let mut found = -1;
@@ -95,7 +95,7 @@ fn find_byte(value: &Bytes, byte: i64, start: i64) -> i64 ! {} {
     found
 }
 
-fn load(path: &Bytes) -> Result<Bytes, i64> ! {io, alloc} {
+fn load(path: &Bytes) -> Result<Bytes, i64> {
     match store.load(path) {
         Result.Ok(value) => Result.Ok(value),
         Result.Err(22) => {
@@ -109,7 +109,7 @@ fn load(path: &Bytes) -> Result<Bytes, i64> ! {io, alloc} {
     }
 }
 
-fn save(path: &Bytes, data: &Bytes) -> Result<Unit, i64> ! {io, alloc} {
+fn save(path: &Bytes, data: &Bytes) -> Result<Unit, i64> {
     match store.save(path, data) {
         Result.Ok(_) => Result.Ok(()),
         Result.Err(code) => {
@@ -119,7 +119,7 @@ fn save(path: &Bytes, data: &Bytes) -> Result<Unit, i64> ! {io, alloc} {
     }
 }
 
-fn list(path: &Bytes) -> Result<Unit, i64> ! {io, alloc} {
+fn list(path: &Bytes) -> Result<Unit, i64> {
     let data = match load(path) {
         Result.Ok(value) => value,
         Result.Err(code) => return Result.Err(code),
@@ -162,11 +162,11 @@ fn list(path: &Bytes) -> Result<Unit, i64> ! {io, alloc} {
     result
 }
 
-fn title_byte_allowed(byte: i64) -> Bool ! {} {
+fn title_byte_allowed(byte: i64) -> Bool {
     byte != 0 && byte != 10 && byte != 13 && byte != 124
 }
 
-fn add(path: &Bytes, first: i64, argc: i64) -> Result<Unit, i64> ! {io, alloc} {
+fn add(path: &Bytes, first: i64, argc: i64) -> Result<Unit, i64> {
     if first >= argc {
         let _ = usage();
         return Result.Err(2);
@@ -219,7 +219,7 @@ fn add(path: &Bytes, first: i64, argc: i64) -> Result<Unit, i64> ! {io, alloc} {
     result
 }
 
-fn parse_id(argc: i64, first: i64) -> Result<i64, i64> ! {io, alloc} {
+fn parse_id(argc: i64, first: i64) -> Result<i64, i64> {
     if first + 1 != argc {
         let _ = usage();
         return Result.Err(2);
@@ -246,7 +246,7 @@ fn parse_id(argc: i64, first: i64) -> Result<i64, i64> ! {io, alloc} {
     }
 }
 
-fn change(path: &Bytes, first: i64, argc: i64, remove: Bool) -> Result<Unit, i64> ! {io, alloc} {
+fn change(path: &Bytes, first: i64, argc: i64, remove: Bool) -> Result<Unit, i64> {
     let id = match parse_id(argc, first) {
         Result.Ok(value) => value,
         Result.Err(code) => return Result.Err(code),

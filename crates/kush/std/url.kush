@@ -16,7 +16,7 @@ pub struct Segments { bytes: Bytes, entries: Vec<Range> }
 /// Duplicate names and empty values are kept.
 pub struct Fields { bytes: Bytes, entries: Vec<Field> }
 
-fn append(buffer: Bytes, part: &Bytes) -> Bytes ! {alloc} {
+fn append(buffer: Bytes, part: &Bytes) -> Bytes {
     let mut buffer = buffer;
     let mut i = 0;
     while i < Bytes.len(part) {
@@ -26,7 +26,7 @@ fn append(buffer: Bytes, part: &Bytes) -> Bytes ! {alloc} {
     buffer
 }
 
-fn copy(buffer: &Bytes, range: Range) -> Bytes ! {alloc} {
+fn copy(buffer: &Bytes, range: Range) -> Bytes {
     let mut out = Bytes.with_capacity(range.end - range.start);
     let mut i = range.start;
     while i < range.end {
@@ -58,14 +58,14 @@ impl Fields {
     }
 }
 
-fn hex(c: i64) -> i64 ! {} {
+fn hex(c: i64) -> i64 {
     if c >= 48 && c <= 57 { return c - 48; }
     if c >= 65 && c <= 70 { return c - 55; }
     if c >= 97 && c <= 102 { return c - 87; }
     -1
 }
 
-fn valid_utf8(input: &Bytes) -> Bool ! {} {
+fn valid_utf8(input: &Bytes) -> Bool {
     let n = Bytes.len(input);
     let mut at = 0;
     while at < n {
@@ -95,7 +95,7 @@ fn valid_utf8(input: &Bytes) -> Bool ! {} {
 
 // Decode one range only once. Split delimiters before calling this, so
 // escaped delimiters cannot become structure. All ranges are internal.
-fn decode(input: &Bytes, start: i64, end: i64, plus: Bool) -> Result<Bytes, Error> ! {alloc} {
+fn decode(input: &Bytes, start: i64, end: i64, plus: Bool) -> Result<Bytes, Error> {
     let mut out = Bytes.with_capacity(end - start);
     let mut at = start;
     while at < end {
@@ -148,7 +148,7 @@ pub fn path_segments(input: &Bytes, max_bytes: i64) -> Result<Segments, Error> !
     Ok(Segments { bytes: bytes, entries: out })
 }
 
-fn fields(input: &Bytes, max_bytes: i64, plus: Bool) -> Result<Fields, Error> ! {alloc} {
+fn fields(input: &Bytes, max_bytes: i64, plus: Bool) -> Result<Fields, Error> {
     let n = Bytes.len(input);
     if n > max_bytes { return Err(Error.TooLong); }
     let mut out: Vec<Field> = Vec.new();

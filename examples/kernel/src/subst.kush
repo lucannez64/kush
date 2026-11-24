@@ -31,7 +31,7 @@ const ABSTRACT: i64 = 4;
 
 struct Op { kind: i64, operand: i64 }
 
-fn walk_list(s: &mut Store, op: Op, list: i64, depth: i64, generation: i64) -> Result<i64, i64> ! {alloc} {
+fn walk_list(s: &mut Store, op: Op, list: i64, depth: i64, generation: i64) -> Result<i64, i64> {
     let n = term.list_len(s, list);
     let mut items: Vec<i64> = Vec.with_capacity(n);
     let mut i = 0;
@@ -44,7 +44,7 @@ fn walk_list(s: &mut Store, op: Op, list: i64, depth: i64, generation: i64) -> R
     Result.Ok(term.list(s, &items))
 }
 
-fn levels_list(s: &mut Store, list: i64, levels: i64) -> Result<i64, i64> ! {alloc} {
+fn levels_list(s: &mut Store, list: i64, levels: i64) -> Result<i64, i64> {
     let n = term.list_len(s, list);
     let mut items: Vec<i64> = Vec.with_capacity(n);
     let mut i = 0;
@@ -57,7 +57,7 @@ fn levels_list(s: &mut Store, list: i64, levels: i64) -> Result<i64, i64> ! {all
     Result.Ok(term.list(s, &items))
 }
 
-fn variable(s: &mut Store, op: Op, t: i64, depth: i64) -> Result<i64, i64> ! {alloc} {
+fn variable(s: &mut Store, op: Op, t: i64, depth: i64) -> Result<i64, i64> {
     let index = term.field(s, t, 0);
     if index < depth || op.kind == LEVELS { return Result.Ok(t); }
     if op.kind == SHIFT { return Result.Ok(term.var(s, index + op.operand)); }
@@ -74,7 +74,7 @@ fn variable(s: &mut Store, op: Op, t: i64, depth: i64) -> Result<i64, i64> ! {al
     Result.Ok(shift(s, term.list_at(s, op.operand, position), depth, 0))
 }
 
-fn walk(s: &mut Store, op: Op, t: i64, depth: i64, generation: i64) -> Result<i64, i64> ! {alloc} {
+fn walk(s: &mut Store, op: Op, t: i64, depth: i64, generation: i64) -> Result<i64, i64> {
     // Abstraction may replace closed subterms, so it visits everything.
     if op.kind != LEVELS && op.kind != ABSTRACT && term.range(s, t) <= depth { return Result.Ok(t); }
     if op.kind == ABSTRACT {
@@ -148,7 +148,7 @@ fn walk(s: &mut Store, op: Op, t: i64, depth: i64, generation: i64) -> Result<i6
     Result.Ok(result)
 }
 
-fn run(s: &mut Store, op: Op, t: i64, depth: i64) -> Result<i64, i64> ! {alloc} {
+fn run(s: &mut Store, op: Op, t: i64, depth: i64) -> Result<i64, i64> {
     let generation = store.fresh_generation(s);
     walk(s, op, t, depth, generation)
 }

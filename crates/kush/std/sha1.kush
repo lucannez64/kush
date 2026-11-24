@@ -27,7 +27,7 @@ pub struct Hasher {
     length: u64,
 }
 
-fn add(a: u32, b: u32) -> u32 ! {} {
+fn add(a: u32, b: u32) -> u32 {
     Int.wrapping_add(a, b)
 }
 
@@ -39,7 +39,7 @@ fn word(
     n: i64,
     at: i64,
     erased q: { 0 <= at && at + 4 <= n && n == Bytes.len(data) },
-) -> u32 ! {} {
+) -> u32 {
     let b0: u32 = Int.truncate(Bytes.at(data, at, _));
     let b1: u32 = Int.truncate(Bytes.at(data, at + 1, _));
     let b2: u32 = Int.truncate(Bytes.at(data, at + 2, _));
@@ -54,7 +54,7 @@ fn compress(
     n: i64,
     at: i64,
     erased q: { 0 <= at && at + 64 <= n && n == Bytes.len(data) },
-) -> Words ! {} {
+) -> Words {
     let mut w0 = word(data, n, at, _);
     let mut w1 = word(data, n, at + 4, _);
     let mut w2 = word(data, n, at + 8, _);
@@ -375,7 +375,7 @@ fn compress(
 
 /// The four lanes in reverse order, with word rotations instead of a
 /// shuffle (the x86-64 baseline has no SSSE3).
-fn reverse(v: u32x4) -> u32x4 ! {} {
+fn reverse(v: u32x4) -> u32x4 {
     let (w0, w1) = u32x4.to_bits(v);
     u32x4.from_bits(((w1 >> 32) | (w1 << 32), (w0 >> 32) | (w0 << 32)))
 }
@@ -390,7 +390,7 @@ fn compress_ni(
     n: i64,
     at: i64,
     erased q: { 0 <= at && at + 64 <= n && n == Bytes.len(data) },
-) -> Words ! {} {
+) -> Words {
     let (a, b, c, d, e) = state;
     let abcd_save = u32x4.new(d, c, b, a);
     let e_save = u32x4.new(0, 0, 0, e);
@@ -525,7 +525,7 @@ fn compress_any(
     n: i64,
     at: i64,
     erased q: { 0 <= at && at + 64 <= n && n == Bytes.len(data) },
-) -> Words ! {} {
+) -> Words {
     match fast {
         Option.Some(sha) => compress_ni(&sha, state, data, n, at, _),
         Option.None => compress(state, data, n, at, _),
@@ -572,7 +572,7 @@ pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc} {
     Hasher { state: state, block: block, length: length }
 }
 
-fn push_word(out: Bytes, v: u32) -> Bytes ! {alloc} {
+fn push_word(out: Bytes, v: u32) -> Bytes {
     let out = Bytes.push(out, Int.convert(v >> 24));
     let out = Bytes.push(out, Int.convert((v >> 16) & 255));
     let out = Bytes.push(out, Int.convert((v >> 8) & 255));

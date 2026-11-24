@@ -52,7 +52,7 @@ struct Controls {
     toggle_fullscreen: Bool,
 }
 
-fn key_bit(key: Key) -> i64 ! {} {
+fn key_bit(key: Key) -> i64 {
     match key {
         Key.Up => UP, Key.Down => DOWN, Key.Left => LEFT, Key.Right => RIGHT,
         Key.Enter => START, Key.Space => SELECT, Key.Backspace => SELECT,
@@ -67,7 +67,7 @@ fn key_bit(key: Key) -> i64 ! {} {
 }
 
 /// Buttons laid out like a Nintendo pad: the right face button is A.
-fn button_bit(button: Button) -> i64 ! {} {
+fn button_bit(button: Button) -> i64 {
     match button {
         Button.East => A, Button.North => A,
         Button.South => B, Button.West => B,
@@ -78,7 +78,7 @@ fn button_bit(button: Button) -> i64 ! {} {
     }
 }
 
-fn held(c: &Controls) -> i64 ! {} {
+fn held(c: &Controls) -> i64 {
     let mut stick = 0;
     if c.stick_x < 0 - DEADZONE { stick = stick | LEFT; }
     if c.stick_x > DEADZONE { stick = stick | RIGHT; }
@@ -88,7 +88,7 @@ fn held(c: &Controls) -> i64 ! {} {
 }
 
 /// Apply every pending window event to the controls.
-fn handle_events(win: &Window, c: &mut Controls) -> Unit ! {io} {
+fn handle_events(win: &Window, c: &mut Controls) -> Unit {
     let mut more = true;
     while more {
         match window.next_event(win) {
@@ -117,12 +117,12 @@ fn handle_events(win: &Window, c: &mut Controls) -> Unit ! {io} {
     }
 }
 
-fn controls() -> Controls ! {} {
+fn controls() -> Controls {
     Controls { keys: 0, pad: 0, tapped: 0, stick_x: 0, stick_y: 0, quit: false, toggle_fullscreen: false }
 }
 
 /// A frame's shades as RGB bytes for the window.
-fn pixels(screen: &Vec<u8> where len >= 23040) -> Bytes ! {alloc} {
+fn pixels(screen: &Vec<u8> where len >= 23040) -> Bytes {
     let size = machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT;
     let mut out = Bytes.with_capacity(size * 3);
     let mut i = 0;
@@ -135,7 +135,7 @@ fn pixels(screen: &Vec<u8> where len >= 23040) -> Bytes ! {alloc} {
 }
 
 /// Samples encoded for the audio queue.
-fn encode(samples: &Vec<i64>) -> Bytes ! {alloc} {
+fn encode(samples: &Vec<i64>) -> Bytes {
     let mut out = Bytes.with_capacity(samples.len() * 2);
     let mut i = 0;
     while i < samples.len() {
@@ -145,7 +145,7 @@ fn encode(samples: &Vec<i64>) -> Bytes ! {alloc} {
     out
 }
 
-fn show_rate(win: &Window, title: &Bytes, rate: i64) -> Unit ! {io, alloc} {
+fn show_rate(win: &Window, title: &Bytes, rate: i64) -> Unit {
     let mut name = emulator.append(Bytes.from("Kush Game Boy - "), title);
     name = emulator.append(name, &Bytes.from(" - "));
     name = text.format_i64_into(name, rate);
@@ -215,7 +215,7 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64, fullscreen
 /// `Present` draws each frame and keeps the frame rate in the title. The
 /// handlers share the window and the controls through references they
 /// capture; `Play` is left to the caller.
-fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes, fullscreen: Bool) -> Result<Unit, i64> ! {Play, io, alloc} {
+fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes, fullscreen: Bool) -> Result<Unit, i64> {
     let mut full = fullscreen;
     let mut c = controls();
     let pad = &mut c;

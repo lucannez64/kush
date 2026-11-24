@@ -3,20 +3,20 @@
 // the shorter name while the checker keeps every source owner borrowed. Run:
 //   cargo run -p kush -- run examples/lifetime-bounds.kush
 
-fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} {
+fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] {
     view
 }
 
 fn shorten_mut<'long: 'short, 'short>(
     view: &'long mut [i64],
-) -> &'short mut [i64] ! {} {
+) -> &'short mut [i64] {
     view
 }
 
 // Outlives is transitive: 'long outlives 'middle, which outlives 'short.
 fn transit<'long: 'middle, 'middle: 'short, 'short>(
     view: &'long [i64],
-) -> &'short [i64] ! {} {
+) -> &'short [i64] {
     view
 }
 
@@ -25,11 +25,11 @@ struct Window<'a> {
     start: i64,
 }
 
-fn window<'long: 'short, 'short>(view: &'long [i64]) -> Window<'short> ! {} {
+fn window<'long: 'short, 'short>(view: &'long [i64]) -> Window<'short> {
     Window { view: view, start: 5 }
 }
 
-fn first<'a>(w: Window<'a>) -> &'a [i64] ! {} {
+fn first<'a>(w: Window<'a>) -> &'a [i64] {
     let Window { view, ..} = w;
     view
 }
@@ -39,12 +39,12 @@ fn first<'a>(w: Window<'a>) -> &'a [i64] ! {} {
 fn pair<'long: 'short, 'short>(
     long: &'long [i64],
     short: &'short [i64],
-) -> i64 ! {} {
+) -> i64 {
     Slice.get(long, 0) + Slice.get(short, 1)
 }
 
 // A helper may pass on the shorter name; the result keeps the caller's owner.
-fn relay<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} {
+fn relay<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] {
     shorten(view)
 }
 

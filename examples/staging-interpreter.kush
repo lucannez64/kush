@@ -1,6 +1,6 @@
 // Specialize an accumulator interpreter for a fixed bytecode program.
 // Instructions 0 and 1 add or multiply by the following byte, respectively.
-fn interpret(code: &Bytes, input: i64) -> i64 ! {} {
+fn interpret(code: &Bytes, input: i64) -> i64 {
     let mut pc = 0;
     let mut acc = input;
     while pc < Bytes.len(code) {
@@ -14,7 +14,7 @@ fn interpret(code: &Bytes, input: i64) -> i64 ! {} {
     acc
 }
 
-fn specialize(code: &Bytes, pc: i64) -> Code<fn(i64) -> i64 ! {}> ! {alloc} {
+fn specialize(code: &Bytes, pc: i64) -> Code<fn(i64) -> i64 ! {}> {
     if pc == Bytes.len(code) {
         quote fn(acc: i64) -> i64 ! {} { acc }
     } else {
@@ -31,14 +31,14 @@ fn specialize(code: &Bytes, pc: i64) -> Code<fn(i64) -> i64 ! {}> ! {alloc} {
     }
 }
 
-fn bytecode() -> Bytes ! {alloc} {
+fn bytecode() -> Bytes {
     let code = Bytes.with_capacity(6);
     let code = Bytes.push(Bytes.push(code, 0), 3);
     let code = Bytes.push(Bytes.push(code, 1), 4);
     Bytes.push(Bytes.push(code, 0), 2)
 }
 
-fn generate() -> Code<fn(i64) -> i64 ! {}> ! {alloc} {
+fn generate() -> Code<fn(i64) -> i64 ! {}> {
     let program = bytecode();
     specialize(&program, 0)
 }

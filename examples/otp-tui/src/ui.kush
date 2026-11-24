@@ -29,7 +29,7 @@ pub fn navigate(selected: i64, count: i64, event: i64) -> i64 ! {} {
     next
 }
 
-fn failure() -> Bytes ! {io, alloc} {
+fn failure() -> Bytes {
     match adapter.last_error() { Ok(message) => message, Err(_) => Bytes.from("Operation failed") }
 }
 

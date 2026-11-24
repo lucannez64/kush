@@ -5,14 +5,14 @@ use std.task.TaskExit;
 // Direct-style cooperative tasks. There is no async fn/await coloring:
 // suspending calls use ordinary syntax and declare the suspend effect.
 
-fn worker(name: i64) -> i64 ! {io, suspend} {
+fn worker(name: i64) -> i64 {
     print_i64(name * 10 + 1);
     Task.yield();
     print_i64(name * 10 + 2);
     name
 }
 
-fn cancellable(owner: Box<i64>) -> i64 ! {io, suspend} {
+fn cancellable(owner: Box<i64>) -> i64 {
     let value = Box.take(owner);
     print_i64(value);
     if Task.yield() {

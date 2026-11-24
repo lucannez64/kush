@@ -6,7 +6,7 @@ use std.text;
 use todo_cli.store;
 
 #[test]
-fn accepts_well_formed_lines() -> Unit ! {alloc} {
+fn accepts_well_formed_lines() -> Unit {
     let data = Bytes.from("0|Buy milk\n1|Ship code\n0|No trailing newline");
     test.is_true(match store.validate(&data) {
         Result.Ok(_) => true,
@@ -15,7 +15,7 @@ fn accepts_well_formed_lines() -> Unit ! {alloc} {
 }
 
 #[test]
-fn rejects_malformed_lines() -> Unit ! {alloc} {
+fn rejects_malformed_lines() -> Unit {
     let blank = Bytes.from("\n");
     let bad_state = Bytes.from("2|no\n");
     let missing_separator = Bytes.from("0 no\n");
@@ -39,7 +39,7 @@ fn rejects_malformed_lines() -> Unit ! {alloc} {
 }
 
 #[test]
-fn appends_after_a_line_without_a_newline() -> Unit ! {alloc} {
+fn appends_after_a_line_without_a_newline() -> Unit {
     let data = Bytes.from("0|Existing");
     let title = Bytes.from("New");
     let updated = store.append_task(data, &title);
@@ -48,7 +48,7 @@ fn appends_after_a_line_without_a_newline() -> Unit ! {alloc} {
 }
 
 #[test]
-fn marks_and_removes_one_task() -> Unit ! {alloc} {
+fn marks_and_removes_one_task() -> Unit {
     let data = Bytes.from("0|One\n0|Two\n0|Three\n");
     let marked = match store.set_state(data, 2, 1) {
         Result.Ok(value) => value,

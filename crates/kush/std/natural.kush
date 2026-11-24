@@ -23,7 +23,7 @@ pub struct Natural {
     limbs: Vec<i64>,
 }
 
-fn base() -> i64 ! {} { 1000000000 }
+fn base() -> i64 { 1000000000 }
 
 pub fn zero() -> Natural ! {alloc} {
     let limbs: Vec<i64> = Vec.new();
@@ -89,7 +89,7 @@ pub fn work(n: &Natural) -> i64 ! {} {
 /// Number of decimal digits (1 for zero).
 pub fn digits(n: &Natural) -> i64 ! {} { limb_digits(&n.limbs) }
 
-fn limb_digits(limbs: &Vec<i64>) -> i64 ! {} {
+fn limb_digits(limbs: &Vec<i64>) -> i64 {
     let count = Vec.len(limbs);
     if count == 0 { return 1; }
     let mut last = Vec.get(limbs, count - 1);

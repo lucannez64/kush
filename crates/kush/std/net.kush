@@ -34,7 +34,7 @@ pub enum Outcome {
 
 /// Connect to the first address of `host` that accepts, within the budget.
 /// A timeout ends the search; otherwise the last address's error is kept.
-fn open(host: &Bytes, port: i64, deadline: i64) -> Result<i64, i64> ! {io} {
+fn open(host: &Bytes, port: i64, deadline: i64) -> Result<i64, i64> {
     let list = match sys.resolve(host, port) {
         Result.Ok(list) => list,
         Result.Err(code) => { return Result.Err(code); },
@@ -65,7 +65,7 @@ fn open(host: &Bytes, port: i64, deadline: i64) -> Result<i64, i64> ! {io} {
 
 /// Block the thread until `fd` has one of `events` or the deadline passes:
 /// 0, ETIMEDOUT (110), or the errno of the poll.
-fn wait_blocking(fd: i64, events: i64, deadline: i64) -> i64 ! {io} {
+fn wait_blocking(fd: i64, events: i64, deadline: i64) -> i64 {
     loop {
         match sys.poll(fd, events, time.remaining_ms(deadline)) {
             Result.Ok(0) => {
@@ -81,7 +81,7 @@ fn wait_blocking(fd: i64, events: i64, deadline: i64) -> i64 ! {io} {
 }
 
 /// Send all of `request` within the budget: 0, or the errno that stopped it.
-fn send_all(fd: i64, request: &Bytes, deadline: i64) -> i64 ! {io} {
+fn send_all(fd: i64, request: &Bytes, deadline: i64) -> i64 {
     let length = Bytes.len(request);
     let mut sent = 0;
     while sent < length {
@@ -105,7 +105,7 @@ fn send_all(fd: i64, request: &Bytes, deadline: i64) -> i64 ! {io} {
 
 /// Suspend the task until `fd` has one of `events` or the deadline passes:
 /// 0, ETIMEDOUT (110), ECANCELED (125), or another errno.
-fn wait(fd: i64, events: i64, deadline: i64) -> i64 ! {io, suspend} {
+fn wait(fd: i64, events: i64, deadline: i64) -> i64 {
     loop {
         match sys.wait_ready(fd, events, time.remaining_ms(deadline)) {
             Result.Ok(0) => {
@@ -121,7 +121,7 @@ fn wait(fd: i64, events: i64, deadline: i64) -> i64 ! {io, suspend} {
 }
 
 /// `send_all` on the reactor.
-fn send_task(fd: i64, data: &Bytes, deadline: i64) -> i64 ! {io, suspend} {
+fn send_task(fd: i64, data: &Bytes, deadline: i64) -> i64 {
     let length = Bytes.len(data);
     let mut sent = 0;
     while sent < length {
@@ -222,16 +222,16 @@ pub struct Conn {
     fd: i64,
 }
 
-fn discard_listener(listener: Listener) -> Unit ! {io} {
+fn discard_listener(listener: Listener) -> Unit {
     let _ = close_listener(listener);
 }
 
-fn discard_conn(conn: Conn) -> Unit ! {io} {
+fn discard_conn(conn: Conn) -> Unit {
     let _ = close(conn);
 }
 
 /// SO_REUSEADDR (and SO_REUSEPORT), bind and listen on a fresh socket.
-fn bind_listen(fd: i64, list: i64, index: i64, backlog: i64, reuse_port: Bool) -> Result<Unit, i64> ! {io} {
+fn bind_listen(fd: i64, list: i64, index: i64, backlog: i64, reuse_port: Bool) -> Result<Unit, i64> {
     match sys.setsockopt(fd, sys.SOL_SOCKET(), sys.SO_REUSEADDR(), 1) {
         Result.Err(code) => { return Result.Err(code); },
         Result.Ok(_) => {},
@@ -290,7 +290,7 @@ pub fn listen(host: &Bytes, port: i64, backlog: i64, reuse_port: Bool) -> Result
 
 /// One `sendto` of all of `data`, retrying EINTR and waiting while the
 /// socket is full: the count sent, or the errno.
-fn send_datagram(fd: i64, data: &Bytes, list: i64, index: i64) -> Result<i64, i64> ! {io} {
+fn send_datagram(fd: i64, data: &Bytes, list: i64, index: i64) -> Result<i64, i64> {
     loop {
         match sys.sendto(fd, data, list, index) {
             Result.Ok(count) => { return Result.Ok(count); },
@@ -327,14 +327,14 @@ pub fn udp_broadcast(host: &Bytes, port: i64, data: &Bytes) -> Result<i64, i64> 
 }
 
 /// `send_datagram` after setting SO_BROADCAST on the socket.
-fn send_broadcast(fd: i64, data: &Bytes, list: i64, index: i64) -> Result<i64, i64> ! {io} {
+fn send_broadcast(fd: i64, data: &Bytes, list: i64, index: i64) -> Result<i64, i64> {
     match sys.setsockopt(fd, sys.SOL_SOCKET(), sys.SO_BROADCAST(), 1) {
         Result.Ok(_) => send_datagram(fd, data, list, index),
         Result.Err(code) => Result.Err(code),
     }
 }
 
-fn udp_send_from(host: &Bytes, port: i64, data: &Bytes, broadcast: Bool) -> Result<i64, i64> ! {io} {
+fn udp_send_from(host: &Bytes, port: i64, data: &Bytes, broadcast: Bool) -> Result<i64, i64> {
     if port < 1 || port > 65535 { return Result.Err(22); }
     let list = match sys.resolve_udp(host, port) {
         Result.Ok(list) => list,
@@ -352,7 +352,7 @@ fn udp_send_from(host: &Bytes, port: i64, data: &Bytes, broadcast: Bool) -> Resu
 /// Send `data` from a fresh socket to the first address of a resolved list
 /// that takes it: that address's index, or the errno of the last address
 /// tried. The list stays allocated.
-fn send_to_list(list: i64, data: &Bytes, broadcast: Bool) -> Result<i64, i64> ! {io} {
+fn send_to_list(list: i64, data: &Bytes, broadcast: Bool) -> Result<i64, i64> {
     let mut last = 99; // EADDRNOTAVAIL
     let mut index = 0;
     loop {
@@ -404,7 +404,7 @@ pub fn udp_send6(host: &Bytes, port: i64, data: &Bytes, address: Bytes) -> Resul
 
 /// The text of the address `sent` went to, appended to `address`, or the
 /// errno of the send (freeing the buffer).
-fn address_used(list: i64, sent: Result<i64, i64>, address: Bytes) -> Result<Bytes, i64> ! {io} {
+fn address_used(list: i64, sent: Result<i64, i64>, address: Bytes) -> Result<Bytes, i64> {
     match sent {
         Result.Ok(index) => sys.address_text(list, index, address),
         Result.Err(code) => {
@@ -440,7 +440,7 @@ pub fn udp_route_source(host: &Bytes, port: i64, address: Bytes) -> Result<Bytes
 
 /// `udp_route_source` over a resolved list: the first address that a UDP
 /// socket can connect to.
-fn route_source_from(list: i64, address: Bytes) -> Result<Bytes, i64> ! {io} {
+fn route_source_from(list: i64, address: Bytes) -> Result<Bytes, i64> {
     let mut last = 99; // EADDRNOTAVAIL
     let mut index = 0;
     loop {
@@ -469,7 +469,7 @@ fn route_source_from(list: i64, address: Bytes) -> Result<Bytes, i64> ! {io} {
 }
 
 /// Set SO_BROADCAST, then connect: 0, or the errno.
-fn connect_broadcast(fd: i64, list: i64, index: i64) -> i64 ! {io} {
+fn connect_broadcast(fd: i64, list: i64, index: i64) -> i64 {
     match sys.setsockopt(fd, sys.SOL_SOCKET(), sys.SO_BROADCAST(), 1) {
         Result.Err(code) => code,
         Result.Ok(_) => match sys.connect_to(fd, list, index) {

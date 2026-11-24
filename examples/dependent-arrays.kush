@@ -14,15 +14,15 @@ type ReadOnly = Pair<i64>;
 
 struct Buffer<N: Nat> { data: [i64; N] }
 
-fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
+fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] { xs }
 
-fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {} { xs[N - 1] }
+fn last<T: Type, N: Nat>(xs: [T; N]) -> T { xs[N - 1] }
 
-fn second(xs: [i64; add<1, 1>]) -> i64 ! {} { xs[add(0, 1)] }
+fn second(xs: [i64; add<1, 1>]) -> i64 { xs[add(0, 1)] }
 
-fn head<N: Nat>(b: Buffer<N>) -> i64 ! {} { b.data[0] }
+fn head<N: Nat>(b: Buffer<N>) -> i64 { b.data[0] }
 
-fn describe(v: Value) -> i64 ! {} {
+fn describe(v: Value) -> i64 {
     match v {
         i64 @n => n,
         Bool @b => if b { 1 } else { 0 },

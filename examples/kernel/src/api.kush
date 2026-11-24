@@ -72,7 +72,7 @@ pub fn describe(code: i64) -> Bytes ! {alloc} {
 }
 
 /// Start an operation in `context`, validating each hypothesis.
-fn enter(k: &mut Kernel, context: &Vec<i64>) -> Result<Unit, i64> ! {alloc} {
+fn enter(k: &mut Kernel, context: &Vec<i64>) -> Result<Unit, i64> {
     engine.begin(k);
     let mut i = 0;
     while i < context.len() {

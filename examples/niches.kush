@@ -1,7 +1,7 @@
 use std.option.Option;
 
 struct Point { x: i64 }
-fn owned(yes: Bool) -> Option<Box<i64>> ! {alloc} {
+fn owned(yes: Bool) -> Option<Box<i64>> {
     if yes { Option.Some(Box.new(42)) } else { Option.None }
 }
 

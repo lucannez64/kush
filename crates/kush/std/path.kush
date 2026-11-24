@@ -59,7 +59,7 @@ pub fn extension(path: &Bytes) -> Bytes ! {alloc} {
     Bytes.with_capacity(0)
 }
 
-fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
+fn append(out: Bytes, text: &Bytes) -> Bytes {
     let mut out = out;
     let mut i = 0;
     while i < Bytes.len(text) {
@@ -69,7 +69,7 @@ fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
     out
 }
 
-fn copy(text: &Bytes) -> Bytes ! {alloc} {
+fn copy(text: &Bytes) -> Bytes {
     let mut out = Bytes.with_capacity(Bytes.len(text));
     let mut i = 0;
     while i < Bytes.len(text) {

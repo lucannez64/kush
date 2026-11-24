@@ -2,7 +2,7 @@
 // Run with: cargo run -p kush -- run examples/borrowed-callables.kush
 // Prints 42, 2, 40, then exits with 0.
 
-fn sum(values: &[i64]) -> i64 ! {} {
+fn sum(values: &[i64]) -> i64 {
     let mut i = 0;
     let mut acc = 0;
     while i < Slice.len(values) {
@@ -13,18 +13,18 @@ fn sum(values: &[i64]) -> i64 ! {} {
 }
 
 // The callback borrows the slice only for the duration of the call.
-fn measure(values: &[i64], f: fn(&[i64]) -> i64 ! {}) -> i64 ! {} {
+fn measure(values: &[i64], f: fn(&[i64]) -> i64 ! {}) -> i64 {
     f(values)
 }
 
-fn tail<'a>(values: &'a [i64]) -> &'a [i64] ! {} { &values[1..] }
+fn tail<'a>(values: &'a [i64]) -> &'a [i64] { &values[1..] }
 
 // The callback's result borrows from its argument, so the helper can return
 // it under the caller's lifetime.
 fn apply<'x>(
     f: fn<'a>(&'a [i64]) -> &'a [i64] ! {},
     values: &'x [i64],
-) -> &'x [i64] ! {} {
+) -> &'x [i64] {
     f(values)
 }
 

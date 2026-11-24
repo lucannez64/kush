@@ -65,7 +65,7 @@ pub struct Kernel {
     pub failure_depth: i64,
 }
 
-fn zeros(count: i64) -> Vec<i64> ! {alloc} {
+fn zeros(count: i64) -> Vec<i64> {
     let mut out: Vec<i64> = Vec.with_capacity(count);
     let mut i = 0;
     while i < count {
@@ -125,7 +125,7 @@ pub fn enter(k: &mut Kernel) -> Result<Unit, i64> ! {} {
 
 pub fn leave(k: &mut Kernel) -> Unit ! {} { k.depth = k.depth - 1; }
 
-fn slot_of(k: &Kernel, name: i64) -> i64 ! {} {
+fn slot_of(k: &Kernel, name: i64) -> i64 {
     let mask = k.keys.len() - 1;
     let mut slot = Int.wrapping_mul(name + 1, 2654435761) & mask;
     while k.keys[slot] != 0 && k.keys[slot] != name + 1 {
@@ -142,7 +142,7 @@ pub fn lookup(k: &Kernel, name: i64) -> i64 ! {} {
 
 pub fn contains(k: &Kernel, name: i64) -> Bool ! {} { lookup(k, name) >= 0 }
 
-fn grow(k: &mut Kernel) -> Unit ! {alloc} {
+fn grow(k: &mut Kernel) -> Unit {
     let size = 2 * k.keys.len();
     let mask = size - 1;
     let mut keys = zeros(size);
@@ -166,7 +166,7 @@ fn grow(k: &mut Kernel) -> Unit ! {alloc} {
     drop(old_values);
 }
 
-fn insert(k: &mut Kernel, name: i64, entry: i64) -> Unit ! {alloc} {
+fn insert(k: &mut Kernel, name: i64, entry: i64) -> Unit {
     let slot = slot_of(k, name);
     k.keys[slot] = name + 1;
     k.values[slot] = entry;
@@ -174,7 +174,7 @@ fn insert(k: &mut Kernel, name: i64, entry: i64) -> Unit ! {alloc} {
     if 2 * k.entries > k.keys.len() { grow(k); }
 }
 
-fn entry(k: &mut Kernel, tag: i64, a: i64, b: i64, c: i64, d: i64, e: i64, count: i64) -> i64 ! {alloc} {
+fn entry(k: &mut Kernel, tag: i64, a: i64, b: i64, c: i64, d: i64, e: i64, count: i64) -> i64 {
     store.begin(&mut k.store, tag);
     store.add(&mut k.store, a);
     store.add(&mut k.store, b);

@@ -102,7 +102,7 @@ total fn symmetry<T: Type>(x: T, y: T, proof: Eq<T, x, y>) -> Eq<T, y, x> ! {} {
 
 // Erased evidence consumed by an executable function. `proof_required` has no
 // runtime parameter for the vector; `two_items()` is checked as a proof term.
-fn proof_required(erased v: Vect<Nat, 2>) -> i64 ! {} {
+fn proof_required(erased v: Vect<Nat, 2>) -> i64 {
     42
 }
 

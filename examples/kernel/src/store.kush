@@ -57,7 +57,7 @@ const SEED: i64 = 1469598103934665603;
 const CACHE: i64 = 65536;
 const PRIME: i64 = 1099511628211;
 
-fn zeros(count: i64) -> Vec<i64> ! {alloc} {
+fn zeros(count: i64) -> Vec<i64> {
     let mut out: Vec<i64> = Vec.with_capacity(count);
     let mut i = 0;
     while i < count {
@@ -110,10 +110,10 @@ pub fn add(s: &mut Store, cell: i64) -> Unit ! {alloc} {
     s.scratch.push(cell);
 }
 
-fn mix(hash: i64, cell: i64) -> i64 ! {} { Int.wrapping_mul(hash ^ cell, PRIME) }
+fn mix(hash: i64, cell: i64) -> i64 { Int.wrapping_mul(hash ^ cell, PRIME) }
 
 /// Whether object `id` has exactly the cells of the scratch buffer.
-fn matches_scratch(s: &Store, id: i64) -> Bool ! {} {
+fn matches_scratch(s: &Store, id: i64) -> Bool {
     let n = s.scratch.len();
     if s.lens[id] != n { return false; }
     let start = s.starts[id];
@@ -182,13 +182,13 @@ pub fn finish(s: &mut Store, range: i64) -> i64 ! {alloc} {
 }
 
 /// Double the table and reinsert every object by its stored hash.
-fn grow(s: &mut Store) -> Unit ! {alloc} {
+fn grow(s: &mut Store) -> Unit {
     let size = 2 * s.table.len();
     rebuild(s, size);
 }
 
 /// Rebuild the table at `size` slots from the objects in use.
-fn rebuild(s: &mut Store, size: i64) -> Unit ! {alloc} {
+fn rebuild(s: &mut Store, size: i64) -> Unit {
     s.tombstones = 0;
     let mask = size - 1;
     let mut table = zeros(size);
@@ -212,7 +212,7 @@ pub fn fresh_generation(s: &mut Store) -> i64 ! {} {
     s.generation
 }
 
-fn cache_slot(key: i64, depth: i64) -> i64 ! {} {
+fn cache_slot(key: i64, depth: i64) -> i64 {
     Int.wrapping_mul(mix(SEED, key), Int.wrapping_add(PRIME, depth)) & (CACHE - 1)
 }
 

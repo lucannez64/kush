@@ -25,7 +25,7 @@ pub fn mentions(s: &mut Store, t: i64, name: i64) -> Bool ! {alloc} {
     visit(s, t, name, generation)
 }
 
-fn visit(s: &mut Store, t: i64, name: i64, generation: i64) -> Bool ! {alloc} {
+fn visit(s: &mut Store, t: i64, name: i64, generation: i64) -> Bool {
     let hit = store.cached(s, generation, t, -4);
     if hit >= 0 { return hit == 1; }
     let tag = term.tag(s, t);
@@ -67,7 +67,7 @@ pub fn direct(s: &Store, field: i64, name: i64, params: i64) -> Bool ! {} {
 /// A family's parameters and constructors at universe levels `levels`.
 pub struct Info { pub params: i64, pub constructors: i64 }
 
-fn instantiate_list(s: &mut Store, list: i64, levels: i64) -> Result<i64, i64> ! {alloc} {
+fn instantiate_list(s: &mut Store, list: i64, levels: i64) -> Result<i64, i64> {
     let n = term.list_len(s, list);
     let mut items: Vec<i64> = Vec.with_capacity(n);
     let mut i = 0;
@@ -102,12 +102,12 @@ pub fn at_levels(s: &mut Store, params: i64, constructors: i64, levels: i64) -> 
 
 /// `Var` for the binder at `position` (outermost 0) in a telescope of
 /// `length` binders.
-fn variable(s: &mut Store, length: i64, position: i64) -> i64 ! {alloc} {
+fn variable(s: &mut Store, length: i64, position: i64) -> i64 {
     term.var(s, length - 1 - position)
 }
 
 /// The variables for the given telescope positions, as a list.
-fn variables(s: &mut Store, length: i64, positions: &Vec<i64>) -> i64 ! {alloc} {
+fn variables(s: &mut Store, length: i64, positions: &Vec<i64>) -> i64 {
     let mut items: Vec<i64> = Vec.with_capacity(positions.len());
     let mut i = 0;
     while i < positions.len() {

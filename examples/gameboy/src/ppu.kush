@@ -23,7 +23,7 @@ const TALL_SPRITES: u8 = 0x04;
 const SPRITES_ON: u8 = 0x02;
 const BACKGROUND_ON: u8 = 0x01;
 
-fn wide(value: u8) -> i64 ! {} ensures { result == value } { Int.convert(value) }
+fn wide(value: u8) -> i64 ensures { result == value } { Int.convert(value) }
 
 /// Advance the display by `cycles` dots.
 pub fn advance<M>(m: &mut Machine<M>, cycles: i64) -> Unit ! {} {
@@ -64,7 +64,7 @@ pub fn skip<M>(m: &mut Machine<M>, steps: i64) -> Unit ! {} {
     if (m.io[0x40] & DISPLAY_ON) != 0 { m.dot = m.dot + steps * 4; }
 }
 
-fn next_line<M>(m: &mut Machine<M>) -> Unit ! {} {
+fn next_line<M>(m: &mut Machine<M>) -> Unit {
     let mut line = wide(m.io[0x44]) + 1;
     if line == VISIBLE_LINES {
         machine.request(m, machine.VBLANK);
@@ -79,7 +79,7 @@ fn next_line<M>(m: &mut Machine<M>) -> Unit ! {} {
 
 /// The coincidence flag, and the STAT interrupt on a rising edge of any
 /// enabled source.
-fn update_stat<M>(m: &mut Machine<M>) -> Unit ! {} {
+fn update_stat<M>(m: &mut Machine<M>) -> Unit {
     let stat = m.io[0x41];
     let coincidence = m.io[0x44] == m.io[0x45];
     m.io[0x41] = if coincidence { stat | 0x04 } else { stat & 0xFB };
@@ -100,7 +100,7 @@ fn tile_pixel<M>(
     at: i64,
     column: i64,
     erased inside: { 0 <= at && at < 0x1FFF },
-) -> u8 ! {} {
+) -> u8 {
     let low = m.vram[at];
     let high = m.vram[at + 1];
     let bit: u8 = Int.truncate(7 - column);
@@ -108,7 +108,7 @@ fn tile_pixel<M>(
 }
 
 /// Where a background or window tile's data starts, from its map entry.
-fn tile_address(lcdc: u8, entry: u8) -> i64 ! {}
+fn tile_address(lcdc: u8, entry: u8) -> i64
     ensures { 0 <= result && result <= 0x17F0 }
 {
     let index: i64 = Int.convert(entry);
@@ -118,13 +118,13 @@ fn tile_address(lcdc: u8, entry: u8) -> i64 ! {}
     0x1000 + index * 16
 }
 
-fn shade(palette: u8, index: u8) -> u8 ! {} {
+fn shade(palette: u8, index: u8) -> u8 {
     (palette >> (index * 2)) & 0x03
 }
 
 /// Choose the (at most ten) sprites on this line in OAM order, then order
 /// them by drawing priority: smaller X first, then lower OAM index.
-fn select_sprites<M>(m: &mut Machine<M>, lcdc: u8, line: i64, height: i64) -> i64 ! {}
+fn select_sprites<M>(m: &mut Machine<M>, lcdc: u8, line: i64, height: i64) -> i64
     ensures { 0 <= result && result <= 10 }
 {
     if (lcdc & SPRITES_ON) == 0 { return 0; }
@@ -152,7 +152,7 @@ fn select_sprites<M>(m: &mut Machine<M>, lcdc: u8, line: i64, height: i64) -> i6
 /// Byte `field` (0-3) of the sprite whose OAM offset is `offset`. Offsets
 /// are multiples of four below 0xA0; the mask keeps that visible to the
 /// prover, so the read needs no check (OAM is backed by 0x100 bytes).
-fn sprite_byte(offset: u8, field: i64, erased small: { 0 <= field && field <= 3 }) -> i64 ! {}
+fn sprite_byte(offset: u8, field: i64, erased small: { 0 <= field && field <= 3 }) -> i64
     ensures { 0 <= result && result <= 0xFF }
 {
     let base: i64 = Int.convert(offset & 0xFC);
@@ -163,7 +163,7 @@ fn draw_line<M>(
     m: &mut Machine<M>,
     line: i64,
     erased visible: { 0 <= line && line < 144 },
-) -> Unit ! {} {
+) -> Unit {
     let lcdc = m.io[0x40];
     let scroll_y = wide(m.io[0x42]);
     let scroll_x = wide(m.io[0x43]);

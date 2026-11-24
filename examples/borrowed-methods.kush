@@ -26,11 +26,11 @@ impl Describe for Point {
     }
 }
 
-fn peek(point: &Point) -> i64 ! {} {
+fn peek(point: &Point) -> i64 {
     point.x
 }
 
-fn shift_via(point: &mut Point, by: i64) -> Unit ! {} {
+fn shift_via(point: &mut Point, by: i64) -> Unit {
     point.x = point.x + by;
 }
 

@@ -3,9 +3,9 @@ use std.result.Result;
 
 // 32 slots, each [state, title length, 96 title bytes]. State 0=free, 1=open, 2=done.
 
-fn cell(slot: i64) -> i64 ! {} { slot * 98 }
+fn cell(slot: i64) -> i64 { slot * 98 }
 
-fn append_ref(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
+fn append_ref(out: Bytes, text: &Bytes) -> Bytes {
     let mut out = out;
     let mut i = 0;
     while i < Bytes.len(text) {
@@ -15,17 +15,17 @@ fn append_ref(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
     out
 }
 
-fn append(out: Bytes, text: Bytes) -> Bytes ! {alloc} {
+fn append(out: Bytes, text: Bytes) -> Bytes {
     append_ref(out, &text)
 }
 
-fn number(out: Bytes, n: i64) -> Bytes ! {alloc} {
+fn number(out: Bytes, n: i64) -> Bytes {
     let mut out = out;
     if n >= 10 { out = Bytes.push(out, 48 + n / 10); }
     Bytes.push(out, 48 + n % 10)
 }
 
-fn screen(items: &[i64], filter: i64, message: &Bytes) -> Bytes ! {alloc} {
+fn screen(items: &[i64], filter: i64, message: &Bytes) -> Bytes {
     let mut out = Bytes.with_capacity(4096);
     // ANSI home + clear. No raw mode, alternate screen or hidden cursor to restore.
     out = Bytes.push(out, 27);
@@ -71,7 +71,7 @@ fn screen(items: &[i64], filter: i64, message: &Bytes) -> Bytes ! {alloc} {
     append(out, Bytes.from("\n> "))
 }
 
-fn equals(line: &[i64], text: Bytes) -> Bool ! {} {
+fn equals(line: &[i64], text: Bytes) -> Bool {
     if Slice.len(line) != Bytes.len(&text) { return false; }
     let mut i = 0;
     while i < Slice.len(line) {
@@ -82,7 +82,7 @@ fn equals(line: &[i64], text: Bytes) -> Bool ! {} {
 }
 
 // Validate all input before changing state. Titles cannot inject terminal escapes.
-fn change(items: &mut [i64], line: &[i64]) -> Bytes ! {alloc} {
+fn change(items: &mut [i64], line: &[i64]) -> Bytes {
     let len = Slice.len(line);
     if len < 3 || Slice.get(line, 1) != 32 {
         return Bytes.from("Use a <title>, t <id>, d <id>, f all/open/done, or q.");
@@ -135,7 +135,7 @@ fn change(items: &mut [i64], line: &[i64]) -> Bytes ! {alloc} {
     Bytes.from("Task toggled.")
 }
 
-fn run() -> Result<Unit, i64> ! {io, alloc} {
+fn run() -> Result<Unit, i64> {
     let mut items: Vec<i64> = Vec.with_capacity(3136);
     let mut i = 0;
     while i < 3136 { items = Vec.push(items, 0); i = i + 1; }

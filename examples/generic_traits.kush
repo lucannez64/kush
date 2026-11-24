@@ -52,7 +52,7 @@ impl Point {
 /// The bounded helper discharges `Convert<i64>` when specialized. The explicit
 /// `Convert::<i64>` selector is needed because Point also implements
 /// `Convert<Bool>`.
-fn convert_point<T: Convert<i64>>(value: T) -> i64 ! {} {
+fn convert_point<T: Convert<i64>>(value: T) -> i64 {
     value.Convert::<i64>.render()
 }
 

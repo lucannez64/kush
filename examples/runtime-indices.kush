@@ -39,19 +39,19 @@ total fn unit_proof() -> UnitTag<()> ! {} { UnitTag.Mk::<()> }
 total fn same_i64(n: i64) -> Eq<i64, n, n> ! {} { refl::<i64>(n) }
 
 // The proof parameter's type depends on the earlier runtime parameter `n`.
-fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-fn keep_bool(b: Bool, erased same: Eq<Bool, b, b>) -> i64 ! {} {
+fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 { n }
+fn keep_bool(b: Bool, erased same: Eq<Bool, b, b>) -> i64 {
     if b { 1 } else { 0 }
 }
 
-fn keep_zero(n: i64, erased p: ZeroI<n>) -> i64 ! {} { n }
-fn keep_true(b: Bool, erased p: IsTrue<b>) -> i64 ! {} { 4 }
-fn keep_unit(u: Unit, erased p: UnitTag<u>) -> i64 ! {} { 2 }
-fn keep_tag(n: i64, erased p: Tag<n>) -> i64 ! {} { 11 }
+fn keep_zero(n: i64, erased p: ZeroI<n>) -> i64 { n }
+fn keep_true(b: Bool, erased p: IsTrue<b>) -> i64 { 4 }
+fn keep_unit(u: Unit, erased p: UnitTag<u>) -> i64 { 2 }
+fn keep_tag(n: i64, erased p: Tag<n>) -> i64 { 11 }
 
 // The wrapper substitutes the symbolic local and proof through another erased
 // binder: the kernel still sees the same `n`.
-fn forward(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { keep(n, p) }
+fn forward(n: i64, erased p: Eq<i64, n, n>) -> i64 { keep(n, p) }
 
 fn main() -> i64 ! {} {
     let five: i64 = 5;

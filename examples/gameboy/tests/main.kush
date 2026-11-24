@@ -14,7 +14,7 @@ use gameboy.machine.Machine;
 // pin down the behaviours around them: flags, the stack, interrupts, banking
 // and frame timing.
 
-fn rom(code: &Vec<u8>) -> Vec<u8> ! {alloc} {
+fn rom(code: &Vec<u8>) -> Vec<u8> {
     let mut image = cartridge.zeroed(0x8000);
     let mut i = 0;
     // A program longer than the ROM after 0x0100 is cut (a fuzz input may be).
@@ -25,7 +25,7 @@ fn rom(code: &Vec<u8>) -> Vec<u8> ! {alloc} {
     image
 }
 
-fn assemble(bytes: &Bytes) -> Vec<u8> ! {alloc} {
+fn assemble(bytes: &Bytes) -> Vec<u8> {
     let mut out: Vec<u8> = Vec.with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -35,12 +35,12 @@ fn assemble(bytes: &Bytes) -> Vec<u8> ! {alloc} {
     out
 }
 
-fn machine_for(code: &Vec<u8>) -> Machine<cartridge.Plain> ! {alloc} {
+fn machine_for(code: &Vec<u8>) -> Machine<cartridge.Plain> {
     machine.new(cartridge.plain(&rom(code)))
 }
 
 /// Run until HALT (or a step budget runs out).
-fn run<M: Mapper>(m: &mut Machine<M>, budget: i64) -> Unit ! {alloc} {
+fn run<M: Mapper>(m: &mut Machine<M>, budget: i64) -> Unit {
     let mut steps = 0;
     while !m.halted && steps < budget {
         let cycles = cpu.step(m);
@@ -49,10 +49,10 @@ fn run<M: Mapper>(m: &mut Machine<M>, budget: i64) -> Unit ! {alloc} {
     }
 }
 
-fn wide(value: u8) -> i64 ! {} { Int.convert(value) }
+fn wide(value: u8) -> i64 { Int.convert(value) }
 
 #[test]
-fn decimal_adjust_turns_binary_sums_into_bcd() -> Unit ! {io, alloc} {
+fn decimal_adjust_turns_binary_sums_into_bcd() -> Unit {
     // LD A,0x15; ADD A,0x27; DAA; HALT
     let mut code: Vec<u8> = Vec.new();
     code = code.push(0x3E).push(0x15).push(0xC6).push(0x27).push(0x27).push(0x76);
@@ -63,7 +63,7 @@ fn decimal_adjust_turns_binary_sums_into_bcd() -> Unit ! {io, alloc} {
 }
 
 #[test]
-fn push_and_pop_move_pairs_through_the_stack() -> Unit ! {io, alloc} {
+fn push_and_pop_move_pairs_through_the_stack() -> Unit {
     // LD SP,0xDFF0; LD BC,0x1234; PUSH BC; POP DE; HALT
     let mut code: Vec<u8> = Vec.new();
     code = code.push(0x31).push(0xF0).push(0xDF);
@@ -77,7 +77,7 @@ fn push_and_pop_move_pairs_through_the_stack() -> Unit ! {io, alloc} {
 }
 
 #[test]
-fn a_timer_interrupt_wakes_halt_and_jumps_to_its_vector() -> Unit ! {io, alloc} {
+fn a_timer_interrupt_wakes_halt_and_jumps_to_its_vector() -> Unit {
     // TIMA = 0xFE, TAC = enabled at 16 cycles, IE = timer, EI, HALT. The
     // vector at 0x50 loads B and halts again.
     let mut code: Vec<u8> = Vec.new();
@@ -108,7 +108,7 @@ fn a_timer_interrupt_wakes_halt_and_jumps_to_its_vector() -> Unit ! {io, alloc} 
 }
 
 #[test]
-fn mbc1_switches_the_upper_rom_window() -> Unit ! {io, alloc} {
+fn mbc1_switches_the_upper_rom_window() -> Unit {
     // Four 16 KiB banks, each starting with its own number.
     let mut image = cartridge.zeroed(0x10000);
     image[0x4000] = 1;
@@ -129,7 +129,7 @@ fn mbc1_switches_the_upper_rom_window() -> Unit ! {io, alloc} {
 }
 
 #[test]
-fn a_frame_is_70224_cycles_and_raises_vblank() -> Unit ! {io, alloc} {
+fn a_frame_is_70224_cycles_and_raises_vblank() -> Unit {
     // JR -2: spin forever with the display on.
     let mut code: Vec<u8> = Vec.new();
     code = code.push(0x18).push(0xFE);
@@ -143,7 +143,7 @@ fn a_frame_is_70224_cycles_and_raises_vblank() -> Unit ! {io, alloc} {
 }
 
 #[test]
-fn a_triggered_square_wave_sounds_and_its_length_runs_out() -> Unit ! {io, alloc} {
+fn a_triggered_square_wave_sounds_and_its_length_runs_out() -> Unit {
     let mut code: Vec<u8> = Vec.new();
     code = code.push(0x18).push(0xFE);
     let mut m = machine_for(&code);
@@ -178,7 +178,7 @@ fn a_triggered_square_wave_sounds_and_its_length_runs_out() -> Unit ! {io, alloc
 }
 
 #[test]
-fn the_core_runs_under_a_scripted_front_end() -> Unit ! {io, alloc} {
+fn the_core_runs_under_a_scripted_front_end() -> Unit {
     // The program copies the button row of P1 to 0xC000 forever:
     // LD A,0x10; LDH (0x00),A; loop: LDH A,(0x00); LD (0xC000),A; JR loop
     let mut code: Vec<u8> = Vec.new();
@@ -224,7 +224,7 @@ fn the_core_runs_under_a_scripted_front_end() -> Unit ! {io, alloc} {
 }
 
 #[test]
-fn battery_ram_survives_a_save_and_a_restore() -> Unit ! {io, alloc} {
+fn battery_ram_survives_a_save_and_a_restore() -> Unit {
     // MBC1 with RAM and a battery (type 0x03), 8 KiB of RAM (size code 2).
     let mut image = cartridge.zeroed(0x8000);
     image[0x147] = 0x03;
@@ -252,7 +252,7 @@ fn battery_ram_survives_a_save_and_a_restore() -> Unit ! {io, alloc} {
 // Found by `kush fuzz` (docs/proof-fuzz.md): a file too short to hold a
 // header crashed in `cartridge.title`, which runs before `kind` rejects it.
 #[test]
-fn a_file_without_a_header_is_rejected_not_a_crash() -> Unit ! {io, alloc} {
+fn a_file_without_a_header_is_rejected_not_a_crash() -> Unit {
     let mut short: Vec<u8> = Vec.new();
     short = short.push(7);
     test.equal_i64(Bytes.len(&cartridge.title(&short)), 0);
@@ -262,13 +262,13 @@ fn a_file_without_a_header_is_rejected_not_a_crash() -> Unit ! {io, alloc} {
 
 // --- Skipping halted steps ----------------------------------------------------
 
-fn same_voice(a: &apu.Voice, b: &apu.Voice) -> Bool ! {} {
+fn same_voice(a: &apu.Voice, b: &apu.Voice) -> Bool {
     a.enabled == b.enabled && a.length == b.length && a.volume == b.volume
         && a.envelope_timer == b.envelope_timer && a.frequency == b.frequency
         && a.timer == b.timer && a.position == b.position
 }
 
-fn same_bytes(a: &Vec<u8>, b: &Vec<u8>) -> Bool ! {} {
+fn same_bytes(a: &Vec<u8>, b: &Vec<u8>) -> Bool {
     if a.len() != b.len() { return false; }
     let mut i = 0;
     while i < a.len() {
@@ -278,7 +278,7 @@ fn same_bytes(a: &Vec<u8>, b: &Vec<u8>) -> Bool ! {} {
     true
 }
 
-fn same_samples(a: &Vec<i64>, b: &Vec<i64>) -> Bool ! {} {
+fn same_samples(a: &Vec<i64>, b: &Vec<i64>) -> Bool {
     if a.len() != b.len() { return false; }
     let mut i = 0;
     while i < a.len() {
@@ -289,7 +289,7 @@ fn same_samples(a: &Vec<i64>, b: &Vec<i64>) -> Bool ! {} {
 }
 
 /// Everything a program, the screen or the speaker could observe.
-fn same_state<M>(a: &Machine<M>, b: &Machine<M>) -> Bool ! {} {
+fn same_state<M>(a: &Machine<M>, b: &Machine<M>) -> Bool {
     a.a == b.a && a.f == b.f && a.b == b.b && a.c == b.c && a.d == b.d && a.e == b.e
         && a.h == b.h && a.l == b.l && a.sp == b.sp && a.pc == b.pc
         && a.ime == b.ime && a.ime_pending == b.ime_pending && a.halted == b.halted
@@ -308,7 +308,7 @@ fn same_state<M>(a: &Machine<M>, b: &Machine<M>) -> Bool ! {} {
 
 /// Run `count` frames on two copies of a program, one skipping halted
 /// steps and one stepping through them, and compare them after each frame.
-fn skipping_matches_stepping(image: &Vec<u8>, count: i64) -> Bool ! {alloc} {
+fn skipping_matches_stepping(image: &Vec<u8>, count: i64) -> Bool {
     let mut fast = machine.new(cartridge.plain(image));
     let mut slow = machine.new(cartridge.plain(image));
     let mut frame = 0;
@@ -324,7 +324,7 @@ fn skipping_matches_stepping(image: &Vec<u8>, count: i64) -> Bool ! {alloc} {
 }
 
 /// Interrupt handlers count in C, D and E, then return with RETI.
-fn with_handlers(code: &Vec<u8>) -> Vec<u8> ! {alloc} {
+fn with_handlers(code: &Vec<u8>) -> Vec<u8> {
     let mut image = rom(code);
     image[0x40] = 0x0C; image[0x41] = 0xD9; // VBlank: INC C; RETI
     image[0x48] = 0x14; image[0x49] = 0xD9; // STAT: INC D; RETI
@@ -334,7 +334,7 @@ fn with_handlers(code: &Vec<u8>) -> Vec<u8> ! {alloc} {
 
 /// Sound on, interrupts from the timer (TAC as given), STAT and VBlank,
 /// then HALT in a loop.
-fn halting_program(tac: u8) -> Vec<u8> ! {alloc} {
+fn halting_program(tac: u8) -> Vec<u8> {
     let code: Vec<u8> = [
         0x3E, 0x80, 0xE0, 0x26,     // NR52: sound on
         0x3E, 0x77, 0xE0, 0x24,     // NR50: full volume
@@ -358,7 +358,7 @@ fn halting_program(tac: u8) -> Vec<u8> ! {alloc} {
 }
 
 #[test]
-fn skipping_halted_steps_matches_stepping_through_them() -> Unit ! {io, alloc} {
+fn skipping_halted_steps_matches_stepping_through_them() -> Unit {
     // The fastest timer, the slowest, and the timer off: ever longer
     // stretches to skip between events.
     test.is_true(skipping_matches_stepping(&halting_program(0x05), 30));
@@ -372,7 +372,7 @@ fn skipping_halted_steps_matches_stepping_through_them() -> Unit ! {io, alloc} {
 
 /// Up to 4 KiB of arbitrary code at 0x0100 of a blank ROM, for two frames.
 #[fuzz]
-fn random_program(input: &Bytes) -> Unit ! {alloc} {
+fn random_program(input: &Bytes) -> Unit {
     let mut m = machine_for(&assemble(input));
     emulator.run_frame(&mut m);
     emulator.run_frame(&mut m);
@@ -381,11 +381,11 @@ fn random_program(input: &Bytes) -> Unit ! {alloc} {
 /// Arbitrary code with the interrupt handlers in place: skipping halted
 /// steps must leave the machine exactly as stepping through them does.
 #[fuzz]
-fn random_halting_program(input: &Bytes) -> Unit ! {alloc} {
+fn random_halting_program(input: &Bytes) -> Unit {
     if !skipping_matches_stepping(&with_handlers(&assemble(input)), 3) { panic(); }
 }
 
-fn frames<M: Mapper>(board: M) -> Unit ! {alloc} {
+fn frames<M: Mapper>(board: M) -> Unit {
     let mut m = machine.new(board);
     emulator.run_frame(&mut m);
 }
@@ -393,7 +393,7 @@ fn frames<M: Mapper>(board: M) -> Unit ! {alloc} {
 /// The input is the start of a cartridge, header included; the controller
 /// is chosen from it as `main` does.
 #[fuzz]
-fn random_cartridge(input: &Bytes) -> Unit ! {alloc} {
+fn random_cartridge(input: &Bytes) -> Unit {
     let image = assemble(input);
     match cartridge.kind(&image) {
         cartridge.Kind.Plain => frames(cartridge.plain(&image)),

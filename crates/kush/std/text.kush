@@ -108,7 +108,7 @@ pub fn count(text: &Bytes, needle: &Bytes) -> i64 ! {} {
     count_range(text, needle, 0, Bytes.len(text))
 }
 
-fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
+fn append(out: Bytes, text: &Bytes) -> Bytes {
     let mut out = out;
     let mut i = 0;
     while i < Bytes.len(text) {

@@ -120,7 +120,7 @@ pub fn prelude() -> Bytes ! {alloc} {
     Bytes.from("(data And 0 prop (prop prop) (ctor And::Intro () ((var 1) (var 1)) ((var 3) (var 2))))\n(data Or 0 prop (prop prop) (ctor Or::Left () ((var 1)) ((var 2) (var 1))) (ctor Or::Right () ((var 0)) ((var 2) (var 1))))\n(data False 0 prop ())\n")
 }
 
-fn global(s: &mut Store, text: &Bytes) -> i64 ! {alloc} {
+fn global(s: &mut Store, text: &Bytes) -> i64 {
     let name = term.name(s, text);
     let none: Vec<i64> = Vec.new();
     let levels = term.list(s, &none);
@@ -186,7 +186,7 @@ pub fn hypotheses(s: &Store, context: i64) -> Vec<i64> ! {alloc} {
 }
 
 /// `a b` applied twice: `f a b`.
-fn app2(s: &mut Store, f: i64, a: i64, b: i64) -> i64 ! {alloc} {
+fn app2(s: &mut Store, f: i64, a: i64, b: i64) -> i64 {
     let fa = term.app(s, f, a);
     term.app(s, fa, b)
 }
@@ -197,7 +197,7 @@ pub fn connective(s: &mut Store, family: i64, p: i64, q: i64) -> i64 ! {alloc} {
 }
 
 /// The shape of a term in weak head normal form.
-fn shape(st: &State, t: i64) -> i64 ! {} {
+fn shape(st: &State, t: i64) -> i64 {
     let s = &st.kernel.store;
     if term.tag(s, t) == term.PI { return PI; }
     if t == st.false_type { return FALSE; }
@@ -210,7 +210,7 @@ fn shape(st: &State, t: i64) -> i64 ! {} {
 }
 
 /// A Pi's domain or codomain; a connective's left or right argument.
-fn part(st: &State, t: i64, i: i64) -> i64 ! {} {
+fn part(st: &State, t: i64, i: i64) -> i64 {
     let s = &st.kernel.store;
     if term.tag(s, t) == term.PI { return term.field(s, t, i); }
     if i == 1 { return term.field(s, t, 1); }
@@ -222,7 +222,7 @@ fn part(st: &State, t: i64, i: i64) -> i64 ! {} {
 /// Motive `fun P Q (x : And P Q) => (P -> Q -> G) -> G`; the branch for
 /// `Intro` is `fun P Q l r (k : P -> Q -> G) => k l r`. `G` is relative to
 /// the current context, so it is shifted under the binders above it.
-fn elim_and(st: &mut State, h: i64, g: i64) -> i64 ! {alloc} {
+fn elim_and(st: &mut State, h: i64, g: i64) -> i64 {
     let family = st.and_type;
     let name = st.and_name;
     let s = &mut st.kernel.store;
@@ -256,7 +256,7 @@ fn elim_and(st: &mut State, h: i64, g: i64) -> i64 ! {alloc} {
 }
 
 /// `h : P | Q` eliminated into `G`: a proof of `(P -> G) -> (Q -> G) -> G`.
-fn elim_or(st: &mut State, h: i64, g: i64) -> i64 ! {alloc} {
+fn elim_or(st: &mut State, h: i64, g: i64) -> i64 {
     let family = st.or_type;
     let name = st.or_name;
     let s = &mut st.kernel.store;
@@ -297,7 +297,7 @@ fn elim_or(st: &mut State, h: i64, g: i64) -> i64 ! {alloc} {
 }
 
 /// `h : False` eliminated into `G`: motive `fun (x : False) => G`, no branch.
-fn elim_false(st: &mut State, h: i64, g: i64) -> i64 ! {alloc} {
+fn elim_false(st: &mut State, h: i64, g: i64) -> i64 {
     let family = st.false_type;
     let name = st.false_name;
     let s = &mut st.kernel.store;
@@ -308,14 +308,14 @@ fn elim_false(st: &mut State, h: i64, g: i64) -> i64 ! {alloc} {
     term.indelim(s, name, motive, branches, h)
 }
 
-fn whnf_in(st: &mut State, items: &Vec<i64>, t: i64) -> i64 ! {alloc} {
+fn whnf_in(st: &mut State, items: &Vec<i64>, t: i64) -> i64 {
     match api.whnf(&mut st.kernel, items, t) {
         Result.Ok(n) => n,
         Result.Err(_) => FAIL,
     }
 }
 
-fn defeq_in(st: &mut State, items: &Vec<i64>, a: i64, b: i64) -> Bool ! {alloc} {
+fn defeq_in(st: &mut State, items: &Vec<i64>, a: i64, b: i64) -> Bool {
     match api.defeq(&mut st.kernel, items, a, b) {
         Result.Ok(equal) => equal,
         Result.Err(_) => false,
@@ -324,7 +324,7 @@ fn defeq_in(st: &mut State, items: &Vec<i64>, a: i64, b: i64) -> Bool ! {alloc} 
 
 /// Whether a hypothesis type `A1 -> .. -> An -> B` (n >= 1) has the goal as
 /// its conclusion `B`.
-fn concludes(st: &mut State, context: i64, ty: i64, goal: i64) -> Bool ! {alloc} {
+fn concludes(st: &mut State, context: i64, ty: i64, goal: i64) -> Bool {
     let mut items = hypotheses(&st.kernel.store, context);
     let mut t = ty;
     let mut binders = 0;
@@ -343,7 +343,7 @@ fn concludes(st: &mut State, context: i64, ty: i64, goal: i64) -> Bool ! {alloc}
     }
 }
 
-fn alternatives(st: &mut State, context: i64, goal: i64) -> i64 ! {alloc} {
+fn alternatives(st: &mut State, context: i64, goal: i64) -> i64 {
     let items = hypotheses(&st.kernel.store, context);
     let n = items.len();
     let mut out: Vec<i64> = Vec.new();

@@ -2,13 +2,13 @@ module examples.integrated_core;
 
 type Input<T: Type, N: Nat> = [T; N];
 
-fn identity<T: Type, N: Nat>(xs: Input<T, N>) -> Input<T, N> ! {} { xs }
+fn identity<T: Type, N: Nat>(xs: Input<T, N>) -> Input<T, N> { xs }
 
 total fn reflexive(n: i64) -> Eq<i64, n, n> ! {} { refl::<i64>(n) }
 
-fn verified(n: i64, erased proof: Eq<i64, n, n>) -> i64 ! {} { n }
-fn twice(x: i64 @[2]) -> i64 ! {} { x + x }
-fn inc(x: i64) -> i64 ! {} { x + 1 }
+fn verified(n: i64, erased proof: Eq<i64, n, n>) -> i64 { n }
+fn twice(x: i64 @[2]) -> i64 { x + x }
+fn inc(x: i64) -> i64 { x + 1 }
 
 fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} { f(x) }
 

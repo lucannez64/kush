@@ -5,24 +5,24 @@ use std.text;
 use otp_tui.adapter;
 use otp_tui.ui;
 
-fn argument_count() -> i64 ! {io} { match ENV.arg_count() { Ok(value) => value, Err(_) => 0 } }
+fn argument_count() -> i64 { match ENV.arg_count() { Ok(value) => value, Err(_) => 0 } }
 
-fn write_line(value: &Bytes) -> Unit ! {io, alloc} {
+fn write_line(value: &Bytes) -> Unit {
     let _ = IO.write(IO.stdout(), value);
     let _ = IO.write(IO.stdout(), &Bytes.from("\n"));
 }
 
-fn error() -> i64 ! {io, alloc} {
+fn error() -> i64 {
     let message = match adapter.last_error() { Ok(value) => value, Err(_) => Bytes.from("Operation failed") };
     let _ = adapter.report(&message);
     1
 }
 
-fn help() -> Unit ! {io, alloc} {
+fn help() -> Unit {
     write_line(&Bytes.from("otp-tui — Kush application with Rust HMAC and terminal adapters\n\nUsage:\n  otp-tui                 interactive session (no persistence)\n  otp-tui --demo          interactive session with public RFC test entries\n  otp-tui --code-stdin [--at SECONDS]\n                          read one otpauth URI from stdin and print its code\n  otp-tui --help\n\nKeys: a add, d delete, c copy, n advance HOTP, q/Ctrl-C quit\n      arrows, PgUp/PgDn, Home/End navigate\n\nClipboard uses terminal OSC 52. Codes and entries are not saved.\nThe URI prompt is hidden; headless mode reads stdin rather than argv."));
 }
 
-fn headless(store: &adapter.Store) -> i64 ! {io, alloc} {
+fn headless(store: &adapter.Store) -> i64 {
     let mut timestamp = match adapter.now() { Ok(value) => value, Err(_) => { return error(); } };
     if argument_count() == 4 {
         let option = match ENV.arg(2, Bytes.with_capacity(64)) { Ok(value) => value, Err(_) => { return 2; } };

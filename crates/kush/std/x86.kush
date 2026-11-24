@@ -14,24 +14,24 @@ module std.x86;
 use std.cpu;
 use std.simd.u32x4;
 
-fn rotr(x: u32, n: u64, erased q: { 1 <= n && n <= 31 }) -> u32 ! {} {
+fn rotr(x: u32, n: u64, erased q: { 1 <= n && n <= 31 }) -> u32 {
     (x >> n) | (x << (32 - n))
 }
 
-fn rotl(x: u32, n: u64, erased q: { 1 <= n && n <= 31 }) -> u32 ! {} {
+fn rotl(x: u32, n: u64, erased q: { 1 <= n && n <= 31 }) -> u32 {
     (x << n) | (x >> (32 - n))
 }
 
-fn add(a: u32, b: u32) -> u32 ! {} {
+fn add(a: u32, b: u32) -> u32 {
     Int.wrapping_add(a, b)
 }
 
-fn big0(x: u32) -> u32 ! {} { rotr(x, 2, _) ^ rotr(x, 13, _) ^ rotr(x, 22, _) }
-fn big1(x: u32) -> u32 ! {} { rotr(x, 6, _) ^ rotr(x, 11, _) ^ rotr(x, 25, _) }
-fn small0(x: u32) -> u32 ! {} { rotr(x, 7, _) ^ rotr(x, 18, _) ^ (x >> 3) }
-fn small1(x: u32) -> u32 ! {} { rotr(x, 17, _) ^ rotr(x, 19, _) ^ (x >> 10) }
-fn ch(e: u32, f: u32, g: u32) -> u32 ! {} { (e & f) ^ (!e & g) }
-fn maj(a: u32, b: u32, c: u32) -> u32 ! {} { (a & b) ^ (a & c) ^ (b & c) }
+fn big0(x: u32) -> u32 { rotr(x, 2, _) ^ rotr(x, 13, _) ^ rotr(x, 22, _) }
+fn big1(x: u32) -> u32 { rotr(x, 6, _) ^ rotr(x, 11, _) ^ rotr(x, 25, _) }
+fn small0(x: u32) -> u32 { rotr(x, 7, _) ^ rotr(x, 18, _) ^ (x >> 3) }
+fn small1(x: u32) -> u32 { rotr(x, 17, _) ^ rotr(x, 19, _) ^ (x >> 10) }
+fn ch(e: u32, f: u32, g: u32) -> u32 { (e & f) ^ (!e & g) }
+fn maj(a: u32, b: u32, c: u32) -> u32 { (a & b) ^ (a & c) ^ (b & c) }
 
 /// SHA256RNDS2: two SHA-256 rounds. `cdgh` holds C, D, G, H in lanes 3 to
 /// 0, `abef` holds A, B, E, F, and lanes 0 and 1 of `wk` are the two
@@ -86,7 +86,7 @@ pub fn sha256msg2(sha: &cpu.Sha, a: u32x4, b: u32x4) -> u32x4 ! {} {
 }
 
 /// The SHA-1 round function and constant for SHA1RNDS4's function index.
-fn sha1_f(func: i64, b: u32, c: u32, d: u32) -> u32 ! {} {
+fn sha1_f(func: i64, b: u32, c: u32, d: u32) -> u32 {
     if func == 0 {
         (b & c) ^ (!b & d)
     } else if func == 2 {
@@ -96,7 +96,7 @@ fn sha1_f(func: i64, b: u32, c: u32, d: u32) -> u32 ! {} {
     }
 }
 
-fn sha1_k(func: i64) -> u32 ! {} {
+fn sha1_k(func: i64) -> u32 {
     if func == 0 {
         0x5a827999
     } else if func == 1 {

@@ -15,7 +15,7 @@ struct MutableView<'a> {
     items: Vec<i64>
 }
 
-fn make<'a>(view: &'a [i64]) -> BufferView<'a> ! {alloc} {
+fn make<'a>(view: &'a [i64]) -> BufferView<'a> {
     // Source order differs from the declared layout.
     BufferView { token: Box.new(5), start: 3, view: view }
 }

@@ -10,7 +10,7 @@ use std.result.Result;
 use std.sys;
 
 /// stat(2) one field with EINTR retried.
-fn stat_field(path: &Bytes, field: i64) -> Result<i64, i64> ! {io} {
+fn stat_field(path: &Bytes, field: i64) -> Result<i64, i64> {
     loop {
         match sys.stat(path, field) {
             Result.Err(code) => {
@@ -21,7 +21,7 @@ fn stat_field(path: &Bytes, field: i64) -> Result<i64, i64> ! {io} {
     }
 }
 
-fn open_flags(path: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> ! {io} {
+fn open_flags(path: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> {
     loop {
         match sys.openat(path, flags, mode) {
             Result.Err(code) => {
@@ -71,7 +71,7 @@ pub fn read(path: &Bytes, buffer: Bytes) -> Result<Bytes, i64> ! {io} {
 
 /// Write all of `data` to a fresh descriptor, then close it; a close error
 /// other than EINTR is reported. Returns the number of bytes written.
-fn write_with(path: &Bytes, data: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> ! {io} {
+fn write_with(path: &Bytes, data: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> {
     let fd = match open_flags(path, flags, mode) {
         Result.Ok(fd) => fd,
         Result.Err(code) => { return Result.Err(code); },
@@ -189,7 +189,7 @@ pub fn list(path: &Bytes, buffer: Bytes) -> Result<Bytes, i64> ! {io} {
 }
 
 /// st_mode type test; a missing entry (ENOENT, ENOTDIR) is false.
-fn mode_is(path: &Bytes, kind: i64) -> Result<Bool, i64> ! {io} {
+fn mode_is(path: &Bytes, kind: i64) -> Result<Bool, i64> {
     match stat_field(path, 0) {
         Result.Ok(mode) => Result.Ok(kind == 0 || (mode & sys.S_IFMT()) == kind),
         Result.Err(code) => {

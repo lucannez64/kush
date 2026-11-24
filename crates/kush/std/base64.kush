@@ -19,7 +19,7 @@ module std.base64;
 use std.option.Option;
 
 /// The character for a 6-bit value.
-fn symbol(value: i64, url: Bool, erased q: { 0 <= value && value <= 63 }) -> i64 ! {} {
+fn symbol(value: i64, url: Bool, erased q: { 0 <= value && value <= 63 }) -> i64 {
     if value < 26 {
         65 + value
     } else if value < 52 {
@@ -34,7 +34,7 @@ fn symbol(value: i64, url: Bool, erased q: { 0 <= value && value <= 63 }) -> i64
 }
 
 /// The 6-bit value of a character, or -1 if it is not in the alphabet.
-fn value(c: i64, url: Bool) -> i64 ! {} {
+fn value(c: i64, url: Bool) -> i64 {
     if c >= 65 && c <= 90 {
         c - 65
     } else if c >= 97 && c <= 122 {
@@ -54,7 +54,7 @@ fn value(c: i64, url: Bool) -> i64 ! {} {
     }
 }
 
-fn encode_with(data: &Bytes, url: Bool) -> Bytes ! {alloc} {
+fn encode_with(data: &Bytes, url: Bool) -> Bytes {
     let n = Bytes.len(data);
     // 4/3 of the input rounded up fits in 2n + 4; an absurdly large input
     // starts smaller and the buffer grows.
@@ -108,7 +108,7 @@ fn decode_with(
     count: i64,
     url: Bool,
     erased q: { 0 <= count && count <= Bytes.len(text) },
-) -> Option<Bytes> ! {alloc} {
+) -> Option<Bytes> {
     // 3/4 of the characters fit in `count` bytes.
     let mut out = Bytes.with_capacity(count);
     let mut i = 0;

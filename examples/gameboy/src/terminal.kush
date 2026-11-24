@@ -21,11 +21,11 @@ const QUIT: i64 = 256;
 const FRAME_NS: i64 = 16742706;
 const ROWS: i64 = 72;
 
-fn escape(out: Bytes) -> Bytes ! {alloc} {
+fn escape(out: Bytes) -> Bytes {
     out.push(27).push(91)
 }
 
-fn colour(out: Bytes, ground: i64, shade: u8) -> Bytes ! {alloc} {
+fn colour(out: Bytes, ground: i64, shade: u8) -> Bytes {
     let (r, g, b) = emulator.rgb(shade);
     let mut o = escape(out);
     o = text.format_i64_into(o, ground);
@@ -39,7 +39,7 @@ fn colour(out: Bytes, ground: i64, shade: u8) -> Bytes ! {alloc} {
 }
 
 /// Append the cells that differ from `shown`, and record them there.
-fn draw(screen: &Vec<u8> where len >= 23040, shown: &mut Vec<u8> where len >= 23040, out: Bytes) -> Bytes ! {alloc} {
+fn draw(screen: &Vec<u8> where len >= 23040, shown: &mut Vec<u8> where len >= 23040, out: Bytes) -> Bytes {
     let mut o = out;
     let width = machine.SCREEN_WIDTH;
     let mut foreground: u8 = 255;
@@ -86,7 +86,7 @@ fn draw(screen: &Vec<u8> where len >= 23040, shown: &mut Vec<u8> where len >= 23
     o
 }
 
-fn status(title: &Bytes, frames_per_second: i64) -> Bytes ! {alloc} {
+fn status(title: &Bytes, frames_per_second: i64) -> Bytes {
     let mut o = escape(Bytes.with_capacity(128));
     o = text.format_i64_into(o, ROWS + 1);
     o = emulator.append(o, &Bytes.from(";1H"));

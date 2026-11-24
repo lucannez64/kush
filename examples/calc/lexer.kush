@@ -11,7 +11,7 @@ struct Scanned { value: i64, next: i64 }
 
 /// `start` is proved non-negative by every caller; `Bytes.at` needs no
 /// runtime bounds check because the loop condition establishes the bound.
-fn number(source: &Bytes, start: i64, erased in_range: { 0 <= start }) -> Scanned ! {} {
+fn number(source: &Bytes, start: i64, erased in_range: { 0 <= start }) -> Scanned {
     let mut index = start;
     let mut value = 0;
     while index >= 0 && index < Bytes.len(source) && ascii.is_digit(Bytes.at(source, index, _)) {
@@ -21,7 +21,7 @@ fn number(source: &Bytes, start: i64, erased in_range: { 0 <= start }) -> Scanne
     Scanned { value: value, next: index }
 }
 
-fn symbol(byte: i64) -> Token.Plus | Token.Minus | Token.Star | Token.Slash | Token.Open | Token.Close | Token.Number ! {} {
+fn symbol(byte: i64) -> Token.Plus | Token.Minus | Token.Star | Token.Slash | Token.Open | Token.Close | Token.Number {
     match byte {
         43 => Token.Plus,
         45 => Token.Minus,

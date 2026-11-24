@@ -37,7 +37,7 @@ pub struct Hasher {
     length: u64,
 }
 
-fn add(a: u32, b: u32) -> u32 ! {} {
+fn add(a: u32, b: u32) -> u32 {
     Int.wrapping_add(a, b)
 }
 
@@ -49,7 +49,7 @@ fn word(
     n: i64,
     at: i64,
     erased q: { 0 <= at && at + 4 <= n && n == Bytes.len(data) },
-) -> u32 ! {} {
+) -> u32 {
     let b0: u32 = Int.truncate(Bytes.at(data, at, _));
     let b1: u32 = Int.truncate(Bytes.at(data, at + 1, _));
     let b2: u32 = Int.truncate(Bytes.at(data, at + 2, _));
@@ -64,7 +64,7 @@ fn compress(
     n: i64,
     at: i64,
     erased q: { 0 <= at && at + 64 <= n && n == Bytes.len(data) },
-) -> Words ! {} {
+) -> Words {
     let mut w0 = word(data, n, at, _);
     let mut w1 = word(data, n, at + 4, _);
     let mut w2 = word(data, n, at + 8, _);
@@ -341,13 +341,13 @@ fn compress(
 /// The vector with its two 64-bit halves swapped: lanes 2, 3 in 0, 1, which
 /// is all the second `sha256rnds2` of a group reads. Word moves, not a
 /// shuffle, so the x86-64 baseline (no SSSE3) needs no byte-shuffle call.
-fn swap_halves(v: u32x4) -> u32x4 ! {} {
+fn swap_halves(v: u32x4) -> u32x4 {
     let (w0, w1) = u32x4.to_bits(v);
     u32x4.from_bits((w1, w0))
 }
 
 /// Lanes 1, 2, 3 of `lo` then lane 0 of `hi` (x86 `palignr hi, lo, 4`).
-fn align4(hi: u32x4, lo: u32x4) -> u32x4 ! {} {
+fn align4(hi: u32x4, lo: u32x4) -> u32x4 {
     let (l0, l1) = u32x4.to_bits(lo);
     let (h0, h1) = u32x4.to_bits(hi);
     u32x4.from_bits(((l0 >> 32) | (l1 << 32), (l1 >> 32) | (h0 << 32)))
@@ -363,7 +363,7 @@ fn compress_ni(
     n: i64,
     at: i64,
     erased q: { 0 <= at && at + 64 <= n && n == Bytes.len(data) },
-) -> Words ! {} {
+) -> Words {
     let (a, b, c, d, e, f, g, h) = state;
     let abef = u32x4.new(f, e, b, a);
     let cdgh = u32x4.new(h, g, d, c);
@@ -473,7 +473,7 @@ fn compress_any(
     n: i64,
     at: i64,
     erased q: { 0 <= at && at + 64 <= n && n == Bytes.len(data) },
-) -> Words ! {} {
+) -> Words {
     match fast {
         Option.Some(sha) => compress_ni(&sha, state, data, n, at, _),
         Option.None => compress(state, data, n, at, _),
@@ -523,7 +523,7 @@ pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc} {
     Hasher { state: state, block: block, length: length }
 }
 
-fn push_word(out: Bytes, v: u32) -> Bytes ! {alloc} {
+fn push_word(out: Bytes, v: u32) -> Bytes {
     let out = Bytes.push(out, Int.convert(v >> 24));
     let out = Bytes.push(out, Int.convert((v >> 16) & 255));
     let out = Bytes.push(out, Int.convert((v >> 8) & 255));

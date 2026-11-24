@@ -16,7 +16,7 @@ pub fn monotonic_ns() -> Result<i64, i64> ! {io} { sys.clock_gettime(1, 1) }
 pub fn sleep_ms(milliseconds: i64) -> Result<Unit, i64> ! {io} { sys.nanosleep(milliseconds) }
 
 /// The monotonic clock in milliseconds, or -1 when it cannot be read.
-fn now_ms() -> i64 ! {io} {
+fn now_ms() -> i64 {
     match sys.clock_gettime(1, 2) {
         Result.Ok(ms) => ms,
         Result.Err(_) => -1,

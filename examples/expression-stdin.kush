@@ -5,7 +5,7 @@ enum ParseError { ExpectedNumber(i64), UnexpectedByte(i64), Overflow }
 enum Expr { Number(i64), Add(Box<Expr>, Box<Expr>), Multiply(Box<Expr>, Box<Expr>) }
 enum Parsed { At(Expr, i64) }
 
-fn skip_space(source: &Bytes, index: i64) -> i64 ! {} {
+fn skip_space(source: &Bytes, index: i64) -> i64 {
     if index >= Bytes.len(source) { return index; }
     match Bytes.get(source, index) {
         9 | 10 | 13 | 32 => skip_space(source, index + 1),
@@ -13,7 +13,7 @@ fn skip_space(source: &Bytes, index: i64) -> i64 ! {} {
     }
 }
 
-fn number_tail(source: &Bytes, index: i64, value: i64) -> Result<Parsed, ParseError> ! {} {
+fn number_tail(source: &Bytes, index: i64, value: i64) -> Result<Parsed, ParseError> {
     if index >= Bytes.len(source) { return Ok(Parsed.At(Expr.Number(value), index)); }
     let byte = Bytes.get(source, index);
     if byte < 48 || byte > 57 { return Ok(Parsed.At(Expr.Number(value), index)); }
@@ -22,7 +22,7 @@ fn number_tail(source: &Bytes, index: i64, value: i64) -> Result<Parsed, ParseEr
     number_tail(source, index + 1, value * 10 + digit)
 }
 
-fn number(source: &Bytes, start: i64) -> Result<Parsed, ParseError> ! {} {
+fn number(source: &Bytes, start: i64) -> Result<Parsed, ParseError> {
     let index = skip_space(source, start);
     if index >= Bytes.len(source) { return Err(ParseError.ExpectedNumber(index)); }
     let byte = Bytes.get(source, index);
@@ -30,7 +30,7 @@ fn number(source: &Bytes, start: i64) -> Result<Parsed, ParseError> ! {} {
     number_tail(source, index, 0)
 }
 
-fn product_tail(source: &Bytes, left: Expr, start: i64) -> Result<Parsed, ParseError> ! {alloc} {
+fn product_tail(source: &Bytes, left: Expr, start: i64) -> Result<Parsed, ParseError> {
     let index = skip_space(source, start);
     if index >= Bytes.len(source) { return Ok(Parsed.At(left, index)); }
     if Bytes.get(source, index) == 42 {
@@ -41,12 +41,12 @@ fn product_tail(source: &Bytes, left: Expr, start: i64) -> Result<Parsed, ParseE
     } else { Ok(Parsed.At(left, index)) }
 }
 
-fn product(source: &Bytes, start: i64) -> Result<Parsed, ParseError> ! {alloc} {
+fn product(source: &Bytes, start: i64) -> Result<Parsed, ParseError> {
     let parsed = number(source, start)?;
     match parsed { Parsed.At(left, next) => product_tail(source, left, next) }
 }
 
-fn sum_tail(source: &Bytes, left: Expr, start: i64) -> Result<Parsed, ParseError> ! {alloc} {
+fn sum_tail(source: &Bytes, left: Expr, start: i64) -> Result<Parsed, ParseError> {
     let index = skip_space(source, start);
     if index >= Bytes.len(source) { return Ok(Parsed.At(left, index)); }
     if Bytes.get(source, index) == 43 {
@@ -57,7 +57,7 @@ fn sum_tail(source: &Bytes, left: Expr, start: i64) -> Result<Parsed, ParseError
     } else { Ok(Parsed.At(left, index)) }
 }
 
-fn parse(source: &Bytes) -> Result<Expr, ParseError> ! {alloc} {
+fn parse(source: &Bytes) -> Result<Expr, ParseError> {
     let parsed = product(source, 0)?;
     match parsed {
         Parsed.At(left, next) => {
@@ -73,7 +73,7 @@ fn parse(source: &Bytes) -> Result<Expr, ParseError> ! {alloc} {
     }
 }
 
-fn evaluate(tree: Expr) -> i64 ! {} {
+fn evaluate(tree: Expr) -> i64 {
     match tree {
         Expr.Number(n) => n,
         Expr.Add(left, right) => evaluate(Box.take(left)) + evaluate(Box.take(right)),
@@ -81,7 +81,7 @@ fn evaluate(tree: Expr) -> i64 ! {} {
     }
 }
 
-fn run(source: Bytes) -> Unit ! {io, alloc} {
+fn run(source: Bytes) -> Unit {
     let parsed = parse(&source);
     drop(source);
     match parsed {

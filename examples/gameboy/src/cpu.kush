@@ -21,29 +21,29 @@ pub enum Cond { NotZero, Zero, NoCarry, Carry }
 /// The eight CB-prefixed rotates and shifts.
 pub enum Shift { Rlc, Rrc, Rl, Rr, Sla, Sra, Swap, Srl }
 
-fn reg8(field: u8) -> Reg8 ! {} {
+fn reg8(field: u8) -> Reg8 {
     match field & 7 {
         0 => Reg8.B, 1 => Reg8.C, 2 => Reg8.D, 3 => Reg8.E,
         4 => Reg8.H, 5 => Reg8.L, 6 => Reg8.Hl, _ => Reg8.A,
     }
 }
 
-fn pair(field: u8) -> Pair ! {} {
+fn pair(field: u8) -> Pair {
     match field & 3 { 0 => Pair.Bc, 1 => Pair.De, 2 => Pair.Hl, _ => Pair.Sp }
 }
 
-fn alu(field: u8) -> Alu ! {} {
+fn alu(field: u8) -> Alu {
     match field & 7 {
         0 => Alu.Add, 1 => Alu.Adc, 2 => Alu.Sub, 3 => Alu.Sbc,
         4 => Alu.And, 5 => Alu.Xor, 6 => Alu.Or, _ => Alu.Cp,
     }
 }
 
-fn cond(field: u8) -> Cond ! {} {
+fn cond(field: u8) -> Cond {
     match field & 3 { 0 => Cond.NotZero, 1 => Cond.Zero, 2 => Cond.NoCarry, _ => Cond.Carry }
 }
 
-fn shift(field: u8) -> Shift ! {} {
+fn shift(field: u8) -> Shift {
     match field & 7 {
         0 => Shift.Rlc, 1 => Shift.Rrc, 2 => Shift.Rl, 3 => Shift.Rr,
         4 => Shift.Sla, 5 => Shift.Sra, 6 => Shift.Swap, _ => Shift.Srl,
@@ -52,55 +52,55 @@ fn shift(field: u8) -> Shift ! {} {
 
 // --- Small helpers ------------------------------------------------------------
 
-fn wide(value: u8) -> i64 ! {} ensures { result == value } { Int.convert(value) }
-fn byte(value: i64) -> u8 ! {} { Int.truncate(value) }
-fn word(value: i64) -> u16 ! {} { Int.truncate(value) }
-fn flag(on: Bool, bit: u8) -> u8 ! {} { if on { bit } else { 0 } }
+fn wide(value: u8) -> i64 ensures { result == value } { Int.convert(value) }
+fn byte(value: i64) -> u8 { Int.truncate(value) }
+fn word(value: i64) -> u16 { Int.truncate(value) }
+fn flag(on: Bool, bit: u8) -> u8 { if on { bit } else { 0 } }
 /// The byte with only bit `n` set.
-fn mask(n: u8) -> u8 ! {} { let one: u8 = 1; one << n }
+fn mask(n: u8) -> u8 { let one: u8 = 1; one << n }
 
-fn join(high: u8, low: u8) -> u16 ! {} {
+fn join(high: u8, low: u8) -> u16 {
     (Int.convert::<u16>(high) << 8) | Int.convert::<u16>(low)
 }
 
-fn high(value: u16) -> u8 ! {} { Int.truncate(value >> 8) }
-fn low(value: u16) -> u8 ! {} { Int.truncate(value) }
+fn high(value: u16) -> u8 { Int.truncate(value >> 8) }
+fn low(value: u16) -> u8 { Int.truncate(value) }
 
-fn set_flags<M>(m: &mut Machine<M>, zero: Bool, subtract: Bool, half: Bool, carry: Bool) -> Unit ! {} {
+fn set_flags<M>(m: &mut Machine<M>, zero: Bool, subtract: Bool, half: Bool, carry: Bool) -> Unit {
     m.f = flag(zero, machine.ZERO)
         | flag(subtract, machine.SUBTRACT)
         | flag(half, machine.HALF)
         | flag(carry, machine.CARRY);
 }
 
-fn carry<M>(m: &Machine<M>) -> Bool ! {} { (m.f & machine.CARRY) != 0 }
+fn carry<M>(m: &Machine<M>) -> Bool { (m.f & machine.CARRY) != 0 }
 
-fn hl<M>(m: &Machine<M>) -> u16 ! {} { join(m.h, m.l) }
+fn hl<M>(m: &Machine<M>) -> u16 { join(m.h, m.l) }
 
-fn set_hl<M>(m: &mut Machine<M>, value: u16) -> Unit ! {} {
+fn set_hl<M>(m: &mut Machine<M>, value: u16) -> Unit {
     m.h = high(value);
     m.l = low(value);
 }
 
-fn fetch<M: Mapper>(m: &mut Machine<M>) -> u8 ! {} {
+fn fetch<M: Mapper>(m: &mut Machine<M>) -> u8 {
     let value = machine.read(m, m.pc);
     m.pc = Int.wrapping_add(m.pc, 1);
     value
 }
 
-fn fetch16<M: Mapper>(m: &mut Machine<M>) -> u16 ! {} {
+fn fetch16<M: Mapper>(m: &mut Machine<M>) -> u16 {
     let low = fetch(m);
     join(fetch(m), low)
 }
 
-fn get<M: Mapper>(m: &Machine<M>, r: Reg8) -> u8 ! {} {
+fn get<M: Mapper>(m: &Machine<M>, r: Reg8) -> u8 {
     match r {
         Reg8.B => m.b, Reg8.C => m.c, Reg8.D => m.d, Reg8.E => m.e,
         Reg8.H => m.h, Reg8.L => m.l, Reg8.Hl => machine.read(m, hl(m)), Reg8.A => m.a,
     }
 }
 
-fn set<M: Mapper>(m: &mut Machine<M>, r: Reg8, value: u8) -> Unit ! {alloc} {
+fn set<M: Mapper>(m: &mut Machine<M>, r: Reg8, value: u8) -> Unit {
     match r {
         Reg8.B => { m.b = value; }, Reg8.C => { m.c = value; },
         Reg8.D => { m.d = value; }, Reg8.E => { m.e = value; },
@@ -110,7 +110,7 @@ fn set<M: Mapper>(m: &mut Machine<M>, r: Reg8, value: u8) -> Unit ! {alloc} {
     }
 }
 
-fn get_pair<M>(m: &Machine<M>, p: Pair) -> u16 ! {} {
+fn get_pair<M>(m: &Machine<M>, p: Pair) -> u16 {
     match p {
         Pair.Bc => join(m.b, m.c),
         Pair.De => join(m.d, m.e),
@@ -119,7 +119,7 @@ fn get_pair<M>(m: &Machine<M>, p: Pair) -> u16 ! {} {
     }
 }
 
-fn set_pair<M>(m: &mut Machine<M>, p: Pair, value: u16) -> Unit ! {} {
+fn set_pair<M>(m: &mut Machine<M>, p: Pair, value: u16) -> Unit {
     match p {
         Pair.Bc => { m.b = high(value); m.c = low(value); },
         Pair.De => { m.d = high(value); m.e = low(value); },
@@ -128,14 +128,14 @@ fn set_pair<M>(m: &mut Machine<M>, p: Pair, value: u16) -> Unit ! {} {
     }
 }
 
-fn push<M: Mapper>(m: &mut Machine<M>, value: u16) -> Unit ! {alloc} {
+fn push<M: Mapper>(m: &mut Machine<M>, value: u16) -> Unit {
     m.sp = Int.wrapping_sub(m.sp, 1);
     machine.write(m, m.sp, high(value));
     m.sp = Int.wrapping_sub(m.sp, 1);
     machine.write(m, m.sp, low(value));
 }
 
-fn pop<M: Mapper>(m: &mut Machine<M>) -> u16 ! {} {
+fn pop<M: Mapper>(m: &mut Machine<M>) -> u16 {
     let low = machine.read(m, m.sp);
     m.sp = Int.wrapping_add(m.sp, 1);
     let high = machine.read(m, m.sp);
@@ -143,7 +143,7 @@ fn pop<M: Mapper>(m: &mut Machine<M>) -> u16 ! {} {
     join(high, low)
 }
 
-fn holds<M>(m: &Machine<M>, c: Cond) -> Bool ! {} {
+fn holds<M>(m: &Machine<M>, c: Cond) -> Bool {
     match c {
         Cond.NotZero => (m.f & machine.ZERO) == 0,
         Cond.Zero => (m.f & machine.ZERO) != 0,
@@ -154,7 +154,7 @@ fn holds<M>(m: &Machine<M>, c: Cond) -> Bool ! {} {
 
 // --- Arithmetic ---------------------------------------------------------------
 
-fn accumulate<M>(m: &mut Machine<M>, op: Alu, operand: u8) -> Unit ! {} {
+fn accumulate<M>(m: &mut Machine<M>, op: Alu, operand: u8) -> Unit {
     let a = wide(m.a);
     let v = wide(operand);
     let c = if carry(m) { 1 } else { 0 };
@@ -199,7 +199,7 @@ fn accumulate<M>(m: &mut Machine<M>, op: Alu, operand: u8) -> Unit ! {} {
 }
 
 /// INC and DEC of an 8-bit operand leave the carry flag alone.
-fn step_by<M>(m: &mut Machine<M>, value: u8, up: Bool) -> u8 ! {} {
+fn step_by<M>(m: &mut Machine<M>, value: u8, up: Bool) -> u8 {
     let keep = m.f & machine.CARRY;
     let result = if up { Int.wrapping_add(value, 1) } else { Int.wrapping_sub(value, 1) };
     let half = if up { (value & 0x0F) == 0x0F } else { (value & 0x0F) == 0 };
@@ -207,7 +207,7 @@ fn step_by<M>(m: &mut Machine<M>, value: u8, up: Bool) -> u8 ! {} {
     result
 }
 
-fn rotate<M>(m: &mut Machine<M>, op: Shift, value: u8) -> u8 ! {} {
+fn rotate<M>(m: &mut Machine<M>, op: Shift, value: u8) -> u8 {
     let v = wide(value);
     let c = if carry(m) { 1 } else { 0 };
     let (result, out) = match op {
@@ -224,7 +224,7 @@ fn rotate<M>(m: &mut Machine<M>, op: Shift, value: u8) -> u8 ! {} {
     byte(result)
 }
 
-fn add_hl<M>(m: &mut Machine<M>, operand: u16) -> Unit ! {} {
+fn add_hl<M>(m: &mut Machine<M>, operand: u16) -> Unit {
     let a = machine.wide(hl(m));
     let v = machine.wide(operand);
     let r = a + v;
@@ -235,7 +235,7 @@ fn add_hl<M>(m: &mut Machine<M>, operand: u16) -> Unit ! {} {
 
 /// SP plus a signed byte, as ADD SP,e and LD HL,SP+e compute it: the flags
 /// come from the unsigned low-byte addition.
-fn sp_offset<M: Mapper>(m: &mut Machine<M>) -> u16 ! {} {
+fn sp_offset<M: Mapper>(m: &mut Machine<M>) -> u16 {
     let e = fetch(m);
     let sp = machine.wide(m.sp);
     let v = wide(e);
@@ -244,7 +244,7 @@ fn sp_offset<M: Mapper>(m: &mut Machine<M>) -> u16 ! {} {
     word(sp + signed)
 }
 
-fn daa<M>(m: &mut Machine<M>) -> Unit ! {} {
+fn daa<M>(m: &mut Machine<M>) -> Unit {
     let mut a = wide(m.a);
     let mut carry_out = carry(m);
     let half = (m.f & machine.HALF) != 0;
@@ -260,7 +260,7 @@ fn daa<M>(m: &mut Machine<M>) -> Unit ! {} {
     m.f = subtract | flag(m.a == 0, machine.ZERO) | flag(carry_out, machine.CARRY);
 }
 
-fn jump_relative<M: Mapper>(m: &mut Machine<M>, taken: Bool) -> i64 ! {} {
+fn jump_relative<M: Mapper>(m: &mut Machine<M>, taken: Bool) -> i64 {
     let e = wide(fetch(m));
     if !taken { return 8; }
     let signed = if e >= 0x80 { e - 0x100 } else { e };
@@ -295,7 +295,7 @@ pub fn step<M: Mapper>(m: &mut Machine<M>) -> i64 ! {alloc} {
     cycles
 }
 
-fn execute<M: Mapper>(m: &mut Machine<M>, op: u8) -> i64 ! {alloc} {
+fn execute<M: Mapper>(m: &mut Machine<M>, op: u8) -> i64 {
     let x = op >> 6;
     let y = (op >> 3) & 7;
     let z = op & 7;
@@ -319,7 +319,7 @@ fn execute<M: Mapper>(m: &mut Machine<M>, op: u8) -> i64 ! {alloc} {
     }
 }
 
-fn block0<M: Mapper>(m: &mut Machine<M>, op: u8, y: u8, z: u8) -> i64 ! {alloc} {
+fn block0<M: Mapper>(m: &mut Machine<M>, op: u8, y: u8, z: u8) -> i64 {
     let p = pair(y >> 1);
     let q = y & 1;
     match z {
@@ -398,7 +398,7 @@ fn block0<M: Mapper>(m: &mut Machine<M>, op: u8, y: u8, z: u8) -> i64 ! {alloc} 
     }
 }
 
-fn block3<M: Mapper>(m: &mut Machine<M>, op: u8, y: u8, z: u8) -> i64 ! {alloc} {
+fn block3<M: Mapper>(m: &mut Machine<M>, op: u8, y: u8, z: u8) -> i64 {
     let q = y & 1;
     match z {
         0 => match y {
@@ -542,14 +542,14 @@ fn block3<M: Mapper>(m: &mut Machine<M>, op: u8, y: u8, z: u8) -> i64 ! {alloc} 
 }
 
 /// The eleven unused opcodes lock up a real CPU; here they halt it for good.
-fn illegal<M>(m: &mut Machine<M>, op: u8) -> i64 ! {} {
+fn illegal<M>(m: &mut Machine<M>, op: u8) -> i64 {
     m.halted = true;
     m.ime = false;
     m.ie = 0;
     4
 }
 
-fn prefixed<M: Mapper>(m: &mut Machine<M>, op: u8) -> i64 ! {alloc} {
+fn prefixed<M: Mapper>(m: &mut Machine<M>, op: u8) -> i64 {
     let x = op >> 6;
     let y = (op >> 3) & 7;
     let target = reg8(op);

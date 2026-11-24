@@ -32,12 +32,12 @@ use kernel.term;
 
 pub const PROP_SORT: i64 = -1;
 
-fn at(k: &Kernel, t: i64, i: i64) -> i64 ! {} { term.field(&k.store, t, i) }
+fn at(k: &Kernel, t: i64, i: i64) -> i64 { term.field(&k.store, t, i) }
 
-fn tag(k: &Kernel, t: i64) -> i64 ! {} { term.tag(&k.store, t) }
+fn tag(k: &Kernel, t: i64) -> i64 { term.tag(&k.store, t) }
 
 /// Reject a level mentioning a universe parameter that is not in scope.
-fn level_in_scope(k: &Kernel, level: i64) -> Result<Unit, i64> ! {} {
+fn level_in_scope(k: &Kernel, level: i64) -> Result<Unit, i64> {
     let pairs = term.level_pairs(&k.store, level);
     let mut i = 0;
     while i < pairs {
@@ -50,12 +50,12 @@ fn level_in_scope(k: &Kernel, level: i64) -> Result<Unit, i64> ! {} {
 }
 
 /// The level a sort contributes: `Prop` sits at level 0.
-fn sort_level(k: &mut Kernel, sort: i64) -> i64 ! {alloc} {
+fn sort_level(k: &mut Kernel, sort: i64) -> i64 {
     if sort == PROP_SORT { term.level_of(&mut k.store, 0) } else { sort }
 }
 
 /// The sort a reduced term denotes: `sort l` or `prop`.
-fn as_sort(k: &mut Kernel, t: i64, code: i64) -> Result<i64, i64> ! {alloc} {
+fn as_sort(k: &mut Kernel, t: i64, code: i64) -> Result<i64, i64> {
     let reduced = normal.whnf(k, t)?;
     let reduced_tag = tag(k, reduced);
     if reduced_tag == term.SORT { return Result.Ok(at(k, reduced, 0)); }
@@ -83,7 +83,7 @@ pub fn check(k: &mut Kernel, t: i64, ty: i64) -> Result<Unit, i64> ! {alloc} {
 }
 
 /// The sort returned by a type family `m : domain -> Sort`.
-fn family(k: &mut Kernel, m: i64, domain: i64) -> Result<i64, i64> ! {alloc} {
+fn family(k: &mut Kernel, m: i64, domain: i64) -> Result<i64, i64> {
     let ty = infer(k, m)?;
     let reduced = normal.whnf(k, ty)?;
     if tag(k, reduced) != term.PI { return Result.Err(error.BAD_FAMILY); }
@@ -108,14 +108,14 @@ pub fn infer(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
     result
 }
 
-fn nat(k: &mut Kernel) -> i64 ! {alloc} { term.nat(&mut k.store) }
+fn nat(k: &mut Kernel) -> i64 { term.nat(&mut k.store) }
 
-fn type0(k: &mut Kernel) -> i64 ! {alloc} {
+fn type0(k: &mut Kernel) -> i64 {
     let zero = term.level_of(&mut k.store, 0);
     term.sort(&mut k.store, zero)
 }
 
-fn infer_step(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
+fn infer_step(k: &mut Kernel, t: i64) -> Result<i64, i64> {
     let t_tag = tag(k, t);
     if t_tag == term.VAR {
         let index = at(k, t, 0);
@@ -221,7 +221,7 @@ fn infer_step(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
     Result.Err(error.UNSUPPORTED)
 }
 
-fn infer_natelim(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
+fn infer_natelim(k: &mut Kernel, t: i64) -> Result<i64, i64> {
     let motive = at(k, t, 0);
     let zero_case = at(k, t, 1);
     let step = at(k, t, 2);
@@ -248,7 +248,7 @@ fn infer_natelim(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
     Result.Ok(term.app(&mut k.store, motive, value))
 }
 
-fn infer_transport(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
+fn infer_transport(k: &mut Kernel, t: i64) -> Result<i64, i64> {
     let ty = at(k, t, 0);
     let from = at(k, t, 1);
     let to = at(k, t, 2);
@@ -268,7 +268,7 @@ fn infer_transport(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
 
 /// J: motive : (y : A) -> Eq(A, x, y) -> Sort, refl : motive x (refl A x),
 /// proof : Eq(A, x, y); the result is motive y proof.
-fn infer_eqelim(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
+fn infer_eqelim(k: &mut Kernel, t: i64) -> Result<i64, i64> {
     let ty = at(k, t, 0);
     let left = at(k, t, 1);
     let right = at(k, t, 2);
@@ -315,14 +315,14 @@ fn infer_eqelim(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
 /// The motive of an eliminator abstracts over every family parameter and
 /// then the eliminated value: `(p1 : P1) -> ... -> D p1 .. pk -> Sort`.
 /// Returns the motive's sort.
-fn check_motive(k: &mut Kernel, motive: i64, name: i64, params: i64, levels: i64) -> Result<i64, i64> ! {alloc} {
+fn check_motive(k: &mut Kernel, motive: i64, name: i64, params: i64, levels: i64) -> Result<i64, i64> {
     let size = engine.context_size(k);
     let result = check_motive_in(k, motive, name, params, levels);
     engine.truncate(k, size);
     result
 }
 
-fn check_motive_in(k: &mut Kernel, motive: i64, name: i64, params: i64, levels: i64) -> Result<i64, i64> ! {alloc} {
+fn check_motive_in(k: &mut Kernel, motive: i64, name: i64, params: i64, levels: i64) -> Result<i64, i64> {
     let mut ty = infer(k, motive)?;
     let count = term.list_len(&k.store, params);
     let mut i = 0;
@@ -354,7 +354,7 @@ fn check_motive_in(k: &mut Kernel, motive: i64, name: i64, params: i64, levels: 
 }
 
 /// `IndElim D motive branches scrutinee : motive indices scrutinee`.
-fn infer_indelim(k: &mut Kernel, t: i64) -> Result<i64, i64> ! {alloc} {
+fn infer_indelim(k: &mut Kernel, t: i64) -> Result<i64, i64> {
     let name = at(k, t, 0);
     let motive = at(k, t, 1);
     let branches = at(k, t, 2);
@@ -458,7 +458,7 @@ fn define_data_checked(
     prop: Bool,
     params: i64,
     constructors: i64,
-) -> Result<i64, i64> ! {alloc} {
+) -> Result<i64, i64> {
     let own = data.own_levels(&mut k.store, levels);
     let param_count = term.list_len(&k.store, params);
     let count = term.list_len(&k.store, constructors);
@@ -538,7 +538,7 @@ fn constructor_types(
     own: i64,
     params: i64,
     constructors: i64,
-) -> Result<i64, i64> ! {alloc} {
+) -> Result<i64, i64> {
     let count = term.list_len(&k.store, constructors);
     let mut types: Vec<i64> = Vec.with_capacity(count);
     let mut i = 0;
@@ -592,7 +592,7 @@ fn constructor_types(
 /// Whether `t` is a proof: an inhabitant of a proposition. Types, numerals,
 /// scalar values and `refl` (equality is Type-valued) never are, so they
 /// are answered without inference.
-fn is_proof(k: &mut Kernel, t: i64) -> Result<Bool, i64> ! {alloc} {
+fn is_proof(k: &mut Kernel, t: i64) -> Result<Bool, i64> {
     let t_tag = tag(k, t);
     if !(t_tag == term.VAR || t_tag == term.GLOBAL || t_tag == term.APP || t_tag == term.LAM || t_tag == term.NATELIM || t_tag == term.TRANSPORT || t_tag == term.EQELIM || t_tag == term.INDELIM) {
         return Result.Ok(false);
@@ -613,7 +613,7 @@ pub fn defeq(k: &mut Kernel, a: i64, b: i64) -> Result<Bool, i64> ! {alloc} {
     result
 }
 
-fn defeq_fields(k: &mut Kernel, a: i64, b: i64, count: i64) -> Result<Bool, i64> ! {alloc} {
+fn defeq_fields(k: &mut Kernel, a: i64, b: i64, count: i64) -> Result<Bool, i64> {
     let mut i = 0;
     while i < count {
         let x = at(k, a, i);
@@ -625,7 +625,7 @@ fn defeq_fields(k: &mut Kernel, a: i64, b: i64, count: i64) -> Result<Bool, i64>
 }
 
 /// `λ(d). body` against a non-lambda `other`: `body` against `other↑ 0`.
-fn eta(k: &mut Kernel, lambda: i64, other: i64) -> Result<Bool, i64> ! {alloc} {
+fn eta(k: &mut Kernel, lambda: i64, other: i64) -> Result<Bool, i64> {
     let domain = at(k, lambda, 0);
     let body = at(k, lambda, 1);
     let s = &mut k.store;
@@ -642,7 +642,7 @@ fn eta(k: &mut Kernel, lambda: i64, other: i64) -> Result<Bool, i64> ! {alloc} {
 /// reduction, eta and numerals), or two proofs of equal propositions. The
 /// structural test needs no type inference, so it goes first, and proof
 /// irrelevance, which infers both types, is only tried when it fails.
-fn defeq_step(k: &mut Kernel, a: i64, b: i64) -> Result<Bool, i64> ! {alloc} {
+fn defeq_step(k: &mut Kernel, a: i64, b: i64) -> Result<Bool, i64> {
     if structurally_equal(k, a, b)? { return Result.Ok(true); }
     if is_proof(k, a)? && is_proof(k, b)? {
         let left = infer(k, a)?;
@@ -652,7 +652,7 @@ fn defeq_step(k: &mut Kernel, a: i64, b: i64) -> Result<Bool, i64> ! {alloc} {
     Result.Ok(false)
 }
 
-fn structurally_equal(k: &mut Kernel, a: i64, b: i64) -> Result<Bool, i64> ! {alloc} {
+fn structurally_equal(k: &mut Kernel, a: i64, b: i64) -> Result<Bool, i64> {
     let x = normal.whnf(k, a)?;
     let y = normal.whnf(k, b)?;
     if x == y { return Result.Ok(true); }
@@ -733,7 +733,7 @@ pub fn define(k: &mut Kernel, name: i64, levels: i64, ty: i64, value: i64) -> Re
     Result.Ok(())
 }
 
-fn define_checked(k: &mut Kernel, ty: i64, value: i64) -> Result<Unit, i64> ! {alloc} {
+fn define_checked(k: &mut Kernel, ty: i64, value: i64) -> Result<Unit, i64> {
     sort_of(k, ty)?;
     check(k, value, ty)
 }

@@ -8,15 +8,15 @@ struct Pair<'a, 'b> {
     second: &'b [i64]
 }
 
-fn window<'a>(view: &'a [i64]) -> Window<'a, i64> ! {} {
+fn window<'a>(view: &'a [i64]) -> Window<'a, i64> {
     Window { view: view, start: 0 }
 }
 
-fn first<'a>(window: Window<'a, i64>) -> &'a [i64] ! {} {
+fn first<'a>(window: Window<'a, i64>) -> &'a [i64] {
     window.view
 }
 
-fn at<'a>(window: Window<'a, i64>, index: i64) -> i64 ! {} {
+fn at<'a>(window: Window<'a, i64>, index: i64) -> i64 {
     Slice.get(window.view, index) + window.start
 }
 

@@ -7,7 +7,7 @@
 // Both backends print the same seven lines and exit with status 0.
 use std.option.Option;
 
-fn classify(x: f64) -> i64 ! {} {
+fn classify(x: f64) -> i64 {
     if x.is_nan() {
         3
     } else if x.is_infinite() {

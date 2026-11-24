@@ -5,7 +5,7 @@ use std.test;
 use rust_adapter_example.sha256_adapter;
 
 #[test]
-fn hashing_and_error_text_work() -> Unit ! {io, alloc} {
+fn hashing_and_error_text_work() -> Unit {
     let input = Bytes.from("abc");
     let digest = match sha256_adapter.sha256(&input) {
         Ok(value) => value,
@@ -21,7 +21,7 @@ fn hashing_and_error_text_work() -> Unit ! {io, alloc} {
 }
 
 #[test]
-fn hasher_is_released_exactly_once() -> Unit ! {io, alloc} {
+fn hasher_is_released_exactly_once() -> Unit {
     let digest = {
         let hasher = sha256_adapter.hasher_new();
         let _ = match sha256_adapter.hasher_update(&hasher, &Bytes.from("abc")) {

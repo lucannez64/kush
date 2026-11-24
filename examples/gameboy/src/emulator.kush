@@ -45,7 +45,7 @@ pub fn run_frame<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc} {
 
 /// The four-cycle steps, within the frame budget, until the first one in
 /// which something besides counting happens.
-fn quiet<M: Mapper>(m: &Machine<M>, budget: i64) -> i64 ! {} {
+fn quiet<M: Mapper>(m: &Machine<M>, budget: i64) -> i64 {
     let mut steps = (budget + 3) / 4;
     let timer = machine.timer_quiet(m);
     if timer < steps { steps = timer; }

@@ -55,7 +55,7 @@ pub fn hash(key: &Bytes) -> u64 ! {} {
     h
 }
 
-fn table<V>(count: i64, filler: V, arena_capacity: i64) -> Map<V> ! {alloc} {
+fn table<V>(count: i64, filler: V, arena_capacity: i64) -> Map<V> {
     let mut slots: Vec<Slot<V>> = Vec.with_capacity(count);
     let mut i = 0;
     while i < count {
@@ -89,7 +89,7 @@ pub fn slots<V>(map: &Map<V>) -> i64 ! {} {
 
 /// Whether `arena[start .. start + len(key)]` equals `key`. One range check,
 /// then reads proved in bounds.
-fn same_bytes(arena: &Bytes, start: i64, key: &Bytes) -> Bool ! {} {
+fn same_bytes(arena: &Bytes, start: i64, key: &Bytes) -> Bool {
     let n = Bytes.len(key);
     if start < 0 || start > Bytes.len(arena) - n {
         return false;
@@ -106,7 +106,7 @@ fn same_bytes(arena: &Bytes, start: i64, key: &Bytes) -> Bool ! {} {
 
 /// Append `source[start .. start + n]` to `out`, or nothing if the range is
 /// outside `source`.
-fn append_range(out: Bytes, source: &Bytes, start: i64, n: i64) -> Bytes ! {alloc} {
+fn append_range(out: Bytes, source: &Bytes, start: i64, n: i64) -> Bytes {
     let mut out = out;
     if start < 0 || n < 0 || start > Bytes.len(source) - n {
         return out;
@@ -121,13 +121,13 @@ fn append_range(out: Bytes, source: &Bytes, start: i64, n: i64) -> Bytes ! {allo
 
 /// The first slot of `h`'s probe chain in a table of `count` slots (a power
 /// of two).
-fn home(h: u64, count: i64) -> i64 ! {} {
+fn home(h: u64, count: i64) -> i64 {
     let mask: u64 = Int.truncate(count - 1);
     Int.truncate(h & mask)
 }
 
 /// The slot holding `key`, or -1.
-fn find<V>(map: &Map<V>, key: &Bytes, h: u64) -> i64 ! {} {
+fn find<V>(map: &Map<V>, key: &Bytes, h: u64) -> i64 {
     let slots = &map.slots;
     let count = Vec.len(slots);
     let n = Bytes.len(key);
@@ -156,7 +156,7 @@ fn find<V>(map: &Map<V>, key: &Bytes, h: u64) -> i64 ! {} {
 }
 
 /// The slot `find` returned, read once more (its index is in range).
-fn entry_at<V>(map: &Map<V>, slot: i64) -> Slot<V> ! {} {
+fn entry_at<V>(map: &Map<V>, slot: i64) -> Slot<V> {
     Vec.get(&map.slots, slot)
 }
 
@@ -171,7 +171,7 @@ pub fn contains<V>(map: &Map<V>, key: &Bytes) -> Bool ! {} {
 
 /// The first free (empty or removed) slot on `h`'s probe chain. The table
 /// always has an empty slot, so this terminates.
-fn free_slot<V>(map: &Map<V>, h: u64) -> i64 ! {} {
+fn free_slot<V>(map: &Map<V>, h: u64) -> i64 {
     let slots = &map.slots;
     let count = Vec.len(slots);
     let mut slot = home(h, count);
@@ -185,7 +185,7 @@ fn free_slot<V>(map: &Map<V>, h: u64) -> i64 ! {} {
 }
 
 /// Store a new key, known to be absent, from `source[start .. start + n]`.
-fn place<V>(map: Map<V>, source: &Bytes, start: i64, n: i64, h: u64, value: V) -> Map<V> ! {alloc} {
+fn place<V>(map: Map<V>, source: &Bytes, start: i64, n: i64, h: u64, value: V) -> Map<V> {
     let slot = free_slot(&map, h);
     let Map { slots, arena, count, removed, garbage, filler } = map;
     let was_removed = Vec.get(&slots, slot).state == 2;
@@ -202,7 +202,7 @@ fn place<V>(map: Map<V>, source: &Bytes, start: i64, n: i64, h: u64, value: V) -
 }
 
 /// Rebuild into `count` slots, dropping tombstones and arena garbage.
-fn rebuild<V>(map: Map<V>, count: i64) -> Map<V> ! {alloc} {
+fn rebuild<V>(map: Map<V>, count: i64) -> Map<V> {
     let mut fresh = table(count, map.filler, Bytes.len(&map.arena) - map.garbage + 16);
     let old = &map.slots;
     let old_count = Vec.len(old);

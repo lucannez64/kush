@@ -12,7 +12,7 @@ pub fn empty() -> Bytes ! {alloc} {
     Bytes.with_capacity(0)
 }
 
-fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
+fn append(out: Bytes, text: &Bytes) -> Bytes {
     let mut out = out;
     let mut i = 0;
     while i < Bytes.len(text) {
@@ -22,7 +22,7 @@ fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
     out
 }
 
-fn append_range(out: Bytes, text: &Bytes, start: i64, end: i64) -> Bytes ! {alloc} {
+fn append_range(out: Bytes, text: &Bytes, start: i64, end: i64) -> Bytes {
     let mut out = out;
     let mut i = start;
     while i < end {
@@ -32,7 +32,7 @@ fn append_range(out: Bytes, text: &Bytes, start: i64, end: i64) -> Bytes ! {allo
     out
 }
 
-fn concat(first: &Bytes, second: &Bytes) -> Bytes ! {alloc} {
+fn concat(first: &Bytes, second: &Bytes) -> Bytes {
     let mut out = Bytes.with_capacity(Bytes.len(first) + Bytes.len(second));
     out = append(out, first);
     append(out, second)
@@ -40,13 +40,13 @@ fn concat(first: &Bytes, second: &Bytes) -> Bytes ! {alloc} {
 
 /// A fresh per-attempt temporary name for exclusive creation. The name is
 /// unpredictable and unique, so a planted path cannot be followed.
-fn unique_temp(path: &Bytes, seed: i64, attempt: i64) -> Bytes ! {alloc} {
+fn unique_temp(path: &Bytes, seed: i64, attempt: i64) -> Bytes {
     let prefix = concat(path, &Bytes.from("."));
     let numbered = format_i64_into(prefix, seed + attempt);
     concat(&numbered, &Bytes.from(".tmp"))
 }
 
-fn find_byte(text: &Bytes, byte: i64, start: i64) -> i64 ! {} {
+fn find_byte(text: &Bytes, byte: i64, start: i64) -> i64 {
     let n = Bytes.len(text);
     let mut at = start;
     let mut found = -1;
@@ -158,7 +158,7 @@ pub fn append_task(data: Bytes, title: &Bytes) -> Bytes ! {alloc} {
     Bytes.push(out, 10)
 }
 
-fn rewrite(data: Bytes, id: i64, mode: i64, state: i64) -> Result<Bytes, i64> ! {alloc} {
+fn rewrite(data: Bytes, id: i64, mode: i64, state: i64) -> Result<Bytes, i64> {
     let n = Bytes.len(&data);
     let mut out = Bytes.with_capacity(n);
     let mut start = 0;

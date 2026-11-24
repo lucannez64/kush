@@ -14,11 +14,11 @@ pub fn position(error: ParseError) -> i64 ! {} {
     match error { ParseError.Expected(at) | ParseError.Trailing(at) => at }
 }
 
-fn peek(tokens: &Vec<Token>, at: i64) -> Token ! {} {
+fn peek(tokens: &Vec<Token>, at: i64) -> Token {
     if at >= 0 && at < Vec.len(tokens) { Vec.at(tokens, at, _) } else { Token.Close }
 }
 
-fn primary(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc} {
+fn primary(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> {
     if at >= Vec.len(tokens) { return Err(ParseError.Expected(at)); }
     match peek(tokens, at) {
         Token.Number(n) => Ok(Parsed { tree: Expr.Number(n), next: at + 1 }),
@@ -38,7 +38,7 @@ fn primary(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc}
 }
 
 /// Binary levels share one loop; `level` 0 is +/-, 1 is * and /.
-fn operator(token: Token, level: i64) -> Option ! {} {
+fn operator(token: Token, level: i64) -> Option {
     match token {
         Token.Plus if level == 0 => Option.Some(Op.Add),
         Token.Minus if level == 0 => Option.Some(Op.Sub),
@@ -50,11 +50,11 @@ fn operator(token: Token, level: i64) -> Option ! {} {
 
 enum Option { None, Some(Op) }
 
-fn operand(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> ! {alloc} {
+fn operand(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> {
     if level == 0 { product(tokens, at) } else { primary(tokens, at) }
 }
 
-fn chain(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> ! {alloc} {
+fn chain(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> {
     let Parsed { tree: first, next: start } = operand(tokens, at, level)?;
     let mut tree = first;
     let mut next = start;
@@ -71,8 +71,8 @@ fn chain(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError>
     Ok(Parsed { tree: tree, next: next })
 }
 
-fn product(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc} { chain(tokens, at, 1) }
-fn sum(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc} { chain(tokens, at, 0) }
+fn product(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> { chain(tokens, at, 1) }
+fn sum(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> { chain(tokens, at, 0) }
 
 pub fn parse(tokens: &Vec<Token>) -> Result<Expr, ParseError> ! {alloc} {
     let Parsed { tree: tree, next: next } = sum(tokens, 0)?;

@@ -3,11 +3,11 @@ use std.option.Option;
 // A borrowed text view is a shared four-word descriptor over a validated
 // String. It allocates nothing, never mutates its owner, and cannot outlive it.
 
-fn scalar_count(text: &str) -> i64 ! {} {
+fn scalar_count(text: &str) -> i64 {
     Str.scalar_len(text)
 }
 
-fn initial(text: &str) -> &str ! {} {
+fn initial(text: &str) -> &str {
     if Str.scalar_len(text) == 0 {
         text
     } else {
@@ -15,7 +15,7 @@ fn initial(text: &str) -> &str ! {} {
     }
 }
 
-fn shorten<'long: 'short, 'short>(text: &'long str) -> &'short str ! {} {
+fn shorten<'long: 'short, 'short>(text: &'long str) -> &'short str {
     text
 }
 

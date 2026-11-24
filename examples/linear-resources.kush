@@ -13,16 +13,16 @@
 // or ABI change. Inference, custom grade semirings, and grade-zero erasure are
 // not part of this subset.
 
-fn make(n: i64) -> Box<i64> @[1] ! {alloc} {
+fn make(n: i64) -> Box<i64> @[1] {
     Box.new(n)
 }
 
 /// An annotated identity moves its parameter obligation into the result.
-fn identity(b: Box<i64> @[1]) -> Box<i64> @[1] ! {} {
+fn identity(b: Box<i64> @[1]) -> Box<i64> @[1] {
     b
 }
 
-fn consume(b: Box<i64> @[1]) -> i64 ! {} {
+fn consume(b: Box<i64> @[1]) -> i64 {
     Box.take(b)
 }
 
@@ -47,7 +47,7 @@ impl Produce for Factory {
 }
 
 /// A graded arrow keeps the transfer contract across a call through a value.
-fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc}, n: i64) -> i64 ! {alloc} {
+fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc}, n: i64) -> i64 {
     consume(f(n))
 }
 

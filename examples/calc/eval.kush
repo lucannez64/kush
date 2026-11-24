@@ -8,7 +8,7 @@ pub enum EvalError { DivideByZero }
 
 /// Only multiplicative operators reach here: the parameter type is the
 /// variant subset `Op.Mul | Op.Div`, so the match needs no other arms.
-fn multiplicative(op: Op.Mul | Op.Div, left: i64, right: i64) -> Result<i64, EvalError> ! {} {
+fn multiplicative(op: Op.Mul | Op.Div, left: i64, right: i64) -> Result<i64, EvalError> {
     match op {
         Op.Mul => Ok(left * right),
         Op.Div => if right == 0 { Err(EvalError.DivideByZero) } else { Ok(left / right) },

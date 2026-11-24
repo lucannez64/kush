@@ -2,7 +2,7 @@ module examples.stdio;
 
 enum Result<T, E> { Ok(T), Err(E) }
 
-fn copy(input: Stdin, output: Stdout, buffer: Bytes) -> Result<Unit, i64> ! {io} {
+fn copy(input: Stdin, output: Stdout, buffer: Bytes) -> Result<Unit, i64> {
     let bytes = IO.read_all(input, buffer)?;
     IO.write(output, &bytes)
 }

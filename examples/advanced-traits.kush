@@ -27,7 +27,7 @@ trait Describe {
 impl Describe for Point { fn describe(self: Self) -> i64 ! {} { self.x } }
 impl Describe for Wrapper<i64> { fn describe(self: Self) -> i64 ! {} { self.value } }
 
-fn reveal<T: Scaled>(value: T) -> T.Out ! {} { value.scaled() }
+fn reveal<T: Scaled>(value: T) -> T.Out { value.scaled() }
 
 fn main() -> i64 ! {io} {
     print_i64(reveal(Point { x: 4 }));

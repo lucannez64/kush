@@ -19,7 +19,7 @@ pub fn response_status(response: &Response) -> i64 ! {} {
     response.status
 }
 
-fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
+fn append(out: Bytes, text: &Bytes) -> Bytes {
     let mut out = out;
     let mut i = 0;
     while i < Bytes.len(text) {
@@ -29,7 +29,7 @@ fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
     out
 }
 
-fn find_pair(text: &Bytes, first: i64, second: i64, start: i64) -> i64 ! {} {
+fn find_pair(text: &Bytes, first: i64, second: i64, start: i64) -> i64 {
     let n = Bytes.len(text);
     if start < 0 || start + 1 >= n { return -1; }
     let mut at = start;
@@ -45,7 +45,7 @@ fn find_pair(text: &Bytes, first: i64, second: i64, start: i64) -> i64 ! {} {
     found
 }
 
-fn status_line(text: &Bytes, line_end: i64) -> Result<i64, i64> ! {} {
+fn status_line(text: &Bytes, line_end: i64) -> Result<i64, i64> {
     if line_end < 12 { return Result.Err(22); }
     if Bytes.get(text, 0) != 72 || Bytes.get(text, 1) != 84
         || Bytes.get(text, 2) != 84 || Bytes.get(text, 3) != 80
@@ -71,7 +71,7 @@ fn status_line(text: &Bytes, line_end: i64) -> Result<i64, i64> ! {} {
     Result.Ok((a - 48) * 100 + (b - 48) * 10 + (c - 48))
 }
 
-fn parse(raw: Bytes) -> Result<Response, i64> ! {alloc} {
+fn parse(raw: Bytes) -> Result<Response, i64> {
     let line_end = find_pair(&raw, 13, 10, 0);
     if line_end < 0 {
         return Result.Err(22);
