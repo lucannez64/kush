@@ -510,7 +510,7 @@ impl<W: Write> Server<W> {
             documents: &self.documents,
             root: &root,
         };
-        let result = program::load(&root.display().to_string(), &text, &modules);
+        let result = program::load_std_root(&root.display().to_string(), &text, &modules);
         let mut analysis = Analysis::default();
         match result {
             Ok(program) => {
@@ -608,7 +608,7 @@ impl<W: Write> Server<W> {
             documents: &self.documents,
             root,
         };
-        let program = program::load(&root.display().to_string(), &text, &modules).ok()?;
+        let program = program::load_std_root(&root.display().to_string(), &text, &modules).ok()?;
         let file_index =
             program.sources.files.iter().position(|file| {
                 source_file_path(file).as_deref() == Some(document.path.as_path())
@@ -2059,6 +2059,27 @@ mod tests {
             read_frame(&mut reader).unwrap(),
             Frame::InvalidHeader(_)
         ));
+    }
+
+    /// Viewing a std source file checks it as that std module, with std's
+    /// privileges, instead of rejecting it as a program named under `std`.
+    #[test]
+    fn std_source_files_check_as_std_modules() {
+        let modules = program::Memory(Vec::new());
+        for (key, text) in program::STD {
+            let name = format!("/repo/std/{}.kush", &key[4..]);
+            let program = program::load_std_root(&name, text, &modules)
+                .unwrap_or_else(|(_, error)| panic!("{key}: {}", error.message));
+            assert!(program.sources.files.iter().any(|file| file.name == name), "{key}");
+            if let Err(error) = crate::executable::check_program(&program) {
+                panic!("{key}: {}", error.message);
+            }
+        }
+        let edited = "module std.fs;\nfn helper() -> i64 ! {} { 1 }\n";
+        if let Err((_, error)) = program::load_std_root("/repo/std/fs.kush", edited, &modules) {
+            panic!("edited std.fs: {}", error.message);
+        }
+        assert!(program::load("/repo/std/fs.kush", edited, &modules).is_err());
     }
 
     /// The words `semantic_token_data` colors as keywords, in order.

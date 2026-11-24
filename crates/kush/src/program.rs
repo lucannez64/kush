@@ -183,12 +183,46 @@ pub fn load(
     text: &str,
     modules: &dyn ModuleSource,
 ) -> Result<Program, (Option<SourceMap>, Diagnostic)> {
+    load_with(name, text, modules, None)
+}
+/// Like [`load`], but a root file declaring one of the embedded
+/// standard-library modules (an editor viewing `std/fs.kush`) is loaded as
+/// that std module, imported by an empty synthetic root, so it keeps std's
+/// privileges. Its text and file name replace the embedded copy. Tooling
+/// only: compiled programs must use [`load`].
+pub fn load_std_root(
+    name: &str,
+    text: &str,
+    modules: &dyn ModuleSource,
+) -> Result<Program, (Option<SourceMap>, Diagnostic)> {
+    let key = crate::parser::parse(text)
+        .ok()
+        .and_then(|module| Loader::header(&module))
+        .map(|path| path.join("."))
+        .filter(|key| STD.iter().any(|(n, _)| n == key));
+    match key {
+        Some(key) => load_with(
+            "<std root>",
+            &format!("use {key};\n"),
+            modules,
+            Some((key, name.to_owned(), text.to_owned())),
+        ),
+        None => load(name, text, modules),
+    }
+}
+fn load_with(
+    name: &str,
+    text: &str,
+    modules: &dyn ModuleSource,
+    std_override: Option<(String, String, String)>,
+) -> Result<Program, (Option<SourceMap>, Diagnostic)> {
     let mut loader = Loader {
         sources: SourceMap::default(),
         units: Vec::new(),
         items: Vec::new(),
         by_path: BTreeMap::new(),
         modules,
+        std_override,
     };
     match loader.run(name, text) {
         Ok(()) => Ok(Program {
@@ -208,6 +242,8 @@ struct Loader<'a> {
     items: Vec<ast::Declaration>,
     by_path: BTreeMap<Vec<String>, usize>,
     modules: &'a dyn ModuleSource,
+    /// (module key, file name, text) replacing one embedded std module.
+    std_override: Option<(String, String, String)>,
 }
 impl Loader<'_> {
     fn parse(&mut self, name: String, text: String) -> Result<(usize, ast::Module), Diagnostic> {
@@ -320,7 +356,11 @@ impl Loader<'_> {
             return Ok(Some(*unit));
         }
         let key = path.join(".");
-        let found = if path.first().is_some_and(|p| p == "std") {
+        let found = if let Some((_, name, text)) =
+            self.std_override.as_ref().filter(|(k, _, _)| *k == key)
+        {
+            Some((name.clone(), text.clone()))
+        } else if path.first().is_some_and(|p| p == "std") {
             STD.iter()
                 .find(|(name, _)| *name == key)
                 .map(|(name, text)| (format!("<{name}>"), (*text).to_owned()))
