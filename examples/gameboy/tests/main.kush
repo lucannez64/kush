@@ -77,6 +77,22 @@ fn push_and_pop_move_pairs_through_the_stack() -> Unit {
 }
 
 #[test]
+fn halt_with_a_pending_interrupt_and_ime_clear_reads_the_next_byte_twice() -> Unit {
+    // DI; IE = VBlank; IF = VBlank; LD A,0; HALT; INC A; HALT. The interrupt
+    // is pending but cannot be taken, so HALT does not halt and the INC A
+    // after it runs twice (the HALT bug).
+    let mut code: Vec<u8> = Vec.new();
+    code = code.push(0xF3);
+    code = code.push(0x3E).push(0x01).push(0xE0).push(0xFF);
+    code = code.push(0x3E).push(0x01).push(0xE0).push(0x0F);
+    code = code.push(0x3E).push(0x00).push(0x76).push(0x3C).push(0x76);
+    let mut m = machine_for(&code);
+    run(&mut m, 30);
+    test.equal_i64(wide(m.a), 2);
+    test.is_false(m.halted);
+}
+
+#[test]
 fn a_timer_interrupt_wakes_halt_and_jumps_to_its_vector() -> Unit {
     // TIMA = 0xFE, TAC = enabled at 16 cycles, IE = timer, EI, HALT. The
     // vector at 0x50 loads B and halts again.

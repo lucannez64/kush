@@ -107,7 +107,7 @@ Test ROMs are not included. Blargg's are at
 | `src/emulator.kush` | The core's interface (`Buttons`, `Present`, `Play`), the frame loop and screenshots. |
 | `src/terminal.kush` | The terminal front end, as handlers: renderer and frame pacing. |
 | `terminal/` | A Rust adapter with no dependencies: raw mode and key events. |
-| `tests/main.kush` | DAA, the stack, a timer interrupt waking HALT, MBC1 banking, frame length, a square wave and its length counter, and the core under a scripted test front end. |
+| `tests/main.kush` | DAA, the stack, a timer interrupt waking HALT, the HALT bug, MBC1 banking, frame length, a square wave and its length counter, and the core under a scripted test front end. |
 
 Some choices that show the language:
 
@@ -209,8 +209,8 @@ references as scoped borrows ([functions](../../docs/functions.md)).
 ## Not yet
 
 - No Game Boy Color, no serial link, and the MBC3 clock reads as stopped.
-- The HALT bug and the exact timing of reads and writes inside an instruction
-  are not modelled: an instruction's memory accesses happen at its start, and
+- The exact timing of reads and writes inside an instruction is not
+  modelled: an instruction's memory accesses happen at its start, and
   the picture processor draws each line whole when it finishes.
 - Not checked against `dmg-acid2` yet: no built ROM could be fetched in the
   environment this was written in; it builds from source with RGBDS.

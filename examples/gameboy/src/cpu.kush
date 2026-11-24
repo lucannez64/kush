@@ -84,7 +84,12 @@ fn set_hl<M>(m: &mut Machine<M>, value: u16) -> Unit {
 
 fn fetch<M: Mapper>(m: &mut Machine<M>) -> u8 {
     let value = machine.read(m, m.pc);
-    m.pc = Int.wrapping_add(m.pc, 1);
+    if m.halt_bug {
+        // The HALT bug: this fetch leaves PC where it was.
+        m.halt_bug = false;
+    } else {
+        m.pc = Int.wrapping_add(m.pc, 1);
+    }
     value
 }
 
@@ -290,7 +295,15 @@ pub fn step<M: Mapper>(m: &mut Machine<M>) -> i64 ! {alloc} {
     // EI takes effect after the instruction that follows it.
     let enable = m.ime_pending;
     m.ime_pending = false;
-    let cycles = execute(m, fetch(m));
+    let op = fetch(m);
+    let cycles = execute(m, op);
+    // The HALT bug: HALT with an interrupt already pending that cannot be
+    // taken (IME clear, and no EI just before) does not halt, and the next
+    // opcode is read twice. After EI the interrupt is taken instead.
+    if op == 0x76 && pending != 0 && !m.ime && !enable {
+        m.halted = false;
+        m.halt_bug = true;
+    }
     if enable { m.ime = true; }
     cycles
 }
