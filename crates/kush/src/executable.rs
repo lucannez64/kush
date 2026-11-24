@@ -13459,9 +13459,10 @@ struct HandlerScope {
     /// Abortive operations that may leave the body through the resumption
     /// token (its row; E-ABORT-INTERACT).
     token_effects: u16,
-    /// A reusable capturing handler (see `HandlerPush::reusable`): its
-    /// performs, lexical ones included, go through the dynamic frame.
-    reusable: bool,
+    /// The handler was moved into its dynamic frame: a capturing one-shot
+    /// handler of a declared operation, reusable or consumed by its first
+    /// perform. Its performs, lexical ones included, go through the frame.
+    in_frame: bool,
 }
 
 struct Checker<'a, 't> {
@@ -36712,6 +36713,11 @@ impl Checker<'_, '_> {
         // plain values) can serve every perform from a copy of its
         // environment, like a noncapturing `fn`.
         let reusable = declared.is_some() && !multishot && !region && copyable_captures;
+        // Any other capturing handler pushed on the dynamic stack is moved
+        // there too: a perform in its own body reaches it through the frame
+        // (a second one panics, as a second perform from a callee does).
+        let in_frame =
+            declared.is_some() && !multishot && !region && !matches!(handler_type, Type::Fn(_));
         let handler_capture_types = known_captures.unwrap_or_default();
         self.handlers.push(HandlerScope {
             operation: operation.to_owned(),
@@ -36728,7 +36734,7 @@ impl Checker<'_, '_> {
             declared: declared.is_some(),
             abort: None,
             token_effects: token_effects.unwrap_or(0),
-            reusable,
+            in_frame,
         });
         // A lexical handle discharges the declared operation's row requirement
         // for its body: the body is checked as if `Op` were available, while the
@@ -37045,7 +37051,7 @@ impl Checker<'_, '_> {
             declared: declared.is_some(),
             abort: Some(label),
             token_effects: 0,
-            reusable: false,
+            in_frame: false,
         });
         let operation_effect = self.operation_effect(operation);
         let saved_effects = self.effects;
@@ -38428,7 +38434,7 @@ impl Checker<'_, '_> {
             // serves every perform from a copy of its environment; perform
             // through the frame, as a perform by name does. A nested handle
             // for the same operation would intercept that perform.
-            if self.handlers[index].reusable {
+            if self.handlers[index].in_frame {
                 if let Some(inner) = self.handlers[index + 1..]
                     .iter()
                     .find(|inner| inner.operation == operation)
@@ -38728,7 +38734,7 @@ impl Checker<'_, '_> {
             .handlers
             .iter()
             .rposition(|scope| scope.operation == operation)
-            && !self.handlers[index].reusable
+            && !self.handlers[index].in_frame
         {
             return self.lexical_perform(index, operation, operation_effect, value, expected, span);
         }

@@ -278,6 +278,38 @@ fn capturing_capability_handlers_run_in_their_own_body() {
         103,
         "",
     );
+    // BUG-HANDLER-OWNING-CAPTURE: a handler owning a capture is moved into
+    // its frame too, by name or through its capability, and frees it.
+    for perform in ["perform Ask(1)", "perform ask(1)"] {
+        agrees(
+            &format!(
+                "effect Ask: i64 -> i64;
+                 fn main() -> i64 ! {{alloc}} {{
+                     let k = Box.new(100);
+                     handle Ask: i64 -> i64 as ask with fn(
+                         x: i64,
+                         resume: linear once fn(i64) -> i64 ! {{}},
+                     ) -> i64 ! {{}} {{ resume(Box.take(k) + x) }} {{ {perform} + 2 }}
+                 }}"
+            ),
+            103,
+            "",
+        );
+    }
+    // It is consumed by its first perform: a second one panics, as a second
+    // perform from a called function does.
+    let twice = check(
+        "effect Ask: i64 -> i64;
+         fn main() -> i64 ! {alloc} {
+             let k = Box.new(100);
+             handle Ask: i64 -> i64 with fn(
+                 x: i64,
+                 resume: linear once fn(i64) -> i64 ! {},
+             ) -> i64 ! {} { resume(Box.take(k) + x) } { perform Ask(1) + perform Ask(2) }
+         }",
+    )
+    .unwrap();
+    assert!(twice.evaluate(&mut Vec::new()).is_err());
     // The pure handler lives in its dynamic frame, which a nested handle for
     // the same operation would hide.
     rejects(
