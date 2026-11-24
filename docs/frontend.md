@@ -10,7 +10,7 @@ Rust.
 This page retains the bootstrap grammar and parser-phase boundaries. For the
 current checked executable language and features added afterward, use
 [executable.md](executable.md), [lifetimes.md](lifetimes.md),
-[functions.md](functions.md), and [core-status.md](core-status.md). Parser-only
+[functions.md](functions.md), and [core-status.md](history/core-status.md). Parser-only
 acceptance is distinct from the checks performed by `check`, `eval`, and `run`.
 
 ## Run it

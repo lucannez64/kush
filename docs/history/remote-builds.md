@@ -159,7 +159,7 @@ are `examples/mutable-borrowed-records.kush` and
 
 The final no-argument run uploaded 128 files, matched the local SHA-256 manifest,
 and stopped sandbox `bx_3m6vs6ah` with a completed, verified snapshot. See the [borrowing audit record](borrowing-audit.md) and
-[borrowed-record contract](borrowed-records.md). This is not a formal soundness
+[borrowed-record contract](../borrowed-records.md). This is not a formal soundness
 proof.
 
 ## Stopping and resuming
@@ -175,7 +175,7 @@ The basic-values milestone (fixed-width integers and explicit conversions,
 syntax) passes **529 tests**, `cargo fmt --all -- --check`, and Clippy with
 `-D warnings` on Boat. The reference evaluator and native backend agree on the
 executable basic-value cases. Floating-point values remain unimplemented; see
-[basic-values.md](basic-values.md) for the exact remaining scope.
+[basic-values.md](../basic-values.md) for the exact remaining scope.
 
 `scripts/boat-check.sh` stops the sandbox automatically when checks finish, so
 normal use needs no manual lifecycle commands. Use `KUSH_KEEP_RUNNING=1` when you

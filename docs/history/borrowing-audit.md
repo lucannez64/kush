@@ -20,7 +20,7 @@ native lowering and runtime remain trusted implementations.
 - Normal exits cannot abandon linear results already evaluated for an enclosing
   operation. Affine results retain their deterministic cleanup behavior.
 
-The exact syntax and restrictions are in [lifetimes.md](lifetimes.md).
+The exact syntax and restrictions are in [lifetimes.md](../lifetimes.md).
 
 ## Confirmed defects and fixes
 
@@ -68,8 +68,8 @@ additional confirmed defect in its sample. This does not establish the absence
 of other bugs or a formal safety theorem.
 
 Repository regressions are in
-[lifetimes.rs](../crates/kush/tests/lifetimes.rs). The
-[borrowed pipeline](../examples/borrowed-pipeline.kush) integrates byte-buffer
+[lifetimes.rs](../../crates/kush/tests/lifetimes.rs). The
+[borrowed pipeline](../../examples/borrowed-pipeline.kush) integrates byte-buffer
 mutation, elided helper returns, split siblings, borrowed closure callees and
 task joining during argument evaluation.
 
@@ -107,7 +107,7 @@ field carrying the selected callee lifetime, so a wrong output cannot borrow an
 unrelated field. Compiler-inferred local/argument labels are kept only as
 checker-only identities; they are never surface lifetimes.
 
-The regression suite in [borrowed_records.rs](../crates/kush/tests/borrowed_records.rs)
+The regression suite in [borrowed_records.rs](../../crates/kush/tests/borrowed_records.rs)
 covers construction, access, destructuring, copies, aliases, nested/generic
 records, multiple lifetimes, helper results, Vec/Bytes/array owners, split
 siblings, loops/branches, early `?`, same-task suspension, zero/allocation-balanced
@@ -116,7 +116,7 @@ local-owner escapes, wrong/shuffled fields, owner replacement/drop in later
 fields or arguments, mutable or owning mixed fields, container/union/enum/array
 storage, generic type-parameter crossing, function-value parameters/results,
 closures and task captures, and mutable upgrades of shared fields. The example is
-[borrowed-records.kush](../examples/borrowed-records.kush).
+[borrowed-records.kush](../../examples/borrowed-records.kush).
 
 ## Mutable fields and mixed owning records
 
@@ -153,8 +153,8 @@ constructor field order, split siblings stored in one record, mixed owning
 `Box`/`Bytes`/`Vec` payloads, unused-record drop, reordered and partial
 constructors, `?`/loop exits, same-task suspension, `noalloc` helpers,
 self-reference, containers, and linear/stream metadata. Examples are
-[mutable-borrowed-records.kush](../examples/mutable-borrowed-records.kush) and
-[mixed-borrowed-records.kush](../examples/mixed-borrowed-records.kush).
+[mutable-borrowed-records.kush](../../examples/mutable-borrowed-records.kush) and
+[mixed-borrowed-records.kush](../../examples/mixed-borrowed-records.kush).
 
 ## Remaining boundaries
 

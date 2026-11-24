@@ -195,7 +195,7 @@ Vulkan, are unaffected. It is compiled in only when the program uses `Gpu`
   device.
 - Upload and download go through a host-visible staging buffer and convert
   between 64-bit words and 4-byte elements.
-- CI and Boat use Mesa's lavapipe (software Vulkan), so every test runs without
+- CI uses Mesa's lavapipe (software Vulkan), so every test runs without
   GPU hardware.
 
 ## Reference evaluator (GPU-EVAL-ORACLE)

@@ -237,7 +237,7 @@ write the loop.
 ## Validation
 
 - `KUSH_BACKEND=llvm cargo test --workspace` replays the entire suite on the
-  LLVM backend: 1,708 tests pass on both backends and with `KUSH_BACKEND=llvm-release` (LLVM 18.1.3, 2026-11-11).
+  LLVM backend (also with `KUSH_BACKEND=llvm-release`).
   Tests that replace `cc` to exercise the Cranelift pipeline pin themselves to
   it.
 - `tests/llvm_backend.rs` runs 22 example programs through four LLVM

@@ -280,4 +280,4 @@ reachable function can quote at run time. Templates used only by
 - The runtime linker rejects any relocation kind or target it does not
   recognize, so `Code.compile` returns an error instead of publishing code.
 
-Detailed constraints are in [the working notes](staging-runtime-notes.md).
+Detailed constraints are in [the working notes](history/staging-runtime-notes.md).

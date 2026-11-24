@@ -83,15 +83,3 @@ move/linear obligations, and hostile reference escapes. Internal layout tests
 assert actual instantiated word counts and explicit-tag fallbacks. See
 [the example](../examples/niches.kush).
 
-## Validation checkpoint
-
-The full Boat workspace gate passed **1,164 tests**, formatting, and strict
-all-target Clippy. The sandbox was stopped afterwards. Local focused checks
-also passed the two instantiated-layout assertions and ten integration tests;
-each accepted integration program ran in the evaluator and native backend
-with both default and release code generation. Existing integer, string,
-slice, async and linear-task regressions passed locally during development.
-The example prints `42`, `42`, `65` in evaluator and native release execution.
-
-Logs: `/tmp/kush-niche-layout-integration.log`,
-`/tmp/kush-niche-layout-final.log`, `/tmp/kush-boat-niche-first.log`.

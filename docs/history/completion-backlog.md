@@ -10,7 +10,7 @@ changing a diagnostic or deleting an explicit rejection is not completion.
 ## Borrowing
 
 Integrated on `main` in `401662d` and `342537d`; see
-[expanded borrowing contracts](borrowing-extensions.md) for the exact contract
+[expanded borrowing contracts](../borrowing-extensions.md) for the exact contract
 and remaining limits.
 
 - [x] General shared/exclusive reference support, including escape and reborrow
@@ -42,7 +42,7 @@ and remaining limits.
   container are not write destinations; `Vec.try_reserve` through `&mut`
   stays excluded; disjointness is per path, not a range algebra; and only one
   level of borrowed `TaskExit` may cross a child task. See
-  [borrowing-extensions.md](borrowing-extensions.md).
+  [borrowing-extensions.md](../borrowing-extensions.md).
 - [x] Broader sound lifetime inference. Function/arrow/lambda
   results can be inferred from a single record-field source or a per-field body
   origin. A multi-lifetime record supports per-field selection, including
@@ -56,19 +56,19 @@ and remaining limits.
   a body that delegates to a helper follows the helper's declared result
   source. This is a finite, closed constraint graph over one function's
   declared lifetimes with a documented reachability decision procedure (see
-  [borrowing-extensions.md](borrowing-extensions.md#lifetime-constraints-and-decidability)).
+  [borrowing-extensions.md](../borrowing-extensions.md#lifetime-constraints-and-decidability)).
   A returned `&Field` may also name a field of a `&Record` parameter; the finite
   `reference_reaches_type` reachability rule accepts it when the parameter
   lifetime outlives the result, and the ownership pass still proves the exact
   origin. Recursive functions and methods get declaration-level summaries
   solved as a bounded SCC fixed point, including per-field record results and
   inferred caller requirements (R[f]) for inherent methods
-  ([recursive-lifetime-design.md](recursive-lifetime-design.md)). Lifetime
+  ([recursive-lifetime-design.md](../recursive-lifetime-design.md)). Lifetime
   variance is checked by a witness over records, callables and type arguments
-  ([lifetime-variance.md](lifetime-variance.md)). Structural rows carry field
+  ([lifetime-variance.md](../lifetime-variance.md)). Structural rows carry field
   lifetime labels through `..r`, and borrowed structural results are accepted
   when every leaf's actual origin is caller-owned and long enough
-  ([lifetime-rows-design.md](lifetime-rows-design.md)). Accepted limits:
+  ([lifetime-rows-design.md](../lifetime-rows-design.md)). Accepted limits:
   indirect calls, `dyn`, effects, loops and tasks keep explicit contracts;
   trait and generic-impl methods keep exact contracts; outer-only reference
   provenance and canonical indirect-arrow bounds; an elided structural result
@@ -133,7 +133,7 @@ and remaining limits.
   dispatch, and owned upcasts to any subset of their traits. Remaining
   boundaries: no FFI-compatible vtable or open-world membership, no reference
   upcasts or downcasts, no per-field partial moves, no exact-use `@[1]` object
-  results (see [traits.md](traits.md#limits)). A closed object whose trait has
+  results (see [traits.md](../traits.md#limits)). A closed object whose trait has
   one concrete impl keeps its object type everywhere, including tuples
   (`D-SINGLE-TUPLE`): it is not a value of its member type. Generic
   inference from two such objects is still open (`D-SINGLE-JOIN`). Effect-row trait parameters do not
@@ -149,7 +149,7 @@ or `String` associated constants, associated constants depending on an impl
 type parameter, and lifetime/effect impl parameters. The dynamic representation
 is a whole-program checked member table with a fixed fat-object layout, not an
 FFI-compatible vtable or arbitrary open-world membership. See
-[trait contracts](traits.md).
+[trait contracts](../traits.md).
 
 ## Grades and linear resources
 
@@ -223,7 +223,7 @@ outstanding implementation item.
   renaming, row subtraction/aliasing, first-class row values, bare `..` impl
   headers, direct structural owner-reference fields, and floating-point/
   owning/borrowed/union/nominal structural equality. See
-  [subtyping.md](subtyping.md#structural-records).
+  [subtyping.md](../subtyping.md#structural-records).
 - [x] Broader algebraic subtype inference with documented decidability
   boundaries. **Done:** contextual array/vector/tuple/structural literals
   and first-order generic matching accumulate constraints over every finite
@@ -247,7 +247,7 @@ outstanding implementation item.
   substitution survives. Several survivors are an ambiguity diagnostic. Dependent
   unions remain an explicit-specialization boundary. The independent review's
   seven findings are fixed with regressions, and soundness held throughout. See
-  [subtyping.md](subtyping.md#contextual-and-algebraic-inference).
+  [subtyping.md](../subtyping.md#contextual-and-algebraic-inference).
 - [x] Effect handlers and checked resumption ownership. Deep, one-shot by
   default handlers with a linear resumption token, first-class handler
   callables, nested shadowing, handler-effect propagation, and declared
@@ -265,9 +265,9 @@ outstanding implementation item.
   suspension. Remaining limits (no `return`/`?` out of a handled body after a
   perform under a non-tail handler, no multi-prompt capture, no multishot
   through called functions, borrows of outer storage across a perform) are
-  listed in [effect-handlers.md](effect-handlers.md#limits); the design and
+  listed in [effect-handlers.md](../effect-handlers.md#limits); the design and
   eight independent review rounds are in
-  [effect-state-machines.md](effect-state-machines.md).
+  [effect-state-machines.md](../effect-state-machines.md).
 - [x] General row constraints beyond concrete exclusions. A finite Boolean
   constraint solver accumulates inclusion constraints across every higher-order
   argument, unions evidence from repeated row variables, and supports arbitrarily
@@ -286,7 +286,7 @@ outstanding implementation item.
   unification step. Remaining language limits: parameterized row aliases,
   first-class row values (rows only occur in effect annotations), row equality
   predicates. See
-  [effect-constraints.md](effect-constraints.md#accumulated-row-constraints).
+  [effect-constraints.md](../effect-constraints.md#accumulated-row-constraints).
 - [ ] Broader runtime-dependent proofs with mutation/version tracking.
   **Partial:** mutable scalar locals index erased proofs at their current
   version; assignment appends a fresh versioned binder or records an assigned
@@ -309,10 +309,10 @@ outstanding implementation item.
   "not established" boundaries. Calling a closure that
   writes a captured scalar now invalidates old proof facts about that location,
   while a read-only call preserves them. See
-  [runtime-indices.md](runtime-indices.md#4-freezing-mutation-and-joins) and
-  [runtime-indices.md](runtime-indices.md#4a-arithmetic-proof-search).
+  [runtime-indices.md](../runtime-indices.md#4-freezing-mutation-and-joins) and
+  [runtime-indices.md](../runtime-indices.md#4a-arithmetic-proof-search).
 - [x] Runtime-sized inline arrays with checked lifetime/storage layout.
-  **Implemented** in [dynamic-arrays.md](dynamic-arrays.md).
+  **Implemented** in [dynamic-arrays.md](../dynamic-arrays.md).
   `DynArray<T, capacity>` has compile-time capacity, a runtime length, inline
   storage, checked push/set/pop/reads, owning-prefix drop, contextual
   literals, elementwise equality, and shared/exclusive live-prefix views.
@@ -409,7 +409,7 @@ outstanding implementation item.
   concrete state. Also absent: user-supplied per-container metadata allocation
   (fixed headers are runtime-owned bookkeeping) and FFI/raw-pointer callbacks.
   See
-  [memory-completion.md](memory-completion.md#41-user-defined-allocators).
+  [memory-completion.md](../memory-completion.md#41-user-defined-allocators).
 - [x] Fallible allocation/reuse with exact cleanup on all failure paths.
   **Implemented:** `Box.try_new`, growth-capable `Box.try_reuse`,
   `Bytes.try_with_capacity`, `Vec.try_reserve`, `Arena.try_alloc`, and
@@ -434,7 +434,7 @@ output, and scheduling order can differ. Existing explicit map chains
 select that order deliberately. Automatic fusion proves the documented
 trace-free/total equivalence rather than silently changing the language's
 evaluation semantics; the unresolved general cases are listed in
-[memory-completion.md](memory-completion.md#unresolved-generality).
+[memory-completion.md](../memory-completion.md#unresolved-generality).
 
 ## Advanced types and effects validation
 
@@ -456,7 +456,7 @@ rejection diagnostics, native/reference agreement, and owning cleanup for all
 six items. Existing exact-grade, trait, borrowing, async, runtime-index, and
 subtyping suites still pass unchanged except for the deliberate
 mutable-index/frozen-capture relaxations documented in
-[runtime-indices.md](runtime-indices.md).
+[runtime-indices.md](../runtime-indices.md).
 
 Baseline note: commit `3e478cf` did not compile in this checkout because a
 stale `result_linear` field was present in a `Function` literal at
@@ -672,7 +672,7 @@ nominal `dyn` fields, in-place borrowed dispatch of owning/linear members,
 lifetime-parameterized object methods, per-member `Nat` impl substitution) on
 top of `7f372cf`. The full Boat gate passes **908 tests**, formatting, and
 all-targets Clippy. This work has not yet had an independent review.
-Remaining boundaries are listed in [traits.md](traits.md).
+Remaining boundaries are listed in [traits.md](../traits.md).
 
 ## Dynamic trait-object review follow-up
 
@@ -846,7 +846,7 @@ use the checked caller-origin gate; nested field renaming, row
 subtraction/aliasing, first-class row values, direct structural
 owner-reference fields, and bare `..` impl headers remain explicit, tested
 rejections. See
-[subtyping.md](subtyping.md#structural-records).
+[subtyping.md](../subtyping.md#structural-records).
 
 ## Declared effect rows, owned dynamic frames, and task inheritance
 
@@ -930,7 +930,7 @@ allow, on top of `15f62d3`:
   branch thresholds, and Farkas multipliers. Documented limits: no nonlinear
   terms, no full Presburger completeness or complete cutting-plane closure, and
   explicit rational and integer budgets. See
-  [integer-refutation.md](integer-refutation.md).
+  [integer-refutation.md](../integer-refutation.md).
 - **Mutable captures were a snapshot at this checkpoint; they are now live
   views.** The scoped closure-borrow work in P-CLOSURE-LT/P-LIVE-CAPTURE gives
   the environment a checked caller-location loan, and P-INVALIDATE drops old
@@ -1040,7 +1040,7 @@ are receiver-tied borrowed results through owned or temporary receivers,
 mutable/consuming dispatch on projected fields, a projection required before any
 member of an object specialization is registered, multi-trait `dyn A + B`, and
 effect-row trait parameters (which the trait grammar does not support at all).
-See [traits.md](traits.md).
+See [traits.md](../traits.md).
 
 ## DynArray and allocator remainder checkpoint
 

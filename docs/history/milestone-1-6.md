@@ -12,13 +12,13 @@ implementation target. This document describes the boundary of this milestone.
    inference or explicit `::<T>` specialization, generic records and destructuring,
    and owning `Vec<T>` storage. `Vec.new`, `with_capacity`, `push`, `len`, `get`,
    `set`, and proof-checked `at` are available. Copying reads reject owning
-   elements; vectors reject linear elements. [Fixed-length inline arrays](arrays.md)
+   elements; vectors reject linear elements. [Fixed-length inline arrays](../arrays.md)
    support literal/computed constant lengths, `N: Nat` const parameters,
    symbolic lengths in generic records/enums/aliases, explicit specialization
    and narrow length inference, and constant or checked dynamic indexing.
-   Shared and exclusive [slice views](slices.md) span arrays, vectors, and byte
+   Shared and exclusive [slice views](../slices.md) span arrays, vectors, and byte
    buffers with sub-slicing, `len`/`get`/proved `at`, exclusive `set`, explicit
-   [lifetime](lifetimes.md) parameters, checked shared and mutable borrowed
+   [lifetime](../lifetimes.md) parameters, checked shared and mutable borrowed
    returns, capability-ancestry reborrows with parent suspension/restoration,
    and last-use loan release. Checked disjoint mutable siblings are available
    through the restricted `let (left, right) = Slice.split_at_mut(view, mid);`
@@ -26,7 +26,7 @@ implementation target. This document describes the boundary of this milestone.
    views for local calls. Runtime-sized inline arrays, general disjoint-range
    inference, borrowed
    owner-reference returns, and general lifetime inference remain deferred; see
-   [dependent array lengths](dependent-indices.md).
+   [dependent array lengths](../dependent-indices.md).
 3. **Iteration and diagnostics:** `while`, `loop`, `break`, and `continue`, with
    ownership checking across repeated iterations and cleanup on exits. Break
    statements in match arms need a block, e.g. `None => { break; }`.
@@ -45,14 +45,14 @@ implementation target. This document describes the boundary of this milestone.
    checked logical proof term, which the kernel verifies with call-site
    substitution and no proof search. Immutable runtime `i64`/`Bool`/`Unit`
    values may also be symbolic indices in erased proof types (never machine
-   arithmetic or evidence); see [runtime indices](runtime-indices.md). A `Prop`
+   arithmetic or evidence); see [runtime indices](../runtime-indices.md). A `Prop`
    sort, positive inductive
    propositions, and proof irrelevance for `Prop` inhabitants are implemented;
    large elimination from user propositions is rejected. Propositions over
    runtime values and general relevance/irrelevance rules remain future work.
-   See [the kernel boundary](kernel.md#checked-interoperability-with-executable-functions),
-   [dependent array lengths](dependent-indices.md), and
-   [propositions](propositions.md).
+   See [the kernel boundary](../kernel.md#checked-interoperability-with-executable-functions),
+   [dependent array lengths](../dependent-indices.md), and
+   [propositions](../propositions.md).
 5. **Usage grades:** `T @[g]` supports natural exact multiplicities, `@[many]`,
    and compile-time grade arithmetic over a checked natural-plus-infinity
    semiring. `@[1]` preserves the original exactly-once semantics and
@@ -70,7 +70,7 @@ implementation target. This document describes the boundary of this milestone.
    rejected, and an ungraded result cannot launder a linear binding. Erased proof
    parameters remain the zero-runtime erasure mechanism. User-defined grade
    semirings, grade inference, dependent grade indices, and a formal soundness
-   proof remain deferred. See [usage grades](grades.md).
+   proof remain deferred. See [usage grades](../grades.md).
 6. **Algebraic subtyping:** normalized heterogeneous unions and intersections
    over the concrete value fragment, including same-enum variant subsets
    (`Op.Mul | Op.Div`), owning/scalar/record/enum unions, distributive
@@ -78,9 +78,9 @@ implementation target. This document describes the boundary of this milestone.
    narrowing matches written `Type @ pattern`. Same-enum masks keep their
    zero-cost layout; heterogeneous unions use a discriminator. Arrow subtyping
    for first-class function values and owning once closures is implemented in
-   [functions.md](functions.md). Structural record/width subtyping remains
+   [functions.md](../functions.md). Structural record/width subtyping remains
    blocked by the absence of a structural record representation. See
-   [algebraic subtyping](subtyping.md) for the exact boundary.
+   [algebraic subtyping](../subtyping.md) for the exact boundary.
 
 ## Application milestone
 

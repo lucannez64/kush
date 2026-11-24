@@ -12,14 +12,11 @@ printf ' { "todo": ["Ship Kush"], "done": false } ' | ./target/kush-json
 # {"todo":["Ship Kush"],"done":false}
 ```
 
-The Linux x86-64 binary is built remotely on Boat. To build from source on a
-machine where compilation is allowed:
+Build it from source:
 
 ```sh
 cargo run -p kush -- build examples/json.kush -o target/kush-json
 ```
-
-In this workspace, use Boat as directed by `AGENTS.md`.
 
 ## API
 
@@ -108,8 +105,7 @@ printing yet. Parsing and serialization allocate; lexical helpers use checked
 
 ## Validation
 
-The full Boat workspace suite passes 474 tests, formatting and Clippy. JSON
-regressions cover exact number text, decoded Unicode and controls, malformed
+JSON regressions cover exact number text, decoded Unicode and controls, malformed
 UTF-8 and escapes, duplicate keys, error positions, partial-tree cleanup,
 container/depth boundaries and native/reference agreement. Allocations and frees
 balance in reference runs; native normal-exit ownership checks remain enabled.

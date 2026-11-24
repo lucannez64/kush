@@ -108,9 +108,3 @@ proofs are not completed by it. The scope is a precise operational review
 contract for current checked Kush and the upcoming LIFE changes.
 
 
-Validation: the five focused `lifetime_integration_baseline` tests and strict
-Clippy passed on Boat. The accepted last-use case also compares reference,
-default native and release native execution. This is focused baseline evidence,
-not a full-suite result for the upcoming delegated implementations. The initial
-probe confirmed a conservative derived-view parent-drop restriction; tests and
-this contract preserve it rather than claiming Rust-style view-copy semantics.

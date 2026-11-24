@@ -17,7 +17,7 @@ Active work targets useful applications and reusing existing Rust/C libraries:
    lowering, exactly-once `#[foreign("release")]` resources, `LinkSpec` and
    `build_with_options`, generated Rust adapter shims with panic containment,
    the `[native]` manifest mapping, and `examples/rust-adapter/` reusing `sha2`.
-   See [native interop](native-interop.md). Project-manifest wiring and the
+   See [native interop](../native-interop.md). Project-manifest wiring and the
    integrated Boat gate are parent-owned.
 5. Everyday library helpers and a persistent multi-file CLI application that
    demonstrates the project workflow end to end.
@@ -34,7 +34,7 @@ the reference evaluator: bounded filesystem read/write/append/remove/rename/
 mkdir/list/metadata, process arguments and environment, wall/monotonic clocks
 and sleeping, a bounded non-shell subprocess runner with explicit timeout, and
 one-shot plain TCP exchange. Blocking semantics, errno values, ownership, and
-explicit timeouts are documented in [host-api.md](host-api.md). Reference
+explicit timeouts are documented in [host-api.md](../host-api.md). Reference
 evaluation accepts deterministic `Host` arguments/environment; native output
 reads the real process argv, so the project `ProgramInvocation` forwarding
 requires no source rewriting.
@@ -61,7 +61,7 @@ jobs. Broader compiler validation and independent review remain required.
 ## Project workflow milestone
 
 The practical project layer is implemented in `kush::project` and documented in
-[projects.md](projects.md): strict `Kush.toml` parsing, local path dependency
+[projects.md](../projects.md): strict `Kush.toml` parsing, local path dependency
 resolution with deterministic ordering and cycle/missing/name-collision
 diagnostics, a generated `Kush.lock`, `kush new`, project
 check/build/run/test, `#[test]` discovery with per-test processes and filtering,
@@ -71,10 +71,10 @@ forwarding after `--`, and validated `[native]` manifest extension points.
 This is not full editor or package tooling: the LSP now supplies live
 diagnostics and lexical go-to-definition, but not completion, hover, rename,
 references, semantic tokens, or incremental sync; there is no package registry,
-workspace, or incremental build. See [language-server.md](language-server.md).
+workspace, or incremental build. See [language-server.md](../language-server.md).
 Test functions return `Unit` and use the `std.test` assertion helpers; runtime
 failures are reported by test name with captured output, while compile errors
-retain normal source diagnostics. See [projects.md](projects.md) for exact
+retain normal source diagnostics. See [projects.md](../projects.md) for exact
 limits and integration points.
 
 ## Project workflow integration
@@ -130,7 +130,7 @@ reports drift without writing, and output symlinks are refused. Generated Rust
 requires `panic = "unwind"` and works through `include!`; each adapter derives
 distinct error-helper symbols so two adapters can link together. The
 `examples/rust-adapter` project reuses `sha2` and now demonstrates
-`bindgen -> kush run -> kush test`. See [native interop](native-interop.md).
+`bindgen -> kush run -> kush test`. See [native interop](../native-interop.md).
 Callbacks, arbitrary Rust ABI, borrowed results, structs/variadics, and
 resource ownership transfer into foreign code remain outside the boundary.
 
@@ -192,7 +192,7 @@ Not implemented and not claimed: completion, hover, rename, references,
 semantic tokens, incremental sync, type-directed method dispatch in
 go-to-definition, or a real pretty-printer. Builtins and virtual standard
 modules return no definition instead of a bogus file path. See
-[language-server.md](language-server.md) for protocol details, UTF-16 handling,
+[language-server.md](../language-server.md) for protocol details, UTF-16 handling,
 and the exact limits. Integrated Boat validation at compiler checkpoint
 `772b1f6` passes **56 focused tests** (library, language server, project, CLI,
 and bindgen), formatting, and workspace/all-targets Clippy with warnings denied.
@@ -330,7 +330,7 @@ terminal restoration after q/Ctrl-C and no URI-secret echo. This is separate
 from the compiler workspace test count. Source checkpoint `984e1b1`, final
 PTY harness `d431137`; logs `/tmp/kush-boat-otp-tui-final.log` and
 `/tmp/kush-boat-otp-tui-pty-final.log`. Boat stopped with its snapshot preserved.
-See [the application README](../examples/otp-tui/README.md) for launch commands,
+See [the application README](../../examples/otp-tui/README.md) for launch commands,
 architecture and exact clipboard, memory-erasure and state limits.
 
 ## Native release checkpoint (2026-11-03)
@@ -339,7 +339,7 @@ Compiler `a4060de` adds explicit release optimization and bounded scalar map
 callback inlining. Boat passed 1,141 workspace tests and strict all-target
 Clippy; formatting passed separately. A retry resolved a missing cached
 dependency artifact from the first test attempt. The sandbox stopped with its
-snapshot preserved. See [native optimizations](native-optimizations.md) for
+snapshot preserved. See [native optimizations](../native-optimizations.md) for
 controls, safety boundaries, measurements, and local/remote verification.
 
 ## Runtime cache and collection checkpoint (2026-11-03)
@@ -348,7 +348,7 @@ Compiler `94cbe30` passes the full Boat gate: 1,147 workspace tests, formatting,
 and strict all-target Clippy. The sandbox stopped with its snapshot preserved.
 The installed local `kush` has been updated. Native builds automatically cache
 the C runtime; `--release` also enables vector-push fast paths and guarded
-slice-loop specialization. [Measured results and limits](native-optimizations.md)
+slice-loop specialization. [Measured results and limits](../native-optimizations.md)
 include same-cohort previous-release and Rust controls, plus separate cold/warm
 build timings.
 
@@ -358,5 +358,5 @@ Compiler `528a804` passes the full Boat gate: 1,149 tests, formatting and strict
 Clippy. The sandbox stopped with its snapshot preserved. The local installed
 compiler is updated and passes the JSON-project smoke check. Compact allocation
 headers and per-class retention bounds reduce memory overhead; the
-[measured comparison and tradeoffs](../benchmarks/json-memory/sample-results/compact-pool-2026-11-03/analysis.md)
+[measured comparison and tradeoffs](../../benchmarks/json-memory/sample-results/compact-pool-2026-11-03/analysis.md)
 retain old/current/Rust controls, allocation accounting and three-run phase RSS.

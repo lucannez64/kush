@@ -4,20 +4,12 @@
 redrawn task board. It accepts commands followed by Enter, using the terminal's
 normal line editing. It does not change terminal modes or hide the cursor.
 
-A Linux x86-64 binary built on Boat is available in this checkout:
-
-```sh
-./target/kush-todo
-```
-
-Build and run from source on a machine where compilation is allowed:
+Build and run it from source:
 
 ```sh
 cargo run -p kush -- build examples/todo.kush -o /tmp/kush-todo
 /tmp/kush-todo
 ```
-
-In this workspace, compile and test on Boat as required by `AGENTS.md`.
 
 | Command | Action |
 | --- | --- |

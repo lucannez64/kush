@@ -105,7 +105,7 @@ First add metadata-preserving interning and row views without removing the
 result gate. Then carry descriptors through residual-row inference and callable
 construction. Only after those paths and variance witnesses are integrated
 should LT-STRUCT-RESULT enable supported borrowed result forms. Finalize with
-independent review plus the integrated Boat gate before LT-REVIEW/LIFE close.
+independent review plus the full suite before LT-REVIEW/LIFE close.
 
 ## Implementation status
 

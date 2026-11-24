@@ -5,7 +5,7 @@
 A functional systems language exploring dependent types, algebraic subtyping,
 graded ownership, and direct-style cooperative tasks.
 
-See the [core implementation and integration status](docs/core-status.md).
+See the [core implementation and integration status](docs/history/core-status.md).
 
 Read the [language reference](docs/reference/README.md) for the language as it
 is implemented today; every example in it is checked against the compiler by
@@ -91,7 +91,7 @@ contracts, effect-row parameters,
 transparent generic type aliases, and normalized heterogeneous union/intersection
 types (including callable alternatives), and symbolic `i64`/`Bool`/`Unit`
 runtime indices in erased proofs. See the [steps
-1–6 milestone and its limitations](docs/milestone-1-6.md), the [implemented
+1–6 milestone and its limitations](docs/history/milestone-1-6.md), the [implemented
 grade rules](docs/grades.md), the [algebraic subtyping
 boundary](docs/subtyping.md), [dependent array lengths and compile-time
 indices](docs/dependent-indices.md), [runtime scalar proof
@@ -263,7 +263,7 @@ with an independent JSON oracle and a measured laptop snapshot.
 The standalone [project demo](examples/project-demo) exercises a local module, a
 local dependency, tests, and formatting.
 
-For dependency-first development priorities, see the [foundation roadmap](docs/foundation-roadmap.md).
+For dependency-first development priorities, see the [foundation roadmap](docs/history/foundation-roadmap.md).
 The [streaming copy](examples/stream-copy.kush) example uses `IO.read_chunk` and
 `Bytes.clear` to reuse one buffer for input larger than its capacity.
 

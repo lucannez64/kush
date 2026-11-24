@@ -449,25 +449,3 @@ explicit copies retain their ordinary existing usage rules. The general
 [usage grades](grades.md#result-transfer-contracts)); this conversion boundary
 stays deliberately conservative.
 
-The final full Boat run passes 602 tests, formatting and Clippy with warnings
-denied. The generic-trait/generic-method stage adds eighteen tests for
-concrete specializations, trait-argument identity and arity, bounded helpers,
-contract alpha-equivalence, generic nominal impl targets, borrowed-record
-receivers, loan retention, cross-module visibility, owning cleanup, and
-native/reference agreement; see [traits.md](traits.md). Root review added regression coverage for the String conversion
-boundary after the initial 528-test implementation; the float stage added nine
-tests, including native/reference differential printing, conversion boundaries,
-aggregate/callable storage, lexer/projection regressions, and erased-index
-rejections; the borrowed-text stage adds thirteen tests covering views,
-substrings, boundaries, allocations, loans, helpers/outlives, loops/branches,
-`#[noalloc]`/`#[nosuspend]`, later arguments, native agreement, and every
-documented escape rejection. The static trait/method stage adds sixteen tests
-covering inherent and trait dispatch, bounded generic helpers, receiver order,
-owned moves and cleanup, erased evidence, lifetime returns, visibility,
-duplicates/ambiguity, exact contracts, and rejected unsupported forms; see
-[traits.md](traits.md). The borrowed-receiver stage adds seventeen tests for
-shared inspection and exclusive updates in both backends, ordinary `&Record`
-helpers, owning-record cleanup, nested records and arrays, linear/owning
-borrows, trait contracts and disambiguation, bounded generic helpers,
-`#[noalloc]`/`#[nosuspend]` contracts, and alias/move/field/escape rejections;
-see [borrowed records](borrowed-records.md).

@@ -499,7 +499,3 @@ ordinary arguments and block tails. An early return from any of those positions
 must retain its linear result contract. Regressions pair rejected ungraded
 factories with accepted explicitly graded versions of the same control flow.
 
-Final root validation passes 618 workspace tests, formatting and Clippy on
-Boat. Three additional regression tests cover hidden control-flow returns,
-returns inside `?` operands and later assignments that must not erase an
-earlier return obligation.

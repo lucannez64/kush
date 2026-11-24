@@ -37,14 +37,7 @@ The standalone tests compare every directed four-node graph without self edges
 identity, anonymous names, deterministic path witnesses, missing constraints,
 and empty graphs. Compiler integration tests check cycle witnesses and missing
 call-bound notes; the existing lifetime/borrowing suites remain the acceptance
-and rejection regressions. Integration uses the full Boat gate.
-
-The source review checks that both former closure loops route to the new solver,
-that SCC closure introduces exactly reachable pairs, that declared-cycle rejection
-still occurs before a signature is accepted, and that notes only describe a
-failure rather than changing the successful ownership path. This is a limited
-in-session review and exhaustive small-graph testing, not an independent review
-or a soundness proof.
+and rejection regressions.
 
 Recursive inference across function SCCs, variance rules, lifetimes in row
 variables, borrowed structural results and principal unification remain separate
@@ -53,9 +46,6 @@ to infer those missing contracts. Reachability output can still be quadratic in
 the number of lifetime names because callers currently consume a materialized
 closure set.
 
-Final validation: full Boat gate passed **1,179 tests**, formatting and strict
-workspace/all-target Clippy. Standalone solver tests and Clippy also passed
-locally. No recursive inference or variance node is closed by this result.
 
 
 Follow-up designs (implementation remains open): [lifetime variance](lifetime-variance-design.md)

@@ -41,5 +41,5 @@ is not an automatic box-elimination optimization: boxed controls remain
 available and separately measured.
 
 The [measured checkpoint](../benchmarks/json-memory/sample-results/compact-layout-2026-11-03/analysis.md)
-records the 1,152-test full Boat gate, matched before/after controls, explicit
+records matched before/after controls, explicit
 inline metadata controls, remaining per-document overhead and installed CLI.

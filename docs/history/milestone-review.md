@@ -9,15 +9,15 @@ complete implementations of every remaining language feature.
 - Noncapturing lambdas returning shared/exclusive slices from one slice input,
   with checked elision, indirect-call provenance, and split-side metadata.
 - Inherited default trait method bodies with per-impl substitution and exact
-  override contracts; see [traits](traits.md).
+  override contracts; see [traits](../traits.md).
 - Bare result-only grade inference from an expected `@[1]` arrow and transparent
-  grade-parameterized result aliases; see [result grades](result-grade-inference.md).
+  grade-parameterized result aliases; see [result grades](../result-grade-inference.md).
 - Concrete effect exclusion constraints for executable function/method binders,
-  including checked generic `noalloc`/`nosuspend`; see [effects](effect-constraints.md).
+  including checked generic `noalloc`/`nosuspend`; see [effects](../effect-constraints.md).
 - Capacity-preserving vector clear, checked reserve, and explicit interleaved
-  effectful map chains; see [vector reuse](vector-reuse.md).
+  effectful map chains; see [vector reuse](../vector-reuse.md).
 - Bounded native small-block pooling, normal-exit drain, and optional physical
-  pool diagnostics with unchanged logical counters; see [allocator pool](allocator-pool.md).
+  pool diagnostics with unchanged logical counters; see [allocator pool](../allocator-pool.md).
 
 ## Validation
 

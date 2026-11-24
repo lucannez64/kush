@@ -7,7 +7,7 @@ memory/performance superiority over Rust.
 Test counts and gate runs below are historical milestone records. "Boat" was a
 remote build machine that is no longer available; every milestone below is
 committed. The open structural changes are in
-[foundations-review.md](foundations-review.md).
+[foundations-review.md](../foundations-review.md).
 
 | Area | Implemented |
 | --- | --- |
@@ -60,7 +60,7 @@ The example prints `100`, `4`, and `3`. `Box.reuse` retains one box allocation
 across 100 updates, and `Vec.map_in_place` retains vector storage while
 transforming elements. `--stats` writes one stable `allocation-stats:` line to
 stderr without changing program stdout or exit status. See
-[checked reuse and allocation diagnostics](reuse.md). These counters are
+[checked reuse and allocation diagnostics](../reuse.md). These counters are
 tooling observations, not source effects or proof facts.
 
 ## Integration review and regression fixes
@@ -117,7 +117,7 @@ an already-evaluated linear callee or earlier linear argument. A loop contained
 entirely inside an argument may still finish normally. Affine cleanup remains
 valid on these paths. See the [borrowing audit record](borrowing-audit.md).
 
-The [borrowed pipeline example](../examples/borrowed-pipeline.kush) combines
+The [borrowed pipeline example](../../examples/borrowed-pipeline.kush) combines
 elided returns, checked split siblings and borrowed closures over a byte buffer.
 A closure callee remains loaned while its argument joins another task. The
 reference evaluator and native executable both print `20`, `120`, and `7`.
@@ -129,7 +129,7 @@ copyable fields work through shared and exclusive references; exclusive
 references may replace copyable, non-owning fields. Stored, returned, captured,
 projected, temporary, reborrowed-through-reference, borrowed-field, and
 owning-field access remains explicitly rejected. See
-[borrowed records](borrowed-records.md) and [static traits](traits.md).
+[borrowed records](../borrowed-records.md) and [static traits](../traits.md).
 
 The borrowed-record milestone adds `struct Window<'a, T> { view: &'a [T], ... }`
 and exclusive `view: &'a mut [T]` fields with checked destructuring, shared
@@ -140,7 +140,7 @@ survives calls and reordered record temporaries; shared fields cannot be
 upgraded to mutable, and an exclusive field is extracted by destructuring first.
 Stored views elsewhere, containers/unions/generic/callable/task escapes, linear
 or stream/callable/union mixed metadata, and self-reference are rejected. See
-[borrowed and mixed records](borrowed-records.md).
+[borrowed and mixed records](../borrowed-records.md).
 
 These tests and reviews do not establish the absence of all bugs. The kernel,
 compiler, C runtime support and toolchain remain trusted implementations.
@@ -171,10 +171,10 @@ returns with explicit or elided lifetimes, explicit outlives bounds, and
 later-argument loans. Text views are deliberately excluded from records,
 tuples, arrays, `Vec`, `Box`, enums, unions, generic type parameters, closures,
 tasks, and arrow types; `&mut str` was rejected at this milestone (it is now a
-checked exclusive view, see [borrowed text](borrowed-text.md#exclusive-text-views)).
+checked exclusive view, see [borrowed text](../borrowed-text.md#exclusive-text-views)).
 The full Boat run passes **551
 automated tests**, formatting, and Clippy with warnings denied. See
-[borrowed text views](borrowed-text.md).
+[borrowed text views](../borrowed-text.md).
 
 The static trait/method milestone adds trait declarations with owned and
 call-scoped borrowed nominal-record receivers, concrete `impl Trait for Type`
@@ -203,7 +203,7 @@ or escaping/general reference receivers; the [advanced-trait
 stage](#advanced-traits) adds associated items, blanket impls, and closed-world
 objects, including mutable and stored borrowed dispatch. The full Boat run passed **602
 tests**, formatting, and Clippy with warnings denied. See
-[static traits and user-defined methods](traits.md).
+[static traits and user-defined methods](../traits.md).
 
 The default-method extension lets a trait method declare a body. An impl that
 omits the method inherits a fresh checked specialization per `(impl, method)`
@@ -245,8 +245,8 @@ grade-zero binding erasure, and cancellation-preserving linear task results.
 The full Boat run passes
 **618 tests**, formatting, and Clippy with warnings denied; the new
 `examples/linear-resources.kush` prints `20`, `21`, `21`, `7`, and `42` and
-exits with status 0 in both backends. See [usage grades](grades.md) and
-[owned resources](ownership.md).
+exits with status 0 in both backends. See [usage grades](../grades.md) and
+[owned resources](../ownership.md).
 
 ## Advanced traits
 
@@ -312,7 +312,7 @@ Owning or
 `String` associated constants, associated constants that depend on an impl type
 parameter, effect/lifetime impl parameters, `default fn`, negative impls, and
 arbitrary-overlap specialization remain outside this subset. See
-[static traits](traits.md) and the focused
+[static traits](../traits.md) and the focused
 `crates/kush/tests/trait_advanced.rs` regression file.
 
 The advanced-trait changes were validated locally on Linux x86-64 with the
@@ -325,11 +325,11 @@ that integrated run remains with the coordinating parent.
 
 ## Deliberate current boundaries
 
-See [kernel](kernel.md), [propositions](propositions.md),
-[runtime indices](runtime-indices.md), [dependent indices](dependent-indices.md),
-[grades](grades.md), [subtyping](subtyping.md), [functions](functions.md),
-[slices](slices.md), [basic values](basic-values.md), and
-[borrowing/lifetimes](lifetimes.md) for the full rules
+See [kernel](../kernel.md), [propositions](../propositions.md),
+[runtime indices](../runtime-indices.md), [dependent indices](../dependent-indices.md),
+[grades](../grades.md), [subtyping](../subtyping.md), [functions](../functions.md),
+[slices](../slices.md), [basic values](../basic-values.md), and
+[borrowing/lifetimes](../lifetimes.md) for the full rules
 and rejected cases.
 
 The basic-value layer is implemented for fixed-width machine integers, `Char`,
@@ -337,7 +337,7 @@ tuples, validated UTF-8 `String`, and IEEE-754 `f32`/`f64`, with receiver-style
 spellings for the existing builtin operations. Floats have one-word
 bit-preserving storage, IEEE arithmetic/comparisons, explicit checked
 conversions, and shortest round-trip printing in both backends; the exact
-contracts and limits are recorded in [basic-values.md](basic-values.md).
+contracts and limits are recorded in [basic-values.md](../basic-values.md).
 Tuples are 2–16 inline elements and do not store borrows, borrowed records, or
 task handles. Strings have no byte slicing; borrowed `&str` views and checked
 byte-offset substrings are available but stay immutable and outside aggregates,
@@ -369,21 +369,21 @@ physically erased: the caller sees `Unit` and no value can be laundered through
 it. `@[0]` on an owning/linear result, `> 1`, `many`, and abstract result grades
 without a concrete specialization remain rejected on both owning and copyable
 results. User-defined finite grade algebras are validated by exhaustive law
-enumeration; see [grade algebras](grade-algebras.md). General grade inference is
-documented in [grade inference](grade-inference.md), physical grade-zero
-parameter/result/local erasure in [grade-zero erasure](grade-zero-erasure.md),
+enumeration; see [grade algebras](../grade-algebras.md). General grade inference is
+documented in [grade inference](../grade-inference.md), physical grade-zero
+parameter/result/local erasure in [grade-zero erasure](../grade-zero-erasure.md),
 and cancellation-preserving linear and copyable task results in
-[linear task results](linear-task-results.md). Forced cancellation unwinding is
+[linear task results](../linear-task-results.md). Forced cancellation unwinding is
 not implemented.
 
 LLVM, general filesystem/FFI APIs, general automatic effectful fusion, nonblocking task I/O, forced cancellation unwinding, benchmarked
 performance superiority, and kernel/embedded targets remain future work. The
-implemented reuse fragment is explicit and checked; see [reuse.md](reuse.md)
-and [memory-completion.md](memory-completion.md) for justified alloc-only
+implemented reuse fragment is explicit and checked; see [reuse.md](../reuse.md)
+and [memory-completion.md](../memory-completion.md) for justified alloc-only
 fusion, box and vector widening/fallible reuse, the built-in arena strategy
 with an optional user chunk-sizing policy, and measured benchmarks.
 The task system is cooperative on one OS thread; see
-[async.md](async.md) for its exact scheduling, cancellation, ownership, and
+[async.md](../async.md) for its exact scheduling, cancellation, ownership, and
 allocation boundaries.
 
 
@@ -412,23 +412,23 @@ direct and indirect calls. Borrowed `Task.scope` results and borrowed
 `TaskExit<T>` values may cross function/callable boundaries. Mutable owner
 borrows, `&str` fields/containers, and reference-field reads through `&Record`
 remain rejected. See
-[expanded borrowing contracts](borrowing-extensions.md).
+[expanded borrowing contracts](../borrowing-extensions.md).
 
-[Effect-row exclusions](effect-constraints.md) permit concrete forbidden-effect
+[Effect-row exclusions](../effect-constraints.md) permit concrete forbidden-effect
 sets on executable function/method binders, and declared rows support finite
 union/subtraction (`{e - io}`). Checked specializations enforce the constraint,
 including inferred arguments and trait defaults. `noalloc` and `nosuspend`
 permit only rows constrained to exclude their forbidden effect. Effect handlers
 exist only as the restricted one-shot fragment in
-[effect-handlers.md](effect-handlers.md); there is no general constraint solver.
+[effect-handlers.md](../effect-handlers.md); there is no general constraint solver.
 
-[Vector reuse](vector-reuse.md) adds capacity-preserving `Vec.clear`, checked
+[Vector reuse](../vector-reuse.md) adds capacity-preserving `Vec.clear`, checked
 `Vec.reserve`, and explicitly interleaved effectful map chains. Existing nested
-maps retain their original observable order. [Native allocator pooling](allocator-pool.md)
+maps retain their original observable order. [Native allocator pooling](../allocator-pool.md)
 reuses small blocks under a 1 MiB physical retention cap, with normal-exit drain
 and unchanged logical allocation diagnostics. The pool adds 32 bytes of header
 per allocation and has no benchmarked latency or memory superiority claim.
-[Memory completion](memory-completion.md) adds a conservative post-check
+[Memory completion](../memory-completion.md) adds a conservative post-check
 fusion analysis for trace-free total callbacks, `Box.reuse_grow`, vector
 element widening through `Vec.map_in_place_grow`/`Vec.map_chain_in_place_grow`,
 checked fallible box/byte/vector/arena allocation, the reference-retained
@@ -437,7 +437,7 @@ checked fallible box/byte/vector/arena allocation, the reference-retained
 retention. Arbitrary user-supplied alloc/dealloc callbacks and
 container-owned general allocators remain absent.
 
-[General grade inference](grade-inference.md) solves simultaneous equations
+[General grade inference](../grade-inference.md) solves simultaneous equations
 over a decidable natural fragment (`+`/`*`, including repeated occurrences with
 a proven target bound) and over declared finite grade algebras, from explicitly
 graded arguments and expected arrows. Composite parameter and result grade
@@ -463,7 +463,7 @@ x86-64 passes **690 automated tests**, formatting, and Clippy with warnings
 denied, including native/reference agreement for every positive case in
 `tests/borrowing_extensions.rs`. This sub-milestone ran locally under the shared
 Cargo cache; an integrated Boat gate remains for the parent milestone. See
-[expanded borrowing contracts](borrowing-extensions.md).
+[expanded borrowing contracts](../borrowing-extensions.md).
 
 ## Native enum niche encoding
 
@@ -472,4 +472,4 @@ Two-variant enums with one empty variant and one `Box<T>`, `Bool`, `Char`,
 and builtin option/task producers share the encoding. Optional references
 are lexical capability carriers; signatures and declared record fields that
 contain them are explicit rejections until named enum lifetime provenance is
-implemented. See [niche layouts](niche-layouts.md) for the exact scope.
+implemented. See [niche layouts](../niche-layouts.md) for the exact scope.
