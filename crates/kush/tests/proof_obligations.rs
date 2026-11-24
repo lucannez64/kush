@@ -109,7 +109,12 @@ fn main() -> i64 ! {alloc, panic} {
         "{bounds:?}"
     );
     assert!(
-        bounds.contains(&("refined", Container::Vec, Some(16), "0 <= index && index < 16")),
+        bounds.contains(&(
+            "refined",
+            Container::Vec,
+            Some(16),
+            "0 <= index && index < 16"
+        )),
         "{bounds:?}"
     );
     assert!(!bounds.iter().any(|(f, ..)| *f == "proved"), "{bounds:?}");
@@ -142,10 +147,9 @@ fn main() -> i64 ! {alloc, panic} {
 }",
     );
     assert!(
-        rows.iter()
-            .any(|(kind, function, _, text)| kind == "bounds"
-                && function == "first"
-                && text == "s[i]"),
+        rows.iter().any(|(kind, function, _, text)| kind == "bounds"
+            && function == "first"
+            && text == "s[i]"),
         "{rows:?}"
     );
 }

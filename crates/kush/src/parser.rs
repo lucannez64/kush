@@ -10,15 +10,17 @@ const LIMIT: usize = 128;
 
 /// `if`, `match`, `while`, `loop`, `handle` and plain blocks end in `}`.
 fn is_block_like(expr: &Expr) -> bool {
-    expr.staging().is_some_and(|(form, _)| form == StagingForm::Quote) || matches!(
-        expr.kind,
-        ExprKind::If { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::Block(_)
-            | ExprKind::Handle { .. }
-            | ExprKind::While { .. }
-            | ExprKind::Loop(_)
-    )
+    expr.staging()
+        .is_some_and(|(form, _)| form == StagingForm::Quote)
+        || matches!(
+            expr.kind,
+            ExprKind::If { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::Block(_)
+                | ExprKind::Handle { .. }
+                | ExprKind::While { .. }
+                | ExprKind::Loop(_)
+        )
 }
 
 /// Parse syntax only. This does not resolve names, check types, or verify proofs.
@@ -442,7 +444,9 @@ impl Parser {
                 }
                 return Err(self.error("expected a declaration; this frontend supports fn, const, struct, enum, type, module, and use"));
             };
-            let staged = attributes.iter().any(|attribute| attribute.kind == "staged");
+            let staged = attributes
+                .iter()
+                .any(|attribute| attribute.kind == "staged");
             if staged
                 && (attributes
                     .iter()
@@ -941,7 +945,9 @@ impl Parser {
             let span = self.since(start);
             Some(Block {
                 statements: Vec::new(),
-                tail: Some(Box::new(StagingForm::Definition.expression(generator, span))),
+                tail: Some(Box::new(
+                    StagingForm::Definition.expression(generator, span),
+                )),
                 span,
             })
         } else {
@@ -2019,19 +2025,33 @@ impl Parser {
     fn prefix(&mut self) -> Result<Expr> {
         let start = self.current().span;
         let kind = match self.current().kind.clone() {
-            Kind::Ident(word) if word == "quote" && self.tokens.get(self.pos + 1)
-                .is_some_and(|t| t.kind == Kind::Fn) => {
+            Kind::Ident(word)
+                if word == "quote"
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == Kind::Fn) =>
+            {
                 self.bump();
                 let lambda_start = self.current().span;
                 self.stage += 1;
                 let lambda = self.nested(|p| p.lambda());
                 self.stage -= 1;
                 let span = self.since(start);
-                let value = Node::new(ExprKind::Lambda(Box::new(lambda?)), self.since(lambda_start));
+                let value = Node::new(
+                    ExprKind::Lambda(Box::new(lambda?)),
+                    self.since(lambda_start),
+                );
                 return Ok(StagingForm::Quote.expression(value, span));
             }
-            Kind::Ident(word) if self.stage > 0 && (word == "splice" || word == "lift")
-                && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == Kind::LParen) => {
+            Kind::Ident(word)
+                if self.stage > 0
+                    && (word == "splice" || word == "lift")
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == Kind::LParen) =>
+            {
                 self.bump();
                 self.bump();
                 self.stage -= 1;
@@ -2039,7 +2059,11 @@ impl Parser {
                 self.stage += 1;
                 let value = value?;
                 self.expect(&Kind::RParen, "')' after a staging operand")?;
-                let form = if word == "splice" { StagingForm::Splice } else { StagingForm::Lift };
+                let form = if word == "splice" {
+                    StagingForm::Splice
+                } else {
+                    StagingForm::Lift
+                };
                 return Ok(form.expression(value, self.since(start)));
             }
             // `handle` is contextual: `handle Name: ...` starts a handler,

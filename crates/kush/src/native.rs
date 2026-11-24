@@ -5007,7 +5007,9 @@ thread_local! {
 pub fn build_with_clif(program: &Executable, output: &Path) -> Result<String> {
     CLIF_DUMP.with(|dump| *dump.borrow_mut() = Some(String::new()));
     let result = build(program, output);
-    let text = CLIF_DUMP.with(|dump| dump.borrow_mut().take()).unwrap_or_default();
+    let text = CLIF_DUMP
+        .with(|dump| dump.borrow_mut().take())
+        .unwrap_or_default();
     result.map(|()| text)
 }
 
@@ -5065,7 +5067,10 @@ pub fn build_with_codegen(
             return Err(error("fuzz builds use the Cranelift backend"));
         }
         defines.push("-DKUSH_FUZZ=1".to_owned());
-        defines.push(format!("-DKUSH_FUZZ_SITES={}", program.obligation_sites().len()));
+        defines.push(format!(
+            "-DKUSH_FUZZ_SITES={}",
+            program.obligation_sites().len()
+        ));
     }
     let objects = match codegen.backend {
         Backend::Cranelift => {
@@ -5525,12 +5530,22 @@ impl Module for CodeModule {
                 .define_function_with_control_plane(func, ctx, ctrl_plane);
             if result.is_ok() && self.stage_recipes.contains(&func) {
                 let compiled = ctx.compiled_code().unwrap();
-                self.stage_bodies.insert(func, staging::Body {
-                    bytes: compiled.buffer.data().to_vec(),
-                    relocs: compiled.buffer.relocs().iter().map(|relocation|
-                        cranelift_module::ModuleReloc::from_mach_reloc(relocation, &ctx.func, func)
-                    ).collect(),
-                });
+                self.stage_bodies.insert(
+                    func,
+                    staging::Body {
+                        bytes: compiled.buffer.data().to_vec(),
+                        relocs: compiled
+                            .buffer
+                            .relocs()
+                            .iter()
+                            .map(|relocation| {
+                                cranelift_module::ModuleReloc::from_mach_reloc(
+                                    relocation, &ctx.func, func,
+                                )
+                            })
+                            .collect(),
+                    },
+                );
             }
             return result;
         };
@@ -5549,9 +5564,8 @@ impl Module for CodeModule {
             // functions take and return machine words in the platform C
             // convention under both backends, so Cranelift's code for the
             // recipe can call the LLVM-compiled program and be called by it.
-            ctx.compile(self.object.isa(), ctrl_plane).map_err(|error| {
-                cranelift_module::ModuleError::Compilation(error.inner)
-            })?;
+            ctx.compile(self.object.isa(), ctrl_plane)
+                .map_err(|error| cranelift_module::ModuleError::Compilation(error.inner))?;
             let compiled = ctx.compiled_code().unwrap();
             let body = staging::Body {
                 bytes: compiled.buffer.data().to_vec(),
@@ -5594,14 +5608,14 @@ impl Module for CodeModule {
         let mut pointers = Vec::new();
         for relocation in data.all_relocs(cranelift_codegen::binemit::Reloc::Abs8) {
             let pointer = match relocation.name {
-                cranelift_module::ModuleRelocTarget::User { namespace: 0, index }
-                    if relocation.addend == 0 =>
-                {
-                    llvm::DataPointer::Function(FuncId::from_u32(index))
-                }
-                cranelift_module::ModuleRelocTarget::User { namespace: 1, index } => {
-                    llvm::DataPointer::Data(DataId::from_u32(index), relocation.addend)
-                }
+                cranelift_module::ModuleRelocTarget::User {
+                    namespace: 0,
+                    index,
+                } if relocation.addend == 0 => llvm::DataPointer::Function(FuncId::from_u32(index)),
+                cranelift_module::ModuleRelocTarget::User {
+                    namespace: 1,
+                    index,
+                } => llvm::DataPointer::Data(DataId::from_u32(index), relocation.addend),
                 _ => {
                     self.failure
                         .get_or_insert(error("LLVM backend: unsupported address in data"));
@@ -5649,7 +5663,10 @@ fn lower(
     library: bool,
 ) -> Result<Lowered> {
     let staged = staging::prepare(program);
-    let recipes = staged.as_ref().map(|p| p.recipes.clone()).unwrap_or_default();
+    let recipes = staged
+        .as_ref()
+        .map(|p| p.recipes.clone())
+        .unwrap_or_default();
     let program = staged.as_ref().map_or(program, |p| &p.program);
     let split = llvm.as_ref().map_or(Split::WHOLE, |(_, split)| *split);
     let llvm = llvm.map(|(interface, _)| interface);
@@ -5704,10 +5721,13 @@ fn lower(
         .declare_function("kush_print_i64", Linkage::Import, &print_sig)
         .map_err(error)?;
     let mut stage_compile_sig = module.make_signature();
-    stage_compile_sig.params.extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    stage_compile_sig
+        .params
+        .extend([AbiParam::new(I64), AbiParam::new(I64)]);
     stage_compile_sig.returns.push(AbiParam::new(I64));
-    let stage_compile = module.declare_function("kush_stage_compile", Linkage::Import,
-        &stage_compile_sig).map_err(error)?;
+    let stage_compile = module
+        .declare_function("kush_stage_compile", Linkage::Import, &stage_compile_sig)
+        .map_err(error)?;
     let print_u64 = module
         .declare_function("kush_print_u64", Linkage::Import, &print_sig)
         .map_err(error)?;
@@ -6407,7 +6427,9 @@ fn lower(
         }
         ids.push(id);
     }
-    module.stage_recipes.extend(recipes.keys().map(|&index| ids[index]));
+    module
+        .stage_recipes
+        .extend(recipes.keys().map(|&index| ids[index]));
     // Lower only what the program can reach. Every reference to a function,
     // whether a call, a function value or a closure, goes through a
     // declaration in the referring body, and `CodeModule` records those as
@@ -6694,7 +6716,10 @@ fn lower(
                 let id = capture_data[&(index, slot)];
                 let global = g.module.declare_data_in_func(id, g.builder.func);
                 let address = g.builder.ins().symbol_value(I64, global);
-                let value = g.builder.ins().load(I64, ir::MemFlagsData::new(), address, 0);
+                let value = g
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), address, 0);
                 g.assign(slot, &[value]);
                 // Captures borrow immutable artifact storage. They are not
                 // activated as resources owned by an individual invocation.
@@ -8057,7 +8082,11 @@ fn synthesize_drops(
                     .extend((0..program.width(Type::Enum(index))).map(|_| AbiParam::new(I64)));
                 signature.returns.push(AbiParam::new(I64));
                 let cleanup = module
-                    .declare_function(&function_symbol(program, function), Linkage::Local, &signature)
+                    .declare_function(
+                        &function_symbol(program, function),
+                        Linkage::Local,
+                        &signature,
+                    )
                     .map_err(error)?;
                 let mut hold_signature = module.make_signature();
                 hold_signature.returns.push(AbiParam::new(I64));
@@ -12575,20 +12604,35 @@ impl Generator<'_, '_> {
                     }
                     Target::StageCompile(shape) => {
                         let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                            ir::StackSlotKind::ExplicitSlot, 8, STACK_SLOT_ALIGN_SHIFT));
+                            ir::StackSlotKind::ExplicitSlot,
+                            8,
+                            STACK_SLOT_ALIGN_SHIFT,
+                        ));
                         let pointer = self.builder.ins().stack_addr(I64, slot, 0);
                         let status = self.runtime_call(self.stage_compile, &[values[0], pointer]);
-                        let owner = self.builder.ins().load(I64, ir::MemFlagsData::new(), pointer, 0);
+                        let owner =
+                            self.builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), pointer, 0);
                         let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
                         let ok = self.encode_variant(expr.ty, shape.ok_tag, &[owner]);
                         let err = self.encode_variant(expr.ty, shape.err_tag, &[status]);
-                        return Some(ok.into_iter().zip(err).map(|(ok, err)|
-                            self.builder.ins().select(success, ok, err)).collect());
+                        return Some(
+                            ok.into_iter()
+                                .zip(err)
+                                .map(|(ok, err)| self.builder.ins().select(success, ok, err))
+                                .collect(),
+                        );
                     }
                     Target::StageEntry(signature) => {
                         debug_assert_eq!(expr.ty, Type::Fn(*signature));
-                        let owner = self.builder.ins().load(I64, ir::MemFlagsData::new(), values[0], 0);
-                        self.builder.ins().load(I64, ir::MemFlagsData::new(), owner, 16)
+                        let owner =
+                            self.builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                        self.builder
+                            .ins()
+                            .load(I64, ir::MemFlagsData::new(), owner, 16)
                     }
                     // GPU-SUBSET: `#[gpu]` bodies are compiled for the CPU
                     // only as unreachable code; no CPU call reaches them.
@@ -13322,7 +13366,9 @@ impl Generator<'_, '_> {
             // when the byte is invalid, then unwind.
             let slow_invalid = self.builder.create_block();
             let valid = self.builder.create_block();
-            self.builder.ins().brif(invalid, slow_invalid, &[], valid, &[]);
+            self.builder
+                .ins()
+                .brif(invalid, slow_invalid, &[], valid, &[]);
             self.builder.switch_to_block(slow_invalid);
             let _ = self.runtime_call(self.bytes_ops[&op], &[handle, value]);
             self.unwind_exit();
@@ -13943,11 +13989,15 @@ impl Generator<'_, '_> {
     fn x86_intrinsic(&mut self, op: &str, values: &[Value]) -> Option<Words> {
         let (symbol, vectors) = match op {
             "sha256rnds2" if values.len() == 7 => ("kush_x86_sha256rnds2".to_owned(), 3),
-            "sha256msg1" | "sha256msg2" | "sha1nexte" | "sha1msg1" | "sha1msg2" if values.len() == 5 => {
+            "sha256msg1" | "sha256msg2" | "sha1nexte" | "sha1msg1" | "sha1msg2"
+                if values.len() == 5 =>
+            {
                 (format!("kush_x86_{op}"), 2)
             }
             "sha1rnds4" if values.len() == 6 => {
-                let func = self.constant_value(values[5]).filter(|f| (0..=3).contains(f))?;
+                let func = self
+                    .constant_value(values[5])
+                    .filter(|f| (0..=3).contains(f))?;
                 (format!("kush_x86_sha1rnds4_{func}"), 2)
             }
             _ => return None,
@@ -14009,7 +14059,11 @@ impl Generator<'_, '_> {
             for half in 0..halves {
                 let a = self.simd_pack(values[2 * half], values[2 * half + 1], lanes);
                 let vector = if operands == 2 {
-                    let b = self.simd_pack(values[words + 2 * half], values[words + 2 * half + 1], lanes);
+                    let b = self.simd_pack(
+                        values[words + 2 * half],
+                        values[words + 2 * half + 1],
+                        lanes,
+                    );
                     match op {
                         "and" => self.builder.ins().band(a, b),
                         "or" => self.builder.ins().bor(a, b),
@@ -14070,7 +14124,9 @@ impl Generator<'_, '_> {
             }
             // `align_right(hi, lo, k)`: bytes k.. of `lo` then `hi`.
             "align_right" if size == 1 && values.len() == 5 => {
-                let k = u8::try_from(self.constant_value(values[4])?).ok().filter(|k| *k <= 16)?;
+                let k = u8::try_from(self.constant_value(values[4])?)
+                    .ok()
+                    .filter(|k| *k <= 16)?;
                 let bytes = (0..16).map(|j| k + j).collect::<Vec<u8>>();
                 let hi = self.simd_pack(values[0], values[1], lanes);
                 let lo = self.simd_pack(values[2], values[3], lanes);

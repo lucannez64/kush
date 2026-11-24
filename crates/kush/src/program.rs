@@ -278,7 +278,11 @@ impl Loader<'_> {
         // imports (by_path is searched first), letting it forge capability
         // tokens or stand in for std's intrinsics (SIMD-REVIEW).
         if path.first().is_some_and(|p| p == "std") {
-            let span = module.items.first().map(|d| d.item.span).unwrap_or_default();
+            let span = module
+                .items
+                .first()
+                .map(|d| d.item.span)
+                .unwrap_or_default();
             return Err(Diagnostic::new(
                 span,
                 format!(

@@ -309,7 +309,9 @@ pub fn suggestion(kind: ObligationKind, text: &str, goal: &str, function: &Targe
     match kind {
         ObligationKind::Bounds { container, .. } => {
             let Some((base, index)) = split_index(text) else {
-                return format!("check the index before `{text}`, or state its range as a precondition");
+                return format!(
+                    "check the index before `{text}`, or state its range as a precondition"
+                );
             };
             let length = match container {
                 Container::Vec => "Vec",
@@ -344,7 +346,10 @@ pub fn suggestion(kind: ObligationKind, text: &str, goal: &str, function: &Targe
                 let operand = operand.trim();
                 return match unknown(&[operand]) {
                     Some(operand) => lemma(&operand),
-                    None => format!("`erased fits: {{ {} < {operand} }}` on {on}; callers then prove it", low),
+                    None => format!(
+                        "`erased fits: {{ {} < {operand} }}` on {on}; callers then prove it",
+                        low
+                    ),
                 };
             }
             let op = ['+', '-', '*']
@@ -357,8 +362,9 @@ pub fn suggestion(kind: ObligationKind, text: &str, goal: &str, function: &Targe
             if let Some(operand) = unknown(&[left, right]) {
                 return lemma(&operand);
             }
-            if op == '*' && !(super::harness::integer_literal(left).is_some()
-                || super::harness::integer_literal(right).is_some())
+            if op == '*'
+                && !(super::harness::integer_literal(left).is_some()
+                    || super::harness::integer_literal(right).is_some())
             {
                 return format!(
                     "`{left} * {right}` is a product of two values, which the prover does not \
@@ -372,14 +378,16 @@ pub fn suggestion(kind: ObligationKind, text: &str, goal: &str, function: &Targe
                  callers then prove it"
             )
         }
-        ObligationKind::Division => match split_binary(text, '/').or_else(|| split_binary(text, '%')) {
-            Some((_, divisor)) if known(divisor) => format!(
-                "`erased nonzero: {{ {divisor} != 0 }}` on {on} (and rule out MIN / -1 for signed types); \
+        ObligationKind::Division => {
+            match split_binary(text, '/').or_else(|| split_binary(text, '%')) {
+                Some((_, divisor)) if known(divisor) => format!(
+                    "`erased nonzero: {{ {divisor} != 0 }}` on {on} (and rule out MIN / -1 for signed types); \
                  division keeps a run-time check"
-            ),
-            Some((_, divisor)) => lemma(divisor),
-            None => lemma(text),
-        },
+                ),
+                Some((_, divisor)) => lemma(divisor),
+                None => lemma(text),
+            }
+        }
         ObligationKind::Shift => {
             let split = split_binary(text, '<').or_else(|| split_binary(text, '>'));
             match split {
@@ -442,7 +450,12 @@ pub fn reproduction(
         }
         let (slot, value) = slots.next()?;
         match (slot, value) {
-            (Slot::Scalar { scalar, passing, .. }, Value::Scalar(v)) => {
+            (
+                Slot::Scalar {
+                    scalar, passing, ..
+                },
+                Value::Scalar(v),
+            ) => {
                 body.push_str(&format!(
                     "    let {name}: {} = {};\n",
                     scalar_type(*scalar),

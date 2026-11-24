@@ -92,9 +92,10 @@ fn planted_bugs_are_found() {
     session.fuzz(&options(None));
     let last = states(&session, "app.lib.last");
     assert!(
-        last.iter().any(|(state, goal, inputs)| *state == State::Found
-            && goal == "0 <= index && index < len"
-            && inputs.ends_with(&format!("i = {}", inputs_length(inputs)))),
+        last.iter()
+            .any(|(state, goal, inputs)| *state == State::Found
+                && goal == "0 <= index && index < len"
+                && inputs.ends_with(&format!("i = {}", inputs_length(inputs)))),
         "{last:?}"
     );
     let next = states(&session, "app.lib.next");
@@ -121,7 +122,11 @@ fn planted_bugs_are_found() {
 /// The vector length in a decoded `v = [..], i = n` input.
 fn inputs_length(inputs: &str) -> usize {
     let list = &inputs[inputs.find('[').unwrap() + 1..inputs.find(']').unwrap()];
-    if list.is_empty() { 0 } else { list.split(", ").count() }
+    if list.is_empty() {
+        0
+    } else {
+        list.split(", ").count()
+    }
 }
 
 #[test]
@@ -130,14 +135,26 @@ fn true_unreached_and_ungenerated_checks_are_told_apart() {
     let mut session = session(&scratch);
     session.fuzz(&options(None));
     let square = states(&session, "app.lib.square");
-    assert!(square.iter().all(|(state, ..)| *state == State::Survived), "{square:?}");
+    assert!(
+        square.iter().all(|(state, ..)| *state == State::Survived),
+        "{square:?}"
+    );
     let never = states(&session, "app.lib.never");
     assert!(
-        never.contains(&(State::Unreached, "the result of + stays in i64".into(), String::new())),
+        never.contains(&(
+            State::Unreached,
+            "the result of + stays in i64".into(),
+            String::new()
+        )),
         "{never:?}"
     );
     let reveal = states(&session, "app.lib.reveal");
-    assert!(reveal.iter().all(|(state, ..)| *state == State::NoGenerator), "{reveal:?}");
+    assert!(
+        reveal
+            .iter()
+            .all(|(state, ..)| *state == State::NoGenerator),
+        "{reveal:?}"
+    );
     let report = session.render(&options(None));
     assert!(
         report.contains("no generator  app.lib.reveal: no generator for `Secret` (private fields and no constructor)"),
@@ -147,10 +164,14 @@ fn true_unreached_and_ungenerated_checks_are_told_apart() {
     // local, since the program may never build that state.
     let sum = states(&session, "app.lib.sum");
     assert!(
-        sum.iter().any(|(state, _, inputs)| *state == State::Found && inputs.starts_with("p.a = ")),
+        sum.iter()
+            .any(|(state, _, inputs)| *state == State::Found && inputs.starts_with("p.a = ")),
         "{sum:?}"
     );
-    assert!(report.contains("local: reached with a generated record"), "{report}");
+    assert!(
+        report.contains("local: reached with a generated record"),
+        "{report}"
+    );
 }
 
 #[test]
@@ -170,9 +191,15 @@ fn parallel_harnesses_give_the_same_session() {
     // run at once changes only the wall-clock time.
     let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
     let mut alone = session(&scratch);
-    alone.fuzz(&Options { jobs: 1, ..options(None) });
+    alone.fuzz(&Options {
+        jobs: 1,
+        ..options(None)
+    });
     let mut together = session(&scratch);
-    together.fuzz(&Options { jobs: 4, ..options(None) });
+    together.fuzz(&Options {
+        jobs: 4,
+        ..options(None)
+    });
     assert_eq!(alone.reports, together.reports);
     assert_eq!(alone.stats, together.stats);
 }
@@ -217,9 +244,20 @@ fn the_command_reports_and_exits_by_findings() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(output.status.code(), Some(1), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
-    assert!(stdout.contains("FOUND  overflow demo.next  src/main.kush:2:36"), "{stdout}");
-    assert!(stdout.contains("input    x = 9223372036854775807"), "{stdout}");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("FOUND  overflow demo.next  src/main.kush:2:36"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("input    x = 9223372036854775807"),
+        "{stdout}"
+    );
 
     let safe = project("safe");
     std::fs::write(
@@ -242,7 +280,9 @@ fn the_command_reports_and_exits_by_findings() {
         .output()
         .unwrap();
     assert_eq!(listed.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("demo.small\n  overflow src/main.kush:2:"));
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("demo.small\n  overflow src/main.kush:2:")
+    );
 
     let bad = Command::new(env!("CARGO_BIN_EXE_kush"))
         .args(["fuzz", "--runs", "many"])
@@ -282,12 +322,32 @@ fn main() -> i64 ! {} { 0 }
             .map(str::to_owned)
             .collect()
     };
-    assert_eq!(row("function"), ["function", "checks", "proved", "found", "survived", "unreached", "no-gen"]);
+    assert_eq!(
+        row("function"),
+        [
+            "function",
+            "checks",
+            "proved",
+            "found",
+            "survived",
+            "unreached",
+            "no-gen"
+        ]
+    );
     // `next` overflows; `bounded` is fully proved; `mixed` has one proved
     // addition (`a + 1`, a is at most 255) and one found (`+ y`).
-    assert_eq!(row("demo.next"), ["demo.next", "1", "0", "1", "0", "0", "0"]);
-    assert_eq!(row("demo.bounded"), ["demo.bounded", "1", "1", "0", "0", "0", "0"]);
-    assert_eq!(row("demo.mixed"), ["demo.mixed", "2", "1", "1", "0", "0", "0"]);
+    assert_eq!(
+        row("demo.next"),
+        ["demo.next", "1", "0", "1", "0", "0", "0"]
+    );
+    assert_eq!(
+        row("demo.bounded"),
+        ["demo.bounded", "1", "1", "0", "0", "0", "0"]
+    );
+    assert_eq!(
+        row("demo.mixed"),
+        ["demo.mixed", "2", "1", "1", "0", "0", "0"]
+    );
     assert_eq!(
         row("package").join(" "),
         "package demo 4 2 2 0 0 0 100% proved or attacked"
@@ -308,7 +368,10 @@ fn main() -> i64 ! {} { 0 }
     assert_eq!(states.iter().filter(|s| **s == "proved").count(), 2);
     assert_eq!(states.iter().filter(|s| **s == "found").count(), 2);
     let next = lines.iter().find(|v| v["function"] == "demo.next").unwrap();
-    assert_eq!(next["finding"]["input"][0], serde_json::json!(["x", "9223372036854775807"]));
+    assert_eq!(
+        next["finding"]["input"][0],
+        serde_json::json!(["x", "9223372036854775807"])
+    );
     assert_eq!(next["line"], 2);
     let _ = std::fs::remove_dir_all(&path);
 }

@@ -33,29 +33,49 @@ impl Executable {
         let heap = SharedHeap::new();
         let stats = StatsHandle::new(0);
         let mut evaluator = Evaluator {
-            program: self, input: io::empty(), output: io::sink(),
-            fuel: 1_000_000, generation: true, depth: 0,
-            heap: heap.clone(), stats: stats.clone(), task: None,
-            dynamic_handlers: vec![], kstack: vec![], kstack_epoch: 0,
-            abort_scopes: vec![], next_activation: 0, pending_abort: None,
-            try_budget: None, host: Arc::new(Host::empty()),
+            program: self,
+            input: io::empty(),
+            output: io::sink(),
+            fuel: 1_000_000,
+            generation: true,
+            depth: 0,
+            heap: heap.clone(),
+            stats: stats.clone(),
+            task: None,
+            dynamic_handlers: vec![],
+            kstack: vec![],
+            kstack_epoch: 0,
+            abort_scopes: vec![],
+            next_activation: 0,
+            pending_abort: None,
+            try_budget: None,
+            host: Arc::new(Host::empty()),
         };
         let value = evaluator.call(entry, vec![])?;
         let bytes = match &value {
             Value::Enum { fields, .. } if fields.len() == 1 => match fields[0] {
-                Value::Owned(id) => heap.with(id, |value| match value {
-                    Value::Buffer { data, .. } => Some(data.clone()),
-                    _ => None,
-                }).flatten(),
+                Value::Owned(id) => heap
+                    .with(id, |value| match value {
+                        Value::Buffer { data, .. } => Some(data.clone()),
+                        _ => None,
+                    })
+                    .flatten(),
                 _ => None,
             },
             _ => None,
-        }.ok_or_else(|| Diagnostic::new(self.functions[entry].span,
-            "a staged generator must return an owned Code value"))?;
+        }
+        .ok_or_else(|| {
+            Diagnostic::new(
+                self.functions[entry].span,
+                "a staged generator must return an owned Code value",
+            )
+        })?;
         evaluator.drop_value(value)?;
         if heap.len() != 0 || stats.snapshot().allocations != stats.snapshot().deallocations {
-            return Err(Diagnostic::new(self.functions[entry].span,
-                "internal ownership error: generator left live allocations"));
+            return Err(Diagnostic::new(
+                self.functions[entry].span,
+                "internal ownership error: generator left live allocations",
+            ));
         }
         Ok(bytes)
     }
@@ -110,7 +130,10 @@ impl Executable {
                 match &expr.kind {
                     ExprKind::Call(Target::Function(callee), _) => pending.push(*callee),
                     ExprKind::FnValue { function, .. } => pending.push(*function),
-                    ExprKind::Suspend { callee: Some(callee), .. } => pending.push(*callee),
+                    ExprKind::Suspend {
+                        callee: Some(callee),
+                        ..
+                    } => pending.push(*callee),
                     ExprKind::Suspendable(suspendable) => {
                         pending.extend(suspendable.handler_function);
                     }
@@ -724,9 +747,17 @@ fn eval_poll(files: &Mutex<FileTable>, fd: i64, events: i64, timeout: i64) -> (i
     let table = files.lock().unwrap();
     if timeout < -1 {
         (22, 0)
-    } else if table.accepted.get(&fd).is_some_and(|queue| !queue.is_empty()) {
+    } else if table
+        .accepted
+        .get(&fd)
+        .is_some_and(|queue| !queue.is_empty())
+    {
         (0, events & 1)
-    } else if let Some(listener) = table.listeners.get(&fd).map(std::net::TcpListener::try_clone) {
+    } else if let Some(listener) = table
+        .listeners
+        .get(&fd)
+        .map(std::net::TcpListener::try_clone)
+    {
         drop(table);
         // No poll without FFI: try a nonblocking accept every
         // 2 ms until the timeout, keeping what it accepts.
@@ -739,7 +770,13 @@ fn eval_poll(files: &Mutex<FileTable>, fd: i64, events: i64, timeout: i64) -> (i
                     Ok((stream, _)) => {
                         let _ = stream.set_nonblocking(false);
                         let _ = listener.set_nonblocking(false);
-                        files.lock().unwrap().accepted.entry(fd).or_default().push_back(stream);
+                        files
+                            .lock()
+                            .unwrap()
+                            .accepted
+                            .entry(fd)
+                            .or_default()
+                            .push_back(stream);
                         break (0, 1);
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -842,8 +879,10 @@ impl EvalPipe {
         match timeout {
             None => ready(&self.ready.wait_while(state, |state| !ready(state)).unwrap()),
             Some(timeout) => {
-                let (state, _) =
-                    self.ready.wait_timeout_while(state, timeout, |state| !ready(state)).unwrap();
+                let (state, _) = self
+                    .ready
+                    .wait_timeout_while(state, timeout, |state| !ready(state))
+                    .unwrap();
                 ready(&state)
             }
         }
@@ -1051,14 +1090,22 @@ impl SharedHeap {
         self.0.lock().unwrap().map.len()
     }
     fn storage_bytes(&self) -> usize {
-        self.0.lock().unwrap().map.values().map(value_storage_bytes).sum()
+        self.0
+            .lock()
+            .unwrap()
+            .map
+            .values()
+            .map(value_storage_bytes)
+            .sum()
     }
 }
 /// Modelled storage of one value and the buffers it holds inline.
 fn value_storage_bytes(value: &Value) -> usize {
     let dynamic = match value {
         Value::Buffer { capacity, .. } => *capacity,
-        Value::Vector { capacity, items, .. } => capacity
+        Value::Vector {
+            capacity, items, ..
+        } => capacity
             .saturating_mul(std::mem::size_of::<Value>())
             .saturating_add(items.iter().map(value_storage_bytes).sum::<usize>()),
         Value::Enum { fields, .. } => fields.iter().map(value_storage_bytes).sum(),
@@ -5050,8 +5097,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     27 // EFBIG
                 } else {
                     data.resize(start + length as usize, 0);
-                    let streamed =
-                        if offset < 0 { stream_read(fd, &mut data[start..]) } else { None };
+                    let streamed = if offset < 0 {
+                        stream_read(fd, &mut data[start..])
+                    } else {
+                        None
+                    };
                     let table = self.host.files.lock().unwrap();
                     let (status, received) = match (streamed, table.open.get(&fd)) {
                         (Some(Ok(count)), _) => (0, count),
@@ -5259,7 +5309,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             "kush_sys_spawn" => {
                 let program = self.borrowed_bytes(&args[0]).ok_or_else(internal)?;
                 let arguments = self.borrowed_bytes(&args[1]).ok_or_else(internal)?;
-                let target = self.host.files.lock().unwrap().pipe_writers.get(&args[2].scalar()).cloned();
+                let target = self
+                    .host
+                    .files
+                    .lock()
+                    .unwrap()
+                    .pipe_writers
+                    .get(&args[2].scalar())
+                    .cloned();
                 match target {
                     None => (9, 0),
                     Some(_) if program.is_empty() || program.contains(&0) => (22, 0),
@@ -5289,7 +5346,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 match child {
                     None => (10, 0), // ECHILD
                     Some(mut child) => {
-                        let status = if block { child.wait().map(Some) } else { child.try_wait() };
+                        let status = if block {
+                            child.wait().map(Some)
+                        } else {
+                            child.try_wait()
+                        };
                         match status {
                             Ok(None) => {
                                 self.host.files.lock().unwrap().children.insert(pid, child);
@@ -5327,7 +5388,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 // tasks are polled in ready-queue order. Without tasks it
                 // is a plain poll.
                 let (fd, events, timeout) = (args[0].scalar(), args[1].scalar(), args[2].scalar());
-                let step = |left: Option<Duration>| left.map_or(1, |left| left.as_millis().min(1) as i64);
+                let step =
+                    |left: Option<Duration>| left.map_or(1, |left| left.as_millis().min(1) as i64);
                 if !(-1..=i64::from(i32::MAX)).contains(&timeout) {
                     (22, 0)
                 } else if self.task.is_none() {
@@ -5335,18 +5397,26 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         eval_poll(&self.host.files, fd, events, timeout)
                     } else {
                         loop {
-                            thread::sleep(Duration::from_millis(if timeout < 0 { 1000 } else { timeout as u64 }));
-                            if timeout >= 0 { break (0, 0); }
+                            thread::sleep(Duration::from_millis(if timeout < 0 {
+                                1000
+                            } else {
+                                timeout as u64
+                            }));
+                            if timeout >= 0 {
+                                break (0, 0);
+                            }
                         }
                     }
                 } else {
-                    let deadline = (timeout >= 0).then(|| Instant::now() + Duration::from_millis(timeout as u64));
+                    let deadline = (timeout >= 0)
+                        .then(|| Instant::now() + Duration::from_millis(timeout as u64));
                     let shielded = events & 256 != 0;
                     loop {
                         if !shielded && self.task_comm()?.check_cancel() {
                             break (125, 0); // ECANCELED
                         }
-                        let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                        let left = deadline
+                            .map(|deadline| deadline.saturating_duration_since(Instant::now()));
                         let slice = step(left);
                         let result = if fd >= 0 {
                             eval_poll(&self.host.files, fd, events, slice)
@@ -5366,9 +5436,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
             "kush_sys_connect_start" => {
                 let (list, index) = (args[0].scalar(), args[1].scalar());
-                let address = self.host.files.lock().unwrap().addresses.get(&list).map(|addresses| {
-                    usize::try_from(index).ok().and_then(|i| addresses.get(i).copied())
-                });
+                let address =
+                    self.host
+                        .files
+                        .lock()
+                        .unwrap()
+                        .addresses
+                        .get(&list)
+                        .map(|addresses| {
+                            usize::try_from(index)
+                                .ok()
+                                .and_then(|i| addresses.get(i).copied())
+                        });
                 match address {
                     None => (9, 0),
                     Some(None) => (2, 0),
@@ -5386,7 +5465,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
             }
             "kush_sys_connect_finish" => {
-                if self.host.files.lock().unwrap().sockets.contains_key(&args[0].scalar()) {
+                if self
+                    .host
+                    .files
+                    .lock()
+                    .unwrap()
+                    .sockets
+                    .contains_key(&args[0].scalar())
+                {
                     (0, 0)
                 } else {
                     (9, 0)
@@ -5401,13 +5487,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Ok(host) => match (host, port as u16).to_socket_addrs() {
                         // IPv6 only, like getaddrinfo with AF_INET6 and no
                         // AI_V4MAPPED: nothing left is EINVAL, as natively.
-                        Ok(addresses) if symbol == "kush_sys_resolve_udp6" => {
-                            Some(addresses.filter(std::net::SocketAddr::is_ipv6).collect::<Vec<_>>())
-                                .filter(|addresses| !addresses.is_empty())
-                                .ok_or(22)
-                        }
+                        Ok(addresses) if symbol == "kush_sys_resolve_udp6" => Some(
+                            addresses
+                                .filter(std::net::SocketAddr::is_ipv6)
+                                .collect::<Vec<_>>(),
+                        )
+                        .filter(|addresses| !addresses.is_empty())
+                        .ok_or(22),
                         Ok(addresses) => Ok(addresses.collect::<Vec<_>>()),
-                        Err(error) => Err(error.raw_os_error().filter(|code| *code > 0).map_or(22, i64::from)),
+                        Err(error) => Err(error
+                            .raw_os_error()
+                            .filter(|code| *code > 0)
+                            .map_or(22, i64::from)),
                     },
                 };
                 match resolved {
@@ -5431,14 +5522,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
             "kush_sys_connect" => {
                 let (list, index, timeout) = (args[0].scalar(), args[1].scalar(), args[2].scalar());
-                let address = self
-                    .host
-                    .files
-                    .lock()
-                    .unwrap()
-                    .addresses
-                    .get(&list)
-                    .map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied()));
+                let address =
+                    self.host
+                        .files
+                        .lock()
+                        .unwrap()
+                        .addresses
+                        .get(&list)
+                        .map(|addresses| {
+                            usize::try_from(index)
+                                .ok()
+                                .and_then(|i| addresses.get(i).copied())
+                        });
                 match address {
                     None => (9, 0),
                     Some(None) => (2, 0), // ENOENT: past the end
@@ -5447,7 +5542,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         let connected = if timeout < 0 {
                             TcpStream::connect(address)
                         } else {
-                            TcpStream::connect_timeout(&address, Duration::from_millis(timeout.max(1) as u64))
+                            TcpStream::connect_timeout(
+                                &address,
+                                Duration::from_millis(timeout.max(1) as u64),
+                            )
                         };
                         match connected {
                             Ok(socket) => {
@@ -5465,11 +5563,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             "kush_sys_send" => {
                 let data = self.borrowed_bytes(&args[1]).ok_or_else(internal)?;
                 let start = args[2].scalar();
-                let socket = self.host.files.lock().unwrap().sockets.get(&args[0].scalar()).map(TcpStream::try_clone);
+                let socket = self
+                    .host
+                    .files
+                    .lock()
+                    .unwrap()
+                    .sockets
+                    .get(&args[0].scalar())
+                    .map(TcpStream::try_clone);
                 match socket {
                     None => (9, 0),
                     Some(_) if start < 0 || start as usize > data.len() => (22, 0),
-                    Some(socket) => code(socket.and_then(|mut socket| socket.write(&data[start as usize..])).map(|count| count as i64)),
+                    Some(socket) => code(
+                        socket
+                            .and_then(|mut socket| socket.write(&data[start as usize..]))
+                            .map(|count| count as i64),
+                    ),
                 }
             }
             "kush_sys_shutdown" => {
@@ -5479,7 +5588,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     2 => Some(Shutdown::Both),
                     _ => None,
                 };
-                match (self.host.files.lock().unwrap().sockets.get(&args[0].scalar()), how) {
+                match (
+                    self.host
+                        .files
+                        .lock()
+                        .unwrap()
+                        .sockets
+                        .get(&args[0].scalar()),
+                    how,
+                ) {
                     (_, None) => (22, 0),
                     (None, _) => (9, 0),
                     (Some(socket), Some(how)) => code(socket.shutdown(how).map(|()| 0)),
@@ -5488,7 +5605,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             "kush_sys_socket" => {
                 let (list, index) = (args[0].scalar(), args[1].scalar());
                 let mut table = self.host.files.lock().unwrap();
-                match table.addresses.get(&list).map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied())) {
+                match table.addresses.get(&list).map(|addresses| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|i| addresses.get(i).copied())
+                }) {
                     None => (9, 0),
                     Some(None) => (2, 0),
                     Some(Some(address)) if table.datagram_lists.contains(&list) => {
@@ -5518,20 +5639,27 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 // is freed on failure, like kush_sys_strerror.
                 let (id, mut data, capacity) = self.take_buffer(&args[2]).ok_or_else(internal)?;
                 let (list, index) = (args[0].scalar(), args[1].scalar());
-                let address = self
-                    .host
-                    .files
-                    .lock()
-                    .unwrap()
-                    .addresses
-                    .get(&list)
-                    .map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied()));
+                let address =
+                    self.host
+                        .files
+                        .lock()
+                        .unwrap()
+                        .addresses
+                        .get(&list)
+                        .map(|addresses| {
+                            usize::try_from(index)
+                                .ok()
+                                .and_then(|i| addresses.get(i).copied())
+                        });
                 let status = match address {
                     None => 9,
                     Some(None) => 2,
-                    Some(Some(address)) => {
-                        Self::append_bounded(&mut data, capacity, address.ip().to_string().as_bytes()).unwrap_or(0)
-                    }
+                    Some(Some(address)) => Self::append_bounded(
+                        &mut data,
+                        capacity,
+                        address.ip().to_string().as_bytes(),
+                    )
+                    .unwrap_or(0),
                 };
                 if status != 0 {
                     self.stats.deallocation();
@@ -5543,11 +5671,17 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             "kush_sys_connect_to" => {
                 let (fd, list, index) = (args[0].scalar(), args[1].scalar(), args[2].scalar());
                 let table = self.host.files.lock().unwrap();
-                let address = table.addresses.get(&list).map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied()));
+                let address = table.addresses.get(&list).map(|addresses| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|i| addresses.get(i).copied())
+                });
                 match (table.datagrams.get(&fd), address) {
                     (_, None) => (9, 0),
                     (_, Some(None)) => (2, 0),
-                    (Some(socket), Some(Some(address))) => code(socket.connect(address).map(|()| 0)),
+                    (Some(socket), Some(Some(address))) => {
+                        code(socket.connect(address).map(|()| 0))
+                    }
                     // Rust's std cannot connect an unbound TCP socket.
                     (None, _) if table.unbound.contains_key(&fd) => (95, 0), // EOPNOTSUPP
                     (None, _) => (9, 0),
@@ -5563,15 +5697,21 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     } else if let Some(socket) = table.sockets.get(&fd) {
                         Some(socket.local_addr())
                     } else {
-                        table.listeners.get(&fd).map(std::net::TcpListener::local_addr)
+                        table
+                            .listeners
+                            .get(&fd)
+                            .map(std::net::TcpListener::local_addr)
                     }
                 };
                 let status = match local {
                     None => 9,
                     Some(Err(error)) => io_error_code(&error),
-                    Some(Ok(address)) => {
-                        Self::append_bounded(&mut data, capacity, address.ip().to_string().as_bytes()).unwrap_or(0)
-                    }
+                    Some(Ok(address)) => Self::append_bounded(
+                        &mut data,
+                        capacity,
+                        address.ip().to_string().as_bytes(),
+                    )
+                    .unwrap_or(0),
                 };
                 if status != 0 {
                     self.stats.deallocation();
@@ -5584,21 +5724,36 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let data = self.borrowed_bytes(&args[1]).ok_or_else(internal)?;
                 let (fd, list, index) = (args[0].scalar(), args[2].scalar(), args[3].scalar());
                 let table = self.host.files.lock().unwrap();
-                let address = table.addresses.get(&list).map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied()));
+                let address = table.addresses.get(&list).map(|addresses| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|i| addresses.get(i).copied())
+                });
                 match (table.datagrams.get(&fd), address) {
                     (None, _) | (_, None) => (9, 0),
                     (_, Some(None)) => (2, 0),
-                    (Some(socket), Some(Some(address))) => code(socket.send_to(&data, address).map(|count| count as i64)),
+                    (Some(socket), Some(Some(address))) => {
+                        code(socket.send_to(&data, address).map(|count| count as i64))
+                    }
                 }
             }
             "kush_sys_setsockopt" => {
-                let (fd, level, name, value) = (args[0].scalar(), args[1].scalar(), args[2].scalar(), args[3].scalar());
+                let (fd, level, name, value) = (
+                    args[0].scalar(),
+                    args[1].scalar(),
+                    args[2].scalar(),
+                    args[3].scalar(),
+                );
                 let table = self.host.files.lock().unwrap();
                 match (level, name) {
                     // SO_REUSEADDR is Rust's default for listeners; it cannot
                     // set SO_REUSEPORT, so the evaluator ignores it (a second
                     // listener on the same port is EADDRINUSE here).
-                    (1, 2 | 15) if table.unbound.contains_key(&fd) || table.listeners.contains_key(&fd) => (0, 0),
+                    (1, 2 | 15)
+                        if table.unbound.contains_key(&fd) || table.listeners.contains_key(&fd) =>
+                    {
+                        (0, 0)
+                    }
                     (6, 1) => match table.sockets.get(&fd) {
                         Some(socket) => code(socket.set_nodelay(value != 0).map(|()| 0)),
                         None => (9, 0),
@@ -5620,7 +5775,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             "kush_sys_bind" => {
                 let (fd, list, index) = (args[0].scalar(), args[1].scalar(), args[2].scalar());
                 let mut table = self.host.files.lock().unwrap();
-                let address = table.addresses.get(&list).map(|addresses| usize::try_from(index).ok().and_then(|i| addresses.get(i).copied()));
+                let address = table.addresses.get(&list).map(|addresses| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|i| addresses.get(i).copied())
+                });
                 match (address, table.unbound.get_mut(&fd)) {
                     (_, None) => (9, 0),
                     (None, _) => (9, 0),
@@ -5636,7 +5795,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let fd = args[0].scalar();
                 let mut table = self.host.files.lock().unwrap();
                 match table.unbound.get(&fd).copied() {
-                    None => (if table.listeners.contains_key(&fd) { 0 } else { 9 }, 0),
+                    None => (
+                        if table.listeners.contains_key(&fd) {
+                            0
+                        } else {
+                            9
+                        },
+                        0,
+                    ),
                     Some(None) => (22, 0),
                     Some(Some(address)) => match std::net::TcpListener::bind(address) {
                         Ok(listener) => {
@@ -5652,7 +5818,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let fd = args[0].scalar();
                 let mut table = self.host.files.lock().unwrap();
                 let queued = table.accepted.get_mut(&fd).and_then(VecDeque::pop_front);
-                let listener = table.listeners.get(&fd).map(std::net::TcpListener::try_clone);
+                let listener = table
+                    .listeners
+                    .get(&fd)
+                    .map(std::net::TcpListener::try_clone);
                 drop(table);
                 let accepted = match queued {
                     Some(stream) => Some(Ok(stream)),
@@ -5663,7 +5832,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             listener.set_nonblocking(true)?;
                             let accepted = loop {
                                 match listener.accept() {
-                                    Ok((stream, _)) => break stream.set_nonblocking(false).map(|()| stream),
+                                    Ok((stream, _)) => {
+                                        break stream.set_nonblocking(false).map(|()| stream);
+                                    }
                                     Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                                     Err(error) => break Err(error),
                                 }
@@ -5689,7 +5860,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let fd = args[0].scalar();
                 let table = self.host.files.lock().unwrap();
                 if let Some(listener) = table.listeners.get(&fd) {
-                    code(listener.local_addr().map(|address| i64::from(address.port())))
+                    code(
+                        listener
+                            .local_addr()
+                            .map(|address| i64::from(address.port())),
+                    )
                 } else if let Some(socket) = table.sockets.get(&fd) {
                     code(socket.local_addr().map(|address| i64::from(address.port())))
                 } else if let Some(address) = table.unbound.get(&fd) {
@@ -7271,10 +7446,16 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     fn expr(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Flow> {
         if self.generation
             && (self.heap.len() > 1024
-                || self.heap.storage_bytes().saturating_add(self.stats.arena_bytes())
+                || self
+                    .heap
+                    .storage_bytes()
+                    .saturating_add(self.stats.arena_bytes())
                     > 64 * 1024 * 1024)
         {
-            return Err(Diagnostic::new(expr.span, "compile-time generator allocation budget exhausted"));
+            return Err(Diagnostic::new(
+                expr.span,
+                "compile-time generator allocation budget exhausted",
+            ));
         }
         if self.depth >= 128 {
             return Err(Diagnostic::new(
@@ -7740,10 +7921,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Target::StageCompile(shape) => {
                         let graph = match &values[0] {
                             Value::Enum { fields, .. } => match fields.first() {
-                                Some(Value::Owned(id)) => self.heap.with(*id, |v| match v {
-                                    Value::Buffer { data, .. } => Some(data.clone()),
-                                    _ => None,
-                                }).flatten(),
+                                Some(Value::Owned(id)) => self
+                                    .heap
+                                    .with(*id, |v| match v {
+                                        Value::Buffer { data, .. } => Some(data.clone()),
+                                        _ => None,
+                                    })
+                                    .flatten(),
                                 _ => None,
                             },
                             _ => None,
@@ -7752,16 +7936,25 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         if !self.try_charge() {
                             self.host_result(*shape, 12, Value::Scalar(0))
                         } else {
-                            let graph = graph.ok_or_else(|| Diagnostic::new(expr.span,
-                                "internal error: compile needs an owned code graph"))?;
+                            let graph = graph.ok_or_else(|| {
+                                Diagnostic::new(
+                                    expr.span,
+                                    "internal error: compile needs an owned code graph",
+                                )
+                            })?;
                             match crate::staging::runtime_compile(self.program, &graph) {
                                 Ok(artifact) => {
                                     let owner = self.allocate(Value::Compiled(Arc::new(artifact)));
-                                    let owner = Value::Enum { tag: 0, fields: vec![owner] };
+                                    let owner = Value::Enum {
+                                        tag: 0,
+                                        fields: vec![owner],
+                                    };
                                     self.host_result(*shape, 0, owner)
                                 }
                                 Err(error) => {
-                                    let status = if error.message == crate::staging::UNSUPPORTED_RUNTIME_TEMPLATE {
+                                    let status = if error.message
+                                        == crate::staging::UNSUPPORTED_RUNTIME_TEMPLATE
+                                    {
                                         95
                                     } else {
                                         22
@@ -7773,10 +7966,16 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                     Target::StageEntry(signature) => {
                         debug_assert_eq!(expr.ty, Type::Fn(*signature));
-                        let owner = self.reference_read(&values[0], args[0].ty)
-                            .ok_or_else(|| Diagnostic::new(expr.span, "invalid compiled owner reference"))?;
-                        let Value::Enum { fields, .. } = owner else { unreachable!() };
-                        let Value::Owned(id) = fields[0] else { unreachable!() };
+                        let owner =
+                            self.reference_read(&values[0], args[0].ty).ok_or_else(|| {
+                                Diagnostic::new(expr.span, "invalid compiled owner reference")
+                            })?;
+                        let Value::Enum { fields, .. } = owner else {
+                            unreachable!()
+                        };
+                        let Value::Owned(id) = fields[0] else {
+                            unreachable!()
+                        };
                         let Some(Value::Compiled(artifact)) = self.heap.get(id) else {
                             return Err(Diagnostic::new(expr.span, "dangling compiled owner"));
                         };
@@ -8119,11 +8318,16 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     self.consume(argument, frame);
                 }
                 if let Value::CompiledCallable(artifact) = &callable {
-                    let Type::Fn(signature) = callee.ty else { unreachable!() };
+                    let Type::Fn(signature) = callee.ty else {
+                        unreachable!()
+                    };
                     let signature = &self.program.function_types[signature];
-                    let values = values.into_iter().enumerate()
+                    let values = values
+                        .into_iter()
+                        .enumerate()
                         .filter(|(i, _)| !signature.parameter_erased(*i))
-                        .map(|(_, value)| value).collect();
+                        .map(|(_, value)| value)
+                        .collect();
                     return self.call_compiled(artifact, values).map(Flow::Value);
                 }
                 if let Value::Token {

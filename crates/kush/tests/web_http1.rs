@@ -21,7 +21,10 @@ fn reference(source: &str) -> String {
         .evaluate_with_host_and_stats(&mut io::empty(), &mut output, &Host::empty())
         .unwrap();
     assert_eq!(status, 0, "{}", String::from_utf8_lossy(&output));
-    assert_eq!(stats.allocations, stats.deallocations, "reference cleanup must be balanced");
+    assert_eq!(
+        stats.allocations, stats.deallocations,
+        "reference cleanup must be balanced"
+    );
     String::from_utf8(output).unwrap()
 }
 
@@ -31,7 +34,12 @@ fn native(source: &str) -> String {
     let binary = scratch.path().join("web-http1");
     kush::native::build(&program, &binary).unwrap();
     let output = Command::new(&binary).stdin(Stdio::null()).output().unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     String::from_utf8(output.stdout).unwrap()
 }
 
@@ -155,40 +163,50 @@ fn the_parser_accepts_valid_heads_and_rejects_smuggling() {
     let output = both(PARSER);
     let lines: Vec<&str> = output.lines().collect();
     let expected = [
-        "21010000128",    // GET, target 2, 1.1, 1 field, no body, keep-alive, 28 bytes
-        "-1",             // incomplete head
-        "-1",             // incomplete request line
-        "400",            // bare LF
-        "400",            // HTTP/1.1 without Host
-        "400",            // two Host fields
-        "10000000018",    // HTTP/1.0 without Host: no keep-alive
-        "10010000142",    // HTTP/1.0 keep-alive
-        "11020000051",    // Connection: close in a list
-        "400",            // Content-Length with Transfer-Encoding
-        "501",            // an unsupported transfer coding
-        "400",            // two different Content-Lengths
-        "2011031005166",  // the same Content-Length twice: Length(5)
-        "400",            // a list as Content-Length
-        "413",            // over the body limit
-        "400",            // obsolete line folding
-        "400",            // space before the colon
-        "505",            // HTTP/2.0
-        "400",            // malformed version
-        "414",            // request line over the limit
-        "414",            // request line over the limit, unfinished
-        "431",            // too many fields
-        "417",            // Expect: 100-continue
-        "2031020002158",  // chunked (case-insensitive)
-        "11010000131",    // leading empty lines skipped (size includes them)
-        "400",            // NUL in a value
-        "9041010000131",  // unknown method
-        "400",            // two spaces
-        "400",            // non-token method
-        "400",            // two Transfer-Encoding fields
-        "400",            // chunked in HTTP/1.0
-        "4021020000150",  // Content-Length: 0 is no body
-        "9", "43", "9", "87", "97", // Wiki + pedia, ends before NEXT
-        "-1", "400", "400", "413", "413", "0", "-1",
+        "21010000128",   // GET, target 2, 1.1, 1 field, no body, keep-alive, 28 bytes
+        "-1",            // incomplete head
+        "-1",            // incomplete request line
+        "400",           // bare LF
+        "400",           // HTTP/1.1 without Host
+        "400",           // two Host fields
+        "10000000018",   // HTTP/1.0 without Host: no keep-alive
+        "10010000142",   // HTTP/1.0 keep-alive
+        "11020000051",   // Connection: close in a list
+        "400",           // Content-Length with Transfer-Encoding
+        "501",           // an unsupported transfer coding
+        "400",           // two different Content-Lengths
+        "2011031005166", // the same Content-Length twice: Length(5)
+        "400",           // a list as Content-Length
+        "413",           // over the body limit
+        "400",           // obsolete line folding
+        "400",           // space before the colon
+        "505",           // HTTP/2.0
+        "400",           // malformed version
+        "414",           // request line over the limit
+        "414",           // request line over the limit, unfinished
+        "431",           // too many fields
+        "417",           // Expect: 100-continue
+        "2031020002158", // chunked (case-insensitive)
+        "11010000131",   // leading empty lines skipped (size includes them)
+        "400",           // NUL in a value
+        "9041010000131", // unknown method
+        "400",           // two spaces
+        "400",           // non-token method
+        "400",           // two Transfer-Encoding fields
+        "400",           // chunked in HTTP/1.0
+        "4021020000150", // Content-Length: 0 is no body
+        "9",
+        "43",
+        "9",
+        "87",
+        "97", // Wiki + pedia, ends before NEXT
+        "-1",
+        "400",
+        "400",
+        "413",
+        "413",
+        "0",
+        "-1",
     ];
     assert_eq!(lines, expected, "\n{output}");
 }

@@ -331,8 +331,8 @@ fn base64_decoding_is_strict_and_canonical() {
     assert_eq!(
         output,
         lines(&[
-            "66", "none", "none", "none", "none", "none", "none", "none", "fbffbf", "none",
-            "none", "none", "none",
+            "66", "none", "none", "none", "none", "none", "none", "none", "fbffbf", "none", "none",
+            "none", "none",
         ])
     );
 }

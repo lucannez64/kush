@@ -59,14 +59,8 @@ fn constant_and_proved_amounts_need_no_panic_effect() {
 
 #[test]
 fn unproved_amounts_still_need_the_check() {
-    rejects(
-        "fn f(x: u32, n: u32) -> u32 ! {} { x << n }",
-        "panic",
-    );
-    rejects(
-        "fn f(x: u32) -> u32 ! {} { x >> 32 }",
-        "panic",
-    );
+    rejects("fn f(x: u32, n: u32) -> u32 ! {} { x << n }", "panic");
+    rejects("fn f(x: u32) -> u32 ! {} { x >> 32 }", "panic");
     rejects(
         "fn f(x: i64, n: i64) -> i64 ! {} { if n < 64 { x << n } else { 0 } }",
         "panic",

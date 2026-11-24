@@ -2,9 +2,9 @@
 //! See docs/proof-fuzz.md. This module holds the pieces shared by the
 //! `kush fuzz` driver and its tests: the instrumented build and the run
 //! record an instrumented program writes to `$KUSH_FUZZ_OUT`.
+use crate::Diagnostic;
 use crate::executable::Executable;
 use crate::native::{self, CodegenOptions, LinkSpec, Optimization};
-use crate::Diagnostic;
 
 pub mod build;
 pub mod engine;

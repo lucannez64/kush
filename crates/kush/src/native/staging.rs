@@ -335,7 +335,11 @@ int main(void) {
     return 0;
 }
 "#;
-        fs::write(&source, format!("#define main kush_original_main\n{RUNTIME}\n{test}")).unwrap();
+        fs::write(
+            &source,
+            format!("#define main kush_original_main\n{RUNTIME}\n{test}"),
+        )
+        .unwrap();
         let output = Command::new("cc")
             .args(["-std=c11", "-O2", "-DKUSH_STATS=1", "-DKUSH_FUSION_COUNT=0"])
             .args(["-Wl,--wrap=mmap,--wrap=mprotect,--wrap=munmap", "-o"])
@@ -344,8 +348,15 @@ int main(void) {
             .arg("-lm")
             .output()
             .unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let output = Command::new(&binary).env_remove("KUSH_ALLOC_FAIL_AFTER").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(&binary)
+            .env_remove("KUSH_ALLOC_FAIL_AFTER")
+            .output()
+            .unwrap();
         assert!(output.status.success(), "{output:?}");
     }
 }

@@ -1033,7 +1033,11 @@ fn unused<N: Nat>() -> Code<fn([i64; N]) -> Bool ! {}> ! {alloc, panic} {
 }
 fn main() -> i64 ! {} { 42 }
 "#;
-    assert!(checked(source).unwrap_err().contains("cannot return an integer"));
+    assert!(
+        checked(source)
+            .unwrap_err()
+            .contains("cannot return an integer")
+    );
     checked(&source.replace("{ 31 }", "{ true }")).unwrap();
 }
 
@@ -1045,11 +1049,19 @@ fn unused<e: Effects>() -> Code<fn() -> Unit ! {e}> ! {alloc, panic} {
 }
 fn main() -> i64 ! {} { 42 }
 "#;
-    assert!(checked(source).unwrap_err().contains("does not guarantee {io, panic}"));
+    assert!(
+        checked(source)
+            .unwrap_err()
+            .contains("does not guarantee {io, panic}")
+    );
     let bounded = source.replace("e: Effects", "e: Effects + (io | panic)");
     checked(&bounded).unwrap();
     let subtract = bounded.replace("! {e}", "! {e - io}");
-    assert!(checked(&subtract).unwrap_err().contains("does not guarantee {io}"));
+    assert!(
+        checked(&subtract)
+            .unwrap_err()
+            .contains("does not guarantee {io}")
+    );
 }
 
 #[test]
@@ -1061,9 +1073,19 @@ fn unused<e: Effects>() -> Code<fn() -> Unit ! {e}> ! {alloc, panic} {
 }
 fn main() -> i64 ! {} { 42 }
 "#;
-    assert!(checked(source).unwrap_err().contains("requires effects {io, panic}"));
+    assert!(
+        checked(source)
+            .unwrap_err()
+            .contains("requires effects {io, panic}")
+    );
     let bounded = source.replace("e: Effects", "e: Effects + (io | panic)");
-    assert_eq!(checked(&bounded).unwrap().evaluate(&mut Vec::new()).unwrap(), 42);
+    assert_eq!(
+        checked(&bounded)
+            .unwrap()
+            .evaluate(&mut Vec::new())
+            .unwrap(),
+        42
+    );
 
     let different_rows = r#"
 fn unused<e: Effects, f: Effects>(code: Code<fn() -> Unit ! {e}>)
@@ -1072,7 +1094,11 @@ fn unused<e: Effects, f: Effects>(code: Code<fn() -> Unit ! {e}>)
 }
 fn main() -> i64 ! {} { 42 }
 "#;
-    assert!(checked(different_rows).unwrap_err().contains("requires effects"));
+    assert!(
+        checked(different_rows)
+            .unwrap_err()
+            .contains("requires effects")
+    );
 }
 
 #[test]
@@ -1092,13 +1118,16 @@ fn main() -> i64 ! {} { choose(11, 31) }
 
 #[test]
 fn generic_generators_can_lift_a_concrete_scalar_specialization() {
-    let program = checked(r#"
+    let program = checked(
+        r#"
 fn specialize<T: Type>(value: T) -> Code<fn() -> T ! {}> ! {alloc, panic} {
     quote fn() -> T ! {} { lift(value) }
 }
 #[staged] fn first() -> i64 ! {} = specialize(42);
 fn main() -> i64 ! {} { first() }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
     assert_native_result(&program, 42);
 }
@@ -1291,7 +1320,8 @@ fn main() -> i64 ! {panic} { second() }
 
 #[test]
 fn nested_closures_own_lifted_text_independently() {
-    let program = checked(r#"
+    let program = checked(
+        r#"
 use std.result.Result;
 fn specialize(text: Bytes) -> Code<fn() -> i64 ! {alloc, panic}> ! {alloc, panic} {
     quote fn() -> i64 ! {alloc, panic} {
@@ -1309,7 +1339,9 @@ fn main() -> i64 ! {alloc, panic} {
     };
     if aot() == 42 && Code.call(&owner) == 42 { Code.call(&owner) } else { 1 }
 }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let (result, stats) = program.evaluate_with_stats(&mut Vec::new()).unwrap();
     assert_eq!(result, 42);
     assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
@@ -1318,7 +1350,8 @@ fn main() -> i64 ! {alloc, panic} {
 
 #[test]
 fn aot_splices_are_specialized_inside_nested_closures() {
-    let program = checked(r#"
+    let program = checked(
+        r#"
 fn specialize(fragment: Code<fn() -> i64 ! {}>) -> Code<fn() -> i64 ! {}> ! {alloc, panic} {
     quote fn() -> i64 ! {} {
         let inner = fn() -> i64 ! {} { splice(fragment)() };
@@ -1328,7 +1361,9 @@ fn specialize(fragment: Code<fn() -> i64 ! {}>) -> Code<fn() -> i64 ! {}> ! {all
 #[staged] fn first() -> i64 ! {} = specialize(quote fn() -> i64 ! {} { 20 });
 #[staged] fn second() -> i64 ! {} = specialize(quote fn() -> i64 ! {} { 22 });
 fn main() -> i64 ! {panic} { first() + second() }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
     assert_native_result(&program, 42);
 }
@@ -1407,11 +1442,16 @@ fn power_example_runs_without_a_runtime_generator_call() {
         let binary = scratch.path().join("staging-power");
         let ir = kush::native::build_with_clif(&program, &binary).unwrap();
         assert!(ir.contains("; cube\n") && ir.contains("; square\n"), "{ir}");
-        assert!(!ir.contains("; power\n") && !ir.contains("$staging_init"), "{ir}");
+        assert!(
+            !ir.contains("; power\n") && !ir.contains("$staging_init"),
+            "{ir}"
+        );
         let executable = std::fs::read(&binary).unwrap();
-        assert!(!executable.windows(8).any(|bytes| {
-            matches!(bytes, b"KUSHCD01" | b"KUSHCD02" | b"KUSHCD03")
-        }));
+        assert!(
+            !executable
+                .windows(8)
+                .any(|bytes| { matches!(bytes, b"KUSHCD01" | b"KUSHCD02" | b"KUSHCD03") })
+        );
         let native = std::process::Command::new(binary).output().unwrap();
         assert!(native.status.success(), "{native:?}");
         assert_eq!(native.stdout, output);
@@ -1463,7 +1503,11 @@ fn main() -> i64 ! {alloc, panic} {
     assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
     assert_native_result(&program, 42);
     let shrinks = source.replace("v.push(99);", "v.clear();");
-    assert!(checked(&shrinks).unwrap_err().contains("preserves the vector length"));
+    assert!(
+        checked(&shrinks)
+            .unwrap_err()
+            .contains("preserves the vector length")
+    );
 }
 
 #[test]
@@ -1492,7 +1536,8 @@ fn main() -> i64 ! {alloc, panic} {
 
 #[test]
 fn each_generic_staged_target_gets_its_own_initializer() {
-    let program = checked(r#"
+    let program = checked(
+        r#"
 fn identity<T: Type>() -> Code<fn(T) -> T ! {}> ! {alloc, panic} {
     quote fn(x: T) -> T ! {} { x }
 }
@@ -1506,7 +1551,9 @@ fn select<N: Nat>() -> Code<fn([i64; N]) -> i64 ! {panic}> ! {alloc, panic} {
 fn main() -> i64 ! {panic} {
     if first::<Bool>(true) { second::<1>([20]) + second::<2>([22, 99]) } else { 0 }
 }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
     assert_native_result(&program, 42);
 }
@@ -1514,25 +1561,39 @@ fn main() -> i64 ! {panic} {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn staged_exports_link_as_ordinary_native_functions() {
-    let program = checked(r#"
+    let program = checked(
+        r#"
 #[staged] export "staged_value" fn staged_value(x: i64) -> i64 ! {} =
     quote fn(x: i64) -> i64 ! {} { x ^ 3 };
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
     let caller = scratch.path().join("caller.c");
-    std::fs::write(&caller, r#"
+    std::fs::write(
+        &caller,
+        r#"
 #include <stdint.h>
 extern int64_t staged_value(int64_t x);
 int main(void) { return staged_value(41) != 42; }
-"#).unwrap();
-    for backend in [kush::native::Backend::Cranelift, kush::native::Backend::Llvm] {
+"#,
+    )
+    .unwrap();
+    for backend in [
+        kush::native::Backend::Cranelift,
+        kush::native::Backend::Llvm,
+    ] {
         let library = scratch.path().join(format!("libstaged-{backend:?}.a"));
         let executable = scratch.path().join(format!("caller-{backend:?}"));
         kush::native::build_library(
             &program,
             &library,
-            kush::native::CodegenOptions { backend, ..Default::default() },
-        ).unwrap();
+            kush::native::CodegenOptions {
+                backend,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let link = std::process::Command::new("cc")
             .arg(&caller)
             .arg(&library)
@@ -1542,6 +1603,11 @@ int main(void) { return staged_value(41) != 42; }
             .output()
             .unwrap();
         assert!(link.status.success(), "{link:?}");
-        assert!(std::process::Command::new(executable).status().unwrap().success());
+        assert!(
+            std::process::Command::new(executable)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }

@@ -25,7 +25,10 @@ fn reference(source: &str) -> String {
         .evaluate_with_host_and_stats(&mut io::empty(), &mut output, &Host::empty())
         .unwrap();
     assert_eq!(status, 0, "{}", String::from_utf8_lossy(&output));
-    assert_eq!(stats.allocations, stats.deallocations, "reference cleanup must be balanced");
+    assert_eq!(
+        stats.allocations, stats.deallocations,
+        "reference cleanup must be balanced"
+    );
     String::from_utf8(output).unwrap()
 }
 
@@ -40,7 +43,12 @@ fn build(source: &str) -> (kush::native::Scratch, std::path::PathBuf) {
 fn native(source: &str) -> String {
     let (_scratch, binary) = build(source);
     let output = Command::new(&binary).stdin(Stdio::null()).output().unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     String::from_utf8(output.stdout).unwrap()
 }
 
@@ -268,7 +276,8 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
 
 #[test]
 fn the_server_answers_keeps_alive_and_refuses() {
-    let hi = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\n\r\nhi";
+    let hi =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\n\r\nhi";
     let expected = format!(
         "{hi}|\n\
 {hi}HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 5\r\n\r\nhello|\n\
@@ -330,10 +339,7 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
 
 #[test]
 fn cancelling_the_server_finishes_responses_and_closes_idle_connections() {
-    both(
-        &format!("{APP}{GRACEFUL}"),
-        "-1\n83\n81\n1\n111\n",
-    );
+    both(&format!("{APP}{GRACEFUL}"), "-1\n83\n81\n1\n111\n");
 }
 
 /// A native server under real clients: concurrent keep-alive connections
@@ -348,7 +354,10 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
 }
 "#;
     let (_scratch, binary) = build(&format!("{APP}{main}"));
-    let mut child = Command::new(&binary).stdout(Stdio::piped()).spawn().unwrap();
+    let mut child = Command::new(&binary)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     lines.read_line(&mut line).unwrap();
@@ -382,7 +391,10 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
             })
         })
         .collect();
-    let answered: usize = workers.into_iter().map(|worker| worker.join().unwrap()).sum();
+    let answered: usize = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .sum();
     let _ = child.kill();
     let _ = child.wait();
     assert_eq!(answered, 80);
@@ -429,7 +441,8 @@ HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\
     // exit check both require it), and a child task of the handler is
     // cancelled and joined.
     let scoped = r#"exchange(port, &Bytes.from("GET /scoped HTTP/1.1\r\nHost: x\r\n\r\n"));"#;
-    let five_hundred = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n|\n";
+    let five_hundred =
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n|\n";
     let source = source.replace("SCOPED", scoped);
     let expected = expected.replace("SCOPED", five_hundred);
     assert_eq!(reference(&source), expected, "reference");
@@ -439,8 +452,15 @@ HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\
     assert_eq!(String::from_utf8(run.stdout).unwrap(), expected, "native");
     let stderr = String::from_utf8(run.stderr).unwrap();
     // Four panics, each reported once; none needed the leaking fallback.
-    assert_eq!(stderr.matches("panic: checked arithmetic").count(), 4, "{stderr}");
-    assert!(!stderr.contains("recovered in an isolated task"), "{stderr}");
+    assert_eq!(
+        stderr.matches("panic: checked arithmetic").count(),
+        4,
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("recovered in an isolated task"),
+        "{stderr}"
+    );
 }
 
 /// A panic unwinding past an open file closes it (PANIC-LINEAR-CLEANUP):
@@ -488,7 +508,12 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
     let expected = "500\n500\n500\n500\n500\n1\n-1\n";
     let (scratch, binary) = build(&source);
     let run = Command::new(&binary).stdin(Stdio::null()).output().unwrap();
-    assert_eq!(run.status.code(), Some(0), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     assert_eq!(String::from_utf8(run.stdout).unwrap(), expected, "native");
     // The reference evaluator in a process of its own, so the descriptor
     // count is only this program's (the File sits inside a Result there).
@@ -500,14 +525,26 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert_eq!(run.status.code(), Some(0), "{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8(run.stdout).unwrap(), expected, "reference");
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(run.stdout).unwrap(),
+        expected,
+        "reference"
+    );
 }
 
 #[test]
 fn unwind_cleanups_are_checked() {
     for (source, message) in [
-        ("#[linear(unwind = missing)] struct R { x: i64 }\nfn main() -> i64 ! {} { 0 }", "names no function"),
+        (
+            "#[linear(unwind = missing)] struct R { x: i64 }\nfn main() -> i64 ! {} { 0 }",
+            "names no function",
+        ),
         (
             "#[linear(unwind = wrong)] struct R { x: i64 }\nfn wrong(r: &R) -> Unit ! {} { }\nfn main() -> i64 ! {} { 0 }",
             "must take the R by value",
@@ -516,11 +553,20 @@ fn unwind_cleanups_are_checked() {
             "#[linear(unwind = wrong)] struct R { x: i64 }\nfn wrong(r: R) -> i64 ! {} { match r { R { x } => x } }\nfn main() -> i64 ! {} { 0 }",
             "return Unit",
         ),
-        ("#[linear(close = f)] struct R { x: i64 }\nfn main() -> i64 ! {} { 0 }", "#[linear(unwind = cleanup)]"),
+        (
+            "#[linear(close = f)] struct R { x: i64 }\nfn main() -> i64 ! {} { 0 }",
+            "#[linear(unwind = cleanup)]",
+        ),
     ] {
         let program = kush::program::load_source("<unwind-test>", source).unwrap();
-        let error = executable::check_program(&program).err().unwrap_or_else(|| panic!("accepted: {source}"));
-        assert!(error.message.contains(message), "{source}: {}", error.message);
+        let error = executable::check_program(&program)
+            .err()
+            .unwrap_or_else(|| panic!("accepted: {source}"));
+        assert!(
+            error.message.contains(message),
+            "{source}: {}",
+            error.message
+        );
     }
 }
 
@@ -640,7 +686,10 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
 }
 "#;
     let (_scratch, binary) = build(&format!("{APP}{main}"));
-    let mut child = Command::new(&binary).stdout(Stdio::piped()).spawn().unwrap();
+    let mut child = Command::new(&binary)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     lines.read_line(&mut line).unwrap();
@@ -672,9 +721,14 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
             })
         })
         .collect();
-    let answered: usize = workers.into_iter().map(|worker| worker.join().unwrap()).sum();
+    let answered: usize = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .sum();
     // The calling thread and three more serve.
-    let threads = std::fs::read_dir(format!("/proc/{}/task", child.id())).unwrap().count();
+    let threads = std::fs::read_dir(format!("/proc/{}/task", child.id()))
+        .unwrap()
+        .count();
     let _ = child.kill();
     let _ = child.wait();
     assert_eq!(answered, 160);

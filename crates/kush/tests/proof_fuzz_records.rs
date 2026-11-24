@@ -150,17 +150,30 @@ fn records_enums_and_generics_are_generated() {
         .find(|r| r.function == "app.lib.factor" && r.finding.is_some())
         .and_then(|r| r.finding.as_ref())
         .unwrap_or_else(|| panic!("{render}"));
-    let inputs: Vec<String> = factor.inputs.iter().map(|(n, v)| format!("{n} = {v}")).collect();
+    let inputs: Vec<String> = factor
+        .inputs
+        .iter()
+        .map(|(n, v)| format!("{n} = {v}"))
+        .collect();
     // The tag picks a variant modulo their number.
-    assert!(inputs[0].starts_with("m = ") && inputs[0].ends_with(" (Mode.Scaled)"), "{render}");
+    assert!(
+        inputs[0].starts_with("m = ") && inputs[0].ends_with(" (Mode.Scaled)"),
+        "{render}"
+    );
     assert_eq!(inputs[1], "m.Scaled.0 = 7", "{render}");
     assert!(factor.public);
     // A record with private fields comes from its constructor.
     let tick = report_of(&session, "app.shapes.tick");
-    assert!(tick.iter().any(|(state, _)| *state == State::Found), "{tick:?}");
+    assert!(
+        tick.iter().any(|(state, _)| *state == State::Found),
+        "{tick:?}"
+    );
     // A generic function at the type implementing its bound.
     let twice = report_of(&session, "app.lib.twice");
-    assert!(twice.iter().any(|(state, _)| *state == State::Found), "{twice:?}\n{render}");
+    assert!(
+        twice.iter().any(|(state, _)| *state == State::Found),
+        "{twice:?}\n{render}"
+    );
 }
 
 #[test]
@@ -168,10 +181,15 @@ fn functions_with_io_get_no_harness() {
     let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
     let session = session(&scratch);
     let say = report_of(&session, "app.lib.say");
-    assert!(say.iter().all(|(state, _)| *state == State::NoGenerator), "{say:?}");
+    assert!(
+        say.iter().all(|(state, _)| *state == State::NoGenerator),
+        "{say:?}"
+    );
     let list = session.render_list(&Options::default());
     assert!(
-        list.contains("app.lib.say  (no generator: performs I/O (attack it through a #[fuzz] entry))"),
+        list.contains(
+            "app.lib.say  (no generator: performs I/O (attack it through a #[fuzz] entry))"
+        ),
         "{list}"
     );
 }

@@ -353,13 +353,15 @@ fn conditional_moves_overwrites_and_reinitialization_have_dynamic_cleanup_flags(
 
 #[test]
 fn regular_recursive_generic_and_mutually_boxed_layouts_destruct_correctly() {
-    compare("enum List<T>{Nil,Cons(T,Box<List<T>>)}
+    compare(
+        "enum List<T>{Nil,Cons(T,Box<List<T>>)}
         enum A{End,Next(Box<Wrap<A>>)} enum Wrap<T>{Item(T)}
         fn make()->List<i64> ! {alloc,panic} {List.Cons(1,Box.new(List.Cons(2,Box.new(List.Nil))))}
         fn sum(xs:List<i64>)->i64 ! {panic} {match xs {Nil=>0,Cons(n,tail)=>n+sum(Box.take(tail))}}
         fn main()->Unit ! {io,alloc,panic} {
             print_i64(sum(make()));let unused=make();let a=A.Next(Box.new(Wrap.Item(A.End)));
-        }");
+        }",
+    );
 }
 
 #[test]

@@ -10,8 +10,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn checked(source: &str) -> Result<executable::Executable, String> {
-    let program = kush::program::load_source("<web-net-test>", source)
-        .map_err(|(_, error)| error.message)?;
+    let program =
+        kush::program::load_source("<web-net-test>", source).map_err(|(_, error)| error.message)?;
     executable::check_program(&program).map_err(|error| program.sources.render(&error))
 }
 
@@ -22,7 +22,10 @@ fn reference(source: &str) -> String {
         .evaluate_with_host_and_stats(&mut io::empty(), &mut output, &Host::empty())
         .unwrap();
     assert_eq!(status, 0, "{}", String::from_utf8_lossy(&output));
-    assert_eq!(stats.allocations, stats.deallocations, "reference cleanup must be balanced");
+    assert_eq!(
+        stats.allocations, stats.deallocations,
+        "reference cleanup must be balanced"
+    );
     String::from_utf8(output).unwrap()
 }
 
@@ -37,7 +40,12 @@ fn build(source: &str, name: &str) -> (kush::native::Scratch, std::path::PathBuf
 fn native(source: &str) -> String {
     let (_scratch, binary) = build(source, "web-net");
     let output = Command::new(&binary).stdin(Stdio::null()).output().unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     String::from_utf8(output.stdout).unwrap()
 }
 
@@ -181,7 +189,10 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
 #[test]
 fn a_native_server_echoes_a_rust_client() {
     let (_scratch, binary) = build(&format!("{PRELUDE}{ECHO}"), "echo");
-    let mut child = Command::new(&binary).stdout(Stdio::piped()).spawn().unwrap();
+    let mut child = Command::new(&binary)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut stdout = child.stdout.take().unwrap();
     // The first line is the port (print_i64 writes it at once).
     let mut line = Vec::new();
@@ -191,7 +202,9 @@ fn a_native_server_echoes_a_rust_client() {
     }
     let port: u16 = String::from_utf8(line).unwrap().parse().unwrap();
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     stream.write_all(b"hello kush").unwrap();
     stream.shutdown(std::net::Shutdown::Write).unwrap();
     let mut reply = Vec::new();
@@ -231,9 +244,13 @@ fn sockets_are_linear_and_cannot_be_forged() {
             "moved",
         ),
         ("let c = net.Conn { fd: 1 }; code(net.close(c))", "private"),
-        ("let l = net.Listener { fd: 3 }; code(net.close_listener(l))", "private"),
+        (
+            "let l = net.Listener { fd: 3 }; code(net.close_listener(l))",
+            "private",
+        ),
     ] {
-        let source = format!("{PRELUDE}\nfn main() -> i64 ! {{io, alloc, panic, suspend}} {{ {body} }}");
+        let source =
+            format!("{PRELUDE}\nfn main() -> i64 ! {{io, alloc, panic, suspend}} {{ {body} }}");
         match checked(&source) {
             Ok(_) => panic!("accepted: {body}"),
             Err(error) => assert!(error.contains(message), "{body}: {error}"),

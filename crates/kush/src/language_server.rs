@@ -2070,7 +2070,10 @@ mod tests {
             let name = format!("/repo/std/{}.kush", &key[4..]);
             let program = program::load_std_root(&name, text, &modules)
                 .unwrap_or_else(|(_, error)| panic!("{key}: {}", error.message));
-            assert!(program.sources.files.iter().any(|file| file.name == name), "{key}");
+            assert!(
+                program.sources.files.iter().any(|file| file.name == name),
+                "{key}"
+            );
             if let Err(error) = crate::executable::check_program(&program) {
                 panic!("{key}: {}", error.message);
             }

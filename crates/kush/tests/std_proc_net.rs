@@ -22,14 +22,21 @@ fn checked(source: &str) -> executable::Executable {
 fn reference(source: &str, arguments: &[String]) -> String {
     let program = checked(source);
     let mut args = vec![b"kush-program".to_vec()];
-    args.extend(arguments.iter().map(|argument| argument.as_bytes().to_vec()));
+    args.extend(
+        arguments
+            .iter()
+            .map(|argument| argument.as_bytes().to_vec()),
+    );
     let host = Host::new(args, Vec::new());
     let mut output = Vec::new();
     let (status, stats) = program
         .evaluate_with_host_and_stats(&mut io::empty(), &mut output, &host)
         .unwrap();
     assert_eq!(status, 0);
-    assert_eq!(stats.allocations, stats.deallocations, "reference cleanup must be balanced");
+    assert_eq!(
+        stats.allocations, stats.deallocations,
+        "reference cleanup must be balanced"
+    );
     String::from_utf8(output).unwrap()
 }
 
@@ -38,8 +45,17 @@ fn native(source: &str, arguments: &[String]) -> String {
     let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
     let binary = scratch.path().join("proc-net");
     kush::native::build(&program, &binary).unwrap();
-    let output = Command::new(&binary).args(arguments).stdin(Stdio::null()).output().unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+    let output = Command::new(&binary)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).unwrap()
 }
 
@@ -118,16 +134,16 @@ fn main() -> i64 ! {io, alloc, panic} {
 #[test]
 fn subprocesses_match_the_builtin() {
     let expected = vec![
-        (0, 12),      // "hello world\n"; empty segments are skipped
-        (-27, 4),     // EFBIG keeps the filled prefix
-        (-110, 0),    // ETIMEDOUT, child killed
-        (-2, 0),      // ENOENT from the exec
-        (137, 0),     // 128 + SIGKILL
-        (3, 100000),  // many reads, then the exit status
-        (-22, 0),     // a negative timeout is EINVAL
-        (-110, 3),    // the timeout keeps what was read
-        (-22, 0),     // empty program
-        (-22, 0),     // NUL in the program
+        (0, 12),     // "hello world\n"; empty segments are skipped
+        (-27, 4),    // EFBIG keeps the filled prefix
+        (-110, 0),   // ETIMEDOUT, child killed
+        (-2, 0),     // ENOENT from the exec
+        (137, 0),    // 128 + SIGKILL
+        (3, 100000), // many reads, then the exit status
+        (-22, 0),    // a negative timeout is EINVAL
+        (-110, 3),   // the timeout keeps what was read
+        (-22, 0),    // empty program
+        (-22, 0),    // NUL in the program
     ];
     let reference = reference(SUBPROCESS, &[]);
     assert_eq!(same_as_builtin(&reference), expected, "{reference}");
@@ -155,7 +171,8 @@ fn start_server() -> u16 {
                 } else if request.starts_with(b"big") {
                     vec![b'x'; 64]
                 } else {
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello".to_vec()
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"
+                        .to_vec()
                 };
                 let _ = stream.write_all(&reply);
             });

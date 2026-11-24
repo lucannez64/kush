@@ -21,7 +21,7 @@
 //! A value built from a generated record may be a state the program never
 //! creates, so its findings are local, never bugs. See docs/proof-fuzz.md,
 //! section 2.4.
-use super::harness::{Collection, Passing, Scalar, Slot, MAX_EXTRA_LENGTH};
+use super::harness::{Collection, MAX_EXTRA_LENGTH, Passing, Scalar, Slot};
 use crate::ast::{self, ExprKind, ItemKind, Payload, TypeKind};
 use crate::lexer::Kind;
 use crate::program::Program;
@@ -212,7 +212,12 @@ impl<'p> Types<'p> {
     }
 
     /// Resolve a written type in `unit`, with generic names bound by `env`.
-    fn resolve(&self, ty: &ast::Type, unit: usize, env: &BTreeMap<String, Ty>) -> Result<Ty, String> {
+    fn resolve(
+        &self,
+        ty: &ast::Type,
+        unit: usize,
+        env: &BTreeMap<String, Ty>,
+    ) -> Result<Ty, String> {
         let unsupported = || format!("no generator for `{}`", self.text(unit, ty.span).trim());
         let TypeKind::Named { path, arguments } = &ty.kind else {
             return Err(unsupported());
@@ -239,7 +244,9 @@ impl<'p> Types<'p> {
                 };
             }
         }
-        let (declared, name) = self.lookup(unit, path, Lookup::Type).ok_or_else(unsupported)?;
+        let (declared, name) = self
+            .lookup(unit, path, Lookup::Type)
+            .ok_or_else(unsupported)?;
         let arguments = arguments
             .iter()
             .map(|argument| self.resolve(argument, unit, env))
@@ -259,7 +266,8 @@ impl<'p> Types<'p> {
         match &expr.kind {
             ExprKind::Integer(text) => super::harness::integer_literal(text),
             ExprKind::Name(name) => {
-                let (declared, name) = self.lookup(unit, std::slice::from_ref(name), Lookup::Constant)?;
+                let (declared, name) =
+                    self.lookup(unit, std::slice::from_ref(name), Lookup::Constant)?;
                 let index = self.units[declared].constants[&name];
                 let ItemKind::Function(function) = &self.item(index).item.kind else {
                     return None;
@@ -306,10 +314,13 @@ impl<'p> Types<'p> {
                 let TypeKind::Named { path, .. } = &trait_path.kind else {
                     continue;
                 };
-                if !generics.is_empty() || self.lookup(index, path, Lookup::Trait).as_ref() != Some(&wanted) {
+                if !generics.is_empty()
+                    || self.lookup(index, path, Lookup::Trait).as_ref() != Some(&wanted)
+                {
                     continue;
                 }
-                if let Ok(ty @ Ty::Nominal { .. }) = self.resolve(self_ty, index, &BTreeMap::new()) {
+                if let Ok(ty @ Ty::Nominal { .. }) = self.resolve(self_ty, index, &BTreeMap::new())
+                {
                     found.push(ty);
                 }
             }
@@ -373,7 +384,10 @@ impl<'t, 'p> Generator<'t, 'p> {
     }
 
     /// The bindings of a generic function's type parameters.
-    pub fn instantiate(&mut self, generics: &[ast::Generic]) -> Result<BTreeMap<String, Ty>, String> {
+    pub fn instantiate(
+        &mut self,
+        generics: &[ast::Generic],
+    ) -> Result<BTreeMap<String, Ty>, String> {
         let mut env = BTreeMap::new();
         for generic in generics {
             if generic.excludes.is_some() || generic.includes.is_some() {
@@ -445,7 +459,13 @@ impl<'t, 'p> Generator<'t, 'p> {
         self.records = saved.records;
     }
 
-    fn value(&mut self, ty: &Ty, minimum: usize, name: &str, depth: usize) -> Result<Build, String> {
+    fn value(
+        &mut self,
+        ty: &Ty,
+        minimum: usize,
+        name: &str,
+        depth: usize,
+    ) -> Result<Build, String> {
         if depth > MAX_DEPTH {
             return Err(format!("`{name}` nests records too deeply"));
         }
@@ -482,7 +502,9 @@ impl<'t, 'p> Generator<'t, 'p> {
             } => {
                 let types = &self.types.units[*unit];
                 if types.module.first().is_some_and(|first| first == "std") {
-                    return Err(format!("no generator for `{type_name}` (a standard-library type)"));
+                    return Err(format!(
+                        "no generator for `{type_name}` (a standard-library type)"
+                    ));
                 }
                 if let Some(&index) = types.enums.get(type_name) {
                     self.enumeration(*unit, index, type_name, arguments, name, depth)
@@ -514,7 +536,8 @@ impl<'t, 'p> Generator<'t, 'p> {
             .borrow()
             .get(&(self.home, last.clone()))
             .is_some_and(|&other| other != unit);
-        if last.is_empty() || home.names.contains(&last) || self.added.contains_key(&last) || taken {
+        if last.is_empty() || home.names.contains(&last) || self.added.contains_key(&last) || taken
+        {
             return Err(format!(
                 "cannot name module `{}` from `{}`",
                 module.join("."),
@@ -522,14 +545,21 @@ impl<'t, 'p> Generator<'t, 'p> {
             ));
         }
         self.added.insert(last.clone(), unit);
-        self.types.aliases.borrow_mut().insert((self.home, last.clone()), unit);
+        self.types
+            .aliases
+            .borrow_mut()
+            .insert((self.home, last.clone()), unit);
         self.uses.push((home.module.join("."), module.join(".")));
         Ok(format!("{last}.{maker}"))
     }
 
     fn add_maker(&mut self, unit: usize, name: &str, text: String) {
         let module = self.types.units[unit].module.join(".");
-        if !self.makers.iter().any(|m| m.module == module && m.name == name) {
+        if !self
+            .makers
+            .iter()
+            .any(|m| m.module == module && m.name == name)
+        {
             self.makers.push(Maker {
                 module,
                 name: name.to_owned(),
@@ -547,10 +577,17 @@ impl<'t, 'p> Generator<'t, 'p> {
         name: &str,
         depth: usize,
     ) -> Result<Build, String> {
-        let ItemKind::Enum { generics, variants, .. } = &self.types.item(index).item.kind else {
+        let ItemKind::Enum {
+            generics, variants, ..
+        } = &self.types.item(index).item.kind
+        else {
             unreachable!("an enum item");
         };
-        if !generics.is_empty() || !arguments.is_empty() || variants.is_empty() || variants.len() > 256 {
+        if !generics.is_empty()
+            || !arguments.is_empty()
+            || variants.is_empty()
+            || variants.len() > 256
+        {
             return Err(format!("no generator for `{type_name}` (a generic enum)"));
         }
         let tag = self.slots.len();
@@ -561,8 +598,13 @@ impl<'t, 'p> Generator<'t, 'p> {
             passing: Passing::Value,
         });
         self.offset += 1;
-        self.labels
-            .insert(tag, variants.iter().map(|v| format!("{type_name}.{}", v.name)).collect());
+        self.labels.insert(
+            tag,
+            variants
+                .iter()
+                .map(|v| format!("{type_name}.{}", v.name))
+                .collect(),
+        );
         let mut parameters = vec!["tag: u8".to_owned()];
         let mut built = vec![Build::Leaf(tag)];
         let mut body = format!("    let which = tag % {};\n", variants.len());
@@ -579,8 +621,16 @@ impl<'t, 'p> Generator<'t, 'p> {
             for (k, component) in components.iter().enumerate() {
                 let resolved = self.types.resolve(component, unit, &BTreeMap::new())?;
                 let parameter = format!("p{}", parameters.len());
-                built.push(self.value(&resolved, 0, &format!("{name}.{}.{k}", variant.name), depth + 1)?);
-                parameters.push(format!("{parameter}: {}", self.types.text(unit, component.span).trim()));
+                built.push(self.value(
+                    &resolved,
+                    0,
+                    &format!("{name}.{}.{k}", variant.name),
+                    depth + 1,
+                )?);
+                parameters.push(format!(
+                    "{parameter}: {}",
+                    self.types.text(unit, component.span).trim()
+                ));
                 names.push(parameter);
             }
             let value = if names.is_empty() {
@@ -591,7 +641,9 @@ impl<'t, 'p> Generator<'t, 'p> {
             if position + 1 == variants.len() {
                 body.push_str(&format!("    {value}\n"));
             } else {
-                body.push_str(&format!("    if which == {position} {{ return {value}; }}\n"));
+                body.push_str(&format!(
+                    "    if which == {position} {{ return {value}; }}\n"
+                ));
             }
         }
         let maker = format!("__kush_fuzz_make_{type_name}");
@@ -626,7 +678,9 @@ impl<'t, 'p> Generator<'t, 'p> {
             unreachable!("a struct item");
         };
         if !lifetimes.is_empty() || !declaration.attributes.is_empty() {
-            return Err(format!("no generator for `{type_name}` (a borrowed or foreign record)"));
+            return Err(format!(
+                "no generator for `{type_name}` (a borrowed or foreign record)"
+            ));
         }
         if generics.len() != arguments.len() {
             return Err(format!("no generator for `{type_name}`"));
@@ -667,10 +721,21 @@ impl<'t, 'p> Generator<'t, 'p> {
                     .types
                     .evaluate(length, unit, 0)
                     .and_then(|n| usize::try_from(n).ok())
-                    .ok_or_else(|| format!("no generator for `{type_name}.{}` (its length)", field.name))?,
+                    .ok_or_else(|| {
+                        format!("no generator for `{type_name}.{}` (its length)", field.name)
+                    })?,
             };
-            built.push(self.value(&resolved, minimum, &format!("{name}.{}", field.name), depth + 1)?);
-            parameters.push(format!("{}: {}", field.name, self.types.text(unit, field.ty.span).trim()));
+            built.push(self.value(
+                &resolved,
+                minimum,
+                &format!("{name}.{}", field.name),
+                depth + 1,
+            )?);
+            parameters.push(format!(
+                "{}: {}",
+                field.name,
+                self.types.text(unit, field.ty.span).trim()
+            ));
             assignments.push(format!("{0}: {0}", field.name));
         }
         let (declared, applied) = self.generic_text(unit, generics);
@@ -701,7 +766,10 @@ impl<'t, 'p> Generator<'t, 'p> {
             })
             .collect();
         let applied: Vec<&str> = generics.iter().map(|g| g.name.as_str()).collect();
-        (format!("<{}>", declared.join(", ")), format!("<{}>", applied.join(", ")))
+        (
+            format!("<{}>", declared.join(", ")),
+            format!("<{}>", applied.join(", ")),
+        )
     }
 
     /// A record with private fields, from a function of its module that
@@ -766,7 +834,11 @@ impl<'t, 'p> Generator<'t, 'p> {
                 };
                 let minimum = match &parameter.min_length {
                     None => 0,
-                    Some(length) => match self.types.evaluate(length, unit, 0).and_then(|n| usize::try_from(n).ok()) {
+                    Some(length) => match self
+                        .types
+                        .evaluate(length, unit, 0)
+                        .and_then(|n| usize::try_from(n).ok())
+                    {
                         Some(n) => n,
                         None => {
                             failed = true;
@@ -774,16 +846,27 @@ impl<'t, 'p> Generator<'t, 'p> {
                         }
                     },
                 };
-                match self.value(&resolved, minimum, &format!("{name}.{}", parameter.name), depth + 1) {
+                match self.value(
+                    &resolved,
+                    minimum,
+                    &format!("{name}.{}", parameter.name),
+                    depth + 1,
+                ) {
                     Ok(build) => built.push(build),
                     Err(_) => {
                         failed = true;
                         break;
                     }
                 }
-                let refinement = parameter.min_length.as_ref().map_or(String::new(), |length| {
-                    format!(" where len >= {}", self.types.text(unit, length.span).trim())
-                });
+                let refinement = parameter
+                    .min_length
+                    .as_ref()
+                    .map_or(String::new(), |length| {
+                        format!(
+                            " where len >= {}",
+                            self.types.text(unit, length.span).trim()
+                        )
+                    });
                 parameters.push(format!(
                     "{}: {}{refinement}",
                     parameter.name,

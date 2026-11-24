@@ -1545,7 +1545,13 @@ impl<'a> Types<'a> {
                 .is_some_and(|binding| binding.kind == BindingKind::Generic))
     }
 
-    fn opaque_code_type(&mut self, callable: Type, name: &str, compiled: bool, span: Span) -> Result<Type> {
+    fn opaque_code_type(
+        &mut self,
+        callable: Type,
+        name: &str,
+        compiled: bool,
+        span: Span,
+    ) -> Result<Type> {
         if !matches!(callable, Type::Fn(_)) {
             return Err(Diagnostic::new(
                 span,
@@ -1590,7 +1596,9 @@ impl<'a> Types<'a> {
             runtime_length: None,
             tuple: false,
             structural: false,
-            foreign: compiled.then(|| ForeignResource { release: "kush_stage_release".into() }),
+            foreign: compiled.then(|| ForeignResource {
+                release: "kush_stage_release".into(),
+            }),
         });
         self.cache.insert(key, index);
         Ok(Type::Enum(index))
@@ -3490,13 +3498,20 @@ impl<'a> Types<'a> {
             // argument is static identity, not a callable stored in the graph.
             // Keep it nominal and opaque: a tuple containing Bytes must not
             // be usable as code, nor may differing latent rows become equal.
-            if b.kind == BindingKind::Builtin && matches!(b.name.as_str(), "Code" | "CompiledCode") {
+            if b.kind == BindingKind::Builtin && matches!(b.name.as_str(), "Code" | "CompiledCode")
+            {
                 if !lifetime_arguments.is_empty() || arguments.len() != 1 {
-                    return Err(Diagnostic::new(ty.span, "Code expects one closed callable type"));
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "Code expects one closed callable type",
+                    ));
                 }
                 let callable = self.lower(arguments[0], substitution, depth + 1)?;
-                return if b.name == "CompiledCode" { self.compiled_code_type(callable, ty.span) }
-                    else { self.code_type(callable, ty.span) };
+                return if b.name == "CompiledCode" {
+                    self.compiled_code_type(callable, ty.span)
+                } else {
+                    self.code_type(callable, ty.span)
+                };
             }
             // THREAD-CHANNELS: `Channel<T>` of plain data (scalars and
             // records of scalars), which crosses threads by copying words.
@@ -5379,7 +5394,9 @@ impl<'a> Types<'a> {
                             .unit_of
                             .get(id)
                             .and_then(|unit| types.resolution.units.get(*unit))
-                            .is_some_and(|path| path.len() == 2 && path[0] == "std" && path[1] == module)
+                            .is_some_and(|path| {
+                                path.len() == 2 && path[0] == "std" && path[1] == module
+                            })
                 })
                 .map(|(id, _)| *id)
         };
@@ -5393,7 +5410,8 @@ impl<'a> Types<'a> {
             ));
         };
         let panic = Type::Enum(self.instantiate(panic, vec![], vec![], vec![], span)?);
-        let ty = Type::Enum(self.instantiate(result, vec![payload, panic], vec![], vec![], span)?);
+        let ty =
+            Type::Enum(self.instantiate(result, vec![payload, panic], vec![], vec![], span)?);
         let shape = self.result(ty, span)?;
         Ok((ty, shape))
     }

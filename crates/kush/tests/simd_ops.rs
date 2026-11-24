@@ -13,7 +13,12 @@ struct Kind {
 }
 
 const fn kind(name: &'static str, bits: u32, signed: bool, width: u32) -> Kind {
-    Kind { name, bits, signed, width }
+    Kind {
+        name,
+        bits,
+        signed,
+        width,
+    }
 }
 
 const KINDS: [Kind; 16] = [
@@ -44,7 +49,11 @@ impl Kind {
         (self.width / 8) as usize
     }
     fn mask(self) -> u128 {
-        if self.bits == 64 { u64::MAX as u128 } else { (1u128 << self.bits) - 1 }
+        if self.bits == 64 {
+            u64::MAX as u128
+        } else {
+            (1u128 << self.bits) - 1
+        }
     }
     /// The lane value of a bit pattern.
     fn value(self, raw: u128) -> i128 {
@@ -89,7 +98,10 @@ impl Kind {
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 11 ^ self.0 << 7
     }
     fn lanes(&mut self, kind: Kind) -> Vec<i128> {
@@ -109,7 +121,11 @@ impl Rng {
 }
 
 fn list(lanes: &[i128]) -> String {
-    lanes.iter().map(i128::to_string).collect::<Vec<_>>().join(", ")
+    lanes
+        .iter()
+        .map(i128::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn run(source: &str) -> String {
@@ -125,16 +141,35 @@ fn run(source: &str) -> String {
         let binary = scratch.path().join("simd-ops");
         kush::native::build(&program, &binary).unwrap();
         let native = std::process::Command::new(&binary).output().unwrap();
-        assert_eq!(native.status.code(), Some(0), "{}", String::from_utf8_lossy(&native.stderr));
-        assert_eq!(String::from_utf8(native.stdout).unwrap(), output, "native and evaluator differ");
+        assert_eq!(
+            native.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&native.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(native.stdout).unwrap(),
+            output,
+            "native and evaluator differ"
+        );
         // SIMD-CRANELIFT-FEATURES: the same with the host's CPU features.
         let host = scratch.path().join("simd-ops-host");
         let mut options = kush::native::CodegenOptions::release();
         options.native_cpu = true;
-        kush::native::build_with_codegen(&program, &host, false, &kush::native::LinkSpec::default(), options)
-            .unwrap();
+        kush::native::build_with_codegen(
+            &program,
+            &host,
+            false,
+            &kush::native::LinkSpec::default(),
+            options,
+        )
+        .unwrap();
         let native = std::process::Command::new(&host).output().unwrap();
-        assert_eq!(String::from_utf8(native.stdout).unwrap(), output, "host-feature build differs");
+        assert_eq!(
+            String::from_utf8(native.stdout).unwrap(),
+            output,
+            "host-feature build differs"
+        );
     }
     output
 }
@@ -146,9 +181,13 @@ fn check_kind(kind: Kind, seed: u64) {
     let a = rng.lanes(kind);
     let b = rng.lanes(kind);
     // c equals a in the even lanes and b in the odd ones.
-    let c: Vec<i128> = (0..n).map(|i| if i % 2 == 0 { a[i] } else { b[i] }).collect();
+    let c: Vec<i128> = (0..n)
+        .map(|i| if i % 2 == 0 { a[i] } else { b[i] })
+        .collect();
     let map2 = |f: &dyn Fn(u128, u128) -> u128| -> Vec<i128> {
-        (0..n).map(|i| kind.value(f(kind.raw(a[i]), kind.raw(b[i])))).collect()
+        (0..n)
+            .map(|i| kind.value(f(kind.raw(a[i]), kind.raw(b[i]))))
+            .collect()
     };
     let mut body = String::new();
     let mut expected: Vec<Vec<i128>> = Vec::new();
@@ -156,8 +195,16 @@ fn check_kind(kind: Kind, seed: u64) {
         body.push_str(&format!("show({call});\n"));
         expected.push(lanes);
     };
-    show(format!("{t}.wrapping_add(a, b)"), map2(&|x, y| x.wrapping_add(y)), &mut body);
-    show(format!("{t}.wrapping_sub(a, b)"), map2(&|x, y| x.wrapping_sub(y)), &mut body);
+    show(
+        format!("{t}.wrapping_add(a, b)"),
+        map2(&|x, y| x.wrapping_add(y)),
+        &mut body,
+    );
+    show(
+        format!("{t}.wrapping_sub(a, b)"),
+        map2(&|x, y| x.wrapping_sub(y)),
+        &mut body,
+    );
     show(format!("{t}.and(a, b)"), map2(&|x, y| x & y), &mut body);
     show(format!("{t}.or(a, b)"), map2(&|x, y| x | y), &mut body);
     show(format!("{t}.xor(a, b)"), map2(&|x, y| x ^ y), &mut body);
@@ -166,37 +213,69 @@ fn check_kind(kind: Kind, seed: u64) {
         let shl = (0..n).map(|i| kind.value(kind.raw(a[i]) << s)).collect();
         show(format!("{t}.shl(a, {s}, _)"), shl, &mut body);
         let shr = (0..n)
-            .map(|i| if kind.signed { kind.value(kind.raw(a[i] >> s)) } else { a[i] >> s })
+            .map(|i| {
+                if kind.signed {
+                    kind.value(kind.raw(a[i] >> s))
+                } else {
+                    a[i] >> s
+                }
+            })
             .collect();
         show(format!("{t}.shr(a, {s}, _)"), shr, &mut body);
     }
     let all_ones = kind.value(kind.mask());
-    let eq = (0..n).map(|i| if a[i] == c[i] { all_ones } else { 0 }).collect();
+    let eq = (0..n)
+        .map(|i| if a[i] == c[i] { all_ones } else { 0 })
+        .collect();
     show(format!("{t}.eq_lanes(a, c)"), eq, &mut body);
     let wide = kind.width == 256;
     let reversed: Vec<usize> = (0..n).rev().collect();
     if !wide {
-    show(
-        format!("{t}.shuffle(a, {}, _)", reversed.iter().map(usize::to_string).collect::<Vec<_>>().join(", ")),
-        reversed.iter().map(|&i| a[i]).collect(),
-        &mut body,
-    );
-    let interleave: Vec<usize> = (0..n).map(|k| if k % 2 == 0 { k / 2 } else { n + k / 2 }).collect();
-    let both: Vec<i128> = a.iter().chain(b.iter()).copied().collect();
-    show(
-        format!("{t}.shuffle2(a, b, {}, _)", interleave.iter().map(usize::to_string).collect::<Vec<_>>().join(", ")),
-        interleave.iter().map(|&i| both[i]).collect(),
-        &mut body,
-    );
+        show(
+            format!(
+                "{t}.shuffle(a, {}, _)",
+                reversed
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            reversed.iter().map(|&i| a[i]).collect(),
+            &mut body,
+        );
+        let interleave: Vec<usize> = (0..n)
+            .map(|k| if k % 2 == 0 { k / 2 } else { n + k / 2 })
+            .collect();
+        let both: Vec<i128> = a.iter().chain(b.iter()).copied().collect();
+        show(
+            format!(
+                "{t}.shuffle2(a, b, {}, _)",
+                interleave
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            interleave.iter().map(|&i| both[i]).collect(),
+            &mut body,
+        );
     }
     let a_le = kind.bytes_of_lanes(&a, false);
     if kind.bits > 8 {
-        show(format!("{t}.swap_bytes(a)"), kind.lanes_of_bytes(&a_le, true), &mut body);
+        show(
+            format!("{t}.swap_bytes(a)"),
+            kind.lanes_of_bytes(&a_le, true),
+            &mut body,
+        );
     } else if !wide {
         let b_le = kind.bytes_of_lanes(&b, false);
         for k in [0usize, 5, 16] {
             let joined: Vec<u8> = b_le.iter().chain(a_le.iter()).copied().collect();
-            show(format!("{t}.align_right(a, b, {k}, _)"), kind.lanes_of_bytes(&joined[k..k + 16], false), &mut body);
+            show(
+                format!("{t}.align_right(a, b, {k}, _)"),
+                kind.lanes_of_bytes(&joined[k..k + 16], false),
+                &mut body,
+            );
         }
     }
     // Bytes: a little-endian, then three filler bytes and b big-endian.
@@ -204,9 +283,21 @@ fn check_kind(kind: Kind, seed: u64) {
     bytes.extend([7, 8, 9]);
     bytes.extend(kind.bytes_of_lanes(&b, true));
     let size = kind.bytes();
-    show(format!("{t}.load_le(&data, len, 0, _)"), a.clone(), &mut body);
-    show(format!("{t}.load_le(&data, len, 3, _)"), kind.lanes_of_bytes(&bytes[3..3 + size], false), &mut body);
-    show(format!("{t}.load_be(&data, len, {}, _)", size + 3), b.clone(), &mut body);
+    show(
+        format!("{t}.load_le(&data, len, 0, _)"),
+        a.clone(),
+        &mut body,
+    );
+    show(
+        format!("{t}.load_le(&data, len, 3, _)"),
+        kind.lanes_of_bytes(&bytes[3..3 + size], false),
+        &mut body,
+    );
+    show(
+        format!("{t}.load_be(&data, len, {}, _)", size + 3),
+        b.clone(),
+        &mut body,
+    );
     let source = format!(
         "use std.simd.{t};
          fn show(v: {t}) -> Unit ! {{io, panic}} {{
@@ -227,13 +318,20 @@ fn check_kind(kind: Kind, seed: u64) {
              drop(data);
              0
          }}",
-        (0..n).map(|i| format!("print_int({t}.lane(v, {i}, _));")).collect::<Vec<_>>().join(" "),
+        (0..n)
+            .map(|i| format!("print_int({t}.lane(v, {i}, _));"))
+            .collect::<Vec<_>>()
+            .join(" "),
         list(&a),
         list(&b),
         list(&c),
         total = 2 * kind.bytes() + 3,
     );
-    let want: String = expected.iter().flatten().map(|v| format!("{v}\n")).collect();
+    let want: String = expected
+        .iter()
+        .flatten()
+        .map(|v| format!("{v}\n"))
+        .collect();
     let got = run(&source);
     if got != want {
         let got_lines: Vec<&str> = got.lines().collect();
@@ -251,7 +349,10 @@ fn check_kind(kind: Kind, seed: u64) {
 
 #[test]
 fn unsigned_operations_match_the_lane_model() {
-    for kind in KINDS.iter().filter(|kind| !kind.signed && kind.width == 128) {
+    for kind in KINDS
+        .iter()
+        .filter(|kind| !kind.signed && kind.width == 128)
+    {
         for seed in [1, 2] {
             check_kind(*kind, seed);
         }
@@ -316,8 +417,15 @@ fn the_native_backend_emits_vector_instructions() {
     // Cranelift prints a value's type on the bitcast that makes it, and the
     // operations on vectors without a suffix.
     for instruction in [
-        "bitcast.i32x4", "bitcast.i16x8", "bitcast.i8x16", "= iadd ", "= bxor ", "= ishl ",
-        "= shuffle ", "= sshr ", "= icmp eq ",
+        "bitcast.i32x4",
+        "bitcast.i16x8",
+        "bitcast.i8x16",
+        "= iadd ",
+        "= bxor ",
+        "= ishl ",
+        "= shuffle ",
+        "= sshr ",
+        "= icmp eq ",
     ] {
         assert!(clif.contains(instruction), "no {instruction:?} in:\n{clif}");
     }
@@ -348,9 +456,14 @@ fn the_llvm_backend_emits_vector_operations() {
          }",
     )
     .unwrap();
-    let ir = kush::native::emit_llvm_ir(&program, kush::native::CodegenOptions::release_llvm()).unwrap();
+    let ir =
+        kush::native::emit_llvm_ir(&program, kush::native::CodegenOptions::release_llvm()).unwrap();
     for operation in [
-        "add <4 x i32>", "xor <4 x i32>", "shl <4 x i32>", "icmp eq <4 x i32>", "shufflevector <16 x i8>",
+        "add <4 x i32>",
+        "xor <4 x i32>",
+        "shl <4 x i32>",
+        "icmp eq <4 x i32>",
+        "shufflevector <16 x i8>",
     ] {
         assert!(ir.contains(operation), "no {operation:?} in the LLVM IR");
     }
@@ -362,8 +475,13 @@ fn host_features_turn_byte_shuffles_into_instructions() {
     // Without SSSE3 (the x86-64 baseline) Cranelift calls a software
     // pshufb; with `--target-cpu native` on an SSSE3 machine it emits the
     // instruction. Checked with objdump when it is installed.
-    let ssse3 = std::fs::read_to_string("/proc/cpuinfo").unwrap().contains(" ssse3");
-    let objdump = std::process::Command::new("objdump").arg("--version").output().is_ok();
+    let ssse3 = std::fs::read_to_string("/proc/cpuinfo")
+        .unwrap()
+        .contains(" ssse3");
+    let objdump = std::process::Command::new("objdump")
+        .arg("--version")
+        .output()
+        .is_ok();
     // A Cranelift property: KUSH_BACKEND=llvm would build with LLVM instead.
     let cranelift = std::env::var("KUSH_BACKEND").is_err();
     if !ssse3 || !objdump || !cranelift {
@@ -380,21 +498,36 @@ fn host_features_turn_byte_shuffles_into_instructions() {
     .unwrap();
     let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
     let count = |native_cpu: bool| -> usize {
-        let binary = scratch.path().join(if native_cpu { "host" } else { "baseline" });
+        let binary = scratch
+            .path()
+            .join(if native_cpu { "host" } else { "baseline" });
         let mut options = kush::native::CodegenOptions::release();
         options.native_cpu = native_cpu;
-        kush::native::build_with_codegen(&program, &binary, false, &kush::native::LinkSpec::default(), options)
-            .unwrap();
+        kush::native::build_with_codegen(
+            &program,
+            &binary,
+            false,
+            &kush::native::LinkSpec::default(),
+            options,
+        )
+        .unwrap();
         let output = std::process::Command::new(&binary).output().unwrap();
         assert_eq!(output.status.code(), Some(15));
-        let disassembly = std::process::Command::new("objdump").arg("-d").arg(&binary).output().unwrap();
+        let disassembly = std::process::Command::new("objdump")
+            .arg("-d")
+            .arg(&binary)
+            .output()
+            .unwrap();
         String::from_utf8_lossy(&disassembly.stdout)
             .lines()
             // The VEX form (vpshufb) when the host also has AVX.
             .filter(|line| line.contains("\tpshufb ") || line.contains("\tvpshufb "))
             .count()
     };
-    assert!(count(true) > count(false), "no pshufb instruction with host features");
+    assert!(
+        count(true) > count(false),
+        "no pshufb instruction with host features"
+    );
 }
 
 #[test]
@@ -406,8 +539,7 @@ fn wide_operations_match_the_lane_model() {
 
 #[test]
 fn wide_vectors_split_into_halves() {
-    let output = run(
-        "use std.simd.u32x8;
+    let output = run("use std.simd.u32x8;
          use std.simd.u32x4;
          fn main() -> i64 ! {io, panic} {
              let v = u32x8.new(1, 2, 3, 4, 5, 6, 7, 8);
@@ -417,8 +549,7 @@ fn wide_vectors_split_into_halves() {
              print_int(u32x8.lane(w, 0, _));
              print_int(u32x8.lane(w, 7, _));
              0
-         }",
-    );
+         }");
     assert_eq!(output, "4\n5\n5\n4\n");
 }
 
@@ -436,6 +567,9 @@ fn wide_lane_wise_operations_become_two_vector_instructions() {
     .unwrap();
     let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
     let clif = kush::native::build_with_clif(&program, &scratch.path().join("wide")).unwrap();
-    assert!(clif.matches("= iadd v").filter(|_| true).count() >= 2, "{clif}");
+    assert!(
+        clif.matches("= iadd v").filter(|_| true).count() >= 2,
+        "{clif}"
+    );
     assert!(clif.contains("bitcast.i32x4"), "{clif}");
 }

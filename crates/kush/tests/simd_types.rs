@@ -26,7 +26,12 @@ fn native(source: &str) -> String {
     let binary = scratch.path().join("simd");
     kush::native::build(&program, &binary).unwrap();
     let native = std::process::Command::new(&binary).output().unwrap();
-    assert_eq!(native.status.code(), Some(0), "{}", String::from_utf8_lossy(&native.stderr));
+    assert_eq!(
+        native.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&native.stderr)
+    );
     String::from_utf8(native.stdout).unwrap()
 }
 
@@ -74,7 +79,21 @@ fn lanes_round_trip_in_every_unsigned_type() {
     );
     assert_eq!(
         output,
-        lines(&[1, 2, 3, 4294967295, 0, 7, 8, 255, 4, 5, 65535, 18446744073709551615, 5])
+        lines(&[
+            1,
+            2,
+            3,
+            4294967295,
+            0,
+            7,
+            8,
+            255,
+            4,
+            5,
+            65535,
+            18446744073709551615,
+            5
+        ])
     );
 }
 
@@ -106,7 +125,16 @@ fn signed_lanes_keep_their_sign() {
     assert_eq!(
         output,
         lines(&[
-            -1, -128, 127, -2, -300, -2147483648, 2147483647, -1, -9223372036854775808, -7
+            -1,
+            -128,
+            127,
+            -2,
+            -300,
+            -2147483648,
+            2147483647,
+            -1,
+            -9223372036854775808,
+            -7
         ])
     );
 }

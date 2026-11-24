@@ -12,7 +12,8 @@ use std::time::Duration;
 fn checked(source: &str) -> executable::Executable {
     let program = kush::program::load_source("<std-net-udp-test>", source)
         .unwrap_or_else(|(_, error)| panic!("{}", error.message));
-    executable::check_program(&program).unwrap_or_else(|error| panic!("{}", program.sources.render(&error)))
+    executable::check_program(&program)
+        .unwrap_or_else(|error| panic!("{}", program.sources.render(&error)))
 }
 
 fn reference(source: &str) -> String {
@@ -21,7 +22,10 @@ fn reference(source: &str) -> String {
         .evaluate_with_host_and_stats(&mut io::empty(), &mut output, &Host::empty())
         .unwrap();
     assert_eq!(status, 0, "{}", String::from_utf8_lossy(&output));
-    assert_eq!(stats.allocations, stats.deallocations, "reference cleanup must be balanced");
+    assert_eq!(
+        stats.allocations, stats.deallocations,
+        "reference cleanup must be balanced"
+    );
     String::from_utf8(output).unwrap()
 }
 
@@ -31,7 +35,12 @@ fn native(source: &str) -> String {
     let binary = scratch.path().join("std-net-udp");
     kush::native::build(&program, &binary).unwrap();
     let output = Command::new(&binary).stdin(Stdio::null()).output().unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     String::from_utf8(output.stdout).unwrap()
 }
 
@@ -91,7 +100,9 @@ fn udp_send_delivers_one_datagram_on_both_backends() {
             Err(_) if host == "::1" => continue,
             Err(error) => panic!("{error}"),
         };
-        receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let source = sender("udp_send", host, receiver.local_addr().unwrap().port());
         assert_eq!(reference(&source).trim(), "102", "{host} reference");
         assert_eq!(receive(&receiver), expected_packet(), "{host} reference");
@@ -106,8 +117,14 @@ fn udp_broadcast_sets_so_broadcast_and_sends_on_both_backends() {
     // what it checks is that setting SO_BROADCAST succeeds on both backends
     // and the datagram still arrives intact.
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
-    receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let source = sender("udp_broadcast", "127.0.0.1", receiver.local_addr().unwrap().port());
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let source = sender(
+        "udp_broadcast",
+        "127.0.0.1",
+        receiver.local_addr().unwrap().port(),
+    );
     assert_eq!(reference(&source).trim(), "102", "reference");
     assert_eq!(receive(&receiver), expected_packet(), "reference");
     assert_eq!(native(&source).trim(), "102", "native");
@@ -178,16 +195,24 @@ fn udp_send6_reports_the_ipv6_address_it_used_on_both_backends() {
     let Ok(receiver) = UdpSocket::bind("[::1]:0") else {
         return; // A host without IPv6 loopback.
     };
-    receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let port = receiver.local_addr().unwrap().port();
     // An IPv4 literal has no IPv6 address: EINVAL, nothing sent.
     let source = sender6(&[("::1", port), ("127.0.0.1", port)]);
-    for (backend, output) in [("reference", reference(&source)), ("native", native(&source))] {
+    for (backend, output) in [
+        ("reference", reference(&source)),
+        ("native", native(&source)),
+    ] {
         assert_eq!(output, "::1\n-22\n", "{backend}");
         assert_eq!(receive(&receiver), b"xyz", "{backend}");
     }
     receiver.set_nonblocking(true).unwrap();
-    assert!(receiver.recv(&mut [0u8; 8]).is_err(), "the IPv4 literal must not be sent");
+    assert!(
+        receiver.recv(&mut [0u8; 8]).is_err(),
+        "the IPv4 literal must not be sent"
+    );
 }
 
 #[test]
@@ -228,9 +253,16 @@ fn main() -> i64 ! {{io, alloc, panic}} {{
     );
     // 127.255.255.255 is loopback's broadcast address: connecting to it
     // needs SO_BROADCAST, and its route leaves from 127.0.0.1.
-    let expected = if ipv6 { "127.0.0.1\n127.0.0.1\n::1\n-22\n" } else { "127.0.0.1\n127.0.0.1\n-22\n" };
+    let expected = if ipv6 {
+        "127.0.0.1\n127.0.0.1\n::1\n-22\n"
+    } else {
+        "127.0.0.1\n127.0.0.1\n-22\n"
+    };
     assert_eq!(reference(&source), expected, "reference");
     assert_eq!(native(&source), expected, "native");
     listener.set_nonblocking(true).unwrap();
-    assert!(listener.recv(&mut [0u8; 8]).is_err(), "a route probe must not send");
+    assert!(
+        listener.recv(&mut [0u8; 8]).is_err(),
+        "a route probe must not send"
+    );
 }

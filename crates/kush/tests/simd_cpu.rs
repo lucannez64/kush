@@ -47,10 +47,18 @@ fn expected_from_cpuinfo() -> i64 {
         .collect();
     let has = |name: &str| flags.contains(&name);
     let mut bits = 0;
-    if has("ssse3") { bits |= 1; }
-    if has("sse4_1") { bits |= 2; }
-    if has("avx2") { bits |= 4; }
-    if has("sha_ni") && has("ssse3") && has("sse4_1") { bits |= 8; }
+    if has("ssse3") {
+        bits |= 1;
+    }
+    if has("sse4_1") {
+        bits |= 2;
+    }
+    if has("avx2") {
+        bits |= 4;
+    }
+    if has("sha_ni") && has("ssse3") && has("sse4_1") {
+        bits |= 8;
+    }
     bits
 }
 
@@ -60,7 +68,10 @@ fn native_detection_matches_the_cpu_and_can_be_disabled() {
     let expected = expected_from_cpuinfo();
     assert_eq!(native(PROBE, None), format!("{expected}\n"));
     assert_eq!(native(PROBE, Some("sha")), format!("{}\n", expected & !8));
-    assert_eq!(native(PROBE, Some("avx2,ssse3")), format!("{}\n", expected & !4 & !1 & !8));
+    assert_eq!(
+        native(PROBE, Some("avx2,ssse3")),
+        format!("{}\n", expected & !4 & !1 & !8)
+    );
 }
 
 #[test]
@@ -123,7 +134,9 @@ fn a_root_module_cannot_stand_in_for_std() {
     let rejects = |source: &str| match check(source) {
         Ok(_) => panic!("accepted:\n{source}"),
         Err(error) => assert!(
-            error.message.contains("reserved for the Kush standard library"),
+            error
+                .message
+                .contains("reserved for the Kush standard library"),
             "{error:?}"
         ),
     };

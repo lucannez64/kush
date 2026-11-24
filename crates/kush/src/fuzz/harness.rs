@@ -9,10 +9,10 @@
 //! fixed offset (little-endian), every collection a two-byte length there;
 //! the collections' elements follow, in parameter order. Bytes past the end
 //! of the tape read as zero, so every byte string is a valid input.
+use crate::Span;
 use crate::ast::{self, ItemKind, TypeKind};
 use crate::executable::Executable;
 use crate::program::{ModuleSource, Program};
-use crate::Span;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use super::build::{Build, Built, Maker};
@@ -72,7 +72,9 @@ impl Scalar {
     fn decode(self, at: &str) -> String {
         match self {
             Self::Int { name: "i64", .. } => format!("__kush_fuzz_word(fz_tape, {at}, 8)"),
-            Self::Int { bytes, .. } => format!("Int.truncate(__kush_fuzz_word(fz_tape, {at}, {bytes}))"),
+            Self::Int { bytes, .. } => {
+                format!("Int.truncate(__kush_fuzz_word(fz_tape, {at}, {bytes}))")
+            }
             Self::Bool => format!("__kush_fuzz_word(fz_tape, {at}, 1) % 2 == 1"),
         }
     }
@@ -213,9 +215,9 @@ pub fn plan(program: &Program, executable: &Executable) -> Vec<Target> {
                 continue;
             };
             if function.body.is_none()
-                || !sites
-                    .iter()
-                    .any(|site| item.item.span.start <= site.span.start && site.span.end <= item.item.span.end)
+                || !sites.iter().any(|site| {
+                    item.item.span.start <= site.span.start && site.span.end <= item.item.span.end
+                })
             {
                 continue;
             }
@@ -385,7 +387,9 @@ fn layout<'t, 'p>(
         // A scalar or a collection written directly is one slot, passed as
         // the parameter is.
         let direct = match &inner.kind {
-            TypeKind::Named { path, arguments } if path.len() == 1 && !env.contains_key(&path[0]) => {
+            TypeKind::Named { path, arguments }
+                if path.len() == 1 && !env.contains_key(&path[0]) =>
+            {
                 let name = path[0].as_str();
                 match (Scalar::from_name(name), arguments.as_slice()) {
                     (Some(scalar), []) if passing == Passing::Value => Some(Slot::Scalar {
@@ -539,7 +543,10 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
     let root_module = targets
         .first()
         .and_then(|t| t.module.first().cloned())
-        .map_or_else(|| ROOT_MODULE.to_owned(), |package| format!("{package}.{ROOT_MODULE}"));
+        .map_or_else(
+            || ROOT_MODULE.to_owned(),
+            |package| format!("{package}.{ROOT_MODULE}"),
+        );
     let package_prefix = root_module
         .strip_suffix(ROOT_MODULE)
         .unwrap_or("")
@@ -561,7 +568,10 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
         // Makers and imports it needs, each appended once.
         for maker in &target.makers {
             if added_makers.insert((maker.module.clone(), maker.name.clone())) {
-                appended.entry(maker.module.clone()).or_default().push_str(&maker.text);
+                appended
+                    .entry(maker.module.clone())
+                    .or_default()
+                    .push_str(&maker.text);
             }
         }
         for (home, used) in &target.uses {
@@ -577,21 +587,30 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
         // have parameters): a slot of a built parameter into `fz_l<slot>`,
         // any other into the parameter's own name.
         if added_words.insert(module.clone()) {
-            appended.entry(module.clone()).or_default().push_str(WORD_HELPER);
+            appended
+                .entry(module.clone())
+                .or_default()
+                .push_str(WORD_HELPER);
         }
         let mut in_built = BTreeSet::new();
         for built in &layout.built {
             leaves(&built.build, &mut in_built);
         }
         let slot_name = |index: usize| match &layout.slots[index] {
-            Slot::Scalar { name, .. } | Slot::Collection { name, .. } if !in_built.contains(&index) => {
+            Slot::Scalar { name, .. } | Slot::Collection { name, .. }
+                if !in_built.contains(&index) =>
+            {
                 name.clone()
             }
             _ => format!("fz_l{index}"),
         };
         let mut body = String::new();
         // `fz_at` walks the collection elements after the fixed part.
-        if layout.slots.iter().any(|slot| matches!(slot, Slot::Collection { .. })) {
+        if layout
+            .slots
+            .iter()
+            .any(|slot| matches!(slot, Slot::Collection { .. }))
+        {
             body.push_str(&format!("    let mut fz_at = {};\n", layout.fixed));
         }
         for (index, slot) in layout.slots.iter().enumerate() {
@@ -651,7 +670,11 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
             runtime += 1;
             let passing = match layout.built.iter().find(|b| b.parameter == position) {
                 Some(built) => {
-                    let mutable = if built.passing == Passing::Exclusive { "mut " } else { "" };
+                    let mutable = if built.passing == Passing::Exclusive {
+                        "mut "
+                    } else {
+                        ""
+                    };
                     body.push_str(&format!(
                         "    let {mutable}{parameter} = {};\n",
                         expression(&built.build, &slot_name)
@@ -678,14 +701,20 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
         }
         let effects = harness_effects(
             &target.effects,
-            layout.slots.iter().any(|slot| matches!(slot, Slot::Collection { .. })),
+            layout
+                .slots
+                .iter()
+                .any(|slot| matches!(slot, Slot::Collection { .. })),
         );
         let harness = format!(
             "\npub fn __kush_fuzz_{number}(fz_tape: &Bytes) -> Unit ! {{{effects}}} {{\n{body}    let _ = {}({});\n}}\n",
             target.function,
             arguments.join(", "),
         );
-        appended.entry(module.clone()).or_default().push_str(&harness);
+        appended
+            .entry(module.clone())
+            .or_default()
+            .push_str(&harness);
         relays
             .entry(relay.clone())
             .or_insert_with(|| (format!("<{relay}>"), format!("module {relay};\n\nuse {module};\n")))
@@ -698,7 +727,8 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
             "    if which == {number} {{\n        {relay_short}.call_{number}(&tape);\n        return 0;\n    }}\n"
         ));
     }
-    let mut root = format!("module {root_module};\n\nuse std.env;\nuse std.io;\nuse std.result.Result;\n");
+    let mut root =
+        format!("module {root_module};\n\nuse std.env;\nuse std.io;\nuse std.result.Result;\n");
     for relay in relays.keys() {
         root.push_str(&format!("use {relay};\n"));
     }
@@ -724,7 +754,10 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
         let mut text = file.text.clone();
         for item in &program.module.items[unit.items.clone()] {
             for attribute in item.attributes.iter().filter(|a| a.kind == "stack_size") {
-                let (start, end) = (attribute.span.start - file.base, attribute.span.end - file.base);
+                let (start, end) = (
+                    attribute.span.start - file.base,
+                    attribute.span.end - file.base,
+                );
                 if let Some(original) = file.text.get(start..end) {
                     stack_size = format!("{original}\n");
                     text.replace_range(start..end, &" ".repeat(end - start));
@@ -733,7 +766,10 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
         }
         (!path.is_empty()).then(|| (path, file.name.clone(), text))
     });
-    let root = root.replace("\nfn main() -> i64", &format!("\n{stack_size}fn main() -> i64"));
+    let root = root.replace(
+        "\nfn main() -> i64",
+        &format!("\n{stack_size}fn main() -> i64"),
+    );
     Sources {
         root_name: format!("<{root_module}>"),
         root,
@@ -827,7 +863,6 @@ fn harness_effects(row: &str, collections: bool) -> String {
     effects.join(", ")
 }
 
-
 /// A module source that appends generated harness text to some modules.
 pub struct Overlay<'a> {
     pub base: &'a dyn ModuleSource,
@@ -876,10 +911,12 @@ pub fn assemble(
             base,
             sources: &sources,
         };
-        let loaded = crate::program::load(&sources.root_name, &sources.root, &overlay)
-            .and_then(|program| match crate::executable::check_program(&program) {
-                Ok(executable) => Ok((program, executable)),
-                Err(error) => Err((Some(program.sources.clone()), error)),
+        let loaded =
+            crate::program::load(&sources.root_name, &sources.root, &overlay).and_then(|program| {
+                match crate::executable::check_program(&program) {
+                    Ok(executable) => Ok((program, executable)),
+                    Err(error) => Err((Some(program.sources.clone()), error)),
+                }
             });
         let (map, error) = match loaded {
             Ok((program, executable)) => {
@@ -909,7 +946,12 @@ pub fn assemble(
 
 /// The targets whose generated text contains `span`: one harness, or every
 /// target needing the maker or import it is in.
-fn culprits(map: &crate::program::SourceMap, sources: &Sources, targets: &[Target], span: Span) -> Vec<usize> {
+fn culprits(
+    map: &crate::program::SourceMap,
+    sources: &Sources,
+    targets: &[Target],
+    span: Span,
+) -> Vec<usize> {
     if let Some(number) = harness_of(map, sources, span) {
         return vec![sources.harnesses[number]];
     }
@@ -935,7 +977,10 @@ fn culprits(map: &crate::program::SourceMap, sources: &Sources, targets: &[Targe
             (0..targets.len())
                 .filter(|&t| {
                     targets[t].harness.is_ok()
-                        && targets[t].makers.iter().any(|m| m.module == *module && m.name == name)
+                        && targets[t]
+                            .makers
+                            .iter()
+                            .any(|m| m.module == *module && m.name == name)
                 })
                 .collect()
         }
@@ -950,7 +995,10 @@ fn culprits(map: &crate::program::SourceMap, sources: &Sources, targets: &[Targe
             (0..targets.len())
                 .filter(|&t| {
                     targets[t].harness.is_ok()
-                        && targets[t].uses.iter().any(|(home, u)| home == module && *u == used)
+                        && targets[t]
+                            .uses
+                            .iter()
+                            .any(|(home, u)| home == module && *u == used)
                 })
                 .collect()
         }
@@ -978,7 +1026,10 @@ fn harness_of(map: &crate::program::SourceMap, sources: &Sources, span: Span) ->
         "pub fn __kush_fuzz_"
     };
     let at = before.rfind(marker)? + marker.len();
-    let digits: String = file.text[at..].chars().take_while(char::is_ascii_digit).collect();
+    let digits: String = file.text[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
     digits.parse().ok()
 }
 
@@ -1032,7 +1083,10 @@ pub fn plan_entries(text: &str, file: &str) -> Result<Vec<Target>, String> {
             .iter()
             .map(|effect| slice(source, effect.span).trim().to_owned())
             .collect();
-        let shape = match effects.iter().find(|e| !ALLOWED_EFFECTS.contains(&e.as_str())) {
+        let shape = match effects
+            .iter()
+            .find(|e| !ALLOWED_EFFECTS.contains(&e.as_str()))
+        {
             Some(effect) => Err(format!("effect `{effect}`")),
             None => shape,
         };

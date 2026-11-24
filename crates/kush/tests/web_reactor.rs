@@ -23,7 +23,10 @@ fn reference(source: &str) -> String {
         .evaluate_with_host_and_stats(&mut io::empty(), &mut output, &Host::empty())
         .unwrap();
     assert_eq!(status, 0, "{}", String::from_utf8_lossy(&output));
-    assert_eq!(stats.allocations, stats.deallocations, "reference cleanup must be balanced");
+    assert_eq!(
+        stats.allocations, stats.deallocations,
+        "reference cleanup must be balanced"
+    );
     String::from_utf8(output).unwrap()
 }
 
@@ -299,7 +302,10 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
     0
 }
 "#;
-    let source = format!("{PRELUDE}{}", SERVER_AND_CLIENTS.split("fn main()").next().unwrap()) + main;
+    let source = format!(
+        "{PRELUDE}{}",
+        SERVER_AND_CLIENTS.split("fn main()").next().unwrap()
+    ) + main;
     assert_eq!(native(&source), "200\n");
 }
 

@@ -380,7 +380,12 @@ impl LlvmModule {
     }
     /// Define a data object. Each pointer replaces the eight bytes at its
     /// offset with an address the linker fills in.
-    pub fn define_data(&mut self, id: DataId, bytes: Vec<u8>, mut pointers: Vec<(usize, DataPointer)>) {
+    pub fn define_data(
+        &mut self,
+        id: DataId,
+        bytes: Vec<u8>,
+        mut pointers: Vec<(usize, DataPointer)>,
+    ) {
         if !pointers.is_empty() {
             pointers.sort_by_key(|(offset, _)| *offset);
             self.pointers.insert(id, pointers);
@@ -389,7 +394,12 @@ impl LlvmModule {
     }
     /// The LLVM initializer of a data object: its bytes, with each pointer
     /// as a `ptr` field of a packed struct.
-    fn initializer(&self, id: DataId, bytes: &[u8], declarations: &ModuleDeclarations) -> (String, String) {
+    fn initializer(
+        &self,
+        id: DataId,
+        bytes: &[u8],
+        declarations: &ModuleDeclarations,
+    ) -> (String, String) {
         fn array(bytes: &[u8]) -> (String, String) {
             let mut value = String::from("c\"");
             for byte in bytes {
@@ -413,7 +423,9 @@ impl LlvmModule {
             let target = match pointer {
                 DataPointer::Function(function) => format!(
                     "@{}",
-                    declarations.get_function_decl(function).linkage_name(function)
+                    declarations
+                        .get_function_decl(function)
+                        .linkage_name(function)
                 ),
                 DataPointer::Data(data, 0) => {
                     format!("@{}", declarations.get_data_decl(data).linkage_name(data))
@@ -511,7 +523,9 @@ impl LlvmModule {
                     let DataPointer::Function(function) = *pointer else {
                         continue;
                     };
-                    let name = declarations.get_function_decl(function).linkage_name(function);
+                    let name = declarations
+                        .get_function_decl(function)
+                        .linkage_name(function);
                     if let Some(&index) = index_of.get(name.as_ref())
                         && plan.home[index] != 0
                     {
@@ -882,7 +896,9 @@ fn lanes(ty: ir::Type) -> Option<(u32, &'static str)> {
 /// A vector constant with `value` in every lane.
 fn splat_constant(ty: ir::Type, value: &str) -> Option<String> {
     let (count, lane) = lanes(ty)?;
-    let items = (0..count).map(|_| format!("{lane} {value}")).collect::<Vec<_>>();
+    let items = (0..count)
+        .map(|_| format!("{lane} {value}"))
+        .collect::<Vec<_>>();
     Some(format!("<{}>", items.join(", ")))
 }
 
@@ -1622,7 +1638,10 @@ impl<'a> Translator<'a> {
                     let result = dfg.first_result(inst);
                     let (name, ty) = (self.name(result), self.tyn(result)?);
                     let (count, lane) = lanes(self.ty(args[0])).ok_or("vector shift")?;
-                    let bits = lane.trim_start_matches('i').parse::<u32>().map_err(|e| e.to_string())?;
+                    let bits = lane
+                        .trim_start_matches('i')
+                        .parse::<u32>()
+                        .map_err(|e| e.to_string())?;
                     let from = self.tyn(args[1])?;
                     let mut amount = self.op(args[1]);
                     if from != lane {
@@ -1633,7 +1652,9 @@ impl<'a> Translator<'a> {
                     let masked = self.temp();
                     self.line(format!("{masked} = and {lane} {amount}, {}", bits - 1));
                     let single = self.temp();
-                    self.line(format!("{single} = insertelement {ty} poison, {lane} {masked}, i32 0"));
+                    self.line(format!(
+                        "{single} = insertelement {ty} poison, {lane} {masked}, i32 0"
+                    ));
                     let splat = self.temp();
                     self.line(format!(
                         "{splat} = shufflevector {ty} {single}, {ty} poison, <{count} x i32> zeroinitializer"
@@ -1764,14 +1785,20 @@ impl<'a> Translator<'a> {
                 let result = dfg.first_result(inst);
                 let (name, from) = (self.name(result), self.tyn(arg)?);
                 let operand = self.op(arg);
-                self.line(format!("{name} = extractelement {from} {operand}, i32 {}", imm));
+                self.line(format!(
+                    "{name} = extractelement {from} {operand}, i32 {}",
+                    imm
+                ));
             }
             InstructionData::TernaryImm8 { args, imm, .. } if opcode == Opcode::Insertlane => {
                 let result = dfg.first_result(inst);
                 let (name, ty) = (self.name(result), self.tyn(result)?);
                 let (vector, lane) = (self.op(args[0]), self.op(args[1]));
                 let lane_ty = self.tyn(args[1])?;
-                self.line(format!("{name} = insertelement {ty} {vector}, {lane_ty} {lane}, i32 {}", imm));
+                self.line(format!(
+                    "{name} = insertelement {ty} {vector}, {lane_ty} {lane}, i32 {}",
+                    imm
+                ));
             }
             InstructionData::Shuffle { args, imm, .. } => {
                 let result = dfg.first_result(inst);
@@ -2457,7 +2484,10 @@ mod tests {
         // Constructs the scheme does not cover are refused, not guessed.
         assert!(split_runtime("@a = alias i64, ptr @b\n").is_none());
         let tls = split_runtime("@t = internal thread_local global i64 0, align 8\n").unwrap();
-        assert!(tls.exported.contains("@t = hidden thread_local global i64 0"));
+        assert!(
+            tls.exported
+                .contains("@t = hidden thread_local global i64 0")
+        );
         assert!(
             tls.inlinable
                 .contains("@t = available_externally hidden thread_local global i64 0")

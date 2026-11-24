@@ -23,7 +23,10 @@ pub(crate) fn generic_quotation_cases(
     resolution: &Resolution,
     limit: usize,
 ) -> Result<Option<GenericQuotationCases>> {
-    let universe = resolution.effect_bits.values().fold(ex::EFFECT_BITS, |row, bit| row | bit);
+    let universe = resolution
+        .effect_bits
+        .values()
+        .fold(ex::EFFECT_BITS, |row, bit| row | bit);
     let mut types = Vec::new();
     let mut domains: Vec<(u16, u16)> = Vec::new();
     let mut count = 1usize;
@@ -65,13 +68,16 @@ pub(crate) fn generic_quotation_cases(
             }
             subset = (subset - 1) & optional;
         }
-        effects = effects.into_iter().flat_map(|previous| {
-            rows.iter().map(move |&row| {
-                let mut arguments = previous.clone();
-                arguments.push(row);
-                arguments
+        effects = effects
+            .into_iter()
+            .flat_map(|previous| {
+                rows.iter().map(move |&row| {
+                    let mut arguments = previous.clone();
+                    arguments.push(row);
+                    arguments
+                })
             })
-        }).collect();
+            .collect();
     }
     Ok(Some(GenericQuotationCases { types, effects }))
 }
@@ -446,12 +452,16 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
                     ));
                 }
                 let mutable_length = function.parameters.iter().find_map(|param| {
-                    param.min_length.as_ref().filter(|_| {
-                        !matches!(
-                            ex::split_grade(&param.ty).0.kind,
-                            ast::TypeKind::Borrow { mutable: false, .. }
-                        )
-                    }).map(|length| length.span)
+                    param
+                        .min_length
+                        .as_ref()
+                        .filter(|_| {
+                            !matches!(
+                                ex::split_grade(&param.ty).0.kind,
+                                ast::TypeKind::Borrow { mutable: false, .. }
+                            )
+                        })
+                        .map(|length| length.span)
                 });
                 let generator = function
                     .body
@@ -568,7 +578,8 @@ pub(crate) fn materialize(
     initializers: BTreeMap<usize, usize>,
     entries: &[Entry],
 ) -> Result<ex::Executable> {
-    let length_contracts: BTreeMap<_, _> = entries.iter()
+    let length_contracts: BTreeMap<_, _> = entries
+        .iter()
         .filter_map(|entry| Some((entry.target.start, entry.mutable_length?)))
         .collect();
     let mut active = BTreeSet::new();
@@ -675,8 +686,11 @@ fn check_length_preservation(
         }
     }
     let failure = |span| {
-        Diagnostic::new(span, "cannot prove that generated code preserves the vector length")
-            .with_note(contract, "mutable length refinement declared here")
+        Diagnostic::new(
+            span,
+            "cannot prove that generated code preserves the vector length",
+        )
+        .with_note(contract, "mutable length refinement declared here")
     };
     let mut pending = vec![instance];
     let mut seen = BTreeSet::new();
@@ -689,7 +703,10 @@ fn check_length_preservation(
         // Other staged targets may still be stubs. Keep the proof independent
         // of materialization order, including for calls made by generators.
         if staged.contains_key(&index)
-            || function.locals.iter().any(|local| !plain_storage(program, local.ty))
+            || function
+                .locals
+                .iter()
+                .any(|local| !plain_storage(program, local.ty))
         {
             return Err(failure(function.span));
         }
@@ -701,22 +718,51 @@ fn check_length_preservation(
             match &expr.kind {
                 E::Call(Target::Function(callee), _) => pending.push(*callee),
                 E::FnValue { function, captures } if captures.is_empty() => pending.push(*function),
-                E::CallIndirect { callee, .. }
-                    if matches!(&callee.kind, E::FnValue { captures, .. } if captures.is_empty()) => {}
+                E::CallIndirect { callee, .. } if matches!(&callee.kind, E::FnValue { captures, .. } if captures.is_empty()) =>
+                    {}
                 E::Call(
-                    Target::Vec(VecOp::WithCapacity | VecOp::Reserve | VecOp::Len
-                        | VecOp::Get | VecOp::At | VecOp::Push | VecOp::Set
-                        | VecOp::PushBorrowed | VecOp::SetBorrowed | VecOp::SetProved
-                        | VecOp::ReserveBorrowed, _)
-                    | Target::Int(..) | Target::Float(..) | Target::Panic,
+                    Target::Vec(
+                        VecOp::WithCapacity
+                        | VecOp::Reserve
+                        | VecOp::Len
+                        | VecOp::Get
+                        | VecOp::At
+                        | VecOp::Push
+                        | VecOp::Set
+                        | VecOp::PushBorrowed
+                        | VecOp::SetBorrowed
+                        | VecOp::SetProved
+                        | VecOp::ReserveBorrowed,
+                        _,
+                    )
+                    | Target::Int(..)
+                    | Target::Float(..)
+                    | Target::Panic,
                     _,
                 ) => {}
                 E::DerefWrite(_, value) if ex::is_live_scalar(value.ty) => {}
-                E::Constant(_) | E::Local(_) | E::Move(_) | E::Borrow(_) | E::BorrowPlace(_)
-                | E::BorrowInit { .. } | E::PlaceIndex { .. } | E::Peek(_) | E::Erased(_)
-                | E::RefRead(_) | E::Drop(_) | E::Block(_) | E::Assign(..) | E::Return(_)
-                | E::If(..) | E::While(..) | E::Loop(_) | E::Break(..) | E::Continue(_)
-                | E::Binary(..) | E::Unary(..) | E::AbortCall { .. } => {}
+                E::Constant(_)
+                | E::Local(_)
+                | E::Move(_)
+                | E::Borrow(_)
+                | E::BorrowPlace(_)
+                | E::BorrowInit { .. }
+                | E::PlaceIndex { .. }
+                | E::Peek(_)
+                | E::Erased(_)
+                | E::RefRead(_)
+                | E::Drop(_)
+                | E::Block(_)
+                | E::Assign(..)
+                | E::Return(_)
+                | E::If(..)
+                | E::While(..)
+                | E::Loop(_)
+                | E::Break(..)
+                | E::Continue(_)
+                | E::Binary(..)
+                | E::Unary(..)
+                | E::AbortCall { .. } => {}
                 _ => result = Err(failure(expr.span)),
             }
         });
@@ -755,7 +801,14 @@ fn finish(
             break;
         }
         for dependency in dependencies {
-            finish(program, dependency, initializers, length_contracts, active, complete)?;
+            finish(
+                program,
+                dependency,
+                initializers,
+                length_contracts,
+                active,
+                complete,
+            )?;
         }
     }
     let encoded = program.evaluate_staged_code(init)?;

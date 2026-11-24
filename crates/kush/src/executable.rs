@@ -5763,7 +5763,11 @@ fn check_program_unstaged(
             // `alloc`/`suspend` (and whose row variables exclude it, as in
             // `e: Effects - alloc`) already says everything the attributes did.
             if function && matches!(attribute.kind.as_str(), "noalloc" | "nosuspend") {
-                let effect = if attribute.kind == "noalloc" { "alloc" } else { "suspend" };
+                let effect = if attribute.kind == "noalloc" {
+                    "alloc"
+                } else {
+                    "suspend"
+                };
                 return Err(Diagnostic::new(
                     attribute.span,
                     format!(
@@ -6008,7 +6012,8 @@ fn check_program_unstaged(
     }
     if validate_generic_staging {
         for (binding, cases) in staged_generics {
-            let arguments: Vec<_> = cases.types
+            let arguments: Vec<_> = cases
+                .types
                 .iter()
                 .map(|&id| types.staging_type_parameter(id))
                 .collect();
@@ -6425,7 +6430,9 @@ fn check_program_unstaged(
                 return None;
             }
             let layout = declared.self_ty?.layout()?;
-            let ty = resolution.bindings[types.enums[layout].definition].name.clone();
+            let ty = resolution.bindings[types.enums[layout].definition]
+                .name
+                .clone();
             Some((ty, declared.ast.name.clone()))
         })
         .collect();
@@ -8320,10 +8327,15 @@ fn collect_methods<'a>(
                     .layout()
                     .map(|layout| types.enums[layout].definition)
                     .ok_or_else(|| {
-                        Diagnostic::new(method.span, "associated functions need a nominal record or enum type")
+                        Diagnostic::new(
+                            method.span,
+                            "associated functions need a nominal record or enum type",
+                        )
                     })?;
                 let table = functions.associated_fns.entry(owner).or_default();
-                if definitions.contains_key(&f.name) || table.insert(f.name.clone(), definition).is_some() {
+                if definitions.contains_key(&f.name)
+                    || table.insert(f.name.clone(), definition).is_some()
+                {
                     return Err(Diagnostic::new(
                         method.span,
                         format!("duplicate method or associated function '{}'", f.name),
@@ -8332,7 +8344,11 @@ fn collect_methods<'a>(
             } else if definitions.insert(f.name.clone(), definition).is_some()
                 || self_key
                     .layout()
-                    .and_then(|layout| functions.associated_fns.get(&types.enums[layout].definition))
+                    .and_then(|layout| {
+                        functions
+                            .associated_fns
+                            .get(&types.enums[layout].definition)
+                    })
                     .is_some_and(|table| table.contains_key(&f.name))
             {
                 return Err(Diagnostic::new(
@@ -25765,14 +25781,23 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn compile_code(&mut self, arguments: &[ast::Expr], expected: Option<Type>, span: Span) -> Result<Expr> {
+    fn compile_code(
+        &mut self,
+        arguments: &[ast::Expr],
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
         if arguments.len() != 1 {
-            return Err(Diagnostic::new(span, "Code.compile expects one owned code graph"));
+            return Err(Diagnostic::new(
+                span,
+                "Code.compile expects one owned code graph",
+            ));
         }
         self.require(ALLOC, span)?;
         let code = self.expr(&arguments[0])?;
-        let signature = self.types.code_signature(code.ty).ok_or_else(||
-            Diagnostic::new(span, "Code.compile expects an owned Code<fn(...)> value"))?;
+        let signature = self.types.code_signature(code.ty).ok_or_else(|| {
+            Diagnostic::new(span, "Code.compile expects an owned Code<fn(...)> value")
+        })?;
         // An ordinary Fn return cannot express an artifact-owner lifetime.
         // Admit owning data and serialized Code results, but do not publish
         // unowned callable addresses through an otherwise owned result.
@@ -25784,40 +25809,78 @@ impl Checker<'_, '_> {
         }
         let owner = self.types.compiled_code_type(Type::Fn(signature), span)?;
         let (ty, shape) = self.types.result_type(owner, Type::I64, span)?;
-        let value = Expr { kind: ExprKind::Call(Target::StageCompile(shape), vec![code]),
-            ty, span, resource: None };
-        match expected { Some(ty) => self.coerce(value, ty, span), None => Ok(value) }
+        let value = Expr {
+            kind: ExprKind::Call(Target::StageCompile(shape), vec![code]),
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(ty) => self.coerce(value, ty, span),
+            None => Ok(value),
+        }
     }
 
-    fn call_code(&mut self, arguments: &[ast::Expr], expected: Option<Type>, span: Span) -> Result<Expr> {
+    fn call_code(
+        &mut self,
+        arguments: &[ast::Expr],
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
         let Some(owner) = arguments.first() else {
-            return Err(Diagnostic::new(span, "Code.call expects a borrowed compiled owner and its arguments"));
+            return Err(Diagnostic::new(
+                span,
+                "Code.call expects a borrowed compiled owner and its arguments",
+            ));
         };
         let owner = self.expr(owner)?;
         let Type::Ref(pointer) = owner.ty else {
-            return Err(Diagnostic::new(span, "Code.call expects &CompiledCode<fn(...)>"));
+            return Err(Diagnostic::new(
+                span,
+                "Code.call expects &CompiledCode<fn(...)>",
+            ));
         };
-        let signature = self.types.compiled_code_signature(self.types.pointees[pointer])
+        let signature = self
+            .types
+            .compiled_code_signature(self.types.pointees[pointer])
             .ok_or_else(|| Diagnostic::new(span, "Code.call expects &CompiledCode<fn(...)>"))?;
         let owner_ty = owner.ty;
         let owner_slot = self.fresh_local(span, owner_ty)?;
         let mut statements = vec![Statement::Let(owner_slot, owner)];
-        let owner = Expr { kind: ExprKind::Local(owner_slot), ty: owner_ty, span, resource: None };
-        let entry = Expr { kind: ExprKind::Call(Target::StageEntry(signature), vec![owner]),
-            ty: Type::Fn(signature), span, resource: None };
+        let owner = Expr {
+            kind: ExprKind::Local(owner_slot),
+            ty: owner_ty,
+            span,
+            resource: None,
+        };
+        let entry = Expr {
+            kind: ExprKind::Call(Target::StageEntry(signature), vec![owner]),
+            ty: Type::Fn(signature),
+            span,
+            resource: None,
+        };
         let mut call = self.indirect_call_checked(entry, &arguments[1..], None, span)?;
-        let ExprKind::CallIndirect { arguments, .. } = &mut call.kind else { unreachable!() };
+        let ExprKind::CallIndirect { arguments, .. } = &mut call.kind else {
+            unreachable!()
+        };
         // Coerced arguments are evaluated before the pure entry load. The
         // owner's reference is used after all of them, so its loan cannot end
         // while an argument could move/drop the compiled artifact.
         for argument in arguments {
             let slot = self.fresh_local(argument.span, argument.ty)?;
-            let value = Expr { kind: ExprKind::Local(slot), ty: argument.ty,
-                span: argument.span, resource: None };
+            let value = Expr {
+                kind: ExprKind::Local(slot),
+                ty: argument.ty,
+                span: argument.span,
+                resource: None,
+            };
             statements.push(Statement::Let(slot, std::mem::replace(argument, value)));
         }
         let value = Self::after(statements, call);
-        match expected { Some(ty) => self.coerce(value, ty, span), None => Ok(value) }
+        match expected {
+            Some(ty) => self.coerce(value, ty, span),
+            None => Ok(value),
+        }
     }
 
     fn clone_code(
@@ -26796,8 +26859,16 @@ impl Checker<'_, '_> {
         // written decides the shared/exclusive loan and proof invalidation.
         let capture_body_mutable = capture_refs.clone();
         let saved_quote_holes = self.quote_holes.clone();
-        self.quote_holes = self.quote_holes.iter().filter_map(|(span, slot)|
-            captures.iter().position(|capture| capture == slot).map(|index| (*span, index))).collect();
+        self.quote_holes = self
+            .quote_holes
+            .iter()
+            .filter_map(|(span, slot)| {
+                captures
+                    .iter()
+                    .position(|capture| capture == slot)
+                    .map(|index| (*span, index))
+            })
+            .collect();
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_capabilities = std::mem::take(&mut self.capability_slots);
         let saved_passable = std::mem::take(&mut self.capability_passable);
@@ -27660,7 +27731,8 @@ impl Checker<'_, '_> {
                     return;
                 }
                 if let Some(id) = c.resolution.reference(expr.span)
-                    && let Some(slot) = c.slots.get(&id) {
+                    && let Some(slot) = c.slots.get(&id)
+                {
                     slots.insert(*slot);
                 }
                 ast_children(expr, &mut |child| visit(c, child, quotation, slots));
@@ -31810,8 +31882,15 @@ impl Checker<'_, '_> {
                         if arguments.len() == 1 && self.types.enums[layout].definition == id =>
                     {
                         let signature = self.types.enums[layout].arguments[0];
-                        self.unify(arguments[0], signature, type_vars, const_vars,
-                            effect_vars, subst, span)?;
+                        self.unify(
+                            arguments[0],
+                            signature,
+                            type_vars,
+                            const_vars,
+                            effect_vars,
+                            subst,
+                            span,
+                        )?;
                     }
                     (BindingKind::Builtin, "Box", Type::Box(p))
                     | (BindingKind::Builtin, "Vec", Type::Vec(p))
@@ -33289,12 +33368,17 @@ impl Checker<'_, '_> {
             "Task.scope" | "Task.catch" => {
                 let catching = name == "Task.catch";
                 if catching && parallel {
-                    return Err(Diagnostic::new(span, "there is no Thread.catch; use Task.catch"));
+                    return Err(Diagnostic::new(
+                        span,
+                        "there is no Thread.catch; use Task.catch",
+                    ));
                 }
                 if explicit.is_some() {
                     return Err(Diagnostic::new(
                         span,
-                        format!("{name} takes no type arguments; its result follows the lambda's result"),
+                        format!(
+                            "{name} takes no type arguments; its result follows the lambda's result"
+                        ),
                     ));
                 }
                 if arguments.len() != 1 {
@@ -33310,8 +33394,7 @@ impl Checker<'_, '_> {
                     self.functions.uses_unwinding = true;
                 }
                 self.next_scope_parallel = parallel;
-                let checked =
-                    self.task_callable(&arguments[0], true, false, name, parallel, span);
+                let checked = self.task_callable(&arguments[0], true, false, name, parallel, span);
                 self.next_scope_parallel = false;
                 let (body, result, effects, result_grade) = checked?;
                 if crate::runtime_types::is_reference_container(self.types, result) {
@@ -42088,4 +42171,3 @@ mod recursive_summary_mapping_tests {
         assert!(error.contains("no inferred borrow lifetime"), "{error}");
     }
 }
-

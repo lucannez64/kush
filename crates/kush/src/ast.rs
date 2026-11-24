@@ -677,7 +677,12 @@ pub enum PatternKind {
 /// visit each operand through the existing call node. Staging elaboration
 /// must consume these forms before ordinary name resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StagingForm { Quote, Splice, Lift, Definition }
+pub enum StagingForm {
+    Quote,
+    Splice,
+    Lift,
+    Definition,
+}
 impl StagingForm {
     pub(crate) fn marker(self) -> &'static str {
         match self {
@@ -688,18 +693,27 @@ impl StagingForm {
         }
     }
     pub(crate) fn expression(self, value: Expr, span: Span) -> Expr {
-        Node::new(ExprKind::Call {
-            callee: Box::new(Node::new(ExprKind::Name(self.marker().into()), span)),
-            arguments: vec![value],
-        }, span)
+        Node::new(
+            ExprKind::Call {
+                callee: Box::new(Node::new(ExprKind::Name(self.marker().into()), span)),
+                arguments: vec![value],
+            },
+            span,
+        )
     }
 }
 impl Expr {
     /// Inspect a parser-produced staging form without interpreting source text.
     pub fn staging(&self) -> Option<(StagingForm, &Expr)> {
-        let ExprKind::Call { callee, arguments } = &self.kind else { return None; };
-        let ExprKind::Name(name) = &callee.kind else { return None; };
-        if arguments.len() != 1 { return None; }
+        let ExprKind::Call { callee, arguments } = &self.kind else {
+            return None;
+        };
+        let ExprKind::Name(name) = &callee.kind else {
+            return None;
+        };
+        if arguments.len() != 1 {
+            return None;
+        }
         let form = match name.as_str() {
             "$stage_quote" => StagingForm::Quote,
             "$stage_splice" => StagingForm::Splice,

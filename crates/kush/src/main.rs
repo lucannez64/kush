@@ -444,7 +444,8 @@ fn fuzz_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, Stri
     }
     let project = open_project(manifest)?;
     project::lock::verify_or_write(&project, locked).map_err(project_error)?;
-    let found = kush::fuzz::fuzz_project(&project, &options, list, save, report, json, out).map_err(project_error)?;
+    let found = kush::fuzz::fuzz_project(&project, &options, list, save, report, json, out)
+        .map_err(project_error)?;
     Ok(u8::from(found != 0))
 }
 

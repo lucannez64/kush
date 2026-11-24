@@ -23,7 +23,10 @@ fn reference(source: &str) -> Result<String, String> {
     match program.evaluate_with_host_and_stats(&mut io::empty(), &mut output, &Host::empty()) {
         Ok((status, stats)) => {
             assert_eq!(status, 0);
-            assert_eq!(stats.allocations, stats.deallocations, "reference cleanup must be balanced");
+            assert_eq!(
+                stats.allocations, stats.deallocations,
+                "reference cleanup must be balanced"
+            );
             Ok(String::from_utf8(output).unwrap())
         }
         Err(error) => Err(error.message),
@@ -214,7 +217,10 @@ fn main() -> i64 ! {{io, alloc, panic, suspend}} {{
     let (stdout, status, stderr) = native(&source);
     assert_eq!(stdout, "1\n");
     assert_ne!(status, Some(0));
-    assert!(stderr.contains("panic: a joined task or thread panicked"), "{stderr}");
+    assert!(
+        stderr.contains("panic: a joined task or thread panicked"),
+        "{stderr}"
+    );
 }
 
 #[test]

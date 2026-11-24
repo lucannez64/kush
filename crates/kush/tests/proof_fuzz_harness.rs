@@ -56,10 +56,12 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let modules = Memory(vec![("app.lib".into(), LIB.into())]);
-    let original = program::load("main.kush", MAIN, &modules).unwrap_or_else(|(_, e)| panic!("{e:?}"));
+    let original =
+        program::load("main.kush", MAIN, &modules).unwrap_or_else(|(_, e)| panic!("{e:?}"));
     let checked = check_program(&original).unwrap();
     let mut targets = harness::plan(&original, &checked);
-    let assembled = harness::assemble(&original, &mut targets, &modules).unwrap_or_else(|e| panic!("{e}"));
+    let assembled =
+        harness::assemble(&original, &mut targets, &modules).unwrap_or_else(|e| panic!("{e}"));
     let harness::Assembled {
         sources,
         program: fuzz_program,
@@ -99,7 +101,12 @@ impl Fixture {
     /// source text of the failing site, if any.
     fn run(&self, name: &str, tape: &[u8]) -> (RunRecord, Option<String>) {
         let (index, _) = self.target(name);
-        let number = self.sources.harnesses.iter().position(|&i| i == index).unwrap();
+        let number = self
+            .sources
+            .harnesses
+            .iter()
+            .position(|&i| i == index)
+            .unwrap();
         let out = self.binary.with_extension("record");
         let mut child = Command::new(&self.binary)
             .arg(number.to_string())
@@ -131,7 +138,11 @@ fn tape(layout: &Layout, scalars: &[i64], collections: &[&[i64]]) -> Vec<u8> {
     let (mut scalar, mut collection) = (0, 0);
     for slot in &layout.slots {
         match slot {
-            Slot::Scalar { offset, scalar: kind, .. } => {
+            Slot::Scalar {
+                offset,
+                scalar: kind,
+                ..
+            } => {
                 let bytes = scalars[scalar].to_le_bytes();
                 fixed[*offset..offset + kind.width()].copy_from_slice(&bytes[..kind.width()]);
                 scalar += 1;
@@ -164,7 +175,14 @@ fn tape(layout: &Layout, scalars: &[i64], collections: &[&[i64]]) -> Vec<u8> {
 fn targets_are_the_functions_with_unproved_checks() {
     let f = fixture();
     let names = f.names();
-    for name in ["app.lib.at", "app.lib.add8", "app.lib.pick", "app.lib.refined", "app.lib.sum", "app.lib.calls"] {
+    for name in [
+        "app.lib.at",
+        "app.lib.add8",
+        "app.lib.pick",
+        "app.lib.refined",
+        "app.lib.sum",
+        "app.lib.calls",
+    ] {
         assert!(names.contains(&name), "{name} missing from {names:?}");
     }
     // `main` has overflow checks too, and is a target with no parameters.
@@ -177,7 +195,10 @@ fn targets_are_the_functions_with_unproved_checks() {
     assert!(f.target("app.lib.twice").1.harness.is_ok());
     // Private fields and no function returning the record: no generator.
     let reveal = f.target("app.lib.reveal").1.harness.as_ref().unwrap_err();
-    assert!(reveal.contains("private fields and no constructor"), "{reveal}");
+    assert!(
+        reveal.contains("private fields and no constructor"),
+        "{reveal}"
+    );
     assert!(f.target("app.lib.calls").1.constants.contains(&7));
     // A result the harness cannot discard: its harness is left out, with
     // the checker's reason.
@@ -200,12 +221,23 @@ fn a_harness_reaches_and_breaks_its_check() {
 #[test]
 fn narrow_scalars_and_bools_decode() {
     let f = fixture();
-    let (_, failed) = f.run("app.lib.add8", &tape(f.layout("app.lib.add8"), &[200, 55], &[]));
+    let (_, failed) = f.run(
+        "app.lib.add8",
+        &tape(f.layout("app.lib.add8"), &[200, 55], &[]),
+    );
     assert_eq!(failed, None);
-    let (_, failed) = f.run("app.lib.add8", &tape(f.layout("app.lib.add8"), &[200, 56], &[]));
+    let (_, failed) = f.run(
+        "app.lib.add8",
+        &tape(f.layout("app.lib.add8"), &[200, 56], &[]),
+    );
     assert_eq!(failed.as_deref(), Some("a + b"));
     let flag = f.layout("app.lib.flag");
-    assert_eq!(f.run("app.lib.flag", &tape(flag, &[1, -128], &[])).1.as_deref(), Some("x - 1"));
+    assert_eq!(
+        f.run("app.lib.flag", &tape(flag, &[1, -128], &[]))
+            .1
+            .as_deref(),
+        Some("x - 1")
+    );
     assert_eq!(f.run("app.lib.flag", &tape(flag, &[0, -128], &[])).1, None);
 }
 
@@ -217,7 +249,12 @@ fn preconditions_guard_the_call() {
     let (record, failed) = f.run("app.lib.pick", &tape(layout, &[9], &[&[1]]));
     assert_eq!((record.outcome, failed), (Outcome::Exited, None));
     // i = 2 satisfies it, but the vector is too short.
-    assert_eq!(f.run("app.lib.pick", &tape(layout, &[2], &[&[1]])).1.as_deref(), Some("v[i]"));
+    assert_eq!(
+        f.run("app.lib.pick", &tape(layout, &[2], &[&[1]]))
+            .1
+            .as_deref(),
+        Some("v[i]")
+    );
 }
 
 #[test]
@@ -229,16 +266,31 @@ fn refined_lengths_slices_and_bytes_are_generated() {
     };
     assert_eq!(*minimum, 8);
     let eight = [0i64; 8];
-    assert_eq!(f.run("app.lib.refined", &tape(refined, &[7], &[&eight])).1, None);
     assert_eq!(
-        f.run("app.lib.refined", &tape(refined, &[8], &[&eight])).1.as_deref(),
+        f.run("app.lib.refined", &tape(refined, &[7], &[&eight])).1,
+        None
+    );
+    assert_eq!(
+        f.run("app.lib.refined", &tape(refined, &[8], &[&eight]))
+            .1
+            .as_deref(),
         Some("v[i]")
     );
     let first = f.layout("app.lib.first");
-    assert_eq!(f.run("app.lib.first", &tape(first, &[1], &[&[4]])).1.as_deref(), Some("s[i]"));
+    assert_eq!(
+        f.run("app.lib.first", &tape(first, &[1], &[&[4]]))
+            .1
+            .as_deref(),
+        Some("s[i]")
+    );
     let bytes = f.layout("app.lib.bytes");
     assert_eq!(
-        f.run("app.lib.bytes", &tape(bytes, &[i64::MAX / 3 + 1], &[&[1, 2]])).1.as_deref(),
+        f.run(
+            "app.lib.bytes",
+            &tape(bytes, &[i64::MAX / 3 + 1], &[&[1, 2]])
+        )
+        .1
+        .as_deref(),
         Some("i * 3")
     );
 }

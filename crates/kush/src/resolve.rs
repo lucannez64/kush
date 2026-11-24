@@ -178,9 +178,14 @@ pub fn resolve_program(program: &Program) -> Result<Resolution> {
 /// This is a front-end building block, not executable type checking. The
 /// ordinary entry points continue to reject unelaborated staging forms.
 pub fn resolve_staged_program(program: &Program) -> Result<Resolution> {
-    let units = program.units.iter().map(|u| UnitInfo {
-        items: u.items.clone(), imports: &u.imports,
-    }).collect::<Vec<_>>();
+    let units = program
+        .units
+        .iter()
+        .map(|u| UnitInfo {
+            items: u.items.clone(),
+            imports: &u.imports,
+        })
+        .collect::<Vec<_>>();
     let mut resolver = Resolver::new();
     resolver.staged = true;
     for name in ["Code.clone", "Code.compile", "Code.call"] {
@@ -614,8 +619,10 @@ impl Resolver {
         };
         let name = path.join(".");
         if name.starts_with("$stage_") {
-            return Err(Diagnostic::new(span,
-                "staging form has not been elaborated; typed staging is not yet implemented"));
+            return Err(Diagnostic::new(
+                span,
+                "staging form has not been elaborated; typed staging is not yet implemented",
+            ));
         }
         if path.len() == 1 {
             for scope in self.scopes.iter().rev() {
@@ -1110,8 +1117,12 @@ impl Resolver {
                 },
             )?;
         }
-        let staged_definition = f.body.as_ref().and_then(|b| b.tail.as_deref())
-            .and_then(Expr::staging).is_some_and(|(form, _)| form == crate::ast::StagingForm::Definition);
+        let staged_definition = f
+            .body
+            .as_ref()
+            .and_then(|b| b.tail.as_deref())
+            .and_then(Expr::staging)
+            .is_some_and(|(form, _)| form == crate::ast::StagingForm::Definition);
         // The full signature is at the execution stage. Erased parameter
         // predicates and result indices can refer to earlier parameters.
         let signature_stage = self.stage;
@@ -1528,10 +1539,15 @@ impl Resolver {
     }
     fn check_stage(&self, id: BindingId, span: Span) -> Result<()> {
         if let Some(stage) = self.result.binding_stages.get(&id)
-            && *stage != self.stage {
-            return Err(Diagnostic::new(span, format!(
-                "'{}' belongs to stage {}, but is used at stage {}; use explicit lift or splice instead of crossing a quotation boundary",
-                self.result.bindings[id].name, stage, self.stage)));
+            && *stage != self.stage
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "'{}' belongs to stage {}, but is used at stage {}; use explicit lift or splice instead of crossing a quotation boundary",
+                    self.result.bindings[id].name, stage, self.stage
+                ),
+            ));
         }
         Ok(())
     }

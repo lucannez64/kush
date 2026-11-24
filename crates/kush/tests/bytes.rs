@@ -125,12 +125,7 @@ fn literal_construction_and_effect_contracts_are_checked() {
         "Bytes.copy(b)",
         "Bytes.push(Bytes.with_capacity(0),1)",
     ] {
-        assert!(
-            check(&format!(
-                "fn f(b:&Bytes)->Bytes ! {{panic}} {{{body}}}"
-            ))
-            .is_err()
-        );
+        assert!(check(&format!("fn f(b:&Bytes)->Bytes ! {{panic}} {{{body}}}")).is_err());
     }
     assert!(check("fn f(b:&Bytes)->i64 ! {} {Bytes.get(b,0)}").is_err());
     assert!(check("fn f(b:Bytes)->Bytes ! {} {Bytes.push_reserved(b,1)}").is_err());

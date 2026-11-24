@@ -217,9 +217,9 @@ impl Session {
                 line: before.matches('\n').count() + 1,
                 column: before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1,
             };
-            let target = ranges
-                .iter()
-                .position(|(name, start, end)| *name == file.name && *start <= offset && offset < *end);
+            let target = ranges.iter().position(|(name, start, end)| {
+                *name == file.name && *start <= offset && offset < *end
+            });
             (location, target)
         };
         let mut proved = Vec::new();
@@ -229,7 +229,12 @@ impl Session {
                 continue;
             };
             let offset = check.span.start - file.base;
-            if !seen.insert((file.name.clone(), offset, check.span.end - file.base, check.kind.label())) {
+            if !seen.insert((
+                file.name.clone(),
+                offset,
+                check.span.end - file.base,
+                check.kind.label(),
+            )) {
                 continue;
             }
             let (location, target) = locate(file, offset);
@@ -277,7 +282,11 @@ impl Session {
             };
             let offset = site.span.start - file.base;
             let is_generated = file.name == assembled.sources.root_name
-                || assembled.sources.relays.values().any(|(name, _)| *name == file.name)
+                || assembled
+                    .sources
+                    .relays
+                    .values()
+                    .any(|(name, _)| *name == file.name)
                 || generated
                     .get(file.name.as_str())
                     .is_some_and(|&start| offset >= start);
@@ -294,19 +303,29 @@ impl Session {
                 line: before.matches('\n').count() + 1,
                 column: before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1,
             };
-            let target = ranges
-                .iter()
-                .position(|(name, start, end)| *name == file.name && *start <= offset && offset < *end);
+            let target = ranges.iter().position(|(name, start, end)| {
+                *name == file.name && *start <= offset && offset < *end
+            });
             let module = assembled
                 .program
                 .sources
                 .files
                 .iter()
                 .position(|f| f.name == file.name)
-                .and_then(|index| assembled.program.units.iter().find(|unit| unit.file == index))
+                .and_then(|index| {
+                    assembled
+                        .program
+                        .units
+                        .iter()
+                        .find(|unit| unit.file == index)
+                })
                 .map(|unit| harness::unit_module(&assembled.program, unit))
                 .unwrap_or_default();
-            let function = site.function_name.split("::<").next().unwrap_or(&site.function_name);
+            let function = site
+                .function_name
+                .split("::<")
+                .next()
+                .unwrap_or(&site.function_name);
             let function = if module.is_empty() {
                 function.to_owned()
             } else {
@@ -419,7 +438,10 @@ impl Session {
             self.reports[report].hits += hits;
             self.reports[report].margin = self.reports[report].margin.min(*margin);
         }
-        let layout = self.targets[target].harness.clone().expect("a harness has a layout");
+        let layout = self.targets[target]
+            .harness
+            .clone()
+            .expect("a harness has a layout");
         for (site, number, tape) in run.failures {
             let Some(Some(report)) = self.sites.get(site).copied() else {
                 continue;
@@ -474,22 +496,28 @@ impl Session {
             sites: &self.sites,
             timeout: options.timeout,
         };
-        let shrunk = parallel(&jobs, options.jobs, &self.directory, |(report, number, layout, tape), record| {
-            // A candidate that runs ten times longer than the finding itself
-            // (a loop it made unbounded) is not one that fails the same way.
-            let began = Instant::now();
-            let _ = worker.run(*number, layout, tape, record);
-            let timeout = (began.elapsed() * 10).clamp(QUICK_TIMEOUT, worker.timeout.max(QUICK_TIMEOUT));
-            // A finding whose runs are slow is minimized as far as
-            // `SHRINK_TIME` allows; past it, no candidate counts.
-            super::shrink::shrink(layout, tape, SHRINK_BUDGET, |tape| {
-                began.elapsed() < SHRINK_TIME
-                    && matches!(
-                    worker.run_within(*number, layout, tape, record, timeout).map(|r| r.outcome),
-                    Some(Outcome::Failed(site)) if worker.sites.get(site).copied().flatten() == Some(*report)
-                )
-            })
-        });
+        let shrunk = parallel(
+            &jobs,
+            options.jobs,
+            &self.directory,
+            |(report, number, layout, tape), record| {
+                // A candidate that runs ten times longer than the finding itself
+                // (a loop it made unbounded) is not one that fails the same way.
+                let began = Instant::now();
+                let _ = worker.run(*number, layout, tape, record);
+                let timeout =
+                    (began.elapsed() * 10).clamp(QUICK_TIMEOUT, worker.timeout.max(QUICK_TIMEOUT));
+                // A finding whose runs are slow is minimized as far as
+                // `SHRINK_TIME` allows; past it, no candidate counts.
+                super::shrink::shrink(layout, tape, SHRINK_BUDGET, |tape| {
+                    began.elapsed() < SHRINK_TIME
+                        && matches!(
+                            worker.run_within(*number, layout, tape, record, timeout).map(|r| r.outcome),
+                            Some(Outcome::Failed(site)) if worker.sites.get(site).copied().flatten() == Some(*report)
+                        )
+                })
+            },
+        );
         for ((report, _, layout, _), (tape, shrink_runs)) in jobs.iter().zip(shrunk) {
             let report = *report;
             let site = &self.reports[report];
@@ -505,7 +533,10 @@ impl Session {
                 &what,
                 site.location.line,
             );
-            let finding = self.reports[report].finding.as_mut().expect("checked above");
+            let finding = self.reports[report]
+                .finding
+                .as_mut()
+                .expect("checked above");
             finding.inputs = decode(layout, &tape);
             finding.tape = tape;
             finding.shrink_runs = shrink_runs;
@@ -528,7 +559,8 @@ impl Session {
             let Ok(entries) = std::fs::read_dir(directory.join(&self.targets[target].name)) else {
                 continue;
             };
-            let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            let mut paths: Vec<PathBuf> =
+                entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
             paths.sort();
             for path in paths {
                 let Ok(tape) = std::fs::read(&path) else {
@@ -546,7 +578,11 @@ impl Session {
     /// `--save`: write each finding's reproduction into the test target
     /// (public functions) or its input under `regressions` (the others).
     /// Returns one line per file written.
-    pub fn save(&self, test_target: Option<&Path>, regressions: &Path) -> Result<Vec<String>, String> {
+    pub fn save(
+        &self,
+        test_target: Option<&Path>,
+        regressions: &Path,
+    ) -> Result<Vec<String>, String> {
         let mut written = Vec::new();
         let mut tests = Vec::new();
         for report in &self.reports {
@@ -581,7 +617,9 @@ impl Session {
                 }
                 let module = target.module.join(".");
                 if !target.fuzz_entry
-                    && !text.lines().any(|line| line.trim() == format!("use {module};"))
+                    && !text
+                        .lines()
+                        .any(|line| line.trim() == format!("use {module};"))
                 {
                     text = insert_use(&text, &module);
                 }
@@ -713,8 +751,15 @@ impl Worker<'_> {
     /// `options.jobs` at a time and folded in order. Seeds always join the
     /// corpus; mutants only when they reach a site this harness had not
     /// reached or come closer to failing one.
-    fn fuzz(&self, job: &Job, options: &Options, deadline: Option<Instant>, directory: &Path) -> HarnessRun {
-        let mut random = Random::new(options.seed ^ (job.number as u64 + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
+    fn fuzz(
+        &self,
+        job: &Job,
+        options: &Options,
+        deadline: Option<Instant>,
+        directory: &Path,
+    ) -> HarnessRun {
+        let mut random =
+            Random::new(options.seed ^ (job.number as u64 + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
         let mut out = HarnessRun {
             number: job.number,
             stats: RunStats::default(),
@@ -749,7 +794,10 @@ impl Worker<'_> {
                     .map(|_| {
                         let parent = &corpus[random.below(corpus.len())];
                         let other = &corpus[random.below(corpus.len())];
-                        (mutate(parent, other, &job.layout, &job.dictionary, &mut random), false)
+                        (
+                            mutate(parent, other, &job.layout, &job.dictionary, &mut random),
+                            false,
+                        )
                     })
                     .collect()
             };
@@ -758,7 +806,8 @@ impl Worker<'_> {
             } else {
                 let mut sorted = finished.clone();
                 sorted.sort_unstable();
-                (sorted[sorted.len() * 9 / 10] * 10).clamp(QUICK_TIMEOUT, self.timeout.max(QUICK_TIMEOUT))
+                (sorted[sorted.len() * 9 / 10] * 10)
+                    .clamp(QUICK_TIMEOUT, self.timeout.max(QUICK_TIMEOUT))
             };
             let records = parallel(&batch, options.jobs, directory, |(tape, _), record| {
                 let began = Instant::now();
@@ -862,7 +911,9 @@ impl Session {
             .filter(|report| {
                 report.finding.is_some()
                     || (!report.library
-                        && (report.target.is_some_and(|target| self.selected(target, options))
+                        && (report
+                            .target
+                            .is_some_and(|target| self.selected(target, options))
                             || (entry && (report.hits > 0 || !in_test_target(report)))))
             })
             .collect()
@@ -872,7 +923,9 @@ impl Session {
     /// whole program: every site it reaches counts.
     fn entry_selected(&self, options: &Options) -> bool {
         (0..self.targets.len()).any(|t| {
-            self.targets[t].fuzz_entry && self.targets[t].harness.is_ok() && self.selected(t, options)
+            self.targets[t].fuzz_entry
+                && self.targets[t].harness.is_ok()
+                && self.selected(t, options)
         })
     }
 
@@ -889,7 +942,9 @@ impl Session {
             }
             match &target.harness {
                 Ok(_) => out.push_str(&format!("{}\n", target.name)),
-                Err(reason) => out.push_str(&format!("{}  (no generator: {reason})\n", target.name)),
+                Err(reason) => {
+                    out.push_str(&format!("{}  (no generator: {reason})\n", target.name))
+                }
             }
             for report in self.reports.iter().filter(|r| r.target == Some(index)) {
                 out.push_str(&format!(
@@ -910,8 +965,13 @@ impl Session {
         // functions by name.
         let mut rows: BTreeMap<(usize, String), [usize; 5]> = BTreeMap::new();
         let entry = self.entry_selected(options);
-        let filter =
-            |name: &str| entry || options.filter.as_ref().is_none_or(|f| name.contains(f.as_str()));
+        let filter = |name: &str| {
+            entry
+                || options
+                    .filter
+                    .as_ref()
+                    .is_none_or(|f| name.contains(f.as_str()))
+        };
         for (target, _, _, _, name) in &self.proved {
             match *target {
                 Some(target) if entry || self.selected(target, options) => {
@@ -958,7 +1018,12 @@ impl Session {
             let checks: usize = counts.iter().sum();
             out.push_str(&format!(
                 "{:<width$}  {checks:>6}  {:>6}  {:>5}  {:>8}  {:>9}  {:>6}\n",
-                row_name(key), counts[0], counts[1], counts[2], counts[3], counts[4]
+                row_name(key),
+                counts[0],
+                counts[1],
+                counts[2],
+                counts[3],
+                counts[4]
             ));
             for (sum, count) in total.iter_mut().zip(counts) {
                 *sum += count;
@@ -966,7 +1031,11 @@ impl Session {
         }
         let checks: usize = total.iter().sum();
         let attacked = total[0] + total[1] + total[2];
-        let percent = if checks == 0 { 100.0 } else { 100.0 * attacked as f64 / checks as f64 };
+        let percent = if checks == 0 {
+            100.0
+        } else {
+            100.0 * attacked as f64 / checks as f64
+        };
         out.push_str(&format!(
             "{:<width$}  {checks:>6}  {:>6}  {:>5}  {:>8}  {:>9}  {:>6}  {percent:.0}% proved or attacked\n",
             format!("package {package}"),
@@ -982,7 +1051,10 @@ impl Session {
         for (target, location, kind, goal, name) in &self.proved {
             let selected = match target {
                 Some(t) => self.selected(*t, options),
-                None => options.filter.as_ref().is_none_or(|f| name.contains(f.as_str())),
+                None => options
+                    .filter
+                    .as_ref()
+                    .is_none_or(|f| name.contains(f.as_str())),
             };
             if !selected {
                 continue;
@@ -1030,9 +1102,9 @@ impl Session {
             let Some(finding) = &report.finding else {
                 continue;
             };
-            let function = report
-                .target
-                .map_or(report.function.as_str(), |target| self.targets[target].name.as_str());
+            let function = report.target.map_or(report.function.as_str(), |target| {
+                self.targets[target].name.as_str()
+            });
             out.push_str(&format!(
                 "FOUND  {:<9}{function}  {}\n       check    {}\n",
                 report.kind.label(),
@@ -1048,11 +1120,18 @@ impl Session {
             let origin = if finding.run == 0 {
                 "saved input".to_owned()
             } else {
-                format!("run {}, minimized in {} runs", finding.run, finding.shrink_runs)
+                format!(
+                    "run {}, minimized in {} runs",
+                    finding.run, finding.shrink_runs
+                )
             };
             out.push_str(&format!(
                 "       input    {}    (calling {via}, {origin})\n",
-                if inputs.is_empty() { "(none)".to_owned() } else { inputs.join(", ") },
+                if inputs.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    inputs.join(", ")
+                },
             ));
             out.push_str(&format!(
                 "       kind     {}\n       suggest  {}\n",
@@ -1138,7 +1217,11 @@ fn insert_use(text: &str, module: &str) -> String {
     let at = lines
         .iter()
         .rposition(|line| line.trim_start().starts_with("use "))
-        .or_else(|| lines.iter().position(|line| line.trim_start().starts_with("module ")))
+        .or_else(|| {
+            lines
+                .iter()
+                .position(|line| line.trim_start().starts_with("module "))
+        })
         .map_or(0, |at| at + 1);
     let mut out = String::new();
     for (index, line) in lines.iter().enumerate() {
@@ -1345,7 +1428,10 @@ fn mutate(
             }
             // A collection gets a new length.
             3 => {
-                if let Some(Slot::Collection { offset, maximum, .. }) = pick_slot(layout, random, false) {
+                if let Some(Slot::Collection {
+                    offset, maximum, ..
+                }) = pick_slot(layout, random, false)
+                {
                     let length = if random.below(2) == 0 {
                         random.below(9)
                     } else {
@@ -1365,7 +1451,12 @@ fn mutate(
                     };
                     let width = element_width(*collection);
                     let value = dictionary[random.below(dictionary.len())];
-                    put(&mut tape, start + random.below(length) * width, width, value);
+                    put(
+                        &mut tape,
+                        start + random.below(length) * width,
+                        width,
+                        value,
+                    );
                 }
             }
             // A random bit flips.
@@ -1442,7 +1533,11 @@ pub fn decode(layout: &Layout, tape: &[u8]) -> Vec<(String, String)> {
                 let raw = get(tape, *offset, scalar.width());
                 match layout.labels.get(&index) {
                     Some(variants) if !variants.is_empty() => {
-                        format!("{} ({})", show_scalar(raw, *scalar), variants[(raw % variants.len() as u128) as usize])
+                        format!(
+                            "{} ({})",
+                            show_scalar(raw, *scalar),
+                            variants[(raw % variants.len() as u128) as usize]
+                        )
                     }
                     _ => show_scalar(raw, *scalar),
                 }

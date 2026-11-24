@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn project(label: &str, tests: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("kush fuzz entries {label} {}", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("kush fuzz entries {label} {}", std::process::id()));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(path.join("src")).unwrap();
     std::fs::create_dir_all(path.join("tests")).unwrap();
@@ -98,7 +99,10 @@ fn an_entry_reaches_code_without_a_generator() {
     );
     assert!(output.contains("kind     bug"), "{output}");
     // The smallest input that reaches the call: three bytes.
-    assert!(output.contains("input    input = b\"\\x00\\x00\\x00\""), "{output}");
+    assert!(
+        output.contains("input    input = b\"\\x00\\x00\\x00\""),
+        "{output}"
+    );
     // Its reproduction calls the entry in the test target.
     assert!(output.contains("let _ = last_byte(&input);"), "{output}");
     // A malformed entry is reported, not attacked.
@@ -111,7 +115,10 @@ fn an_entry_reaches_code_without_a_generator() {
     assert_eq!(status, Some(1), "{output}");
     let (status, output) = kush(&path, &["test"]);
     assert_eq!(status, Some(1), "{output}");
-    assert!(output.contains("test fuzz_last_byte_line_4 ... FAILED"), "{output}");
+    assert!(
+        output.contains("test fuzz_last_byte_line_4 ... FAILED"),
+        "{output}"
+    );
     assert!(output.contains("test passes ... ok"), "{output}");
     let _ = std::fs::remove_dir_all(&path);
 }
@@ -127,7 +134,10 @@ fn corpus_files_seed_an_entry() {
     std::fs::write(corpus.join("header"), [201u8, 13, 177, 42, 7]).unwrap();
     let (status, output) = kush(&path, &["fuzz", "--runs", "5", "magic"]);
     assert_eq!(status, Some(1), "{output}");
-    assert!(output.contains("FOUND  overflow demo.tests.main.magic"), "{output}");
+    assert!(
+        output.contains("FOUND  overflow demo.tests.main.magic"),
+        "{output}"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -135,16 +145,20 @@ fn corpus_files_seed_an_entry() {
 fn an_entry_reports_on_everything_it_reaches() {
     // The entry also calls into the standard library, whose unproved checks
     // are not the program's: they stay out of the table.
-    let tests = TESTS.replace(
-        "let _ = lib.peek(&c, input);",
-        "let _ = lib.peek(&c, input);\n        let _ = text.starts_with(input, input);",
-    )
-    .replace("use std.test;", "use std.test;\nuse std.text;");
+    let tests = TESTS
+        .replace(
+            "let _ = lib.peek(&c, input);",
+            "let _ = lib.peek(&c, input);\n        let _ = text.starts_with(input, input);",
+        )
+        .replace("use std.test;", "use std.test;\nuse std.text;");
     let path = project("report", &tests);
     let (_, output) = kush(&path, &["fuzz", "--runs", "100", "--report", "last_byte"]);
     // The library function the entry reaches has a row; the test target's
     // own tests, which no entry runs, do not.
-    assert!(output.lines().any(|l| l.starts_with("demo.lib.peek ")), "{output}");
+    assert!(
+        output.lines().any(|l| l.starts_with("demo.lib.peek ")),
+        "{output}"
+    );
     assert!(!output.contains("demo.tests.main.adds"), "{output}");
     assert!(!output.lines().any(|l| l.starts_with("std.")), "{output}");
     assert!(output.contains("package demo"), "{output}");

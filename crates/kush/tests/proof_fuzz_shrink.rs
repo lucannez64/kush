@@ -43,7 +43,10 @@ fn shrinking_shortens_collections_and_moves_numbers_to_the_boundary() {
     };
     let start = shrink::encode(
         &layout,
-        &[Value::Scalar(123_456), Value::List(vec![-77, 5, 99, 1 << 40])],
+        &[
+            Value::Scalar(123_456),
+            Value::List(vec![-77, 5, 99, 1 << 40]),
+        ],
     );
     // Fails when x >= 1000 and v has an element of at least 3.
     let fails = |tape: &[u8]| {
@@ -75,10 +78,21 @@ pub fn twice(x: i64, y: i64) -> i64 ! {panic} { x * y }
 fn fuzzed() -> (Session, Scratch) {
     let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
     let modules = Memory(vec![("app.lib".into(), LIB.into())]);
-    let original = program::load("main.kush", "module app;\nuse app.lib;\nfn main() -> i64 ! {} { 0 }", &modules)
-        .unwrap_or_else(|(_, e)| panic!("{e:?}"));
-    let mut session = Session::new(&original, &modules, &LinkSpec::default(), &scratch.path().join("f"), None, Vec::new())
-        .unwrap_or_else(|e| panic!("{e}"));
+    let original = program::load(
+        "main.kush",
+        "module app;\nuse app.lib;\nfn main() -> i64 ! {} { 0 }",
+        &modules,
+    )
+    .unwrap_or_else(|(_, e)| panic!("{e:?}"));
+    let mut session = Session::new(
+        &original,
+        &modules,
+        &LinkSpec::default(),
+        &scratch.path().join("f"),
+        None,
+        Vec::new(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     session.fuzz(&Options {
         runs: 400,
         ..Options::default()
@@ -92,7 +106,12 @@ fn finding<'s>(session: &'s Session, text: &str) -> &'s kush::fuzz::engine::Find
         .iter()
         .find(|r| r.text == text)
         .and_then(|r| r.finding.as_ref())
-        .unwrap_or_else(|| panic!("no finding at {text}: {}", session.render(&Options::default())))
+        .unwrap_or_else(|| {
+            panic!(
+                "no finding at {text}: {}",
+                session.render(&Options::default())
+            )
+        })
 }
 
 fn inputs(finding: &kush::fuzz::engine::Finding) -> String {
@@ -126,9 +145,16 @@ fn findings_are_minimized_classified_and_explained() {
     assert!(byte.reproduction.is_none());
     assert_eq!(inputs(byte), "b = b\"\", i = 0");
     let twice = finding(&session, "x * y");
-    assert!(twice.suggestion.contains("product of two values"), "{}", twice.suggestion);
+    assert!(
+        twice.suggestion.contains("product of two values"),
+        "{}",
+        twice.suggestion
+    );
     let report = session.render(&Options::default());
-    assert!(report.contains("kind     local: reached through a private function"), "{report}");
+    assert!(
+        report.contains("kind     local: reached through a private function"),
+        "{report}"
+    );
     assert!(report.contains("minimized in"), "{report}");
 }
 
@@ -215,13 +241,19 @@ fn saved_reproductions_fail_under_kush_test_and_inputs_replay() {
     let (status, output) = kush(&path, &["test"]);
     assert_eq!(status, Some(1), "{output}");
     assert!(output.contains("test passes ... ok"), "{output}");
-    assert!(output.contains("test fuzz_next_line_2 ... FAILED"), "{output}");
+    assert!(
+        output.contains("test fuzz_next_line_2 ... FAILED"),
+        "{output}"
+    );
     // Saving again adds nothing new.
     let (_, output) = kush(&path, &["fuzz", "--runs", "200", "--save"]);
     assert!(!output.contains("added"), "{output}");
     // With no new inputs at all, the saved one still finds the private bug.
     let (status, output) = kush(&path, &["fuzz", "--runs", "0", "lib.byte"]);
     assert_eq!(status, Some(1), "{output}");
-    assert!(output.contains("(calling demo.lib.byte, saved input)"), "{output}");
+    assert!(
+        output.contains("(calling demo.lib.byte, saved input)"),
+        "{output}"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
