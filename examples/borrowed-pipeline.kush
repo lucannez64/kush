@@ -2,14 +2,10 @@
 // The scoped borrowed callee stays alive while its argument joins a task.
 use std.task.TaskExit;
 
-#[noalloc]
-#[nosuspend]
 fn after_prefix(bytes: &mut [i64]) -> &mut [i64] ! {panic} {
     &mut bytes[1..]
 }
 
-#[noalloc]
-#[nosuspend]
 fn advance_digits(bytes: &mut [i64], by: i64) -> Unit ! {panic} {
     let mut index = 0;
     while index < Slice.len(bytes) {
@@ -21,8 +17,6 @@ fn advance_digits(bytes: &mut [i64], by: i64) -> Unit ! {panic} {
     }
 }
 
-#[noalloc]
-#[nosuspend]
 fn digit_sum(bytes: &[i64]) -> i64 ! {panic} {
     let mut result = 0;
     let mut index = 0;

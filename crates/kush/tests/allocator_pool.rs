@@ -394,10 +394,10 @@ fn clear_reserve_and_push_reserved_integrate_with_the_pool() {
         "the grown headerless 544-byte class"
     );
 
-    // `push_reserved` is still a non-allocating operation under `#[noalloc]`
-    // and never grows; the pooled allocation happens in the caller.
+    // `push_reserved` is still a non-allocating operation in a row without
+    // `alloc` and never grows; the pooled allocation happens in the caller.
     let (stats, pool) = agrees(
-        "#[noalloc]
+        "
          fn append(buffer: Bytes, byte: i64) -> Bytes ! {panic} {
              Bytes.push_reserved(buffer, byte)
          }
@@ -519,10 +519,10 @@ fn nested_owner_cleanup_and_invalid_free_contracts_are_unchanged() {
     );
     assert_eq!(pool.peak_retained, 64, "two class-16 blocks with headers");
 
-    // The `alloc` effect and `#[noalloc]` rejection are source contracts and
-    // must not be weakened by the physical pool.
+    // The `alloc` effect is a source contract and must not be weakened by the
+    // physical pool.
     let noalloc_box = executable::check(
-        "#[noalloc]
+        "
          fn make(x: i64) -> Box<i64> ! {panic} { Box.new(x) }
          fn main() -> i64 ! {alloc, panic} { 42 }",
     )
@@ -534,7 +534,7 @@ fn nested_owner_cleanup_and_invalid_free_contracts_are_unchanged() {
         "{noalloc_box:?}"
     );
     let noalloc_vec = executable::check(
-        "#[noalloc]
+        "
          fn push(values: Vec<i64>, value: i64) -> Vec<i64> ! {panic} {
              Vec.push(values, value)
          }

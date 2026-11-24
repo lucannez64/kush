@@ -315,7 +315,7 @@ fn parameter_and_result_union_repacking_uses_checked_adapters() {
 fn pure_function_pointers_require_no_allocation_and_noalloc_rejects_adapters() {
     assert_eq!(
         value(
-            "#[noalloc]
+            "
              fn apply(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(x) }
              fn inc(x: i64) -> i64 ! {panic} { x + 1 }
              fn main() -> i64 ! {panic} { apply(inc, 41) }"
@@ -325,7 +325,7 @@ fn pure_function_pointers_require_no_allocation_and_noalloc_rejects_adapters() {
     // A representation-changing pure adapter is still generated code, not heap.
     assert_eq!(
         value(
-            "#[noalloc]
+            "
              fn apply(f: fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(42) }
              fn classify(x: i64 | Bool) -> i64 ! {panic} {
                 match x { i64 @ n => n, Bool @ b => if b { 1 } else { 0 } }
@@ -335,7 +335,7 @@ fn pure_function_pointers_require_no_allocation_and_noalloc_rejects_adapters() {
         42
     );
     rejects(
-        "#[noalloc]
+        "
          fn make(n: Box<i64>) -> i64 ! {panic} {
             let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
             f(41)
@@ -345,9 +345,7 @@ fn pure_function_pointers_require_no_allocation_and_noalloc_rejects_adapters() {
     );
     rejects(
         "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         #[noalloc]
          fn use_once(f: once fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(41) }
-         #[noalloc]
          fn main() -> i64 ! {panic} {
             let g: fn(i64) -> i64 ! {panic} = inc;
             use_once(g)
@@ -886,7 +884,7 @@ fn effect_specialization_is_checked_and_stays_separate_from_other_categories() {
         "#[noalloc]
          fn poly<e: Effects>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
          fn main() -> i64 ! {panic} { 42 }",
-        "noalloc contracts cannot be effect-polymorphic",
+        "#[noalloc] was removed",
     );
 }
 
@@ -894,7 +892,7 @@ fn effect_specialization_is_checked_and_stays_separate_from_other_categories() {
 fn noalloc_higher_order_contracts_are_checked_independently_of_specialization() {
     assert_eq!(
         value(
-            "#[noalloc]
+            "
              fn apply(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(x) }
              fn inc(x: i64) -> i64 ! {panic} { x + 1 }
              fn main() -> i64 ! {panic} { apply(inc, 41) }"
@@ -903,7 +901,6 @@ fn noalloc_higher_order_contracts_are_checked_independently_of_specialization() 
     );
     rejects(
         "fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
-         #[noalloc]
          fn apply(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(x) }
          fn main() -> i64 ! {alloc, panic} { apply(alloc_id, 1) }",
         "type mismatch",

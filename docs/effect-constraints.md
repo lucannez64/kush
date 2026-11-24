@@ -8,8 +8,12 @@ may union, subtract, and name a declared row alias, as in `{e - io}`,
 the built-in and declared effects. The runtime effect bitset and its representation are
 unchanged.
 
+**FND-ROWS-ATTRS (2026-11-24):** `#[noalloc]` and `#[nosuspend]` were
+removed. A row without `alloc` (or `suspend`) whose variables exclude it, as
+below, is the whole contract; the attributes only repeated it. Older mentions
+of the attributes in this and other design documents are history.
+
 ```rust
-#[noalloc]
 fn apply<e: Effects - alloc>(
     f: fn(i64) -> i64 ! {e},
     x: i64,

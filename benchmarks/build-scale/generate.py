@@ -15,7 +15,6 @@ from pathlib import Path
 def kush_unit(u):
     a, b, c = 3 + u % 7, 11 + u % 13, 5 + u % 5
     return f"""
-#[noalloc]
 fn sum_{u}(values: &[i64]) -> i64 ! {{panic}} {{
     let mut acc = {u};
     let mut i = 0;
@@ -26,7 +25,6 @@ fn sum_{u}(values: &[i64]) -> i64 ! {{panic}} {{
     acc
 }}
 
-#[noalloc]
 fn scale_{u}<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> Unit ! {{panic}} {{
     let mut i = 0;
     while i < Slice.len(source) {{
@@ -45,7 +43,6 @@ fn fill_{u}(n: i64) -> Vec<i64> ! {{alloc, panic}} {{
     values
 }}
 
-#[noalloc]
 fn pick_{u}(x: i64, y: i64) -> i64 ! {{panic}} {{
     if x < y {{
         if x & 1 == 0 {{ x * {a} + y }} else {{ y - x * {c} }}
@@ -54,12 +51,10 @@ fn pick_{u}(x: i64, y: i64) -> i64 ! {{panic}} {{
     }}
 }}
 
-#[noalloc]
 fn climb_{u}(n: i64, acc: i64) -> i64 ! {{panic}} {{
     if n == 0 {{ acc }} else {{ climb_{u}(n - 1, acc + pick_{u}(n, acc & 63)) }}
 }}
 
-#[noalloc]
 fn find_{u}(values: &[i64], wanted: i64) -> i64 ! {{panic}} {{
     let mut i = 0;
     let mut at = 0 - 1;

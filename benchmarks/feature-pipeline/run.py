@@ -59,9 +59,7 @@ def kush_source(variant):
         core = core.replace("key: i64, erased approved: AuthorizedKey<key>, audit: i64 @[0]", "key: i64")
         core = core.replace("issue(23130, AuthorizedKey.Standard::<23130>, audit)", "issue(23130)")
         core = core.replace(" @[1]", "").replace(" @[2]", "")
-        core = core.replace("#[noalloc]\n", "").replace("#[nosuspend]\n", "")
         assert "erased approved:" not in core and "@[" not in core
-        assert "#[noalloc]" not in core and "#[nosuspend]" not in core
     main = (ROOT / "kush/main.kush").read_text()
     main = main.replace("module feature_pipeline;", "")
     main = main.replace("use feature_pipeline.pipeline;", "").replace("pipeline.batch", "batch")

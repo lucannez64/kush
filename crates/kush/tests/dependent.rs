@@ -19,10 +19,8 @@ fn rejects(source: &str, message: &str) {
 #[test]
 fn const_lengths_are_inferred_and_explicitly_specialized() {
     let source = r#"
-        #[noalloc]
         fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
 
-        #[noalloc]
         fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {panic} { xs[N - 1] }
 
         fn main() -> i64 ! {panic} {
@@ -41,7 +39,6 @@ fn const_lengths_are_inferred_and_explicitly_specialized() {
 
     // A literal array argument infers both the element type and the length.
     let literal = r#"
-        #[noalloc]
         fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
         fn main() -> i64 ! {panic} {
             let a = identity([10, 20, 12]);
@@ -51,7 +48,6 @@ fn const_lengths_are_inferred_and_explicitly_specialized() {
     assert_eq!(evaluate(literal), 42);
     // Constant slice bounds may also use the checked natural fragment.
     let bounded = r#"
-        #[noalloc]
         fn second<T: Type, N: Nat>(a: [T; N]) -> T ! {panic} {
             let view: &[T] = &a[0..N - 1];
             view[0]
@@ -68,7 +64,6 @@ fn kernel_normalized_arithmetic_folds_array_lengths_and_indices() {
         total fn step(n: Nat, acc: Nat) -> Nat ! {} { Nat.succ(acc) }
         total fn add(n: Nat, m: Nat) -> Nat ! {} { Nat.induct(Constant, m, step, n) }
 
-        #[noalloc]
         fn middle(xs: [i64; add<1, 1>]) -> i64 ! {panic} { xs[add(0, 1)] }
 
         fn main() -> i64 ! {panic} {
@@ -98,7 +93,6 @@ fn nested_and_generic_records_keep_symbolic_lengths() {
         struct Buffer<N: Nat> { data: [i64; N] }
         struct Pair { left: i64, right: i64 }
 
-        #[noalloc]
         fn first<N: Nat>(b: Buffer<N>) -> i64 ! {panic} { b.data[0] }
 
         fn main() -> i64 ! {panic} {
@@ -192,7 +186,6 @@ fn executable_aliases_are_transparent_across_arrays_unions_and_generics() {
         type Value = Number | Bool;
         type ReadOnly = Pair<i64>;
 
-        #[noalloc]
         fn pick(v: Value) -> i64 ! {panic} {
             match v {
                 i64 @ n => n,
@@ -218,9 +211,7 @@ fn executable_aliases_are_transparent_across_arrays_unions_and_generics() {
 fn generic_aliases_participate_in_length_inference() {
     let source = r#"
         type Arr<T, N: Nat> = [T; N];
-        #[noalloc]
         fn first<T, N: Nat>(xs: Arr<T, N>) -> T ! {panic} { xs[0] }
-        #[noalloc]
         fn identity<T, N: Nat>(xs: Arr<T, N>) -> Arr<T, N> ! {} { xs }
         fn main() -> i64 ! {panic} {
             let a: Arr<i64, 3> = [20, 21, 1];
@@ -361,9 +352,7 @@ fn dependent_erased_parameters_reject_wrong_proofs_and_runtime_values() {
 fn dependent_arrays_agree_between_reference_and_native_and_do_not_allocate() {
     use std::process::Command;
     let source = r#"
-        #[noalloc]
         fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
-        #[noalloc]
         fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {panic} { xs[N - 1] }
         fn main() -> i64 ! {panic} {
             let a: [i64; 4] = [1, 2, 3, 42];

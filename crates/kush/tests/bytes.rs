@@ -49,8 +49,8 @@ fn growth_and_reserved_append_preserve_ownership_and_capacity() {
     assert_eq!(stats.buffer_growths, 2);
     let (output, stats) = execute(
         r#"
-        #[noalloc] fn append(b:Bytes)->Bytes ! {panic} {Bytes.push_reserved(b,0)}
-        #[noalloc] fn length(b:&Bytes)->i64 ! {} {Bytes.len(b)}
+        fn append(b:Bytes)->Bytes ! {panic} {Bytes.push_reserved(b,0)}
+        fn length(b:&Bytes)->i64 ! {} {Bytes.len(b)}
         fn main()->Unit ! {alloc,panic,io} {
             let b=append(Bytes.with_capacity(1)); print_i64(length(&b)); print_i64(Bytes.get(&b,0));
         }
@@ -127,14 +127,14 @@ fn literal_construction_and_effect_contracts_are_checked() {
     ] {
         assert!(
             check(&format!(
-                "#[noalloc] fn f(b:&Bytes)->Bytes ! {{panic}} {{{body}}}"
+                "fn f(b:&Bytes)->Bytes ! {{panic}} {{{body}}}"
             ))
             .is_err()
         );
     }
     assert!(check("fn f(b:&Bytes)->i64 ! {} {Bytes.get(b,0)}").is_err());
     assert!(check("fn f(b:Bytes)->Bytes ! {} {Bytes.push_reserved(b,1)}").is_err());
-    assert!(check("#[noalloc] fn f(b:&Bytes)->i64 ! {} {Bytes.capacity(b)}").is_ok());
+    assert!(check("fn f(b:&Bytes)->i64 ! {} {Bytes.capacity(b)}").is_ok());
 }
 
 #[test]

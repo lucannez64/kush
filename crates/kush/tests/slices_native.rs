@@ -199,8 +199,6 @@ fn inline_array_try_get_allocates_nothing() {
 fn try_get_preserves_union_payload_layout_and_reversed_option_tags() {
     let source = r#"
         enum Option<T> { Some(T), None }
-        #[noalloc]
-        #[nosuspend]
         fn read(view: &[i64 | Bool], index: i64) -> i64 ! {} {
             match Slice.try_get(view, index) {
                 Option.Some(value) => match value {

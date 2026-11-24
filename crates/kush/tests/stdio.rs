@@ -71,7 +71,6 @@ fn evaluate(source: &str, input: &[u8]) -> (i64, Vec<u8>, MemoryStats) {
 fn read_program(capacity: i64) -> String {
     format!(
         r#"{RESULT}
-        #[noalloc] #[nosuspend]
         fn copy(input:Stdin,output:Stdout,buffer:Bytes)->Result<Unit,i64> ! {{io}} {{
             let bytes=IO.read_all(input,buffer)?;
             IO.write(output,&bytes)
@@ -408,7 +407,7 @@ fn chunk_reads_append_without_probing_and_full_buffers_consume_no_input() {
 
 #[test]
 fn clear_keeps_capacity_and_cannot_invalidate_live_views_or_erase_linear_obligations() {
-    let source = r#"#[noalloc] #[nosuspend]
+    let source = r#"
         fn reset(b: Bytes) -> Bytes ! {} { Bytes.clear(b) }
         fn main() -> i64 ! {alloc, panic} {
             let b = reset(Bytes.from("abc"));

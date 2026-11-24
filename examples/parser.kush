@@ -26,7 +26,6 @@ enum Expr<T: Type> {
 type LoadError = IoError | ParseError;
 type ReadableNamed = Readable & Named;
 
-#[nosuspend]
 pub fn classify(token: &Token) -> i64 ! {} {
     match token {
         Token.Integer(0) => 0,

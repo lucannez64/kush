@@ -449,12 +449,10 @@ fn nested_pure_maps_fuse_and_effectful_maps_do_not() {
 #[test]
 fn noalloc_contracts_are_independent_of_reuse_and_fusion() {
     let source = "fn id(x: i64) -> i64 ! {} { x }
-        #[noalloc]
         fn bump(owner: Box<i64>) -> Box<i64> ! {panic} {
             let n = Box.read(&owner);
             Box.reuse(owner, n + 1)
         }
-        #[noalloc]
         fn same(values: Vec<i64>) -> Vec<i64> ! {} { Vec.map_in_place(values, id) }
         fn main() -> i64 ! {alloc, panic} {
             let owner = bump(Box.new(41));
@@ -467,7 +465,6 @@ fn noalloc_contracts_are_independent_of_reuse_and_fusion() {
     assert_eq!(stats.reuses, 1);
     rejects(
         "fn make(x: i64) -> Box<i64> ! {alloc, panic} { Box.new(x) }
-         #[noalloc]
          fn same(values: Vec<i64>) -> Vec<Box<i64>> ! {panic} {
             Vec.map_in_place(values, make)
          }
@@ -478,7 +475,7 @@ fn noalloc_contracts_are_independent_of_reuse_and_fusion() {
         "#[noalloc]
          fn bump(owner: Box<i64>) -> Box<i64> ! {alloc, panic} { Box.reuse(owner, 1) }
          fn main() -> i64 ! {alloc, panic} { 42 }",
-        "noalloc contract forbids the alloc effect",
+        "#[noalloc] was removed",
     );
 }
 

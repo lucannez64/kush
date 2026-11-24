@@ -464,11 +464,7 @@ fn borrowed_helpers_keep_noalloc_and_nosuspend_contracts() {
     agrees(
         r#"
         struct Point { x: i64, y: i64 }
-        #[noalloc]
-        #[nosuspend]
         fn sum(p: &Point) -> i64 ! {panic} { p.x + p.y }
-        #[noalloc]
-        #[nosuspend]
         fn shift(p: &mut Point, by: i64) -> Unit ! {panic} {
             p.x = p.x + by;
         }
@@ -488,7 +484,7 @@ fn borrowed_helpers_keep_noalloc_and_nosuspend_contracts() {
         fn bad(p: &Point) -> i64 ! {alloc, panic} { Box.take(Box.new(1)) }
         fn main() -> Unit ! {panic} {}
         "#,
-        "noalloc",
+        "#[noalloc] was removed",
     );
 }
 

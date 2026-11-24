@@ -3,13 +3,11 @@
 // until both children and their descendants reach their last use.
 //   cargo run -p kush -- run examples/mutable-splits.kush
 
-#[noalloc]
 fn bump<'a>(left: &'a mut [i64], right: &'a mut [i64]) -> Unit ! {panic} {
     Slice.set(left, 0, Slice.get(left, 0) + 1);
     Slice.set(right, 0, Slice.get(right, 0) + 10);
 }
 
-#[noalloc]
 fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
     &mut view[1..]
 }

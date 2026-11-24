@@ -116,7 +116,7 @@ fn noalloc_and_nosuspend_contracts_accept_fully_constrained_rows() {
     // alloc, including a callback that performs the remaining effects.
     assert_eq!(
         value(
-            "#[noalloc]
+            "
              fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
                  f(x)
              }
@@ -127,7 +127,7 @@ fn noalloc_and_nosuspend_contracts_accept_fully_constrained_rows() {
     );
     assert_eq!(
         value(
-            "#[nosuspend]
+            "
              fn apply<e: Effects - suspend>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
                  f(x)
              }
@@ -138,8 +138,7 @@ fn noalloc_and_nosuspend_contracts_accept_fully_constrained_rows() {
     );
     assert_eq!(
         value(
-            "#[noalloc]
-             #[nosuspend]
+            "
              fn apply<e: Effects - (alloc | suspend)>(
                  f: fn(i64) -> i64 ! {e}, x: i64
              ) -> i64 ! {panic, e} { f(x) }
@@ -149,8 +148,7 @@ fn noalloc_and_nosuspend_contracts_accept_fully_constrained_rows() {
         42
     );
     native_agrees(
-        "#[noalloc]
-         #[nosuspend]
+        "
          fn apply<e: Effects - (alloc | suspend)>(
              f: fn(i64) -> i64 ! {e}, x: i64
          ) -> i64 ! {panic, e} { f(x) }
@@ -230,42 +228,28 @@ fn allocating_or_suspending_specializations_are_rejected() {
 }
 
 #[test]
-fn an_unconstrained_row_variable_keeps_the_contract_rejection() {
+fn removed_contract_attributes_point_at_the_row() {
+    // FND-ROWS-ATTRS: the row (with exclusions on its variables) is the
+    // contract; the attributes are rejected with a pointer to it.
     rejects(
         "#[noalloc]
-         fn poly<e: Effects>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
+         fn poly<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
          fn main() -> i64 ! {panic} { 42 }",
-        "noalloc contracts cannot be effect-polymorphic",
+        "#[noalloc] was removed: the effect row is the contract",
     );
     rejects(
         "#[nosuspend]
-         fn poly<e: Effects>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
+         fn poly(x: i64) -> i64 ! {} { x }
          fn main() -> i64 ! {panic} { 42 }",
-        "nosuspend contracts cannot be effect-polymorphic",
+        "exclude it from the row variable, as in 'e: Effects - suspend'",
     );
-    // Every row variable must exclude the effect; one unconstrained variable
-    // keeps the declaration unsound and rejected.
+    // The row alone keeps the promise: an excluded variable cannot be
+    // specialized with the effect.
     rejects(
-        "#[noalloc]
-         fn poly<e: Effects - alloc, d: Effects>(
-             f: fn(i64) -> i64 ! {e}, g: fn(i64) -> i64 ! {d}
-         ) -> i64 ! {panic, e, d} { f(g(1)) }
-         fn main() -> i64 ! {panic} { 42 }",
-        "noalloc contracts cannot be effect-polymorphic",
-    );
-    // A fixed forbidden effect is still rejected even when every row variable
-    // is constrained.
-    rejects(
-        "#[noalloc]
-         fn poly<e: Effects - alloc>(x: i64) -> i64 ! {alloc, e} { x }
-         fn main() -> i64 ! {panic} { 42 }",
-        "noalloc contract forbids the alloc effect",
-    );
-    rejects(
-        "#[nosuspend]
-         fn poly<e: Effects - suspend>(x: i64) -> i64 ! {suspend, e} { x }
-         fn main() -> i64 ! {panic} { 42 }",
-        "nosuspend contract forbids the suspend effect",
+        "fn poly<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
+         fn grow(x: i64) -> i64 ! {alloc, panic} { Box.take(Box.new(x)) }
+         fn main() -> i64 ! {alloc, panic} { poly(grow) }",
+        "is excluded by",
     );
 }
 

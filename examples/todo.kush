@@ -3,8 +3,6 @@ use std.result.Result;
 
 // 32 slots, each [state, title length, 96 title bytes]. State 0=free, 1=open, 2=done.
 
-#[noalloc]
-#[nosuspend]
 fn cell(slot: i64) -> i64 ! {panic} { slot * 98 }
 
 fn append_ref(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
@@ -73,8 +71,6 @@ fn screen(items: &[i64], filter: i64, message: &Bytes) -> Bytes ! {alloc, panic}
     append(out, Bytes.from("\n> "))
 }
 
-#[noalloc]
-#[nosuspend]
 fn equals(line: &[i64], text: Bytes) -> Bool ! {panic} {
     if Slice.len(line) != Bytes.len(&text) { return false; }
     let mut i = 0;

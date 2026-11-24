@@ -204,9 +204,7 @@ fn proved_slice_bounds_erase_the_runtime_check_and_are_version_aware() {
 fn views_do_not_allocate_and_allow_noalloc_call_scoped_reads() {
     let program = checked(
         r#"
-        #[noalloc]
         fn first(s: &[i64]) -> i64 ! {panic} { Slice.get(s, 0) }
-        #[noalloc]
         fn pair() -> [i64; 2] ! {} { [41, 1] }
         fn main() -> i64 ! {panic} {
             let a = pair();

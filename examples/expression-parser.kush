@@ -5,7 +5,6 @@ enum ParseError { ExpectedNumber(i64), UnexpectedByte(i64), Overflow }
 enum Expr { Number(i64), Add(Box<Expr>, Box<Expr>), Multiply(Box<Expr>, Box<Expr>) }
 enum Parsed { At(Expr, i64) }
 
-#[noalloc]
 fn skip_space(source: &Bytes, index: i64) -> i64 ! {panic} {
     if index >= Bytes.len(source) { return index; }
     match Bytes.get(source, index) {
@@ -14,7 +13,6 @@ fn skip_space(source: &Bytes, index: i64) -> i64 ! {panic} {
     }
 }
 
-#[noalloc]
 fn number_tail(source: &Bytes, index: i64, value: i64) -> Result<Parsed, ParseError> ! {panic} {
     if index >= Bytes.len(source) { return Ok(Parsed.At(Expr.Number(value), index)); }
     let byte = Bytes.get(source, index);
@@ -24,7 +22,6 @@ fn number_tail(source: &Bytes, index: i64, value: i64) -> Result<Parsed, ParseEr
     number_tail(source, index + 1, value * 10 + digit)
 }
 
-#[noalloc]
 fn number(source: &Bytes, start: i64) -> Result<Parsed, ParseError> ! {panic} {
     let index = skip_space(source, start);
     if index >= Bytes.len(source) { return Err(ParseError.ExpectedNumber(index)); }
@@ -76,8 +73,6 @@ fn parse(source: &Bytes) -> Result<Expr, ParseError> ! {alloc, panic} {
     }
 }
 
-#[noalloc]
-#[nosuspend]
 fn evaluate(tree: Expr) -> i64 ! {panic} {
     match tree {
         Expr.Number(n) => n,

@@ -130,7 +130,7 @@ fn clear_retains_capacity_for_later_pushes() {
 #[test]
 fn clear_is_available_under_noalloc() {
     let stats = agrees(
-        "#[noalloc]
+        "
          fn reset(values: Vec<i64>) -> Vec<i64> ! {} { Vec.clear(values) }
          fn main() -> i64 ! {alloc, panic} {
             let mut values: Vec<i64> = Vec.new();
@@ -254,7 +254,7 @@ fn reserve_and_clear_require_an_owned_vector_that_is_not_borrowed() {
         "an owned Vec<T> (it is consumed and returned)",
     );
     rejects(
-        "#[noalloc]
+        "
          fn reserve(values: Vec<i64>) -> Vec<i64> ! {panic} { Vec.reserve(values, 1) }
          fn main() -> i64 ! {alloc, panic} { 42 }",
         "requires effects {alloc}",
@@ -413,7 +413,6 @@ fn map_chain_callback_effects_are_required_independently_of_optimization() {
     rejects(
         "fn make(x: i64) -> Box<i64> ! {alloc, panic} { Box.new(x) }
          fn unwrap(owner: Box<i64>) -> i64 ! {} { Box.take(owner) }
-         #[noalloc]
          fn chain(values: Vec<i64>) -> Vec<i64> ! {panic} {
             Vec.map_chain_in_place(values, make, unwrap)
          }
@@ -421,9 +420,8 @@ fn map_chain_callback_effects_are_required_independently_of_optimization() {
         "requires effects {alloc}",
     );
     let stats = agrees(
-        "#[noalloc]
+        "
          fn id(x: i64) -> i64 ! {} { x }
-         #[noalloc]
          fn same(values: Vec<i64>) -> Vec<i64> ! {} {
             Vec.map_chain_in_place(values, id, id)
          }

@@ -26,14 +26,10 @@ impl Describe for Point {
     }
 }
 
-#[noalloc]
-#[nosuspend]
 fn peek(point: &Point) -> i64 ! {panic} {
     point.x
 }
 
-#[noalloc]
-#[nosuspend]
 fn shift_via(point: &mut Point, by: i64) -> Unit ! {panic} {
     point.x = point.x + by;
 }

@@ -141,7 +141,7 @@ fn modules_enforce_visibility_and_supply_standard_result() {
 #[test]
 fn fixed_arrays_are_inline_typed_and_checked() {
     value(
-        "#[noalloc] fn pair()->[i64;2] ! {} {[20,22]} fn main()->i64 ! {panic} {let a=pair();a[0]+a[1]}",
+        "fn pair()->[i64;2] ! {} {[20,22]} fn main()->i64 ! {panic} {let a=pair();a[0]+a[1]}",
         42,
     );
     value("fn main()->i64 ! {} {let a:[i64;0]=[];42}", 42);
@@ -176,7 +176,7 @@ fn array_destructuring_moves_owning_elements() {
 #[test]
 fn inline_arrays_execute_natively_with_owning_cleanup() {
     use std::process::Command;
-    let source = "#[noalloc] fn pair()->[i64;2] ! {} {[20,22]} fn main()->i64 ! {alloc,panic} {let p=pair();let a:[Box<i64>;2]=[Box.new(p[0]),Box.new(p[1])];let [x,y]=a;let unused:[Box<i64>;1]=[Box.new(0)];Box.take(x)+Box.take(y)}";
+    let source = "fn pair()->[i64;2] ! {} {[20,22]} fn main()->i64 ! {alloc,panic} {let p=pair();let a:[Box<i64>;2]=[Box.new(p[0]),Box.new(p[1])];let [x,y]=a;let unused:[Box<i64>;1]=[Box.new(0)];Box.take(x)+Box.take(y)}";
     let p = check(source).unwrap();
     let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
     let binary = scratch.path().join("arrays");

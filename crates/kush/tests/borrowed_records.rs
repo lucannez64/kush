@@ -367,8 +367,6 @@ fn inferred_local_record_destructuring_and_owner_kinds() {
             view: &'a [T],
             start: i64
         }
-        #[noalloc]
-        #[nosuspend]
         fn length<'a>(window: Window<'a, i64>) -> i64 ! {panic} {
             Slice.len(window.view) + window.start
         }
@@ -1204,8 +1202,6 @@ fn mixed_record_cleanup_balances_across_early_exits_loops_and_noalloc_helpers() 
     );
     agrees(
         r#"struct Mixed<'a> { view: &'a [i64], token: Box<i64> }
-        #[noalloc]
-        #[nosuspend]
         fn payload<'a>(record: Mixed<'a>) -> i64 ! {panic} {
             let Mixed { view, token } = record;
             Slice.get(view, 0) + Box.take(token)

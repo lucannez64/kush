@@ -140,12 +140,12 @@ fn ignored_and_unused_pattern_resources_drop_after_guard_selection() {
 #[test]
 fn allocation_effect_and_noalloc_contracts_are_checked() {
     rejects("fn main()->Unit ! {} {let b=Box.new(1);}", "alloc, panic");
-    rejects("#[noalloc] fn f()->Unit ! {alloc} {}", "noalloc contract");
+    rejects("#[noalloc] fn f()->Unit ! {} {}", "#[noalloc] was removed");
     rejects(
-        "#[noalloc] fn f()->Unit ! {panic} {let b=Box.new(1);}",
+        "fn f()->Unit ! {panic} {let b=Box.new(1);}",
         "requires effects {alloc}",
     );
-    check("#[noalloc] #[nosuspend] fn f(b:Box<i64>)->i64 ! {} {Box.take(b)}").unwrap();
+    check("fn f(b:Box<i64>)->i64 ! {} {Box.take(b)}").unwrap();
     check("fn f(b:&mut Box<i64>)->Unit ! {} {}").unwrap();
     rejects(
         "fn main()->Unit ! {alloc, panic} { let b = Box.new(1); let r = &mut b; }",

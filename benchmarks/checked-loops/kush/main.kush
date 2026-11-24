@@ -11,7 +11,6 @@ fn argument(index: i64) -> i64 ! {io, alloc, panic} {
     match text.parse_i64(&bytes) { Ok(value) => value, Err(_) => -1 }
 }
 
-#[noalloc]
 fn sum(values: &[i64]) -> i64 ! {panic} {
     let mut acc = 0;
     let mut i = 0;
@@ -22,7 +21,6 @@ fn sum(values: &[i64]) -> i64 ! {panic} {
     acc
 }
 
-#[noalloc]
 fn dot(left: &[i64], right: &[i64]) -> i64 ! {panic} {
     let mut acc = 0;
     let mut i = 0;
@@ -33,7 +31,6 @@ fn dot(left: &[i64], right: &[i64]) -> i64 ! {panic} {
     acc
 }
 
-#[noalloc]
 fn scale<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> Unit ! {panic} {
     let mut i = 0;
     while i < Slice.len(source) {

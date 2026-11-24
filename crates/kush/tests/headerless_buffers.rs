@@ -79,7 +79,7 @@ fn byte_range_checks_run_before_the_fast_store_and_the_growth_path() {
 #[test]
 fn reserved_push_checks_logical_capacity_despite_physical_slack() {
     compare(
-        r#"#[noalloc] fn append(b:Bytes)->Bytes ! {panic} {Bytes.push_reserved(b,42)}
+        r#"fn append(b:Bytes)->Bytes ! {panic} {Bytes.push_reserved(b,42)}
     fn main()->i64 ! {alloc,panic} {let b=append(Bytes.with_capacity(1));Bytes.get(&b,0)}"#,
         Some(42),
     );

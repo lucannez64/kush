@@ -36,9 +36,7 @@ pub fn message(error: Error) -> Bytes ! {alloc, panic} {
     }
 }
 
-#[noalloc] #[nosuspend]
 fn digit(byte: i64) -> Bool ! {} { byte >= 48 && byte <= 57 }
-#[noalloc] #[nosuspend]
 fn skip(source: &[i64], start: i64) -> i64 ! {panic} {
     let mut at = start;
     while at < Slice.len(source) {
@@ -49,14 +47,12 @@ fn skip(source: &[i64], start: i64) -> i64 ! {panic} {
     at
 }
 
-#[noalloc] #[nosuspend]
 fn hex(byte: i64) -> i64 ! {panic} {
     if digit(byte) { byte - 48 } else {
         if byte >= 65 && byte <= 70 { byte - 55 } else { if byte >= 97 && byte <= 102 { byte - 87 } else { -1 } }
     }
 }
 
-#[noalloc] #[nosuspend]
 fn hex4(source: &[i64], at: i64) -> Result<i64, Error> ! {panic} {
     if at + 4 > Slice.len(source) { return Err(Error.InvalidUnicode(at)); }
     let mut code = 0;
@@ -71,7 +67,6 @@ fn hex4(source: &[i64], at: i64) -> Result<i64, Error> ! {panic} {
 }
 
 // Validate one raw UTF-8 scalar, rejecting overlongs, surrogates and > U+10FFFF.
-#[noalloc] #[nosuspend]
 fn utf8(source: &[i64], at: i64) -> Result<i64, Error> ! {panic} {
     let lead = Slice.get(source, at);
     let mut width = 0;
@@ -164,7 +159,6 @@ fn string(source: &[i64], start: i64) -> Result<Text, Error> ! {alloc, panic} {
     Err(Error.Unexpected(at))
 }
 
-#[noalloc] #[nosuspend]
 fn number_end(source: &[i64], start: i64) -> Result<i64, Error> ! {panic} {
     let mut at = start;
     if at < Slice.len(source) && Slice.get(source, at) == 45 { at = at + 1; }
@@ -193,7 +187,6 @@ fn copy(source: &[i64], start: i64, end: i64) -> Bytes ! {alloc, panic} {
     out
 }
 
-#[noalloc] #[nosuspend]
 fn keyword(source: &[i64], at: i64, word: &Bytes) -> Result<i64, Error> ! {panic} {
     let mut i = 0;
     while i < Bytes.len(word) {
@@ -310,7 +303,6 @@ fn value(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {all
 }
 
 /// Parse one complete UTF-8 JSON text. Numbers retain their exact lexical bytes.
-#[nosuspend]
 pub fn parse(source: &[i64]) -> Result<Value, Error> ! {alloc, panic} {
     if Slice.len(source) > 65536 { return Err(Error.Limit(65536)); }
     let Parsed { value: value, next: next } = value(source, 0, 0)?;
@@ -417,7 +409,6 @@ fn emit(value: Value, out: Bytes, depth: i64) -> Result<Bytes, Error> ! {alloc, 
 }
 
 /// Consume an owned tree and write compact JSON, validating user-built leaves.
-#[nosuspend]
 pub fn stringify(value: Value) -> Result<Bytes, Error> ! {alloc, panic} {
     emit(value, Bytes.with_capacity(256), 0)
 }

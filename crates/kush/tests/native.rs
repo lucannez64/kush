@@ -356,7 +356,7 @@ fn regular_recursive_generic_and_mutually_boxed_layouts_destruct_correctly() {
     compare("enum List<T>{Nil,Cons(T,Box<List<T>>)}
         enum A{End,Next(Box<Wrap<A>>)} enum Wrap<T>{Item(T)}
         fn make()->List<i64> ! {alloc,panic} {List.Cons(1,Box.new(List.Cons(2,Box.new(List.Nil))))}
-        #[noalloc] fn sum(xs:List<i64>)->i64 ! {panic} {match xs {Nil=>0,Cons(n,tail)=>n+sum(Box.take(tail))}}
+        fn sum(xs:List<i64>)->i64 ! {panic} {match xs {Nil=>0,Cons(n,tail)=>n+sum(Box.take(tail))}}
         fn main()->Unit ! {io,alloc,panic} {
             print_i64(sum(make()));let unused=make();let a=A.Next(Box.new(Wrap.Item(A.End)));
         }");
@@ -365,7 +365,7 @@ fn regular_recursive_generic_and_mutually_boxed_layouts_destruct_correctly() {
 #[test]
 fn call_scoped_borrows_keep_owners_live_and_end_before_later_moves() {
     compare(
-        "#[noalloc] fn inspect(r:&Box<i64>)->i64 ! {} {Box.read(r)}
+        "fn inspect(r:&Box<i64>)->i64 ! {} {Box.read(r)}
         fn combine(a:i64,b:i64)->i64 ! {panic} {a+b}
         fn main()->Unit ! {io,alloc,panic} {
             let b=Box.new(21);
@@ -381,7 +381,7 @@ fn owning_buffers_preserve_raw_bytes_across_copy_growth_and_nested_cleanup() {
     let mut source = String::from(
         r#"
         enum Holder{Bytes(Bytes),Nested(Box<Bytes>)}
-        #[noalloc] fn size(b:&Bytes)->i64 ! {} {Bytes.len(b)}
+        fn size(b:&Bytes)->i64 ! {} {Bytes.len(b)}
         fn main()->Unit ! {alloc,panic,io} {
             let empty=Bytes.from("");print_i64(Bytes.len(&empty));
             let source=Bytes.from("é\0");let copy=Bytes.copy(&source);drop(source);

@@ -278,7 +278,7 @@ fn widening_reuse_drops_the_old_payload_once_and_keeps_obligations() {
 #[test]
 fn widening_reuse_requires_alloc_panic_and_rejects_linear_or_borrowed_owners() {
     rejects(
-        "#[noalloc] fn grow(owner: Box<i64>) -> i64 ! {panic} {
+        "fn grow(owner: Box<i64>) -> i64 ! {panic} {
             let owner: Box<[i64; 2]> = Box.reuse_grow(owner, [1, 2]);
             42
         }
@@ -472,7 +472,7 @@ fn fallible_allocation_does_not_mask_ordinary_abort_contracts() {
     // Ordinary Box.new still requires {alloc, panic}; the fallible spelling
     // requires only alloc and never turns refusal into an abort.
     rejects(
-        "#[noalloc] fn f() -> i64 ! {panic} { match Box.try_new(1) { _ => 1 } }
+        "fn f() -> i64 ! {panic} { match Box.try_new(1) { _ => 1 } }
          enum Result<T, E> { Ok(T), Err(E) }
          fn main() -> i64 ! {alloc, panic} { 0 }",
         "requires effects {alloc}",
@@ -934,7 +934,7 @@ fn vector_capacity_operations_preserve_linear_owner_obligations() {
 fn fallible_vector_reserve_requires_allocation_effect_and_an_owned_receiver() {
     rejects(
         "enum Result<T, E> { Ok(T), Err(E) }
-         #[noalloc] fn reserve(v: Vec<i64>) -> Result<Vec<i64>, Vec<i64>> ! {} { Vec.try_reserve(v, 0) }
+         fn reserve(v: Vec<i64>) -> Result<Vec<i64>, Vec<i64>> ! {} { Vec.try_reserve(v, 0) }
          fn main() -> i64 ! {} { 0 }",
         "alloc",
     );
@@ -1244,7 +1244,7 @@ fn vector_map_grow_does_not_create_automatic_fusions() {
 fn vector_map_grow_requires_alloc_panic_and_an_owned_receiver() {
     rejects(
         r#"fn widen(x: i64) -> [i64; 2] ! {} { [x, x] }
-        #[noalloc] fn transform(values: Vec<i64>) -> Vec<[i64; 2]> ! {panic} {
+        fn transform(values: Vec<i64>) -> Vec<[i64; 2]> ! {panic} {
             Vec.map_in_place_grow(values, widen)
         }
         fn main() -> i64 ! {} { 0 }"#,

@@ -35,7 +35,7 @@
       "patterns": [
         {
           "name": "storage.modifier.attribute.kush",
-          "match": "#\\[(?:noalloc|nosuspend|test|linear)\\]"
+          "match": "#\\[(?:test|fuzz|gpu|linear)\\]"
         }
       ]
     },

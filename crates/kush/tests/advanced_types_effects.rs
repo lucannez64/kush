@@ -641,7 +641,7 @@ fn row_constraints_support_required_effects_and_combined_bounds() {
         #[noalloc]
         fn apply<e: Effects + alloc>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
         fn main() -> i64 ! {panic} { 0 }"#,
-        "noalloc",
+        "#[noalloc] was removed",
     );
 }
 

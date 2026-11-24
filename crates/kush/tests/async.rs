@@ -319,28 +319,24 @@ fn slice_and_borrow_lifetimes_survive_same_task_suspension() {
 #[test]
 fn nosuspend_rejects_reachable_suspension_and_unconstrained_rows() {
     rejects(
-        "#[nosuspend] fn f() -> Unit ! {suspend} { Task.yield(); } fn main()->i64 ! {} {0}",
-        "nosuspend contract forbids the suspend effect",
+        "#[nosuspend] fn f() -> Unit ! {} { } fn main()->i64 ! {} {0}",
+        "#[nosuspend] was removed",
     );
     rejects(
-        "#[nosuspend] fn f<e: Effects>(g: fn() -> Unit ! {e}) -> Unit ! {e} { g() } fn main()->i64 ! {} {0}",
-        "nosuspend contracts cannot be effect-polymorphic",
-    );
-    rejects(
-        "#[nosuspend] fn f(g: fn() -> Unit ! {suspend}) -> Unit ! {} { g() } fn main()->i64 ! {} {0}",
+        "fn f(g: fn() -> Unit ! {suspend}) -> Unit ! {} { g() } fn main()->i64 ! {} {0}",
         "requires effects {suspend}",
     );
     rejects(
-        "#[nosuspend] fn f() -> Unit ! {} { Task.yield(); } fn main()->i64 ! {} {0}",
+        "fn f() -> Unit ! {} { Task.yield(); } fn main()->i64 ! {} {0}",
         "requires effects {suspend}",
     );
-    check("#[nosuspend] fn f(x: i64) -> i64 ! {panic} { x + 1 } fn main()->i64 ! {panic} {f(1)}");
+    check("fn f(x: i64) -> i64 ! {panic} { x + 1 } fn main()->i64 ! {panic} {f(1)}");
 }
 
 #[test]
 fn noalloc_rejects_spawn_and_effect_polymorphic_suspending_calls_propagate() {
     rejects(
-        "#[noalloc] fn f() -> Unit ! {panic, suspend} { Task.scope(fn() -> Unit ! {alloc, panic, suspend} { }) } fn main()->i64 ! {} {0}",
+        "fn f() -> Unit ! {panic, suspend} { Task.scope(fn() -> Unit ! {alloc, panic, suspend} { }) } fn main()->i64 ! {} {0}",
         "requires effects {alloc}",
     );
     let source = format!(
@@ -365,7 +361,6 @@ fn noalloc_rejects_spawn_and_effect_polymorphic_suspending_calls_propagate() {
 fn noalloc_tasks_can_yield_and_join_existing_tasks() {
     let source = format!(
         "{TASK_EXIT}
-        #[noalloc]
         fn wait(t: Task<i64>) -> TaskExit<i64> ! {{suspend}} {{
             Task.yield();
             Task.join(t)

@@ -1,6 +1,5 @@
 module examples.bytes;
 
-#[noalloc]
 fn append_digit(buffer: Bytes, digit: i64) -> Bytes ! {panic} {
     Bytes.push_reserved(buffer, digit)
 }

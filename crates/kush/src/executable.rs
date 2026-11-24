@@ -4470,41 +4470,6 @@ fn is_grade_generic(resolution: &Resolution, generic: &ast::Generic) -> bool {
 fn is_const_generic(resolution: &Resolution, generic: &ast::Generic) -> bool {
     crate::runtime_types::is_const_generic(resolution, generic)
 }
-/// The first row variable that does *not* declare an exclusion for `effect`.
-///
-/// A contract such as `#[noalloc]` on an effect-polymorphic function is sound
-/// only when every row variable in the signature's effect row excludes that
-/// effect. An unconstrained variable, or a mix of constrained and unconstrained
-/// variables, keeps the old rejection.
-fn first_unexcluded_effect_variable(
-    resolution: &Resolution,
-    function: &ast::Function,
-    variables: &[BindingId],
-    effect: u16,
-) -> Result<Option<BindingId>> {
-    for variable in variables {
-        let generic = function
-            .generics
-            .iter()
-            .find(|generic| resolution.binder(generic.span) == Some(*variable));
-        let excluded = generic
-            .map(|generic| crate::runtime_types::effect_excludes(resolution, generic))
-            .transpose()?
-            .flatten()
-            .unwrap_or(0);
-        // A lower bound `+ effect` guarantees the forbidden effect is present,
-        // so it is never a valid `#[noalloc]`/`#[nosuspend]` specialization.
-        let included = generic
-            .map(|generic| crate::runtime_types::effect_includes(resolution, generic))
-            .transpose()?
-            .flatten()
-            .unwrap_or(0);
-        if excluded & effect == 0 || included & effect != 0 {
-            return Ok(Some(*variable));
-        }
-    }
-    Ok(None)
-}
 /// Render a concrete effect set for diagnostics, in canonical order with
 /// declared operations after the built-in vocabulary.
 fn effect_names(resolution: &Resolution, bits: u16) -> String {
@@ -5794,11 +5759,22 @@ fn check_program_unstaged(
                 }
                 continue;
             }
+            // FND-ROWS-ATTRS: the effect row is the contract. A row without
+            // `alloc`/`suspend` (and whose row variables exclude it, as in
+            // `e: Effects - alloc`) already says everything the attributes did.
+            if function && matches!(attribute.kind.as_str(), "noalloc" | "nosuspend") {
+                let effect = if attribute.kind == "noalloc" { "alloc" } else { "suspend" };
+                return Err(Diagnostic::new(
+                    attribute.span,
+                    format!(
+                        "#[{}] was removed: the effect row is the contract. Leave '{effect}' out of the row; for an effect-polymorphic row, exclude it from the row variable, as in 'e: Effects - {effect}'",
+                        attribute.kind
+                    ),
+                ));
+            }
             let valid = if function {
-                matches!(
-                    attribute.kind.as_str(),
-                    "noalloc" | "nosuspend" | "test" | "fuzz" | "gpu"
-                ) && attribute.argument.is_none()
+                matches!(attribute.kind.as_str(), "test" | "fuzz" | "gpu")
+                    && attribute.argument.is_none()
             } else if data {
                 (attribute.kind == "linear"
                     && attribute
@@ -5813,7 +5789,7 @@ fn check_program_unstaged(
                 return Err(Diagnostic::new(
                     attribute.span,
                     if function {
-                        "functions support the #[noalloc], #[nosuspend], #[test], #[fuzz], and #[gpu] attributes"
+                        "functions support the #[test], #[fuzz], and #[gpu] attributes"
                     } else if data {
                         "data declarations support #[linear], #[linear(unwind = cleanup)] or #[foreign(\"release_symbol\")]"
                     } else {
@@ -5947,40 +5923,6 @@ fn check_program_unstaged(
         }
         let (fixed_effects, effect_variables) =
             crate::runtime_types::effect_bits_partial(resolution, &f.effects)?;
-        let noalloc = declaration.attributes.iter().any(|a| a.kind == "noalloc");
-        if noalloc {
-            if fixed_effects & ALLOC != 0 {
-                return Err(Diagnostic::new(
-                    span,
-                    "noalloc contract forbids the alloc effect",
-                ));
-            }
-            if let Some(variable) =
-                first_unexcluded_effect_variable(resolution, f, &effect_variables, ALLOC)?
-            {
-                return Err(Diagnostic::new(
-                    resolution.bindings[variable].span,
-                    "noalloc contracts cannot be effect-polymorphic: the effect row variable may be specialized with 'alloc', so the noalloc guarantee would depend on specialization",
-                ));
-            }
-        }
-        let nosuspend = declaration.attributes.iter().any(|a| a.kind == "nosuspend");
-        if nosuspend {
-            if fixed_effects & SUSPEND != 0 {
-                return Err(Diagnostic::new(
-                    span,
-                    "nosuspend contract forbids the suspend effect",
-                ));
-            }
-            if let Some(variable) =
-                first_unexcluded_effect_variable(resolution, f, &effect_variables, SUSPEND)?
-            {
-                return Err(Diagnostic::new(
-                    resolution.bindings[variable].span,
-                    "nosuspend contracts cannot be effect-polymorphic: the effect row variable may be specialized with 'suspend', so the nosuspend guarantee would depend on specialization",
-                ));
-            }
-        }
         let binding = resolution.declarations[&span.start];
         if declaration.attributes.iter().any(|a| a.kind == "gpu") {
             crate::gpu::check_declaration(

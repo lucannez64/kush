@@ -169,7 +169,7 @@ fn read_success_and_errors_use_declared_tags_even_when_result_variants_are_rever
 fn zero_capacity_checks_eof_and_cleans_buffers_on_error_propagation() {
     let source = r#"
         enum Result<T,E>{Ok(T),Err(E)}
-        #[noalloc] fn read(input:Stdin,buffer:Bytes)->Result<Bytes,i64> ! {io} {
+        fn read(input:Stdin,buffer:Bytes)->Result<Bytes,i64> ! {io} {
             let keep=buffer;IO.read_all(input,keep)
         }
         fn work()->Result<Unit,i64> ! {io,alloc,panic} {

@@ -5,10 +5,9 @@ module examples.reuse;
 // The loop updates one Box<i64> 100 times with Box.reuse. It performs one
 // allocation in total because the allocation is retained and its scalar
 // payload is replaced. Box.reuse has no alloc effect: the surrounding
-// `#[noalloc]` contract is checked from the source operation, not from an
+// `` contract is checked from the source operation, not from an
 // optimization pass.
 
-#[noalloc]
 fn bump(owner: Box<i64>) -> Box<i64> ! {panic} {
     let current = Box.read(&owner);
     Box.reuse(owner, current + 1)

@@ -544,7 +544,7 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
         "must be called immediately",
     );
     rejects(
-        r#"#[noalloc]
+        r#"
         fn main() -> Unit ! {panic} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
@@ -970,26 +970,17 @@ fn elided_borrowed_returns_infer_only_unambiguous_input_lifetimes() {
     // agree for inline arrays, Vec, and Bytes.
     let stats = agrees(
         r#"
-        #[noalloc]
-        #[nosuspend]
         fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
-        #[noalloc]
         fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {panic} { &mut view[1..] }
-        #[noalloc]
         fn reborrow(view: &mut [i64]) -> &[i64] ! {panic} { &view[1..] }
-        #[noalloc]
         fn twice(view: &[i64]) -> &[i64] ! {panic} { tail(tail(view)) }
-        #[noalloc]
         fn twice_mut(view: &mut [i64]) -> &mut [i64] ! {panic} {
             tail_mut(tail_mut(view))
         }
-        #[noalloc]
         fn choose<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &[i64] ! {panic} {
             if flag { left } else { right }
         }
-        #[noalloc]
         fn tail_generic<T>(view: &[T]) -> &[T] ! {panic} { view[1..] }
-        #[noalloc]
         fn tail_after<N: Nat>(view: &[i64], padding: [i64; N]) -> &[i64] ! {panic} {
             padding[0];
             view[1..]
@@ -1034,7 +1025,6 @@ fn borrowed_closures_retain_elided_helper_result_loans() {
     // The loan survives until the call, then the owner is usable again.
     let stats = agrees(
         r#"
-        #[noalloc]
         fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
         fn main() -> i64 ! {alloc, panic} {
             let mut values: Vec<i64> = Vec.new();
@@ -1054,7 +1044,6 @@ fn borrowed_closures_retain_elided_helper_result_loans() {
     assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
     rejects(
         r#"
-        #[noalloc]
         fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
         fn main() -> Unit ! {alloc, panic} {
             let mut values: Vec<i64> = Vec.new();
@@ -1070,7 +1059,6 @@ fn borrowed_closures_retain_elided_helper_result_loans() {
     );
     rejects(
         r#"
-        #[noalloc]
         fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {panic} { &mut view[1..] }
         fn main() -> Unit ! {alloc, panic} {
             let mut values: Vec<i64> = Vec.new();
@@ -1259,7 +1247,6 @@ fn elided_helper_results_keep_split_side_provenance() {
     // sibling stays disjoint; collapsing labels would reject this valid use.
     agrees(
         r#"
-        #[noalloc]
         fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {panic} { &mut view[1..] }
         fn main() -> i64 ! {panic} {
             let mut values: [i64; 4] = [1, 2, 3, 4];
@@ -1280,7 +1267,6 @@ fn elided_results_work_across_modules_and_same_task_suspension() {
     let sources = kush::program::Memory(vec![(
         "helper".into(),
         "module helper;
-         #[noalloc]
          pub fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }"
             .into(),
     )]);
@@ -1299,7 +1285,6 @@ fn elided_results_work_across_modules_and_same_task_suspension() {
     assert_eq!(checked.evaluate(&mut Vec::new()).unwrap(), 20);
     agrees(
         r#"
-        #[noalloc]
         fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
         fn main() -> Unit ! {io, panic, suspend} {
             let values: [i64; 4] = [10, 20, 30, 40];
@@ -1674,11 +1659,9 @@ fn mutable_views_survive_same_task_yields_and_joins() {
     agrees_balanced(
         r#"
         use std.task.TaskExit;
-        #[noalloc]
         fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
             &mut s[1..]
         }
-        #[nosuspend]
         fn narrowed<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
             tail_mut(s)
         }
@@ -2103,7 +2086,6 @@ fn checked_mutable_splits_allow_disjoint_siblings() {
             Slice.set(left, 0, Slice.get(left, 0) + 1);
             Slice.set(right, 0, Slice.get(right, 0) + 10);
         }
-        #[noalloc]
         fn fill<'a>(view: &'a mut [i64]) -> Unit ! {panic} {
             let (left, right) = Slice.split_at_mut(view, 2);
             bump(left, right);
@@ -2307,7 +2289,6 @@ fn mutable_split_siblings_release_the_parent_only_after_both_last_uses() {
 fn split_children_can_be_returned_only_through_matching_parameter_lifetimes() {
     let stats = agrees(
         r#"
-        #[noalloc]
         fn first_half<'a>(view: &'a mut [i64], mid: i64) -> &'a mut [i64] ! {panic} {
             let (left, right) = Slice.split_at_mut(view, mid);
             Slice.set(right, 0, Slice.get(right, 0) + 1);
@@ -2327,7 +2308,6 @@ fn split_children_can_be_returned_only_through_matching_parameter_lifetimes() {
     assert_eq!(stats.allocations, 0, "{stats:?}");
     agrees(
         r#"
-        #[noalloc]
         fn right_half<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
             let (left, right) = Slice.split_at_mut(view, 1);
             Slice.set(left, 0, Slice.get(left, 0) + 1);
@@ -2349,7 +2329,6 @@ fn split_children_can_be_returned_only_through_matching_parameter_lifetimes() {
     );
     agrees(
         r#"
-        #[noalloc]
         fn shared<'a>(view: &'a mut [i64]) -> &'a [i64] ! {panic} {
             &view[..]
         }

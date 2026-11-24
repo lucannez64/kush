@@ -20,31 +20,21 @@ pub fn standard_ticket(audit: i64) -> Box<i64> @[1] ! {alloc, panic} {
 
 // Exactly two syntactic uses. Both callbacks are total straight-line bitwise
 // expressions with empty effect rows, making this eligible for automatic fusion.
-#[noalloc]
-#[nosuspend]
 pub fn scrub(x: i64 @[2]) -> i64 ! {} { (x & 65535) ^ (x & 255) }
 
-#[noalloc]
-#[nosuspend]
 pub fn tag(x: i64) -> i64 ! {} { x ^ 23130 }
 
-#[noalloc]
-#[nosuspend]
 pub fn fused(values: Vec<i64>) -> Vec<i64> ! {} {
     Vec.map_in_place(Vec.map_in_place(values, scrub), tag)
 }
 
 // Intentional two-pass control. The intermediate is not nested in the second
 // map expression. The harness verifies the compiler fusion diagnostic is zero.
-#[noalloc]
-#[nosuspend]
 pub fn staged(values: Vec<i64>) -> Vec<i64> ! {} {
     let intermediate = Vec.map_in_place(values, scrub);
     Vec.map_in_place(intermediate, tag)
 }
 
-#[noalloc]
-#[nosuspend]
 pub fn checksum(values: &[i64]) -> i64 ! {panic} {
     let mut sum = 0;
     let mut i = 0;

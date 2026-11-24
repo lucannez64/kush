@@ -702,13 +702,10 @@ fn borrowed_text_works_in_loops_branches_and_method_chains() {
 #[test]
 fn borrowed_text_reads_are_noalloc_and_nosuspend() {
     agrees(
-        "#[noalloc]
-        #[nosuspend]
+        "
         fn first(text: &str) -> &str ! {panic} {
             if Str.scalar_len(text) == 0 { text } else { text[0..1] }
         }
-        #[noalloc]
-        #[nosuspend]
         fn count(text: &str) -> i64 ! {} { Str.len(text) }
         fn main() -> i64 ! {io, alloc, panic} {
             let text = \"abc\";

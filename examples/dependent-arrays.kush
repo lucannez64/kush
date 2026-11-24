@@ -14,19 +14,14 @@ type ReadOnly = Pair<i64>;
 
 struct Buffer<N: Nat> { data: [i64; N] }
 
-#[noalloc]
 fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
 
-#[noalloc]
 fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {panic} { xs[N - 1] }
 
-#[noalloc]
 fn second(xs: [i64; add<1, 1>]) -> i64 ! {panic} { xs[add(0, 1)] }
 
-#[noalloc]
 fn head<N: Nat>(b: Buffer<N>) -> i64 ! {panic} { b.data[0] }
 
-#[noalloc]
 fn describe(v: Value) -> i64 ! {panic} {
     match v {
         i64 @n => n,
