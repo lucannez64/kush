@@ -15,7 +15,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 host=${1:-}
-binary=${2:-$HOME/.cache/kush-mbx-release/release/kush}
+binary=${2:-$root/target/release/kush}
 [ -x "$binary" ] || { echo "kush binary not found at $binary (build with: mbx build --release -p kush --bin kush)" >&2; exit 1; }
 
 stage=$(mktemp -d)
