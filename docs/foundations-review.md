@@ -128,7 +128,8 @@ on `&str`, string equality, typed error enums.
 - Each feature is implemented in the reference evaluator and in native
   lowering.
 - The LLVM backend translates Cranelift IR, so it never sees types or aliasing.
-- The 4,400-line C runtime is a string literal in `native.rs`.
+- The 4,400-line C runtime was a string literal in `native.rs` (now
+  `crates/kush/runtime/kush.c`, FND-RUNTIME-C).
 
 Change: split the checker into modules; add a typed CFG IR between checking and
 code generation that the borrow checker, evaluator and both backends consume;
