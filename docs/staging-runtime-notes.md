@@ -92,8 +92,12 @@ committing these changes.
   cleanup during panic unwinding, allocation refusal, mapping failure and
   permission failure.
 - Runtime splices currently require immediate calls in the quotation because
-  first-class functions cannot express the compiled owner's lifetime. LLVM
-  runtime compilation returns ENOTSUP. The compiler registers checked
+  first-class functions cannot express the compiled owner's lifetime. An
+  LLVM build hands each recipe to LLVM as usual and also compiles it with
+  Cranelift for the image; the LLVM backend writes the image's function and
+  data addresses as `ptr` fields of packed constants, and capture slots have
+  names so a recipe in another partition can reach them. The tests run every
+  runtime-staging program under both backends. The compiler registers checked
   quotation templates by function identity. Native lowering queues a recipe
   only when a reachable body contains that template's graph literal, so
   templates used only at compile time are not emitted. LLVM AOT staging has

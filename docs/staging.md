@@ -228,8 +228,10 @@ The reference evaluator and Linux x86-64 Cranelift executables support
 templates with graph constants and splice targets. Each compiled owner
 releases its executable mapping when dropped. Compile-time generators
 cannot invoke the runtime compiler. Runtime splices must be
-immediately called in their own quotation. LLVM runtime compilation reports
-`ENOTSUP`.
+immediately called in their own quotation. An LLVM executable carries the
+same recipes, compiled by Cranelift from the same lowered functions: Kush
+functions pass and return machine words in the platform C convention under
+both backends, so recipes call the LLVM-compiled program directly.
 
 Generators whose generics are unconstrained types and effect rows receive a
 separate type, ownership and effect check: each type binder becomes a distinct
@@ -273,7 +275,8 @@ reachable function can quote at run time. Templates used only by
 - Custom allocator contexts, tasks and effect handlers are unavailable to
   compile-time generators.
 - Runtime splices must be called immediately in their quotation. Runtime
-  compilation supports Linux x86-64 with Cranelift; LLVM reports `ENOTSUP`.
+  compilation supports Linux x86-64, in Cranelift and LLVM executables; the
+  generated code itself is always Cranelift's.
 - The runtime linker rejects any relocation kind or target it does not
   recognize, so `Code.compile` returns an error instead of publishing code.
 

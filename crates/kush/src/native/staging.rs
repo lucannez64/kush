@@ -93,7 +93,17 @@ pub(super) fn capture_data(
     let mut result = BTreeMap::new();
     for (&recipe, &(_, captures)) in recipes {
         for capture in 0..captures {
-            let id = module.declare_anonymous_data(false, false).map_err(error)?;
+            // Named, not anonymous: under LLVM a recipe's body may sit in a
+            // different partition from the data, and an assembler-local
+            // name cannot be referenced across object files.
+            let id = module
+                .declare_data(
+                    &format!("kush_stage_capture_{recipe}_{capture}"),
+                    Linkage::Local,
+                    false,
+                    false,
+                )
+                .map_err(error)?;
             let mut data = DataDescription::new();
             data.define_zeroinit(8);
             module.define_data(id, &data).map_err(error)?;

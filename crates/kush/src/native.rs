@@ -5543,6 +5543,29 @@ impl Module for CodeModule {
         if let Err(diagnostic) = llvm.define_function(func, &ctx.func, self.object.declarations()) {
             self.failure.get_or_insert(diagnostic);
         }
+        if self.stage_recipes.contains(&func) {
+            // A runtime recipe is copied and linked by the staging runtime,
+            // so it needs machine code and relocations in the image. Kush
+            // functions take and return machine words in the platform C
+            // convention under both backends, so Cranelift's code for the
+            // recipe can call the LLVM-compiled program and be called by it.
+            ctx.compile(self.object.isa(), ctrl_plane).map_err(|error| {
+                cranelift_module::ModuleError::Compilation(error.inner)
+            })?;
+            let compiled = ctx.compiled_code().unwrap();
+            let body = staging::Body {
+                bytes: compiled.buffer.data().to_vec(),
+                relocs: compiled
+                    .buffer
+                    .relocs()
+                    .iter()
+                    .map(|relocation| {
+                        cranelift_module::ModuleReloc::from_mach_reloc(relocation, &ctx.func, func)
+                    })
+                    .collect(),
+            };
+            self.stage_bodies.insert(func, body);
+        }
         Ok(())
     }
     fn define_function_bytes(
@@ -5568,7 +5591,26 @@ impl Module for CodeModule {
             cranelift_module::Init::Zeros { size } => vec![0; *size],
             cranelift_module::Init::Uninitialized => Vec::new(),
         };
-        llvm.define_data(data_id, bytes);
+        let mut pointers = Vec::new();
+        for relocation in data.all_relocs(cranelift_codegen::binemit::Reloc::Abs8) {
+            let pointer = match relocation.name {
+                cranelift_module::ModuleRelocTarget::User { namespace: 0, index }
+                    if relocation.addend == 0 =>
+                {
+                    llvm::DataPointer::Function(FuncId::from_u32(index))
+                }
+                cranelift_module::ModuleRelocTarget::User { namespace: 1, index } => {
+                    llvm::DataPointer::Data(DataId::from_u32(index), relocation.addend)
+                }
+                _ => {
+                    self.failure
+                        .get_or_insert(error("LLVM backend: unsupported address in data"));
+                    return Ok(());
+                }
+            };
+            pointers.push((relocation.offset as usize, pointer));
+        }
+        llvm.define_data(data_id, bytes, pointers);
         Ok(())
     }
 }
@@ -5606,11 +5648,7 @@ fn lower(
     llvm: Option<(llvm::RuntimeInterface, Split)>,
     library: bool,
 ) -> Result<Lowered> {
-    let staged = if llvm.is_none() {
-        staging::prepare(program)
-    } else {
-        None
-    };
+    let staged = staging::prepare(program);
     let recipes = staged.as_ref().map(|p| p.recipes.clone()).unwrap_or_default();
     let program = staged.as_ref().map_or(program, |p| &p.program);
     let split = llvm.as_ref().map_or(Split::WHOLE, |(_, split)| *split);
@@ -6780,7 +6818,7 @@ fn lower(
         };
         let mut context = module.make_context();
         context.func = body;
-        if module.stage_recipes.contains(&ids[index]) && module.llvm.is_none() {
+        if module.stage_recipes.contains(&ids[index]) {
             // The copied body may live more than 2 GiB from the AOT image.
             // The runtime linker gives data and function addresses nearby GOT
             // entries, including the body and drop glue of a nested closure.
@@ -6861,7 +6899,7 @@ fn lower(
     if let Some(failure) = module.failure {
         return Err(failure);
     }
-    if staged.is_some() && module.llvm.is_none() {
+    if staged.is_some() {
         staging::emit(&mut module, &ids, &recipes, &capture_data)?;
     }
     match module.llvm {

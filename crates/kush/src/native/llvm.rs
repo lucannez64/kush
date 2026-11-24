@@ -346,7 +346,16 @@ pub(super) struct LlvmModule {
     functions: Vec<(String, String)>,
     defined: BTreeSet<FuncId>,
     data: BTreeMap<DataId, Vec<u8>>,
+    /// Per data object, the addresses stored in it, by byte offset.
+    pointers: BTreeMap<DataId, Vec<(usize, DataPointer)>>,
     intrinsics: BTreeSet<String>,
+}
+
+/// An address written into a data object.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum DataPointer {
+    Function(FuncId),
+    Data(DataId, i64),
 }
 impl LlvmModule {
     pub fn new(runtime: RuntimeInterface) -> Self {
@@ -358,6 +367,7 @@ impl LlvmModule {
             functions: Vec::new(),
             defined: BTreeSet::new(),
             data: BTreeMap::new(),
+            pointers: BTreeMap::new(),
             intrinsics: BTreeSet::new(),
         }
     }
@@ -368,8 +378,64 @@ impl LlvmModule {
             self.exclusive.insert(name.to_owned(), parameters);
         }
     }
-    pub fn define_data(&mut self, id: DataId, bytes: Vec<u8>) {
+    /// Define a data object. Each pointer replaces the eight bytes at its
+    /// offset with an address the linker fills in.
+    pub fn define_data(&mut self, id: DataId, bytes: Vec<u8>, mut pointers: Vec<(usize, DataPointer)>) {
+        if !pointers.is_empty() {
+            pointers.sort_by_key(|(offset, _)| *offset);
+            self.pointers.insert(id, pointers);
+        }
         self.data.insert(id, bytes);
+    }
+    /// The LLVM initializer of a data object: its bytes, with each pointer
+    /// as a `ptr` field of a packed struct.
+    fn initializer(&self, id: DataId, bytes: &[u8], declarations: &ModuleDeclarations) -> (String, String) {
+        fn array(bytes: &[u8]) -> (String, String) {
+            let mut value = String::from("c\"");
+            for byte in bytes {
+                let _ = write!(value, "\\{byte:02X}");
+            }
+            value.push('"');
+            (format!("[{} x i8]", bytes.len()), value)
+        }
+        let Some(pointers) = self.pointers.get(&id) else {
+            return array(bytes);
+        };
+        let mut types = Vec::new();
+        let mut values = Vec::new();
+        let mut at = 0;
+        for &(offset, pointer) in pointers {
+            if offset > at {
+                let (ty, value) = array(&bytes[at..offset]);
+                values.push(format!("{ty} {value}"));
+                types.push(ty);
+            }
+            let target = match pointer {
+                DataPointer::Function(function) => format!(
+                    "@{}",
+                    declarations.get_function_decl(function).linkage_name(function)
+                ),
+                DataPointer::Data(data, 0) => {
+                    format!("@{}", declarations.get_data_decl(data).linkage_name(data))
+                }
+                DataPointer::Data(data, addend) => format!(
+                    "getelementptr (i8, ptr @{}, i64 {addend})",
+                    declarations.get_data_decl(data).linkage_name(data)
+                ),
+            };
+            types.push("ptr".to_owned());
+            values.push(format!("ptr {target}"));
+            at = offset + 8;
+        }
+        if at < bytes.len() {
+            let (ty, value) = array(&bytes[at..]);
+            values.push(format!("{ty} {value}"));
+            types.push(ty);
+        }
+        (
+            format!("<{{ {} }}>", types.join(", ")),
+            format!("<{{ {} }}>", values.join(", ")),
+        )
     }
     pub fn define_function(
         &mut self,
@@ -431,7 +497,30 @@ impl LlvmModule {
             None => split.cores,
         }
         .max(1);
-        let plan = partition(&functions, wanted);
+        let mut plan = partition(&functions, wanted);
+        // Data lives in the first partition. A function whose address it
+        // holds is declared there and visible to the linker.
+        if plan.count > 1 {
+            let index_of: BTreeMap<&str, usize> = functions
+                .iter()
+                .enumerate()
+                .map(|(index, (name, _))| (name.as_str(), index))
+                .collect();
+            for pointers in self.pointers.values() {
+                for (_, pointer) in pointers {
+                    let DataPointer::Function(function) = *pointer else {
+                        continue;
+                    };
+                    let name = declarations.get_function_decl(function).linkage_name(function);
+                    if let Some(&index) = index_of.get(name.as_ref())
+                        && plan.home[index] != 0
+                    {
+                        plan.exported.insert(index);
+                        plan.declared[0].insert(index);
+                    }
+                }
+            }
+        }
         let mut modules = Vec::new();
         for part in 0..plan.count {
             modules.push(self.module(declarations, &functions, &plan, part)?);
@@ -473,11 +562,8 @@ impl LlvmModule {
                     } else {
                         "constant"
                     };
-                    let _ = write!(out, "@{name} = {linkage}{kind} [{} x i8] c\"", bytes.len());
-                    for byte in bytes {
-                        let _ = write!(out, "\\{byte:02X}");
-                    }
-                    out.push_str("\", align 8\n");
+                    let (ty, value) = self.initializer(id, bytes, declarations);
+                    let _ = writeln!(out, "@{name} = {linkage}{kind} {ty} {value}, align 8");
                 }
                 None => {
                     let _ = writeln!(out, "@{name} = external global i8");

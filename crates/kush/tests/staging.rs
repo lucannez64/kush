@@ -312,8 +312,29 @@ fn main() -> i64 ! {alloc, panic} {
     assert_native_result(&exe, 51);
 }
 
+fn clang_available() -> bool {
+    std::process::Command::new(std::env::var_os("KUSH_CLANG").unwrap_or_else(|| "clang".into()))
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// The native result under Cranelift and, when `clang` is installed, LLVM.
 fn assert_native_result(exe: &kush::executable::Executable, expected: i32) {
     assert_native_result_with_budget(exe, expected, None);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if clang_available() {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("runtime-staging-llvm");
+        let options = kush::native::CodegenOptions {
+            backend: kush::native::Backend::Llvm,
+            ..Default::default()
+        };
+        kush::native::build_with_codegen(exe, &binary, false, &Default::default(), options)
+            .unwrap();
+        let output = std::process::Command::new(binary).output().unwrap();
+        assert_eq!(output.status.code(), Some(expected), "LLVM: {output:?}");
+    }
 }
 
 fn assert_native_result_with_budget(
@@ -582,17 +603,22 @@ fn main() -> i64 ! {alloc, panic} {
     assert_eq!(exe.evaluate(&mut Vec::new()).unwrap(), 42);
     assert_native_result(&exe, 42);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        let options = kush::native::CodegenOptions {
-            backend: kush::native::Backend::Llvm,
-            ..Default::default()
-        };
-        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
-        let binary = scratch.path().join("no-runtime-recipes");
-        kush::native::build_with_codegen(&exe, &binary, false, &Default::default(), options)
-            .unwrap();
-        let output = std::process::Command::new(binary).output().unwrap();
-        assert_eq!(output.status.code(), Some(95), "{output:?}");
+    if clang_available() {
+        // An LLVM executable carries Cranelift recipes for its quotations.
+        for options in [
+            kush::native::CodegenOptions {
+                backend: kush::native::Backend::Llvm,
+                ..Default::default()
+            },
+            kush::native::CodegenOptions::release_llvm(),
+        ] {
+            let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+            let binary = scratch.path().join("llvm-runtime-recipes");
+            kush::native::build_with_codegen(&exe, &binary, false, &Default::default(), options)
+                .unwrap();
+            let output = std::process::Command::new(binary).output().unwrap();
+            assert_eq!(output.status.code(), Some(42), "{output:?}");
+        }
     }
 }
 
