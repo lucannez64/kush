@@ -321,6 +321,11 @@ fn layout<'t, 'p>(
     types: &'t super::build::Types<'p>,
     unit: usize,
 ) -> Result<(Layout, super::build::Generator<'t, 'p>), String> {
+    // FND-ROWS-INFER: the harness copies the target's row into its own
+    // declared row, so it needs the row written down.
+    if function.row_omitted() {
+        return Err("its effect row is inferred (declare '! {..}' to attack it)".into());
+    }
     for effect in &function.effects {
         let name = match &effect.kind {
             TypeKind::Named { path, arguments } if arguments.is_empty() && path.len() == 1 => {
@@ -1084,6 +1089,9 @@ pub fn plan_entries(text: &str, file: &str) -> Result<Vec<Target>, String> {
             .iter()
             .find(|e| !ALLOWED_EFFECTS.contains(&e.as_str()))
         {
+            _ if function.row_omitted() => {
+                Err("a #[fuzz] entry declares its effect row ('! {..}')".to_owned())
+            }
             Some(effect) => Err(format!("effect `{effect}`")),
             None => shape,
         };

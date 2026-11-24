@@ -55,6 +55,9 @@ borrowed captures bounded by a lifetime once section 1 lands.
 Decisions (user, 2026-11-24):
 
 - E1: private functions infer their row; public functions still declare it.
+  Done (FND-ROWS-INFER): a private free function may omit `! {..}`; methods,
+  foreign, exported, staged and `#[gpu]` functions and functions with effect
+  parameters still declare theirs.
 - E2: `panic` is no longer an effect; any function may panic. Done
   (FND-ROWS-PANIC): naming `panic` in a row is an error, every call tests
   for an unwinding panic, a panic in an allocator release or arena strategy

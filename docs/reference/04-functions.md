@@ -8,17 +8,26 @@ pub fn name<generics>(param: Type, erased proof: { ... }) -> Result ! {effects}
 { body }
 ```
 
-Parameter types, the result type and the effect row are required on every
-function, private ones included (planned change: FND-EFFECT-ROWS infers rows
-of private functions). Functions may be called before their declaration and
-may recurse. `erased` parameters and `ensures` clauses are proofs
-([chapter 9](09-proofs.md)). A declaration ending in `;` instead of a body is
-an interface (trait methods, foreign functions).
+Parameter types and the result type are required on every function. A
+private free function may omit its effect row: its row is inferred from its
+body ([chapter 7](07-effects.md#inferred-rows)). Functions may be called
+before their declaration and may recurse. `erased` parameters and `ensures`
+clauses are proofs ([chapter 9](09-proofs.md)). A declaration ending in `;`
+instead of a body is an interface (trait methods, foreign functions).
+
+```kush eval
+fn double(x: i64) -> i64 { x * 2 }
+fn main() -> Unit ! {io} { print_i64(double(21)); }
+```
+
+```output
+42
+```
 
 ```kush reject
-fn f(x: i64) -> i64 { x }
+pub fn double(x: i64) -> i64 { x * 2 }
 fn main() -> i64 ! {} { 0 }
-// error: expected an explicit effect row
+// error: a public function declares its effect row
 ```
 
 ## Generic functions

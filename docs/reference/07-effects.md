@@ -1,9 +1,7 @@
 # 7. Effects
 
-Planned changes (decided): private functions will infer their rows
-(FND-ROWS-INFER). Handlers will move to one capability model
-and tasks to a library on handlers (FND-HANDLERS-ONE,
-FND-TASKS-ON-HANDLERS).
+Planned changes (decided): handlers will move to one capability model and
+tasks to a library on handlers (FND-HANDLERS-ONE, FND-TASKS-ON-HANDLERS).
 
 ## Effect rows
 
@@ -18,8 +16,9 @@ A function's row `! { ... }` lists what it may do. Built-in effects:
 Panicking is not an effect: any function may panic ([below](#panics)).
 
 Declared operations (below) are also row entries. Each operation in a body
-must be allowed by the row, and a call requires the callee's **declared** row
-(not what its body happens to do). A function with fewer effects can be used
+must be allowed by the row, and a call requires the callee's row (written,
+or [inferred](#inferred-rows) for a private function that omits it), not what
+one call happens to do. A function with fewer effects can be used
 where more are allowed.
 
 ```kush reject
@@ -40,6 +39,49 @@ removed:
 fn sum(values: &[i64]) -> i64 ! {} { values.len() }
 fn main() -> i64 ! {} { 0 }
 // error: #[noalloc] was removed: the effect row is the contract
+```
+
+## Inferred rows
+
+A private free function may leave out `! { ... }`. Its row is then what its
+body requires, through the rows of what it calls: the least fixed point over
+the call graph, so recursion is fine. Callers, function values and handlers
+see the inferred row exactly as if it were written.
+
+```kush eval
+fn show(x: i64) -> Unit { print_i64(x); }
+fn even(n: i64) -> Bool { if n == 0 { true } else { odd(n - 1) } }
+fn odd(n: i64) -> Bool { if n == 0 { false } else { show(n); even(n - 1) } }
+
+fn main() -> Unit ! {io} {
+    if even(2) { show(10) } else { show(20) }
+}
+```
+
+```output
+1
+10
+```
+
+A declared row is still checked against the inferred rows it calls:
+
+```kush reject
+fn show(x: i64) -> Unit { print_i64(x); }
+fn main() -> i64 ! {} { show(1); 0 }
+// error: requires effects {io}
+```
+
+The row is the contract other code checks against, so it stays written on
+public functions, methods (trait and inherent), foreign, exported and staged
+functions, `#[gpu]` kernels, and functions with effect parameters. A
+non-tail `perform` in an inferred function adds `alloc` to its row, since
+whether its continuation allocates is only known after the row is settled.
+
+```kush reject
+struct P { x: i64 }
+impl P { fn value(self: P) -> i64 { self.x } }
+fn main() -> i64 ! {} { 0 }
+// error: a method declares its effect row
 ```
 
 ## Effect polymorphism

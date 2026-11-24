@@ -934,7 +934,18 @@ impl Parser {
         })?;
         self.expect(&Kind::Arrow, "'->' and an explicit return type")?;
         let result = self.ty()?;
-        let effects = self.effects()?;
+        // FND-ROWS-INFER: a private function may omit its row; the checker
+        // infers it. The hole is the same `Infer` marker an unannotated
+        // lambda row uses.
+        let effects = if self.at(&Kind::Bang) {
+            self.effects()?
+        } else {
+            let hole = self.current().span;
+            vec![Node::new(
+                TypeKind::Infer,
+                Span::new(hole.start, hole.start),
+            )]
+        };
         let ensures = self.ensures_clauses()?;
         let body = if self.eat(&Kind::Semi) {
             None

@@ -727,7 +727,7 @@ fn validate(declaration: &Declaration) -> Result<()> {
             declaration.item.span,
             "logical definitions require a body; unchecked axioms are not supported",
         )),
-        ItemKind::Function(f) if !f.effects.is_empty() => Err(Diagnostic::new(
+        ItemKind::Function(f) if !f.effects.is_empty() && !f.row_omitted() => Err(Diagnostic::new(
             declaration.item.span,
             "logical definitions require an empty effect row",
         )),

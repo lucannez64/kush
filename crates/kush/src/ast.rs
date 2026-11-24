@@ -334,6 +334,13 @@ pub struct Function {
     /// replaced by its value expression, checked at each use.
     pub constant: bool,
 }
+impl Function {
+    /// FND-ROWS-INFER: the declaration omits its effect row (`fn f() -> T
+    /// { .. }`); the parser leaves one `Infer` hole, as for a lambda.
+    pub fn row_omitted(&self) -> bool {
+        matches!(self.effects.as_slice(), [only] if matches!(only.kind, TypeKind::Infer))
+    }
+}
 /// One `ensures` clause: `ensures [guard =>] { proposition }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ensures {

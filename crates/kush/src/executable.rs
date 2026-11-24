@@ -2896,6 +2896,24 @@ fn reject_capability_type(ty: &ast::Type) -> Result<()> {
     }
 }
 /// Reject capability types in declarations that store or name values.
+/// FND-ROWS-INFER: only private free functions infer their row. A method's
+/// row is part of its trait contract or of its type's interface.
+fn reject_omitted_method_rows(module: &ast::Module) -> Result<()> {
+    for declaration in &module.items {
+        let (ast::ItemKind::Trait { methods, .. } | ast::ItemKind::Impl { methods, .. }) =
+            &declaration.item.kind
+        else {
+            continue;
+        };
+        if let Some(method) = methods.iter().find(|method| method.function.row_omitted()) {
+            return Err(Diagnostic::new(
+                method.span,
+                "a method declares its effect row; add '! {..}' after the result type",
+            ));
+        }
+    }
+    Ok(())
+}
 fn reject_stored_capabilities(module: &ast::Module) -> Result<()> {
     for declaration in &module.items {
         match &declaration.item.kind {
@@ -5050,6 +5068,20 @@ type WitnessLifetimes = (
     Option<String>,
     BTreeSet<(String, String)>,
 );
+/// FND-ROWS-INFER: the rows of private functions that omit theirs. The check
+/// runs in passes: each assumes the rows the previous one found, checks every
+/// inferred body with all effects available and records what it requires.
+/// Rows only grow, so the passes reach the least fixed point; callees are
+/// checked before their callers, so one pass usually settles it.
+#[derive(Debug, Default)]
+struct RowInference {
+    /// Rows assumed at the start of this pass.
+    guesses: BTreeMap<BindingId, u16>,
+    /// Rows found by this pass: the union over each function's instances.
+    found: BTreeMap<BindingId, u16>,
+    /// A body was checked against a row that later grew in this pass.
+    stale: bool,
+}
 /// Function instances. A monomorphic function has one instance; a generic
 /// function gets one per distinct list of type arguments that is used.
 struct Functions<'a> {
@@ -5151,6 +5183,16 @@ struct Functions<'a> {
     capability_thunks: BTreeMap<(usize, usize), (usize, Type)>,
     /// CAP-CAPTURING-LEXICAL: private operation ids handed out so far.
     private_operations: usize,
+    /// FND-ROWS-INFER: private functions that omit their row.
+    inferred_rows: BTreeSet<BindingId>,
+    /// FND-ROWS-INFER: the rows assumed and found by this pass.
+    rows: &'a mut RowInference,
+    /// FND-ROWS-INFER: functions with an instance body checked (or being
+    /// checked) in this pass; one that names a function whose row then
+    /// grows observed a stale row.
+    checked_bodies: BTreeSet<BindingId>,
+    /// FND-ROWS-INFER: the bindings each declared function's body names.
+    body_refs: BTreeMap<BindingId, BTreeSet<BindingId>>,
     /// Registered members of each dynamically dispatched object specialization.
     /// Indexed by `Type::DynObj`. A member identifier is its position here.
     dyn_members: Vec<Vec<DynMember>>,
@@ -5558,10 +5600,46 @@ fn check_program_unstaged(
     lower_suspensions: bool,
     validate_generic_staging: bool,
 ) -> Result<(Executable, BTreeMap<usize, usize>)> {
+    // FND-ROWS-INFER: rerun the check while an inferred row grew after a
+    // body had observed it. A pass that fails after a row grew is rerun too:
+    // the failure may come from the smaller row it assumed.
+    let mut guesses = BTreeMap::new();
+    loop {
+        let mut rows = RowInference {
+            guesses: guesses.clone(),
+            ..RowInference::default()
+        };
+        let result = check_program_pass(
+            source_program,
+            stage_entries,
+            lower_suspensions,
+            validate_generic_staging,
+            &mut rows,
+        );
+        let grown = rows
+            .found
+            .iter()
+            .any(|(binding, row)| row & !guesses.get(binding).copied().unwrap_or(0) != 0);
+        if !grown || (result.is_ok() && !rows.stale) {
+            return result;
+        }
+        for (binding, row) in rows.found {
+            *guesses.entry(binding).or_insert(0) |= row;
+        }
+    }
+}
+fn check_program_pass(
+    source_program: &crate::program::Program,
+    stage_entries: &[crate::staging::Entry],
+    lower_suspensions: bool,
+    validate_generic_staging: bool,
+    rows: &mut RowInference,
+) -> Result<(Executable, BTreeMap<usize, usize>)> {
     let injected = inject_allocator_protocol(source_program)?;
     let program = &injected;
     let module = &program.module;
     reject_stored_capabilities(module)?;
+    reject_omitted_method_rows(module)?;
     let mut resolution = resolve::resolve_staged_program(program)?;
     // Default trait methods inherited by an impl need one synthetic function
     // binding per (impl, method) pair. Allocate them before `Types` borrows the
@@ -5644,6 +5722,10 @@ fn check_program_unstaged(
         dynamic_dispatch: BTreeMap::new(),
         capability_thunks: BTreeMap::new(),
         private_operations: 0,
+        inferred_rows: BTreeSet::new(),
+        rows,
+        checked_bodies: BTreeSet::new(),
+        body_refs: BTreeMap::new(),
         dyn_members: Vec::new(),
         dyn_methods: BTreeMap::new(),
         dyn_upcasts: BTreeSet::new(),
@@ -5873,6 +5955,38 @@ fn check_program_unstaged(
             // Checked by the logical kernel above and erased from runtime IR.
             continue;
         }
+        // FND-ROWS-INFER: only a private function may omit its row; every
+        // other row is a contract its callers outside the module rely on.
+        if f.row_omitted() {
+            let reason = if declaration.public {
+                Some(
+                    "a public function declares its effect row: it is the contract other modules check against",
+                )
+            } else if f.foreign.is_some() {
+                Some("a foreign function declares its effect row")
+            } else if f.export.is_some() {
+                Some("an exported function declares its effect row")
+            } else if declaration.attributes.iter().any(|a| a.kind == "gpu") {
+                Some("a #[gpu] kernel declares its effect row")
+            } else if f
+                .generics
+                .iter()
+                .any(|generic| generic_category(resolution, generic) == GenericCategory::Effect)
+            {
+                Some("a function with effect parameters declares its effect row")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("{reason}; add '! {{..}}' after the result type"),
+                ));
+            }
+            functions
+                .inferred_rows
+                .insert(resolution.declarations[&span.start]);
+        }
         for parameter in &f.parameters {
             if parameter.erased && split_grade(&parameter.ty).1.is_some() {
                 return Err(Diagnostic::new(
@@ -5970,8 +6084,11 @@ fn check_program_unstaged(
                 }
             }
         }
-        let (fixed_effects, effect_variables) =
-            crate::runtime_types::effect_bits_partial(resolution, &f.effects)?;
+        let (fixed_effects, effect_variables) = if f.row_omitted() {
+            (0, Default::default())
+        } else {
+            crate::runtime_types::effect_bits_partial(resolution, &f.effects)?
+        };
         let binding = resolution.declarations[&span.start];
         if declaration.attributes.iter().any(|a| a.kind == "gpu") {
             crate::gpu::check_declaration(
@@ -6026,6 +6143,43 @@ fn check_program_unstaged(
         // selects concrete impl arguments; it has no `Self` otherwise.
         declared.ast.generics.is_empty() && declared.impl_template.is_none()
     }));
+    // FND-ROWS-INFER: check callees before their callers, so a body sees the
+    // final rows of the inferred functions it names. Pending bodies are
+    // checked last-in first-out, so callers are queued first.
+    if !functions.inferred_rows.is_empty() {
+        for (&binding, declared) in &functions.declared {
+            let mut refs = BTreeSet::new();
+            if let Some(body) = &declared.ast.body {
+                collect_lambda_refs(resolution, body, &mut refs);
+            }
+            functions.body_refs.insert(binding, refs);
+        }
+        let mut order = Vec::new();
+        let mut visited = BTreeSet::new();
+        for &root in &monomorphic {
+            // Iterative post-order: callees end up before callers.
+            let mut stack = vec![(root, false)];
+            while let Some((binding, expanded)) = stack.pop() {
+                if expanded {
+                    order.push(binding);
+                    continue;
+                }
+                if !visited.insert(binding) {
+                    continue;
+                }
+                stack.push((binding, true));
+                if let Some(refs) = functions.body_refs.get(&binding) {
+                    stack.extend(refs.iter().rev().map(|&callee| (callee, false)));
+                }
+            }
+        }
+        let wanted: BTreeSet<_> = monomorphic.iter().copied().collect();
+        monomorphic = order
+            .into_iter()
+            .rev()
+            .filter(|binding| wanted.contains(binding))
+            .collect();
+    }
     for binding in monomorphic {
         functions.instance(
             &mut types,
@@ -6141,7 +6295,19 @@ fn check_program_unstaged(
             entry = Some(index);
         }
         functions.checking = index;
+        // FND-ROWS-INFER: an inferred body is checked with every effect
+        // available; what it requires becomes its row.
+        let inferring_row = functions.inferred_rows.contains(&sig.binding);
+        if !functions.inferred_rows.is_empty() {
+            functions.checked_bodies.insert(sig.binding);
+        }
+        let all_effects = EFFECT_BITS
+            | resolution
+                .effect_bits
+                .values()
+                .fold(0u16, |bits, bit| bits | bit);
         let mut checker = Checker {
+            inferring_row,
             quote_holes: BTreeMap::new(),
             quote_splices: BTreeMap::new(),
             lambda_holes: BTreeMap::new(),
@@ -6182,7 +6348,11 @@ fn check_program_unstaged(
             lifetime_bounds: sig.lifetime_bounds.clone(),
             call_boundary: 0,
             result_grade: sig.result_grade,
-            effects: sig.effects,
+            effects: if inferring_row {
+                all_effects
+            } else {
+                sig.effects
+            },
             depth: 0,
             loops: Vec::new(),
             facts: crate::facts::Facts::default(),
@@ -6343,6 +6513,7 @@ fn check_program_unstaged(
         let capability_parameters = (0..sig.parameters.len())
             .filter(|slot| checker.capability_slots.contains(slot))
             .collect();
+        let required = checker.required_effects.get() & all_effects;
         let locals = checker.locals;
         functions.bodies[index] = Some(Function {
             name: sig.name.clone(),
@@ -6373,6 +6544,9 @@ fn check_program_unstaged(
             capability_parameters,
             shared_environment: false,
         });
+        if inferring_row {
+            functions.settle_inferred_row(sig.binding, required);
+        }
     }
     // Re-check every proof certificate without the search that produced it.
     if let Some(bad) = functions
@@ -12035,8 +12209,20 @@ impl<'a> Functions<'a> {
                 .collect::<Vec<_>>();
             format!("{}::<{}>", f.name, arguments.join(", "))
         };
-        let effects =
-            crate::runtime_types::effect_bits_with(resolution, &f.effects, &effect_substitution)?;
+        let effects = if f.row_omitted() {
+            if !self.inferred_rows.contains(&binding) {
+                return Err(Diagnostic::new(
+                    declared.span,
+                    "only a private function may omit its effect row; add '! {..}' after the result type",
+                ));
+            }
+            // FND-ROWS-INFER: the row this pass assumes, grown by any
+            // instance already checked.
+            self.rows.guesses.get(&binding).copied().unwrap_or(0)
+                | self.rows.found.get(&binding).copied().unwrap_or(0)
+        } else {
+            crate::runtime_types::effect_bits_with(resolution, &f.effects, &effect_substitution)?
+        };
         let foreign = if let Some(symbol) = &f.foreign {
             if effects & IO == 0 && !PURE_HOST_SYMBOLS.contains(&symbol.as_str()) {
                 return Err(Diagnostic::new(
@@ -12207,6 +12393,31 @@ impl<'a> Functions<'a> {
         self.signatures.push(signature);
         self.bodies.push(Some(function));
         Ok(index)
+    }
+    /// FND-ROWS-INFER: record the row a checked instance of an inferred
+    /// function requires. Signatures made later see it at once; a body
+    /// already checked that names the function saw a smaller row, so the pass
+    /// is stale and runs again.
+    fn settle_inferred_row(&mut self, binding: BindingId, required: u16) {
+        let found = self.rows.found.entry(binding).or_insert(0);
+        *found |= required;
+        let row = *found | self.rows.guesses.get(&binding).copied().unwrap_or(0);
+        let mut grew = false;
+        for signature in &mut self.signatures {
+            if signature.binding == binding && signature.effects != row {
+                signature.effects = row;
+                grew = true;
+            }
+        }
+        if grew
+            && self.checked_bodies.iter().any(|body| {
+                self.body_refs
+                    .get(body)
+                    .is_some_and(|refs| refs.contains(&binding))
+            })
+        {
+            self.rows.stale = true;
+        }
     }
 }
 
@@ -13254,6 +13465,9 @@ struct HandlerScope {
 }
 
 struct Checker<'a, 't> {
+    /// FND-ROWS-INFER: this body's row is being inferred; `effects` holds
+    /// every effect and `required_effects` collects the row.
+    inferring_row: bool,
     /// Explicit quotation holes, keyed by original source occurrence. During
     /// template checking their slots are remapped to captured parameters.
     quote_holes: BTreeMap<(usize, usize), usize>,
@@ -37867,6 +38081,12 @@ impl Checker<'_, '_> {
             })?;
         }
         self.anf_block(&mut block)?;
+        // FND-ROWS-INFER: whether a continuation allocates is only known when
+        // the suspension is lowered, after the row is settled, so an inferred
+        // row takes `alloc` for every suspension point.
+        if self.inferring_row {
+            self.require(ALLOC, span)?;
+        }
         let token = self.token_type(result_ty, site.multishot, site.multi, site.token_effects);
         let suspendable = Expr {
             kind: ExprKind::Suspendable(Box::new(Suspendable {

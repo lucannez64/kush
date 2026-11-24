@@ -291,7 +291,9 @@ fn blocks_keep_statement_and_tail_distinct() {
 fn malformed_programs_are_rejected_without_ignoring_trailing_input() {
     for source in [
         "fn f() {}",
-        "pub fn f() -> Unit {}",
+        // FND-ROWS-INFER: an omitted row parses (the checker decides who
+        // may omit it), but a row still needs its braces.
+        "pub fn f() -> Unit ! io {}",
         "fn f() -> Unit ! {} { let x = 1 }",
         "fn f() -> Unit ! {} { 1 2 }",
         "fn f() -> Unit ! {} {",

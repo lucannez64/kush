@@ -463,6 +463,12 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
                         })
                         .map(|length| length.span)
                 });
+                if function.row_omitted() {
+                    return Err(Diagnostic::new(
+                        declaration.item.span,
+                        "a staged definition declares its effect row; add '! {..}' after the result type",
+                    ));
+                }
                 let generator = function
                     .body
                     .as_ref()
