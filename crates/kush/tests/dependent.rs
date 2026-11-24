@@ -447,4 +447,22 @@ fn a_nat_parameter_is_an_i64_value_in_bodies() {
              sum(a) + count(b) * 100
          }";
     assert_eq!(evaluate(source), 15 + 3 + 200);
+    // ARRAY-INDEX-PROOF: `i < N` proves `a[i]`, so it has no run-time check.
+    assert_eq!(checked(source).bounds_report(), (1, 0));
+}
+
+/// ARRAY-INDEX-PROOF: an index the facts do not bound keeps its check, and
+/// it still panics out of range.
+#[test]
+fn unproved_inline_array_indexes_keep_their_check() {
+    let source = "fn get(a: [i64; 3], i: i64) -> i64 ! {} { a[i] }
+                  fn main() -> i64 ! {} { let a: [i64; 3] = [4, 5, 6]; get(a, 7) }";
+    assert_eq!(checked(source).bounds_report(), (0, 1));
+    let error = checked(source).evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("out of bounds"), "{error:?}");
+    let guarded =
+        "fn get(a: [i64; 3], i: i64) -> i64 ! {} { if i >= 0 && i < 3 { a[i] } else { 0 } }
+                   fn main() -> i64 ! {} { let a: [i64; 3] = [4, 5, 6]; get(a, 2) + get(a, 9) }";
+    assert_eq!(evaluate(guarded), 6);
+    assert_eq!(checked(guarded).bounds_report(), (1, 0));
 }

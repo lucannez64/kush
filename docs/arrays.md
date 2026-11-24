@@ -34,7 +34,8 @@ grammar, inference rules, symbolic lengths in generic data, and the alias
 interaction.
 
 Constant integer indexing is checked during compilation. A dynamic index
-`values[index]` lowers to a checked view read and may panic;
+`values[index]` lowers to a checked view read and may panic, unless the facts
+prove `0 <= index < N`, which drops the check (ARRAY-INDEX-PROOF);
 it is bounds-checked at run time in both execution models. Either form copies
 the element, so owned or linear elements cannot be indexed. Move them through
 exact-length destructuring instead:

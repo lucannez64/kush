@@ -286,7 +286,7 @@ fn main() -> Unit ! {io} {
 ```
 
 Read as a value, `N` is the instance's `i64` constant, so a loop can count
-to it:
+to it, and the prover sees the bound (here `a[i]` needs no run-time check):
 
 ```kush eval
 fn sum<N: Nat>(a: [i64; N]) -> i64 ! {} {

@@ -98,19 +98,57 @@ impl Checker<'_, '_> {
                     "dynamic indexing copies the element, but it owns resources or is linear",
                 ));
             }
-            c.require(PANIC, span)?;
-            c.record_bounds(Container::Array, None, span);
             let view =
                 c.slice_from_expr(base, None, None, element, false, false, span, None, None)?;
             let index = c.expr_expected(index, Some(Type::I64))?;
             c.expect(index.ty, Type::I64, index.span)?;
+            // ARRAY-INDEX-PROOF: an index the facts keep in `0..N` reads
+            // without a check, as a proved vector access does.
+            let length = i64::try_from(length).ok();
+            let proved = match (length, c.facts.linear(&index)) {
+                (Some(length), Some(position)) => c.try_prove(
+                    vec![
+                        (
+                            crate::facts::Linear::constant(0),
+                            Kind::Le,
+                            position.clone(),
+                        ),
+                        (
+                            position,
+                            Kind::Lt,
+                            crate::facts::Linear::constant(i128::from(length)),
+                        ),
+                    ],
+                    &format!("0 <= index && index < {}", length),
+                    span,
+                ),
+                _ => false,
+            };
+            let op = if proved {
+                c.functions.bounds_proved += 1;
+                c.record_check(
+                    ObligationKind::Bounds {
+                        container: Container::Array,
+                        refined_length: length,
+                    },
+                    span,
+                    "0 <= index && index < len".to_owned(),
+                    true,
+                );
+                SliceOp::At
+            } else {
+                c.require(PANIC, span)?;
+                c.functions.bounds_checked += 1;
+                c.record_bounds(Container::Array, length, span);
+                SliceOp::Get
+            };
             let ty = if index.ty == Type::Never {
                 Type::Never
             } else {
                 element
             };
             let value = Expr {
-                kind: ExprKind::Call(Target::Slice(SliceOp::Get, element), vec![view, index]),
+                kind: ExprKind::Call(Target::Slice(op, element), vec![view, index]),
                 ty,
                 span,
                 resource: None,
