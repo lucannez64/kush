@@ -44,6 +44,13 @@ call a `#[gpu]` function, take it as a function value, or use `GpuBuf.*`.
 Until GPU-SCOPE adds `Gpu.run`, `#[gpu]` functions are checked but never run;
 the native backend compiles them as unreachable CPU code.
 
+> **Changing (GPU-HELPER-INFER, decision 6):** the paragraph above and the
+> "calls to other `#[gpu]` functions" row describe what GPU-SUBSET shipped.
+> Under decision 6, `#[gpu]` stays required and GPU-only on entry functions
+> only. Helpers are plain functions, checked against this subset because an
+> entry reaches them, and they stay callable from CPU code. See
+> [Helper functions](#helper-functions-decision-6).
+
 `#[gpu]` joins `#[noalloc]`, `#[nosuspend]` and `#[test]` in the function
 attribute list (`executable.rs`). The checker rejects, with an exact
 diagnostic, anything outside this subset:
@@ -65,8 +72,9 @@ diagnostic, anything outside this subset:
 - **Helper functions** take only scalar values. WGSL allows storage-buffer
   pointers only on the entry point unless an extension is enabled, so only the
   entry function receives buffers in v1.
-- A `#[gpu]` function cannot be called from CPU code; `Gpu.run` is the only way
-  in. The evaluator runs it through the same entry point (see below).
+- An entry function cannot be called from CPU code; `Gpu.run` is the only way
+  in. The evaluator runs it through the same entry point (see below). Helpers
+  are ordinary functions and CPU code may call them (decision 6).
 - Integer literals take their contextual type as today. A literal that would
   default to `i64` inside a `#[gpu]` function is an error that asks for an
   annotation.
@@ -158,8 +166,8 @@ to the difference instead of hiding it:
 
 ## Lowering (GPU-WGSL-EMIT)
 
-1. After checking, collect each entry passed to `Gpu.run` and the `#[gpu]`
-   helpers it reaches (acyclic, already checked).
+1. After checking, collect each entry passed to `Gpu.run` and the helpers it
+   reaches (acyclic, already checked against the subset, decision 6).
 2. Emit WGSL text: records and tuples become structs; payloadless enums become
    `u32` tags; `match` becomes `switch` or `if` chains; checked operations
    expand into their tests and failure paths; entry parameters become bindings
@@ -225,3 +233,60 @@ Approved 2026-11-07:
 4. **Runtime:** C over Vulkan, loaded with `dlopen`.
 5. **No device:** `Gpu.open(): Result<GpuDevice, i64> ! {io}`, so programs can
    fall back to the CPU. The evaluator always returns `Ok`.
+
+Approved 2026-11-24:
+
+6. **Helpers are inferred, not colored** (GPU-HELPER-INFER). See below.
+
+## Helper functions (decision 6)
+
+GPU-SUBSET shipped with two colors: a helper had to carry `#[gpu]`, and a
+`#[gpu]` function could not be called from CPU code. A plain function that
+already fits the subset (say `fn clamp(x: f32, lo: f32, hi: f32) -> f32`)
+had to be copied, or its maintainer had to add the flag. Adding the flag
+would break every CPU caller, so in practice it had to be copied. The design
+never argued for this; it followed the `#[noalloc]` attribute pattern and
+CUDA's `__device__`.
+
+The rules from GPU-HELPER-INFER on:
+
+- `#[gpu]` is required only on **entry functions** (the ones passed to
+  `Gpu.run`). Entries stay GPU-only: they take `GpuBuf` bindings and an `id`,
+  so a CPU call has no meaning.
+- Any function an entry reaches, directly or through other helpers, is a
+  **helper**. Each helper is checked against the subset in the table above,
+  using the helper rules (scalar parameters only). Helpers need no attribute.
+- Helpers stay **ordinary CPU functions** too. The native backend compiles them
+  for the CPU as before, and the WGSL emitter emits them a second time.
+  `GpuBuf.*` is still rejected outside `#[gpu]` entries, so helpers cannot
+  touch buffers.
+- A helper that falls outside the subset is reported at the entry's call
+  site, with the call chain and the first rejected construct, for example:
+  `saxpy cannot run on the GPU: saxpy -> lib.clamp -> lib.widen uses i64
+  (lib.kush:12:9)`.
+- `#[gpu]` on a non-entry function becomes an optional **promise**: the
+  function is checked against the helper rules even when no entry uses it,
+  and CPU code may still call it. A library puts it on functions it wants to
+  keep GPU-ready, so a change that breaks the subset fails in the library's
+  own build, not in its users' shaders.
+
+Why not keep explicit coloring everywhere:
+
+- The usual argument is API stability (as with Rust's `const fn`): if GPU use
+  is inferred, a maintainer can break it without knowing it was relied on.
+  Here the break is a compile error with the full chain, never wrong output,
+  and the optional promise attribute gives libraries the explicit contract
+  when they want one.
+- Whole-program checking is already needed: the emitter walks every helper an
+  entry reaches (Lowering, step 1), so inference costs no extra visibility.
+- Checking the subset per call graph rather than per declaration matches how
+  `noalloc` is defined: it forbids allocation "on every reachable path,
+  including transitive calls" (`spec-v0.1.md`).
+
+Limits: generics are still rejected in v1, and integer literals that default
+to `i64` are still errors, so most of `std` is not reachable from GPU code yet.
+The rule matters for small user and library helpers on `f32`, `i32`, `u32`
+and records of them. Same-subset semantics on both backends (checked
+arithmetic, strict `f32`, no FMA contraction) are what make running one
+helper on both sides safe; GPU-PARITY tests a helper called from CPU and GPU
+code with the same inputs.

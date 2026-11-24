@@ -5306,7 +5306,8 @@
       "size": "L",
       "hard": true,
       "deps": [
-        "GPU-SUBSET"
+        "GPU-SUBSET",
+        "GPU-HELPER-INFER"
       ],
       "status": "todo",
       "desc": "Lower the checked subset to WGSL compute shaders; every emitted shader validated with naga in tests; exact-width f32/i32/u32 arithmetic semantics documented.",
@@ -8526,6 +8527,25 @@
           "time": "2026-11-24 00:56:56",
           "who": "agent",
           "text": "done 0944387"
+        }
+      ]
+    },
+    {
+      "id": "GPU-HELPER-INFER",
+      "title": "Infer GPU helpers instead of coloring them",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GPU-SUBSET"
+      ],
+      "status": "todo",
+      "desc": "docs/gpu.md decision 6: #[gpu] required and GPU-only on Gpu.run entries only; functions an entry reaches are checked against the helper subset without an attribute and stay callable from CPU; errors name the call chain; #[gpu] on a non-entry is an optional promise checked even when unused and still CPU-callable. Changes gpu.rs check/cpu_body and the gpu_subset tests.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-24 18:22:22",
+          "who": "agent",
+          "text": "Decision approved by the user 2026-11-24; doc updated."
         }
       ]
     }
