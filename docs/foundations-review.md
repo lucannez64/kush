@@ -124,7 +124,9 @@ on `&str`, string equality, typed error enums.
 
 ## 8. Compiler structure
 
-- `executable.rs` is 42k lines; `expr_expected_unchecked` alone is 2,411.
+- `executable.rs` was 42k lines and `expr_expected_unchecked` alone 2,411
+  (FND-SPLIT-EXEC: now 6.8k lines plus 33 modules under `executable/`, and
+  about 1,000 lines for the expression checker).
 - Each feature is implemented in the reference evaluator and in native
   lowering.
 - The LLVM backend translates Cranelift IR, so it never sees types or aliasing.
