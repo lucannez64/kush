@@ -5910,9 +5910,9 @@
         "STAGING-DESIGN",
         "STAGING-AOT"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "See docs/showcase-roadmap.md.",
-      "commit": null,
+      "commit": "2ed3560",
       "log": [
         {
           "time": "2026-11-17 00:35:32",
@@ -5943,6 +5943,16 @@
           "time": "2026-11-19 20:08:21",
           "who": "agent",
           "text": "The next two-worker full compiler gate passed all 2083 tests with 3 skipped in 856.370 seconds. The gate includes the same-type concrete alias regression, successful scalar lifting, generic staged initializers and native AOT exports. The two parent nodes remain open for constrained abstract checking and generated-body contracts."
+        },
+        {
+          "time": "2026-11-24 17:50:26",
+          "who": "agent",
+          "text": "done 2ed3560"
+        },
+        {
+          "time": "2026-11-24 17:50:27",
+          "who": "agent",
+          "text": "Closed with 2ed3560. Full gate: 2094 passed, 3 skipped. Remaining restrictions are listed in docs/staging.md: staged ensures rejected, natural/grade/trait-bound generics checked per instantiation, no custom allocator contexts in generators, immediate runtime splices, Cranelift-only runtime compilation."
         }
       ]
     },
@@ -5955,9 +5965,9 @@
         "STAGING",
         "STAGING-JIT"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "In-process code generation; executable memory as a linear resource (writable or executable, never both). See docs/showcase-roadmap.md.",
-      "commit": null,
+      "commit": "2ed3560",
       "log": [
         {
           "time": "2026-11-19 19:19:55",
@@ -5968,6 +5978,11 @@
           "time": "2026-11-19 19:30:51",
           "who": "agent",
           "text": "Measured a 56-byte linked scalar specialization, median 112 microseconds for a generate/compile/call/drop iteration and median 4.9 nanoseconds for a call with a retained owner. Added supported targets and benchmark methodology to the staging notes."
+        },
+        {
+          "time": "2026-11-24 17:50:26",
+          "who": "agent",
+          "text": "done 2ed3560"
         }
       ]
     },
@@ -8226,9 +8241,9 @@
       "deps": [
         "STAGING-SCOPES"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Check generators and every template before execution; include effect rows, callable multiplicity, affine code ownership and typed lift/splice holes. Ordinary executable checking must remain strict.",
-      "commit": null,
+      "commit": "2ed3560",
       "log": [
         {
           "time": "2026-11-17 01:25:04",
@@ -8259,6 +8274,16 @@
           "time": "2026-11-19 19:52:17",
           "who": "agent",
           "text": "Abstract validation now checks unconstrained type binders even for instantiated generators. The alias regression rejects U returned as T when all calls choose i64. The specialized scalar lift still passes. Trait, grade, natural and effect binders need abstract representations. The unused effect-row and array-length probes remain open."
+        },
+        {
+          "time": "2026-11-19 20:15:56",
+          "who": "agent",
+          "text": "Added declaration-time checks for provable constrained quotation violations. The fixed Bool result rejects an integer in an unused Nat-generic quotation. Symbolic row assignments reject direct print and panic operations unless their effects are guaranteed, including row subtraction. Full constrained template typing remains open."
+        },
+        {
+          "time": "2026-11-24 17:50:26",
+          "who": "agent",
+          "text": "done 2ed3560"
         }
       ]
     },
@@ -8270,14 +8295,19 @@
       "deps": [
         "STAGING-TYPES"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Use restricted reference evaluation for branches, loops and recursion, typed substitution, lifting, code cloning, deterministic limits, cleanup and diagnostics.",
-      "commit": null,
+      "commit": "2ed3560",
       "log": [
         {
           "time": "2026-11-17 02:55:25",
           "who": "agent",
           "text": "Core generator evaluation now supports branches, loops, recursion, scalar/text lifts, graph cloning and nested stages. Resource diagnostics tested; broader allocator and generic validation remain."
+        },
+        {
+          "time": "2026-11-24 17:50:26",
+          "who": "agent",
+          "text": "done 2ed3560"
         }
       ]
     },
@@ -8289,9 +8319,9 @@
       "deps": [
         "STAGING-EVAL"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Order dependencies, recheck materialized functions, preserve source provenance and module references, test evaluator/Cranelift/LLVM parity and a specialized interpreter.",
-      "commit": null,
+      "commit": "2ed3560",
       "log": [
         {
           "time": "2026-11-17 02:55:25",
@@ -8307,6 +8337,11 @@
           "time": "2026-11-19 19:52:17",
           "who": "agent",
           "text": "Generic staged declarations pair each target instance with a generator instance and follow dependencies discovered during initializer checking. Tested multiple type and natural specializations. Staged native exports link through Cranelift and LLVM. Generated postconditions and mutable length preservation remain open."
+        },
+        {
+          "time": "2026-11-24 17:50:26",
+          "who": "agent",
+          "text": "done 2ed3560"
         }
       ]
     },
@@ -8318,9 +8353,9 @@
       "deps": [
         "STAGING-AOT"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Share native lowering, checked relocation and symbol resolution, W^X publication, owner-bound callables, evaluator parity, failure cleanup and runtime-input specialization.",
-      "commit": null,
+      "commit": "2ed3560",
       "log": [
         {
           "time": "2026-11-17 05:20:39",
@@ -8356,6 +8391,11 @@
           "time": "2026-11-19 19:30:51",
           "who": "agent",
           "text": "Verified cancellation cleanup, shared compiled owners, exact usage across the call ABI, and relocation failure before RX publication. Fixed native lowering of nested text captures and byte literals sharing a span."
+        },
+        {
+          "time": "2026-11-24 17:50:26",
+          "who": "agent",
+          "text": "done 2ed3560"
         }
       ]
     },
