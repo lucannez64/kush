@@ -1051,24 +1051,29 @@ impl SharedHeap {
         self.0.lock().unwrap().map.len()
     }
     fn storage_bytes(&self) -> usize {
-        fn size(value: &Value) -> usize {
-            let dynamic = match value {
-                Value::Buffer { capacity, .. } => *capacity,
-                Value::Vector { capacity, items, .. } => capacity
-                    .saturating_mul(std::mem::size_of::<Value>())
-                    .saturating_add(items.iter().map(size).sum::<usize>()),
-                Value::Enum { fields, .. } => fields.iter().map(size).sum(),
-                _ => 0,
-            };
-            std::mem::size_of::<Value>().saturating_add(dynamic)
-        }
-        self.0.lock().unwrap().map.values().map(size).sum()
+        self.0.lock().unwrap().map.values().map(value_storage_bytes).sum()
     }
+}
+/// Modelled storage of one value and the buffers it holds inline.
+fn value_storage_bytes(value: &Value) -> usize {
+    let dynamic = match value {
+        Value::Buffer { capacity, .. } => *capacity,
+        Value::Vector { capacity, items, .. } => capacity
+            .saturating_mul(std::mem::size_of::<Value>())
+            .saturating_add(items.iter().map(value_storage_bytes).sum::<usize>()),
+        Value::Enum { fields, .. } => fields.iter().map(value_storage_bytes).sum(),
+        _ => 0,
+    };
+    std::mem::size_of::<Value>().saturating_add(dynamic)
 }
 #[derive(Debug)]
 struct StatsState {
     stats: MemoryStats,
     live: usize,
+    /// Arena chunks and payloads a compile-time generator has requested.
+    /// They live outside the shared heap, so the generation budget counts
+    /// them separately and never credits them back.
+    arena_bytes: usize,
 }
 /// Shared allocation diagnostics. Task stacks/control blocks are charged as
 /// allocations even though the reference runtime uses OS threads.
@@ -1082,6 +1087,7 @@ impl StatsHandle {
                 ..MemoryStats::default()
             },
             live: 0,
+            arena_bytes: 0,
         })))
     }
     fn allocation(&self) {
@@ -1103,6 +1109,13 @@ impl StatsHandle {
     }
     fn snapshot(&self) -> MemoryStats {
         self.0.lock().unwrap().stats
+    }
+    fn charge_arena(&self, bytes: usize) {
+        let mut state = self.0.lock().unwrap();
+        state.arena_bytes = state.arena_bytes.saturating_add(bytes);
+    }
+    fn arena_bytes(&self) -> usize {
+        self.0.lock().unwrap().arena_bytes
     }
 }
 #[derive(Clone)]
@@ -2058,9 +2071,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         };
         if needs_chunk {
             let capacity = self.arena_chunk_capacity(state, need, current)?;
+            if self.generation {
+                self.stats.charge_arena(capacity);
+            }
             let mut arena = state.lock().unwrap();
             arena.chunk_capacity = capacity;
             arena.chunk_used = 0;
+        }
+        if self.generation {
+            self.stats.charge_arena(value_storage_bytes(&payload));
         }
         let mut arena = state.lock().unwrap();
         let slot = arena.slots.len();
@@ -2095,9 +2114,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 return Ok(Err(payload));
             }
             let capacity = self.arena_chunk_capacity(state, need, current)?;
+            if self.generation {
+                self.stats.charge_arena(capacity);
+            }
             let mut arena = state.lock().unwrap();
             arena.chunk_capacity = capacity;
             arena.chunk_used = 0;
+        }
+        if self.generation {
+            self.stats.charge_arena(value_storage_bytes(&payload));
         }
         let mut arena = state.lock().unwrap();
         let slot = arena.slots.len();
@@ -7244,7 +7269,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
     }
     fn expr(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Flow> {
-        if self.generation && (self.heap.len() > 1024 || self.heap.storage_bytes() > 64 * 1024 * 1024) {
+        if self.generation
+            && (self.heap.len() > 1024
+                || self.heap.storage_bytes().saturating_add(self.stats.arena_bytes())
+                    > 64 * 1024 * 1024)
+        {
             return Err(Diagnostic::new(expr.span, "compile-time generator allocation budget exhausted"));
         }
         if self.depth >= 128 {

@@ -1,7 +1,7 @@
 # Staging runtime implementation notes
 
-Working notes for the active, user-approved staging goal. These are not a
-completion claim. The design contract remains in `docs/staging.md`.
+Implementation notes for typed staging. The design contract and its
+restrictions are in `docs/staging.md`.
 
 ## Current implementation
 
@@ -44,24 +44,28 @@ committing these changes.
 
 ## Checks and limits
 
-- Declarations parameterized solely by unconstrained types are checked in a
-  separate pass using distinct opaque affine types, even when all concrete
-  calls happen to select the same type. A lifted opaque value keeps its type
-  during quotation checking. Its representation is checked and encoded in
-  the concrete specialization. Trait-bound, grade, natural, and effect
-  binders still need general abstract validation. Stage scope validation
-  covers every declaration.
+- Declarations parameterized by unconstrained types and effect rows are
+  checked in a separate pass using distinct opaque affine types, even when
+  all concrete calls happen to select the same type, and with every effect
+  row the binder bounds allow (`generic_quotation_cases`). A lifted opaque
+  value keeps its type during quotation checking. Its representation is
+  checked and encoded in the concrete specialization. Trait-bound, grade and
+  natural binders are checked per instantiation, like ordinary generics,
+  plus the value-independent declaration checks in `check_generic_quotes`.
+  Stage scope validation covers every declaration.
 - Generic staged declarations specialize their initializers along with their
   callable signatures. Initializers can request further stage specializations.
   Staged declarations keep erased proof and shared length preconditions at
-  call sites. Postconditions and mutable length refinements still require
-  generated-body validation before they can be admitted.
+  call sites. Mutable length refinements are proved by
+  `check_length_preservation` over the generated body and every function it
+  reaches; staged postconditions are rejected.
 - Staged exports link through the ordinary native ABI on Cranelift and LLVM.
 - Ordinary nested closures take their own copies of lifted text in AOT and
   runtime templates. AOT also specializes splices inside nested closures.
-- Arenas and custom allocator contexts are explicitly rejected by the generator
-  sandbox until their storage is accounted for. Current heap accounting covers
-  ordinary heap-backed buffers/vectors/boxes.
+- The generator budget counts heap-backed buffers, vectors and boxes, plus
+  every arena chunk and arena payload a generator requests. Arena charges are
+  never credited back. Custom allocator contexts are rejected by the
+  generator sandbox because their storage is not accounted for.
 - Regressions cover fuel and memory exhaustion, panic, effect rejection,
   affine reuse, ill-typed holes, private-module splices and exact grade transfer.
 - Native lowering interns byte constants by content as it reaches each body.
@@ -90,9 +94,10 @@ committing these changes.
 - Runtime splices currently require immediate calls in the quotation because
   first-class functions cannot express the compiled owner's lifetime. LLVM
   runtime compilation returns ENOTSUP. The compiler registers checked
-  quotation templates by function identity. Pruning unreachable recipes
-  in mixed AOT and JIT programs remains open. LLVM AOT staging has independent
-  coverage.
+  quotation templates by function identity. Native lowering queues a recipe
+  only when a reachable body contains that template's graph literal, so
+  templates used only at compile time are not emitted. LLVM AOT staging has
+  independent coverage.
 
 ## Runtime validation
 
@@ -107,8 +112,12 @@ committing these changes.
 - A native runtime fault test supplies an out-of-bounds relocation and verifies
   that linking returns ENOTSUP, never publishes executable pages, and releases
   both the mapping and the remaining allocations.
-- Audit code graph schema discovery and symbol relocation against all forms
-  emitted by the native backend. Unrecognized relocations fail compilation.
+- Relocations: the recipe table encodes Abs8, X86PCRel4, X86CallPCRel4,
+  X86CallPLTRel4 and X86GOTPCRel4 against functions, data, function offsets
+  and capture slots. Any other kind or target is encoded as 255, and
+  `kush_stage_patch` fails on it, so `Code.compile` returns an error before
+  any page becomes executable. Schema lookup accepts only recipes the
+  executable lowered.
 
 ## Runtime measurements
 

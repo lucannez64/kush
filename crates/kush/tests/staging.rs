@@ -862,6 +862,38 @@ fn main() -> i64 ! {} { answer() }
 }
 
 #[test]
+fn compile_time_templates_do_not_become_runtime_recipes() {
+    let source = r#"
+use std.result.Result;
+fn offset(n: i64) -> Code<fn(i64) -> i64 ! {panic}> ! {alloc, panic} {
+    quote fn(x: i64) -> i64 ! {panic} { x + lift(n) }
+}
+fn scale(n: i64) -> Code<fn(i64) -> i64 ! {panic}> ! {alloc, panic} {
+    quote fn(x: i64) -> i64 ! {panic} { x * lift(n) }
+}
+#[staged] fn add_two(x: i64) -> i64 ! {panic} = offset(2);
+fn main() -> i64 ! {alloc, panic} {
+    let owner = match Code.compile(scale(4)) {
+        Result.Ok(owner) => owner, Result.Err(e) => return -e,
+    };
+    Code.call(&owner, add_two(8))
+}
+"#;
+    let program = checked(source).unwrap();
+    assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 40);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("pruned-recipes");
+        let ir = kush::native::build_with_clif(&program, &binary).unwrap();
+        assert_eq!(ir.matches("; staging recipe ").count(), 1, "{ir}");
+        assert!(!ir.contains("; offset\n"), "{ir}");
+        let native = std::process::Command::new(binary).output().unwrap();
+        assert_eq!(native.status.code(), Some(40), "{native:?}");
+    }
+}
+
+#[test]
 fn code_types_are_opaque_affine_values_with_a_static_callable_signature() {
     checked("fn consume(code: Code<fn(i64) -> i64 ! {panic}>) -> Unit ! {} {} fn main() -> Unit ! {} {}")
         .unwrap();
@@ -965,6 +997,56 @@ fn main() -> i64 ! {} { 42 }
     let moved = source.replace("; result", "; x");
     let error = checked(&moved).unwrap_err();
     assert!(error.contains("moved"), "{error}");
+}
+
+#[test]
+fn unused_generic_quotes_reject_fixed_result_mismatches() {
+    let source = r#"
+fn unused<N: Nat>() -> Code<fn([i64; N]) -> Bool ! {}> ! {alloc, panic} {
+    quote fn(x: [i64; N]) -> Bool ! {} { 31 }
+}
+fn main() -> i64 ! {} { 42 }
+"#;
+    assert!(checked(source).unwrap_err().contains("cannot return an integer"));
+    checked(&source.replace("{ 31 }", "{ true }")).unwrap();
+}
+
+#[test]
+fn unused_generic_quote_rows_must_guarantee_direct_effects() {
+    let source = r#"
+fn unused<e: Effects>() -> Code<fn() -> Unit ! {e}> ! {alloc, panic} {
+    quote fn() -> Unit ! {e} { print_i64(271) }
+}
+fn main() -> i64 ! {} { 42 }
+"#;
+    assert!(checked(source).unwrap_err().contains("does not guarantee {io, panic}"));
+    let bounded = source.replace("e: Effects", "e: Effects + (io | panic)");
+    checked(&bounded).unwrap();
+    let subtract = bounded.replace("! {e}", "! {e - io}");
+    assert!(checked(&subtract).unwrap_err().contains("does not guarantee {io}"));
+}
+
+#[test]
+fn unused_generic_quotes_check_effects_of_called_functions() {
+    let source = r#"
+fn show() -> Unit ! {io, panic} { print_i64(271) }
+fn unused<e: Effects>() -> Code<fn() -> Unit ! {e}> ! {alloc, panic} {
+    quote fn() -> Unit ! {e} { show() }
+}
+fn main() -> i64 ! {} { 42 }
+"#;
+    assert!(checked(source).unwrap_err().contains("requires effects {io, panic}"));
+    let bounded = source.replace("e: Effects", "e: Effects + (io | panic)");
+    assert_eq!(checked(&bounded).unwrap().evaluate(&mut Vec::new()).unwrap(), 42);
+
+    let different_rows = r#"
+fn unused<e: Effects, f: Effects>(code: Code<fn() -> Unit ! {e}>)
+    -> Code<fn() -> Unit ! {f}> ! {alloc, panic} {
+    quote fn() -> Unit ! {f} { splice(code)() }
+}
+fn main() -> i64 ! {} { 42 }
+"#;
+    assert!(checked(different_rows).unwrap_err().contains("requires effects"));
 }
 
 #[test]
@@ -1253,6 +1335,41 @@ fn generation_panics_and_resource_exhaustion_are_compile_diagnostics() {
 }
 
 #[test]
+fn generators_may_use_arenas_within_the_generation_budget() {
+    let source = r#"
+fn make() -> Code<fn() -> i64 ! {}> ! {alloc, panic} {
+    let arena = Arena.new();
+    let first = Arena.alloc(&arena, 20);
+    let second = Arena.alloc(&arena, Box.new(22));
+    drop(arena);
+    let n = ArenaBox.take(first) + Box.take(ArenaBox.take(second));
+    quote fn() -> i64 ! {} { lift(n) }
+}
+#[staged] fn answer() -> i64 ! {} = make();
+fn main() -> i64 ! {} { answer() }
+"#;
+    let program = checked(source).unwrap();
+    assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
+    assert_native_result(&program, 42);
+
+    // Arena chunks live outside the heap; they still count against the budget.
+    let huge = r#"
+fn huge(need: i64, current: i64) -> i64 ! {} { 1099511627776 }
+fn make() -> Code<fn() -> i64 ! {}> ! {alloc, panic} {
+    let arena = Arena.with_strategy(huge);
+    let filler = Arena.alloc(&arena, 1);
+    drop(filler);
+    drop(arena);
+    quote fn() -> i64 ! {} { 42 }
+}
+#[staged] fn answer() -> i64 ! {} = make();
+fn main() -> i64 ! {} { answer() }
+"#;
+    let error = checked(huge).err().unwrap();
+    assert!(error.contains("allocation budget"), "{error}");
+}
+
+#[test]
 fn power_example_runs_without_a_runtime_generator_call() {
     let program = checked(include_str!("../../../examples/staging-power.kush")).unwrap();
     let mut output = Vec::new();
@@ -1299,6 +1416,28 @@ fn main() -> i64 ! {} { value(999) }
     .unwrap();
     let mut output = Vec::new();
     assert_eq!(program.evaluate(&mut output).unwrap(), 42);
+}
+
+#[test]
+fn staged_mutable_refinement_checks_the_generated_body() {
+    let source = r#"
+fn write_value(v: &mut Vec<i64>) -> Unit ! {alloc, panic} {
+    v.push(99);
+    v[0] = 42;
+}
+#[staged] fn update(v: &mut Vec<i64> where len >= 1) -> Unit ! {alloc, panic} =
+    quote fn(v: &mut Vec<i64>) -> Unit ! {alloc, panic} { write_value(v) };
+fn main() -> i64 ! {alloc, panic} {
+    let mut values: Vec<i64> = [1];
+    update(&mut values);
+    values[0]
+}
+"#;
+    let program = checked(source).unwrap();
+    assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
+    assert_native_result(&program, 42);
+    let shrinks = source.replace("v.push(99);", "v.clear();");
+    assert!(checked(&shrinks).unwrap_err().contains("preserves the vector length"));
 }
 
 #[test]

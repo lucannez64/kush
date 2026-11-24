@@ -1,6 +1,7 @@
 # Typed staging
 
-Status: design approved by the user, 2026-11-17. Implementation in progress. Scope:
+Status: design approved by the user, 2026-11-17. Implemented 2026-11-24, with
+the restrictions listed at the end of this document. Scope:
 STAGING-DESIGN, STAGING and STAGING-RUNTIME, independently of the web track.
 The Game Boy specializer/JIT and format generators remain consumers of this
 facility, with their own completion criteria.
@@ -230,8 +231,10 @@ cannot invoke the runtime compiler. Runtime splices must be
 immediately called in their own quotation. LLVM runtime compilation reports
 `ENOTSUP`.
 
-Generators parameterized solely by unconstrained types receive a separate type
-and ownership check with distinct opaque types. Concrete specializations check
+Generators whose generics are unconstrained types and effect rows receive a
+separate type, ownership and effect check: each type binder becomes a distinct
+opaque type and each effect binder takes every row its bounds allow, when the
+domain fits the specialization budget. Concrete specializations check
 and encode lifted values. Generic staged declarations evaluate one initializer
 per concrete specialization. Staged functions can also expose a native ABI
 with `#[staged] export` on Cranelift and LLVM. Erased proof parameters and
@@ -244,7 +247,34 @@ fixed bytecode program and compares the generated function against the
 interpreter across a range of inputs. The power example verifies that the
 native executable omits the generators and their serialized code graphs.
 
-Abstract checking of constrained generics, staged postconditions, and mutable
-length refinements need further work.
-STAGING and STAGING-RUNTIME remain open. Detailed current constraints and the
-runtime implementation direction are in [the working notes](staging-runtime-notes.md).
+A staged declaration with a mutable length refinement (`v: &mut Vec<T> where
+len >= n`) admits its generated body only when that body, and every function
+it reaches, uses operations that cannot shrink the vector.
+
+Generators can use arenas. Arena chunks and payloads count against the same
+generation budget as heap storage.
+
+A native executable carries a machine-code recipe only for templates that a
+reachable function can quote at run time. Templates used only by
+`#[staged]` generators stay out of the binary.
+
+## Restrictions
+
+- Natural, grade and trait-bound generic binders follow the ordinary Kush
+  rule for generics: each instantiation is checked, and a quotation is
+  checked at every instantiation before its generator runs. An unused
+  generator with such binders still gets the declaration-time checks that
+  hold for every value: a fixed result type, and the effects of direct
+  builtins against its row bounds. Checking it abstractly would be stricter
+  than ordinary generic functions, which accept `fn third<N: Nat>(x: [i64;
+  N]) { x[3] }` for N >= 4.
+- `#[staged]` declarations with `ensures` are rejected. Postconditions are
+  proved over source bodies, and a staged body exists only as generated IR.
+- Custom allocator contexts, tasks and effect handlers are unavailable to
+  compile-time generators.
+- Runtime splices must be called immediately in their quotation. Runtime
+  compilation supports Linux x86-64 with Cranelift; LLVM reports `ENOTSUP`.
+- The runtime linker rejects any relocation kind or target it does not
+  recognize, so `Code.compile` returns an error instead of publishing code.
+
+Detailed constraints are in [the working notes](staging-runtime-notes.md).

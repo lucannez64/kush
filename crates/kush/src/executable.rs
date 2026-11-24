@@ -5534,7 +5534,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     if let Some(prepared) = crate::staging::prepare(program)? {
         let (executable, initializers) =
             check_program_unstaged(&prepared.program, &prepared.entries, false, false)?;
-        let mut executable = crate::staging::materialize(executable, initializers)?;
+        let mut executable =
+            crate::staging::materialize(executable, initializers, &prepared.entries)?;
         crate::suspend::lower(&mut executable)?;
         return Ok(executable);
     }
@@ -6049,56 +6050,39 @@ fn check_program_unstaged(
     }
     let mut entry = None;
     for declared in functions.declared.values() {
-        crate::staging::check_generic_quote_results(declared.ast, resolution)?;
+        crate::staging::check_generic_quotes(declared.ast, resolution)?;
     }
-    let staged_generics = functions
-        .declared
-        .iter()
-        .filter_map(|(&binding, declared)| {
-            let function = declared.ast;
-            if declared.impl_template.is_some()
-                || function.generics.is_empty()
-                || !function.body.as_ref().is_some_and(block_contains_quote)
-            {
-                return None;
-            }
-            let parameters = function
-                .generics
-                .iter()
-                .map(|generic| {
-                    let unrestricted = generic.bound.as_ref().is_none_or(|bound| {
-                        resolution.reference(bound.span).is_some_and(|id| {
-                            let binding = &resolution.bindings[id];
-                            binding.kind == BindingKind::Builtin && binding.name == "Type"
-                        })
-                    });
-                    if unrestricted {
-                        resolution.binder(generic.span)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some((binding, parameters))
-        })
-        .collect::<Vec<_>>();
+    let mut staged_generics = Vec::new();
+    for (&binding, declared) in &functions.declared {
+        let function = declared.ast;
+        if declared.impl_template.is_none()
+            && !function.generics.is_empty()
+            && function.body.as_ref().is_some_and(block_contains_quote)
+            && let Some(cases) =
+                crate::staging::generic_quotation_cases(function, resolution, MAX_INSTANCES)?
+        {
+            staged_generics.push((binding, cases));
+        }
+    }
     if validate_generic_staging {
-        for (binding, parameters) in staged_generics {
-            let arguments = parameters
+        for (binding, cases) in staged_generics {
+            let arguments: Vec<_> = cases.types
                 .iter()
                 .map(|&id| types.staging_type_parameter(id))
                 .collect();
-            functions.instance(
-                &mut types,
-                resolution,
-                binding,
-                arguments,
-                vec![],
-                vec![],
-                vec![],
-                None,
-                None,
-            )?;
+            for effects in cases.effects {
+                functions.instance(
+                    &mut types,
+                    resolution,
+                    binding,
+                    arguments.clone(),
+                    vec![],
+                    vec![],
+                    effects,
+                    None,
+                    None,
+                )?;
+            }
         }
     } else if !staged_generics.is_empty() {
         // Use distinct type identities even when every actual specialization

@@ -1,5 +1,7 @@
 //! Typed staging orchestration. Templates are checked by the normal executable
 //! pipeline; generation runs only after that check, with no host capabilities.
+use crate::resolve::{BindingId, BindingKind, Resolution};
+use crate::runtime_types::{effect_excludes, effect_includes, effect_row_term, is_effect_generic};
 use crate::{Diagnostic, Span, ast, executable as ex, program::Program};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -8,15 +10,81 @@ pub(crate) const UNSUPPORTED_RUNTIME_TEMPLATE: &str =
     "runtime splice must be called immediately in its quotation";
 pub(crate) const INITIALIZER_PREFIX: &str = "$staging_init_";
 
-/// Check a generic result against directly known return types without choosing
-/// a type argument. A substitution can make distinct types equal in one
-/// specialization, but cannot justify returning one as the other universally.
-/// Leave expressions that need inference to the normal instance checker.
-pub(crate) fn check_generic_quote_results(
+pub(crate) struct GenericQuotationCases {
+    pub types: Vec<BindingId>,
+    pub effects: Vec<Vec<u16>>,
+}
+
+/// Enumerate the entire allowed effect domain when it fits the ordinary
+/// specialization budget. An opaque type keeps the identity of each type
+/// binder throughout every row assignment.
+pub(crate) fn generic_quotation_cases(
     function: &ast::Function,
-    resolution: &crate::resolve::Resolution,
+    resolution: &Resolution,
+    limit: usize,
+) -> Result<Option<GenericQuotationCases>> {
+    let universe = resolution.effect_bits.values().fold(ex::EFFECT_BITS, |row, bit| row | bit);
+    let mut types = Vec::new();
+    let mut domains: Vec<(u16, u16)> = Vec::new();
+    let mut count = 1usize;
+    for binder in &function.generics {
+        if is_effect_generic(resolution, binder) {
+            let required = effect_includes(resolution, binder)?.unwrap_or(0);
+            let allowed = universe & !effect_excludes(resolution, binder)?.unwrap_or(0);
+            if required & !allowed != 0 {
+                return Ok(None);
+            }
+            let optional = allowed & !required;
+            let size = 1usize << optional.count_ones();
+            if size > limit / count {
+                return Ok(None);
+            }
+            count *= size;
+            domains.push((required, optional));
+        } else {
+            let unrestricted = binder.bound.as_ref().is_none_or(|bound| {
+                resolution.reference(bound.span).is_some_and(|id| {
+                    let binding = &resolution.bindings[id];
+                    binding.kind == BindingKind::Builtin && binding.name == "Type"
+                })
+            });
+            let Some(id) = resolution.binder(binder.span).filter(|_| unrestricted) else {
+                return Ok(None);
+            };
+            types.push(id);
+        }
+    }
+    let mut effects = vec![vec![]];
+    for (required, optional) in domains {
+        let mut rows = Vec::with_capacity(1usize << optional.count_ones());
+        let mut subset = optional;
+        loop {
+            rows.push(required | subset);
+            if subset == 0 {
+                break;
+            }
+            subset = (subset - 1) & optional;
+        }
+        effects = effects.into_iter().flat_map(|previous| {
+            rows.iter().map(move |&row| {
+                let mut arguments = previous.clone();
+                arguments.push(row);
+                arguments
+            })
+        }).collect();
+    }
+    Ok(Some(GenericQuotationCases { types, effects }))
+}
+
+/// Check quotation contracts that can be decided without knowing a layout.
+/// The ordinary checker still checks all concrete instances.
+pub(crate) fn check_generic_quotes(
+    function: &ast::Function,
+    resolution: &Resolution,
 ) -> Result<()> {
-    use crate::resolve::BindingKind;
+    if function.generics.is_empty() {
+        return Ok(());
+    }
     let rigid: BTreeSet<_> = function
         .generics
         .iter()
@@ -24,14 +92,22 @@ pub(crate) fn check_generic_quote_results(
             generic.bound.as_ref().is_none_or(|bound| {
                 resolution.reference(bound.span).is_some_and(|id| {
                     let binding = &resolution.bindings[id];
-                    binding.kind == BindingKind::Builtin && binding.name == "Type"
+                    binding.kind == BindingKind::Trait
+                        || (binding.kind == BindingKind::Builtin && binding.name == "Type")
                 })
             })
         })
         .filter_map(|generic| resolution.binder(generic.span))
         .collect();
-    if rigid.is_empty() {
-        return Ok(());
+    let mut effect_bounds = BTreeMap::new();
+    for binder in &function.generics {
+        if is_effect_generic(resolution, binder)
+            && let Some(id) = resolution.binder(binder.span)
+        {
+            let required = effect_includes(resolution, binder)?.unwrap_or(0);
+            let allowed = !effect_excludes(resolution, binder)?.unwrap_or(0);
+            effect_bounds.insert(id, (required, allowed));
+        }
     }
     fn named(ty: &ast::Type, resolution: &crate::resolve::Resolution) -> Option<usize> {
         match &ty.kind {
@@ -44,47 +120,62 @@ pub(crate) fn check_generic_quote_results(
     fn visit(
         expr: &ast::Expr,
         rigid: &BTreeSet<usize>,
-        resolution: &crate::resolve::Resolution,
+        resolution: &Resolution,
+        effect_bounds: &BTreeMap<BindingId, (u16, u16)>,
     ) -> Result<()> {
         if let Some((ast::StagingForm::Quote, operand)) = expr.staging()
             && let ast::ExprKind::Lambda(lambda) = &operand.kind
-            && let Some(expected) = named(&lambda.result, resolution)
-            && rigid.contains(&expected)
         {
-            let check = |tail: &ast::Expr| {
-                let actual = match &tail.kind {
-                    ast::ExprKind::Name(_) => resolution.reference(tail.span).and_then(|id| {
-                        lambda
-                            .parameters
-                            .iter()
-                            .find(|p| resolution.binder(p.span) == Some(id))
-                            .and_then(|p| named(&p.ty, resolution))
-                            .filter(|id| rigid.contains(id))
-                            .map(|id| (Some(id), resolution.bindings[id].name.as_str()))
-                    }),
-                    ast::ExprKind::Bool(_) => Some((None, "Bool")),
-                    ast::ExprKind::Char(_) => Some((None, "Char")),
-                    _ => None,
+            check_quote_effects(lambda, resolution, effect_bounds)?;
+            if let Some(expected) = named(ex::split_grade(&lambda.result).0, resolution) {
+                let binding = &resolution.bindings[expected];
+                let check = |tail: &ast::Expr| {
+                    if binding.kind == BindingKind::Builtin
+                        && binding.name == "Bool"
+                        && matches!(tail.kind, ast::ExprKind::Integer(_))
+                    {
+                        return Err(Diagnostic::new(
+                            tail.span,
+                            "type mismatch: a quotation returning Bool cannot return an integer",
+                        ));
+                    }
+                    if !rigid.contains(&expected) {
+                        return Ok(());
+                    }
+                    let actual = match &tail.kind {
+                        ast::ExprKind::Name(_) => resolution.reference(tail.span).and_then(|id| {
+                            lambda
+                                .parameters
+                                .iter()
+                                .find(|p| resolution.binder(p.span) == Some(id))
+                                .and_then(|p| named(&p.ty, resolution))
+                                .filter(|id| rigid.contains(id))
+                                .map(|id| (Some(id), resolution.bindings[id].name.as_str()))
+                        }),
+                        ast::ExprKind::Bool(_) => Some((None, "Bool")),
+                        ast::ExprKind::Char(_) => Some((None, "Char")),
+                        _ => None,
+                    };
+                    if let Some((actual_id, actual)) = actual
+                        && actual_id != Some(expected)
+                    {
+                        let expected = &resolution.bindings[expected].name;
+                        return Err(Diagnostic::new(
+                            tail.span,
+                            format!(
+                                "quotation must return generic type '{expected}' for every specialization, found '{actual}'",
+                            ),
+                        ));
+                    }
+                    Ok(())
                 };
-                if let Some((actual_id, actual)) = actual
-                    && actual_id != Some(expected)
-                {
-                    let expected = &resolution.bindings[expected].name;
-                    return Err(Diagnostic::new(
-                        tail.span,
-                        format!(
-                            "quotation must return generic type '{expected}' for every specialization, found '{actual}'",
-                        ),
-                    ));
-                }
-                Ok(())
-            };
-            check_quote_result_paths(&lambda.body, &check)?;
+                check_quote_result_paths(&lambda.body, &check)?;
+            }
         }
         let mut result = Ok(());
         ex::ast_children(expr, &mut |child| {
             if result.is_ok() {
-                result = visit(child, rigid, resolution);
+                result = visit(child, rigid, resolution, effect_bounds);
             }
         });
         result
@@ -93,13 +184,110 @@ pub(crate) fn check_generic_quote_results(
         for statement in &body.statements {
             match statement {
                 ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
-                    visit(value, &rigid, resolution)?;
+                    visit(value, &rigid, resolution, &effect_bounds)?;
                 }
             }
         }
         if let Some(tail) = &body.tail {
-            visit(tail, &rigid, resolution)?;
+            visit(tail, &rigid, resolution, &effect_bounds)?;
         }
+    }
+    Ok(())
+}
+
+/// The presence of each effect is a Boolean expression over row variables.
+/// Check every allowed assignment for the bits required by direct builtins.
+fn check_quote_effects(
+    lambda: &ast::Lambda,
+    resolution: &Resolution,
+    bounds: &BTreeMap<BindingId, (u16, u16)>,
+) -> Result<()> {
+    if lambda
+        .effects
+        .iter()
+        .any(|effect| matches!(effect.kind, ast::TypeKind::Infer))
+    {
+        return Ok(());
+    }
+    let row = effect_row_term(resolution, &lambda.effects)?;
+    let variables = row.variables();
+    if variables.iter().any(|id| !bounds.contains_key(id)) {
+        return Ok(());
+    }
+    let mut missing = 0;
+    for bit in [ex::IO, ex::PANIC] {
+        let mut states = BTreeMap::new();
+        let mut optional = Vec::new();
+        for &id in &variables {
+            let (required, allowed) = bounds[&id];
+            states.insert(id, required & bit);
+            if (allowed & !required) & bit != 0 {
+                optional.push(id);
+            }
+        }
+        // This pass refutes specific violations. Leave larger formulas to
+        // instance checking instead of treating an incomplete search as proof.
+        if optional.len() > 10 {
+            continue;
+        }
+        for mask in 0..(1usize << optional.len()) {
+            for (position, id) in optional.iter().enumerate() {
+                states.insert(*id, if mask & (1 << position) == 0 { 0 } else { bit });
+            }
+            if row
+                .evaluate(&states)
+                .is_some_and(|effects| effects & bit == 0)
+            {
+                missing |= bit;
+                break;
+            }
+        }
+    }
+    if missing == 0 {
+        return Ok(());
+    }
+    fn visit(expr: &ast::Expr, resolution: &Resolution, missing: u16) -> Result<()> {
+        if expr.staging().is_some() || matches!(expr.kind, ast::ExprKind::Lambda(_)) {
+            return Ok(());
+        }
+        if let ast::ExprKind::Call { callee, .. } = &expr.kind
+            && let Some(id) = resolution.reference(callee.span)
+            && resolution.bindings[id].kind == BindingKind::Builtin
+        {
+            let required = match resolution.bindings[id].name.as_str() {
+                "print_i64" | "print_int" | "print_float" => ex::IO | ex::PANIC,
+                "panic" => ex::PANIC,
+                _ => 0,
+            };
+            if required & missing != 0 {
+                let ungaranteed = [(ex::IO, "io"), (ex::PANIC, "panic")]
+                    .into_iter()
+                    .filter_map(|(bit, name)| (required & missing & bit != 0).then_some(name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(Diagnostic::new(
+                    expr.span,
+                    format!("quotation effect row does not guarantee {{{ungaranteed}}}"),
+                ));
+            }
+        }
+        let mut result = Ok(());
+        ex::ast_children(expr, &mut |child| {
+            if result.is_ok() {
+                result = visit(child, resolution, missing);
+            }
+        });
+        result
+    }
+    for statement in &lambda.body.statements {
+        match statement {
+            ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+                visit(value, resolution, missing)?;
+            }
+        }
+    }
+    if let Some(tail) = &lambda.body.tail {
+        visit(tail, resolution, missing)?;
     }
     Ok(())
 }
@@ -221,6 +409,7 @@ pub(crate) struct Prepared {
 pub(crate) struct Entry {
     pub target: Span,
     pub initializer: Span,
+    mutable_length: Option<Span>,
 }
 
 pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
@@ -250,22 +439,20 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
                         "#[staged] needs a function",
                     ));
                 };
-                if !function.ensures.is_empty()
-                    || function.parameters.iter().any(|p| {
-                        // A plain callable may shrink a mutable vector. The
-                        // staged declaration would promise it preserves len.
-                        p.min_length.is_some()
-                            && !matches!(
-                                ex::split_grade(&p.ty).0.kind,
-                                ast::TypeKind::Borrow { mutable: false, .. }
-                            )
-                    })
-                {
+                if !function.ensures.is_empty() {
                     return Err(Diagnostic::new(
                         declaration.item.span,
-                        "staged declarations with ensures or mutable length refinements are not supported yet",
+                        "staged declarations with ensures are not supported yet",
                     ));
                 }
+                let mutable_length = function.parameters.iter().find_map(|param| {
+                    param.min_length.as_ref().filter(|_| {
+                        !matches!(
+                            ex::split_grade(&param.ty).0.kind,
+                            ast::TypeKind::Borrow { mutable: false, .. }
+                        )
+                    }).map(|length| length.span)
+                });
                 let generator = function
                     .body
                     .as_ref()
@@ -346,6 +533,7 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
                 entries.push(Entry {
                     target: declaration.item.span,
                     initializer: synthetic,
+                    mutable_length,
                 });
                 // An unobservable Never body lets the ordinary checker establish
                 // the exported signature. It is replaced before a program is returned.
@@ -378,7 +566,11 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
 pub(crate) fn materialize(
     mut program: ex::Executable,
     initializers: BTreeMap<usize, usize>,
+    entries: &[Entry],
 ) -> Result<ex::Executable> {
+    let length_contracts: BTreeMap<_, _> = entries.iter()
+        .filter_map(|entry| Some((entry.target.start, entry.mutable_length?)))
+        .collect();
     let mut active = BTreeSet::new();
     let mut complete = BTreeSet::new();
     for target in initializers.keys().copied() {
@@ -386,6 +578,7 @@ pub(crate) fn materialize(
             &mut program,
             target,
             &initializers,
+            &length_contracts,
             &mut active,
             &mut complete,
         )?;
@@ -442,12 +635,12 @@ fn generation_dependencies(program: &ex::Executable, root: usize) -> Result<BTre
                 ex::ExprKind::TaskScope { .. }
                 | ex::ExprKind::TaskSpawn { .. }
                 | ex::ExprKind::HandlerPush { .. }
-                | ex::ExprKind::ArenaNew
-                | ex::ExprKind::ArenaNewWith { .. }
                 | ex::ExprKind::AllocatorContextNew { .. } => {
+                    // Arena chunks and payloads are charged to the generation
+                    // budget; custom allocator storage is not accounted yet.
                     return Err(Diagnostic::new(
                         expression.span,
-                        "tasks, effect handlers, arenas and custom allocator contexts are unavailable during compile-time generation",
+                        "tasks, effect handlers and custom allocator contexts are unavailable during compile-time generation",
                     ));
                 }
                 _ => {}
@@ -458,10 +651,85 @@ fn generation_dependencies(program: &ex::Executable, root: usize) -> Result<BTre
     Ok(seen)
 }
 
+/// Mutable length refinements are caller guarantees. Prove them from the
+/// generated body, which may have come from a different quote on each run.
+fn check_length_preservation(
+    program: &ex::Executable,
+    target: usize,
+    instance: usize,
+    staged: &BTreeMap<usize, usize>,
+    contract: Span,
+) -> Result<()> {
+    use ex::{ExprKind as E, Target, Type, VecOp};
+    fn plain_storage(program: &ex::Executable, ty: Type) -> bool {
+        match ty {
+            Type::Never => true,
+            Type::Vec(element) => ex::is_live_scalar(program.pointees[element]),
+            Type::Ref(pointee) | Type::RefMut(pointee) => {
+                let referent = program.pointees[pointee];
+                ex::is_live_scalar(referent)
+                    || matches!(referent, Type::Vec(element)
+                        if ex::is_live_scalar(program.pointees[element]))
+            }
+            _ => ex::is_live_scalar(ty),
+        }
+    }
+    let failure = |span| {
+        Diagnostic::new(span, "cannot prove that generated code preserves the vector length")
+            .with_note(contract, "mutable length refinement declared here")
+    };
+    let mut pending = vec![instance];
+    let mut seen = BTreeSet::new();
+    while let Some(index) = pending.pop() {
+        let index = if index == target { instance } else { index };
+        if !seen.insert(index) {
+            continue;
+        }
+        let function = &program.functions[index];
+        // Other staged targets may still be stubs. Keep the proof independent
+        // of materialization order, including for calls made by generators.
+        if staged.contains_key(&index)
+            || function.locals.iter().any(|local| !plain_storage(program, local.ty))
+        {
+            return Err(failure(function.span));
+        }
+        let mut result = Ok(());
+        each_expression(function, |expr| {
+            if result.is_err() {
+                return;
+            }
+            match &expr.kind {
+                E::Call(Target::Function(callee), _) => pending.push(*callee),
+                E::FnValue { function, captures } if captures.is_empty() => pending.push(*function),
+                E::CallIndirect { callee, .. }
+                    if matches!(&callee.kind, E::FnValue { captures, .. } if captures.is_empty()) => {}
+                E::Call(
+                    Target::Vec(VecOp::WithCapacity | VecOp::Reserve | VecOp::Len
+                        | VecOp::Get | VecOp::At | VecOp::Push | VecOp::Set
+                        | VecOp::PushBorrowed | VecOp::SetBorrowed | VecOp::SetProved
+                        | VecOp::ReserveBorrowed, _)
+                    | Target::Int(..) | Target::Float(..) | Target::Panic,
+                    _,
+                ) => {}
+                E::DerefWrite(_, value) if ex::is_live_scalar(value.ty) => {}
+                E::Constant(_) | E::Local(_) | E::Move(_) | E::Borrow(_) | E::BorrowPlace(_)
+                | E::BorrowInit { .. } | E::PlaceIndex { .. } | E::Peek(_) | E::Erased(_)
+                | E::RefRead(_) | E::Drop(_) | E::Block(_) | E::Assign(..) | E::Return(_)
+                | E::If(..) | E::While(..) | E::Loop(_) | E::Break(..) | E::Continue(_)
+                | E::Binary(..) | E::Unary(..) | E::AbortCall { .. } => {}
+                _ => result = Err(failure(expr.span)),
+            }
+        });
+        result?;
+    }
+    Ok(())
+}
+
 fn finish(
     program: &mut ex::Executable,
     target: usize,
     initializers: &BTreeMap<usize, usize>,
+    length_contracts: &BTreeMap<usize, Span>,
     active: &mut BTreeSet<usize>,
     complete: &mut BTreeSet<usize>,
 ) -> Result<()> {
@@ -487,11 +755,14 @@ fn finish(
             break;
         }
         for dependency in dependencies {
-            finish(program, dependency, initializers, active, complete)?;
+            finish(program, dependency, initializers, length_contracts, active, complete)?;
         }
     }
     let encoded = program.evaluate_staged_code(init)?;
     let instance = instantiate(program, &encoded, 0, false)?;
+    if let Some(&span) = length_contracts.get(&program.functions[target].span.start) {
+        check_length_preservation(program, target, instance, initializers, span)?;
+    }
     let source = &program.functions[instance];
     let original = program.functions[target].clone();
     if source.parameters != original.parameters

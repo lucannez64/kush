@@ -6379,7 +6379,12 @@ fn lower(
     } else {
         vec![entry]
     };
-    pending.extend(recipes.keys().copied());
+    // A recipe is reachable only through a quotation in a reachable body.
+    // Compile-time-only templates stay out of the executable.
+    let recipes_of: BTreeMap<usize, usize> = recipes
+        .iter()
+        .map(|(&recipe, &(schema, _))| (schema, recipe))
+        .collect();
     // NATIVE-INLINE: bodies are built first and defined after, so a
     // caller can absorb any small reachable callee.
     let mut bodies: Vec<Option<ir::Function>> = vec![None; program.functions.len()];
@@ -6398,6 +6403,11 @@ fn lower(
             continue;
         }
         let f = &program.functions[index];
+        staging::quoted_schemas(f, |schema| {
+            if let Some(&recipe) = recipes_of.get(&schema) {
+                pending.push(recipe);
+            }
+        });
         if program
             .foreign_functions
             .get(index)

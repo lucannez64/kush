@@ -67,6 +67,19 @@ pub(super) fn prepare(program: &Executable) -> Option<Prepared> {
     Some(Prepared { program, recipes })
 }
 
+/// Template schemas named by the code graph literals in one function body.
+/// Every quotation is lowered to such a literal: its magic, then the schema.
+pub(super) fn quoted_schemas(function: &ex::Function, mut f: impl FnMut(usize)) {
+    expressions(&function.body, &mut |e| {
+        if let ExprKind::BytesLiteral(bytes) = &e.kind
+            && bytes.len() >= 16
+            && matches!(&bytes[..8], b"KUSHCD01" | b"KUSHCD02" | b"KUSHCD03")
+        {
+            f(u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize);
+        }
+    });
+}
+
 #[derive(Clone)]
 pub(super) struct Body {
     pub bytes: Vec<u8>,
@@ -221,8 +234,15 @@ pub(super) fn emit(
     body_data.set_align(8);
     let bodies_id = module.declare_anonymous_data(false, false).map_err(error)?;
     module.define_data(bodies_id, &body_data).map_err(error)?;
+    // Only recipes reachable from a runtime quotation were lowered. A graph
+    // naming any other schema cannot be constructed by this executable.
     let mut schemas = Vec::new();
+    let mut schema_count = 0;
     for (&recipe, &(schema, count)) in recipes {
+        if !bodies.contains_key(&ids[recipe]) {
+            continue;
+        }
+        schema_count += 1;
         schemas.extend(words(&[
             schema as u64,
             ids[recipe].as_u32() as u64,
@@ -242,7 +262,7 @@ pub(super) fn emit(
     image_data.define(
         words(&[
             bodies.len() as u64,
-            recipes.len() as u64,
+            schema_count as u64,
             0,
             0,
             ids.len() as u64,
