@@ -355,7 +355,7 @@ outstanding implementation item.
   **Implemented for box payloads and vector elements:** `Box.reuse_grow`
   checks the old owner and payload obligations, destroys the old payload once,
   and either keeps the allocation or grows/moves it under an explicit
-  `{alloc, panic}` contract. `Vec.map_in_place_grow` and
+  `{alloc}` contract. `Vec.map_in_place_grow` and
   `Vec.map_chain_in_place_grow` widen the final element layout under the same
   explicit contract, reuse retained physical capacity when it fits, and
   otherwise grow/move once with safe backwards relocation and unchanged
@@ -430,7 +430,7 @@ outstanding implementation item.
   for deterministic workloads. It reports measurements, not superiority.
 
 Arbitrary effectful callback interleaving is not semantics-preserving: callback
-output, panic, and scheduling order can differ. Existing explicit map chains
+output, and scheduling order can differ. Existing explicit map chains
 select that order deliberately. Automatic fusion proves the documented
 trace-free/total equivalence rather than silently changing the language's
 evaluation semantics; the unresolved general cases are listed in
@@ -630,7 +630,7 @@ gaps on top of `460ec58`:
   leaves region references, chunks, and bump state unchanged. Requests fitting
   the current chunk spend no fallible attempt.
 - `Vec.map_in_place_grow` and `Vec.map_chain_in_place_grow` provide explicit
-  `{alloc, panic}` vector-element widening. They reuse retained physical
+  `{alloc}` vector-element widening. They reuse retained physical
   capacity when it fits, otherwise grow/move once; native relocation is
   backwards for widening and forwards for narrowing, callbacks stay in forward
   source order, owning elements are consumed once, and the final stride governs

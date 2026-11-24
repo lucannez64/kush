@@ -74,7 +74,7 @@ fn fails(source: &str, fragment: &str) {
 #[test]
 fn clear_drops_owned_elements_exactly_once_and_keeps_the_allocation() {
     let stats = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<Box<i64>> = Vec.new();
             values = Vec.push(values, Box.new(1));
             values = Vec.push(values, Box.new(2));
@@ -95,7 +95,7 @@ fn clear_drops_owned_elements_exactly_once_and_keeps_the_allocation() {
 #[test]
 fn clear_retains_capacity_for_later_pushes() {
     let stats = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 9);
             values = Vec.clear(values);
@@ -116,7 +116,7 @@ fn clear_retains_capacity_for_later_pushes() {
     );
 
     let empty = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let values: Vec<i64> = Vec.new();
             let values = Vec.clear(values);
             Vec.len(&values)
@@ -132,7 +132,7 @@ fn clear_is_available_under_noalloc() {
     let stats = agrees(
         "
          fn reset(values: Vec<i64>) -> Vec<i64> ! {} { Vec.clear(values) }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 7);
             let values = reset(values);
@@ -147,7 +147,7 @@ fn clear_is_available_under_noalloc() {
 #[test]
 fn clear_and_reserve_also_work_as_receiver_methods() {
     let stats = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = values.push(3);
             values = values.push(4);
@@ -168,7 +168,7 @@ fn clear_and_reserve_also_work_as_receiver_methods() {
 #[test]
 fn reserve_grows_at_most_once_and_makes_room_for_the_request() {
     let stats = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.with_capacity(1);
             values = Vec.push(values, 7);
             values = Vec.reserve(values, 10);
@@ -189,7 +189,7 @@ fn reserve_grows_at_most_once_and_makes_room_for_the_request() {
     // A request that already fits performs no growth; the boundary case
     // `len + additional == capacity` also stays put.
     let no_growth = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.with_capacity(5);
             values = Vec.push(values, 1);
             values = Vec.reserve(values, 4);
@@ -205,7 +205,7 @@ fn reserve_grows_at_most_once_and_makes_room_for_the_request() {
 #[test]
 fn reserve_rejects_negative_and_overflowing_requests() {
     fails(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let values = Vec.reserve(values, -1);
@@ -214,7 +214,7 @@ fn reserve_rejects_negative_and_overflowing_requests() {
         "panic: negative vector reserve",
     );
     fails(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let values = Vec.reserve(values, 9223372036854775807);
@@ -227,7 +227,7 @@ fn reserve_rejects_negative_and_overflowing_requests() {
 #[test]
 fn reserve_and_clear_require_an_owned_vector_that_is_not_borrowed() {
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let view: &[i64] = &values[..];
@@ -237,7 +237,7 @@ fn reserve_and_clear_require_an_owned_vector_that_is_not_borrowed() {
         "cannot move an owner while it is borrowed",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let view: &[i64] = &values[..];
@@ -247,7 +247,7 @@ fn reserve_and_clear_require_an_owned_vector_that_is_not_borrowed() {
         "cannot move an owner while it is borrowed",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let values: Vec<i64> = Vec.new();
             Vec.clear(&values)
         }",
@@ -255,17 +255,17 @@ fn reserve_and_clear_require_an_owned_vector_that_is_not_borrowed() {
     );
     rejects(
         "
-         fn reserve(values: Vec<i64>) -> Vec<i64> ! {panic} { Vec.reserve(values, 1) }
-         fn main() -> i64 ! {alloc, panic} { 42 }",
+         fn reserve(values: Vec<i64>) -> Vec<i64> ! {} { Vec.reserve(values, 1) }
+         fn main() -> i64 ! {alloc} { 42 }",
         "requires effects {alloc}",
     );
 }
 
 #[test]
 fn map_chain_interleaves_callbacks_and_reports_no_compiler_fusion() {
-    let source = "fn first(x: i64) -> i64 ! {io, panic} { print_i64(x); x + 10 }
-        fn second(x: i64) -> i64 ! {io, panic} { print_i64(x); x * 2 }
-        fn main() -> Unit ! {io, alloc, panic} {
+    let source = "fn first(x: i64) -> i64 ! {io} { print_i64(x); x + 10 }
+        fn second(x: i64) -> i64 ! {io} { print_i64(x); x * 2 }
+        fn main() -> Unit ! {io, alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             values = Vec.push(values, 2);
@@ -296,12 +296,12 @@ fn map_chain_interleaves_callbacks_and_reports_no_compiler_fusion() {
 #[test]
 fn map_chain_allows_wider_intermediate_ssa_layouts_with_a_narrow_final_result() {
     let stats = agrees(
-        "fn pair(x: i64) -> [i64; 2] ! {panic} { [x, x + 1] }
-         fn sum_pair(pair: [i64; 2]) -> i64 ! {panic} {
+        "fn pair(x: i64) -> [i64; 2] ! {} { [x, x + 1] }
+         fn sum_pair(pair: [i64; 2]) -> i64 ! {} {
             let [a, b] = pair;
             a + b
          }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             values = Vec.push(values, 2);
@@ -320,7 +320,7 @@ fn map_chain_rejects_widening_and_representation_changes() {
     rejects(
         "fn pair(x: i64) -> [i64; 2] ! {} { [x, x] }
          fn keep(pair: [i64; 2]) -> [i64; 2] ! {} { pair }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let values: Vec<[i64; 2]> = Vec.map_chain_in_place(values, pair, keep);
@@ -330,7 +330,7 @@ fn map_chain_rejects_widening_and_representation_changes() {
     );
     rejects(
         "fn id(x: i64) -> i64 ! {} { x }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let values: Vec<[i64; 2]> = Vec.map_chain_in_place(values, id, id);
@@ -343,9 +343,9 @@ fn map_chain_rejects_widening_and_representation_changes() {
 #[test]
 fn map_chain_checks_both_callback_signatures_and_reusable_values() {
     rejects(
-        "fn take_pair(pair: [i64; 2]) -> i64 ! {panic} { let [a, b] = pair; a + b }
+        "fn take_pair(pair: [i64; 2]) -> i64 ! {} { let [a, b] = pair; a + b }
          fn id(x: i64) -> i64 ! {} { x }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             Vec.map_chain_in_place(values, take_pair, id)
@@ -354,8 +354,8 @@ fn map_chain_checks_both_callback_signatures_and_reusable_values() {
     );
     rejects(
         "fn id(x: i64) -> i64 ! {} { x }
-         fn take_pair(pair: [i64; 2]) -> i64 ! {panic} { let [a, b] = pair; a + b }
-         fn main() -> i64 ! {alloc, panic} {
+         fn take_pair(pair: [i64; 2]) -> i64 ! {} { let [a, b] = pair; a + b }
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             Vec.map_chain_in_place(values, id, take_pair)
@@ -363,11 +363,11 @@ fn map_chain_checks_both_callback_signatures_and_reusable_values() {
         "second callback parameter [i64; 2] must accept i64",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
-            let f: once fn(i64) -> i64 ! {panic} = fn(x: i64) -> i64 ! {panic} { x + 1 };
-            let g: once fn(i64) -> i64 ! {panic} = fn(x: i64) -> i64 ! {panic} { x + 2 };
+            let f: once fn(i64) -> i64 ! {} = fn(x: i64) -> i64 ! {} { x + 1 };
+            let g: once fn(i64) -> i64 ! {} = fn(x: i64) -> i64 ! {} { x + 2 };
             Vec.map_chain_in_place(values, f, g)
          }",
         "once or linear-once callback cannot be reused",
@@ -376,7 +376,7 @@ fn map_chain_checks_both_callback_signatures_and_reusable_values() {
         "#[linear] enum Ticket { Live }
          fn make(x: i64) -> Ticket ! {} { Ticket.Live }
          fn keep(ticket: Ticket) -> Ticket ! {} { ticket }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let values = Vec.map_chain_in_place(values, make, keep);
@@ -389,7 +389,7 @@ fn map_chain_checks_both_callback_signatures_and_reusable_values() {
             Task.spawn(fn() -> i64 ! {suspend} { 1 })
          }
          fn id(x: i64) -> i64 ! {} { x }
-         fn main() -> i64 ! {alloc, panic, suspend} {
+         fn main() -> i64 ! {alloc, suspend} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let values = Vec.map_chain_in_place(values, id, spawn_one);
@@ -398,8 +398,8 @@ fn map_chain_checks_both_callback_signatures_and_reusable_values() {
         "a function cannot return a task handle",
     );
     rejects(
-        "fn noisy(x: i64) -> i64 ! {io, panic} { print_i64(x); x + 1 }
-         fn main() -> i64 ! {alloc, panic} {
+        "fn noisy(x: i64) -> i64 ! {io} { print_i64(x); x + 1 }
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             Vec.map_chain_in_place(values, noisy, noisy)
@@ -411,12 +411,12 @@ fn map_chain_checks_both_callback_signatures_and_reusable_values() {
 #[test]
 fn map_chain_callback_effects_are_required_independently_of_optimization() {
     rejects(
-        "fn make(x: i64) -> Box<i64> ! {alloc, panic} { Box.new(x) }
+        "fn make(x: i64) -> Box<i64> ! {alloc} { Box.new(x) }
          fn unwrap(owner: Box<i64>) -> i64 ! {} { Box.take(owner) }
-         fn chain(values: Vec<i64>) -> Vec<i64> ! {panic} {
+         fn chain(values: Vec<i64>) -> Vec<i64> ! {} {
             Vec.map_chain_in_place(values, make, unwrap)
          }
-         fn main() -> i64 ! {alloc, panic} { 42 }",
+         fn main() -> i64 ! {alloc} { 42 }",
         "requires effects {alloc}",
     );
     let stats = agrees(
@@ -425,7 +425,7 @@ fn map_chain_callback_effects_are_required_independently_of_optimization() {
          fn same(values: Vec<i64>) -> Vec<i64> ! {} {
             Vec.map_chain_in_place(values, id, id)
          }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 21);
             let values = same(values);
@@ -440,12 +440,12 @@ fn map_chain_callback_effects_are_required_independently_of_optimization() {
 #[test]
 fn map_chain_moves_owning_elements_through_the_intermediate_slot_once() {
     let stats = agrees(
-        "fn keep(owner: Box<i64>) -> Box<i64> ! {panic} {
+        "fn keep(owner: Box<i64>) -> Box<i64> ! {} {
             let n = Box.read(&owner);
             Box.reuse(owner, n + 1)
          }
          fn unwrap(owner: Box<i64>) -> i64 ! {} { Box.take(owner) }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<Box<i64>> = Vec.new();
             values = Vec.push(values, Box.new(1));
             values = Vec.push(values, Box.new(2));
@@ -466,14 +466,14 @@ fn empty_map_chain_still_evaluates_callback_expressions_once_left_to_right() {
     // owner is cleaned exactly once.
     let stats = agrees(
         "use std.result.Result;
-         fn bad() -> Result<fn(i64) -> i64 ! {panic}, i64> ! {} { Err(7) }
-         fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn work(r: Result<fn(i64) -> i64 ! {panic}, i64>) -> Result<i64, i64> ! {alloc, panic} {
+         fn bad() -> Result<fn(i64) -> i64 ! {}, i64> ! {} { Err(7) }
+         fn inc(x: i64) -> i64 ! {} { x + 1 }
+         fn work(r: Result<fn(i64) -> i64 ! {}, i64>) -> Result<i64, i64> ! {alloc} {
             let values: Vec<i64> = Vec.new();
             let mapped = Vec.map_chain_in_place(values, inc, r?);
             Ok(Vec.len(&mapped))
          }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             match work(bad()) {
                 Ok(value) => value,
                 Err(error) => error + 35,
@@ -488,15 +488,15 @@ fn empty_map_chain_still_evaluates_callback_expressions_once_left_to_right() {
     // the pending vector owner.
     let early = agrees(
         "use std.result.Result;
-         fn bad() -> Result<fn(i64) -> i64 ! {panic}, i64> ! {} { Err(3) }
-         fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn work(r: Result<fn(i64) -> i64 ! {panic}, i64>) -> Result<i64, i64> ! {alloc, panic} {
+         fn bad() -> Result<fn(i64) -> i64 ! {}, i64> ! {} { Err(3) }
+         fn inc(x: i64) -> i64 ! {} { x + 1 }
+         fn work(r: Result<fn(i64) -> i64 ! {}, i64>) -> Result<i64, i64> ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let mapped = Vec.map_chain_in_place(values, r?, inc);
             Ok(Vec.len(&mapped))
          }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             match work(bad()) {
                 Ok(value) => value,
                 Err(error) => error + 39,
@@ -515,7 +515,7 @@ fn automatic_pure_fusion_handles_owned_intermediates_without_a_new_guard() {
     // owner is a transient SSA value and is released exactly once either way.
     let source = "fn unwrap(owner: Box<i64>) -> i64 ! {} { Box.take(owner) }
         fn id(x: i64) -> i64 ! {} { x }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<Box<i64>> = Vec.new();
             values = Vec.push(values, Box.new(2));
             values = Vec.push(values, Box.new(3));
@@ -532,9 +532,9 @@ fn automatic_pure_fusion_handles_owned_intermediates_without_a_new_guard() {
 
     // An allocating intermediate callback is not pure, so the two maps stay
     // separate passes and the explicit map order is preserved.
-    let allocating = "fn make(x: i64) -> Box<i64> ! {alloc, panic} { Box.new(x) }
+    let allocating = "fn make(x: i64) -> Box<i64> ! {alloc} { Box.new(x) }
         fn unwrap(owner: Box<i64>) -> i64 ! {} { Box.take(owner) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 2);
             values = Vec.push(values, 3);
@@ -551,9 +551,9 @@ fn automatic_pure_fusion_handles_owned_intermediates_without_a_new_guard() {
 
 #[test]
 fn map_chain_does_not_flatten_a_nested_chain_automatically() {
-    let source = "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-        fn double(x: i64) -> i64 ! {panic} { x * 2 }
-        fn main() -> i64 ! {alloc, panic} {
+    let source = "fn inc(x: i64) -> i64 ! {} { x + 1 }
+        fn double(x: i64) -> i64 ! {} { x * 2 }
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let values = Vec.map_chain_in_place(
@@ -578,7 +578,7 @@ fn map_chain_does_not_flatten_a_nested_chain_automatically() {
 fn map_chain_must_consume_an_unborrowed_vector() {
     rejects(
         "fn id(x: i64) -> i64 ! {} { x }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let view: &[i64] = &values[..];
@@ -589,7 +589,7 @@ fn map_chain_must_consume_an_unborrowed_vector() {
     );
     rejects(
         "fn id(x: i64) -> i64 ! {} { x }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             Vec.map_chain_in_place(&values, id, id)

@@ -32,8 +32,7 @@ says the new truth. Limits are written as `reject` examples for that reason.
 that will change some rules below. Each chapter that is affected says so in a
 "Planned changes" note naming the plan node. The decided ones:
 
-- private functions will infer their effect rows (FND-ROWS-INFER); `panic`
-  leaves effect rows (FND-ROWS-PANIC);
+- private functions will infer their effect rows (FND-ROWS-INFER);
 - one reference type `&'a T` with lifetimes in types replaces today's separate
   slice, text and record references (FND-REF-*);
 - capturing closures that can be called more than once (FND-CLOSURE-*);

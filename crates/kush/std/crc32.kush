@@ -15,7 +15,7 @@ pub struct Table {
     entries: Vec<u32>,
 }
 
-pub fn table() -> Table ! {alloc, panic} {
+pub fn table() -> Table ! {alloc} {
     let mut entries: Vec<u32> = Vec.with_capacity(256);
     let mut n: u32 = 0;
     while n < 256 {
@@ -41,7 +41,7 @@ pub fn update(
     start: i64,
     end: i64,
     erased range: { 0 <= start && start <= end && end <= Bytes.len(data) },
-) -> u32 ! {panic} {
+) -> u32 ! {} {
     let entries = &table.entries;
     // Always true for a table from `table()` (the field is private); it lets
     // the loop index the table without bounds checks: `x & 255 <= 255`.
@@ -66,6 +66,6 @@ pub fn of(
     start: i64,
     end: i64,
     erased range: { 0 <= start && start <= end && end <= Bytes.len(data) },
-) -> u32 ! {panic} {
+) -> u32 ! {} {
     update(table, 0, data, start, end, _)
 }

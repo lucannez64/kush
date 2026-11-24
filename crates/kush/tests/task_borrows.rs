@@ -44,11 +44,11 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 #[test]
 fn scope_bodies_and_children_borrow_outside_views() {
     agrees(
-        "fn main() -> i64 ! {alloc, panic, suspend} {
+        "fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 2] = [40, 2];
             let view: &[i64] = &data[..];
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t = Task.spawn(fn() -> i64 ! {panic, suspend} { Task.yield(); Slice.get(view, 0) });
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t = Task.spawn(fn() -> i64 ! {suspend} { Task.yield(); Slice.get(view, 0) });
                 let own = Slice.get(view, 1);
                 match Task.join(t) { TaskExit.Completed(v) => v + own, TaskExit.Cancelled => 0 }
             })
@@ -59,12 +59,12 @@ fn scope_bodies_and_children_borrow_outside_views() {
     // Disjoint exclusive halves go to different children; the parent keeps
     // using a half it did not lend.
     agrees(
-        "fn main() -> i64 ! {alloc, panic, suspend} {
+        "fn main() -> i64 ! {alloc, suspend} {
             let mut data: [i64; 4] = [1, 2, 3, 4];
             let view: &mut [i64] = &mut data[..];
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let (left, right) = Slice.split_at_mut(view, 2);
-                Task.spawn(fn() -> Unit ! {panic, suspend} { Task.yield(); Slice.set(left, 0, 10); });
+                Task.spawn(fn() -> Unit ! {suspend} { Task.yield(); Slice.set(left, 0, 10); });
                 Slice.set(right, 0, 30);
             });
             data[0] + data[2]
@@ -74,13 +74,13 @@ fn scope_bodies_and_children_borrow_outside_views() {
     );
     // Shared views may be lent to many children, including from a loop.
     agrees(
-        "fn main() -> i64 ! {alloc, panic, suspend} {
+        "fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [1, 2, 3];
             let view: &[i64] = &data[..];
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let mut i = 0;
                 while i < 3 {
-                    Task.spawn(fn() -> i64 ! {panic} { Slice.get(view, 0) });
+                    Task.spawn(fn() -> i64 ! {} { Slice.get(view, 0) });
                     i = i + 1;
                 }
                 Slice.get(view, 2)
@@ -91,11 +91,11 @@ fn scope_bodies_and_children_borrow_outside_views() {
     );
     // Once the scope has joined its children, the owner is free again.
     agrees(
-        "fn main() -> i64 ! {alloc, panic, suspend} {
+        "fn main() -> i64 ! {alloc, suspend} {
             let owner: Vec<i64> = [7];
             let view: &[i64] = &owner[..];
-            let r = Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                Task.spawn(fn() -> i64 ! {panic} { Slice.get(view, 0) });
+            let r = Task.scope(fn() -> i64 ! {alloc, suspend} {
+                Task.spawn(fn() -> i64 ! {} { Slice.get(view, 0) });
                 1
             });
             drop(owner);
@@ -109,11 +109,11 @@ fn scope_bodies_and_children_borrow_outside_views() {
 #[test]
 fn children_cannot_borrow_storage_that_dies_before_the_final_join() {
     rejects(
-        "fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        "fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let local: [i64; 1] = [5];
                 let v: &[i64] = &local[..];
-                Task.spawn(fn() -> i64 ! {panic} { Slice.get(v, 0) });
+                Task.spawn(fn() -> i64 ! {} { Slice.get(v, 0) });
                 0
             })
         }",
@@ -121,11 +121,11 @@ fn children_cannot_borrow_storage_that_dies_before_the_final_join() {
     );
     // An owner moved into the scope body is owned by it, not by the caller.
     rejects(
-        "fn main() -> i64 ! {alloc, panic, suspend} {
+        "fn main() -> i64 ! {alloc, suspend} {
             let owner: Vec<i64> = [7];
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let v: &[i64] = &owner[..];
-                Task.spawn(fn() -> i64 ! {panic} { Slice.get(v, 0) });
+                Task.spawn(fn() -> i64 ! {} { Slice.get(v, 0) });
                 0
             })
         }",
@@ -137,12 +137,12 @@ fn children_cannot_borrow_storage_that_dies_before_the_final_join() {
 fn lent_views_stay_borrowed_for_the_rest_of_the_scope() {
     // A child reading through a reborrow keeps the parent from writing.
     rejects(
-        "fn main() -> i64 ! {alloc, panic, suspend} {
+        "fn main() -> i64 ! {alloc, suspend} {
             let mut data: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut data[..];
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let reader: &[i64] = &view[..];
-                Task.spawn(fn() -> i64 ! {panic} { Slice.get(reader, 0) });
+                Task.spawn(fn() -> i64 ! {} { Slice.get(reader, 0) });
                 Slice.set(view, 0, 9);
             });
             0
@@ -151,14 +151,14 @@ fn lent_views_stay_borrowed_for_the_rest_of_the_scope() {
     );
     // Two children cannot get overlapping exclusive views.
     rejects(
-        "fn main() -> i64 ! {alloc, panic, suspend} {
+        "fn main() -> i64 ! {alloc, suspend} {
             let mut data: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut data[..];
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let a: &mut [i64] = &mut view[0..1];
-                Task.spawn(fn() -> Unit ! {panic} { Slice.set(a, 0, 3); });
+                Task.spawn(fn() -> Unit ! {} { Slice.set(a, 0, 3); });
                 let b: &mut [i64] = &mut view[0..1];
-                Task.spawn(fn() -> Unit ! {panic} { Slice.set(b, 0, 4); });
+                Task.spawn(fn() -> Unit ! {} { Slice.set(b, 0, 4); });
             });
             0
         }",
@@ -166,12 +166,12 @@ fn lent_views_stay_borrowed_for_the_rest_of_the_scope() {
     );
     // The parent cannot reuse the split parent while a half is lent.
     rejects(
-        "fn main() -> i64 ! {alloc, panic, suspend} {
+        "fn main() -> i64 ! {alloc, suspend} {
             let mut data: [i64; 4] = [1, 2, 3, 4];
             let view: &mut [i64] = &mut data[..];
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let (left, right) = Slice.split_at_mut(view, 2);
-                Task.spawn(fn() -> Unit ! {panic} { Slice.set(left, 0, 10); });
+                Task.spawn(fn() -> Unit ! {} { Slice.set(left, 0, 10); });
                 Slice.set(view, 0, 99);
             });
             0

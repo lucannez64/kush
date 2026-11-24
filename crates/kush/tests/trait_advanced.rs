@@ -57,8 +57,8 @@ struct Point { x: i64 }
 trait Scaled {
     type Out;
     const FACTOR: i64;
-    fn scaled(self: Self) -> Self.Out ! {panic};
-    fn bumped(self: Self) -> Self.Out ! {panic} {
+    fn scaled(self: Self) -> Self.Out ! {};
+    fn bumped(self: Self) -> Self.Out ! {} {
         self.scaled() + Self.FACTOR
     }
 }
@@ -66,7 +66,7 @@ trait Scaled {
 impl Scaled for Point {
     type Out = i64;
     const FACTOR: i64 = 3;
-    fn scaled(self: Self) -> i64 ! {panic} { self.x * Self.FACTOR }
+    fn scaled(self: Self) -> i64 ! {} { self.x * Self.FACTOR }
 }
 "#;
 
@@ -75,7 +75,7 @@ fn associated_types_and_constants_project_through_impls() {
     agrees(
         &format!(
             "{SCALED}
-            fn main() -> i64 ! {{io, panic}} {{
+            fn main() -> i64 ! {{io}} {{
                 let point = Point {{ x: 4 }};
                 print_i64(point.scaled());
                 print_i64(point.bumped());
@@ -93,10 +93,10 @@ fn associated_projection_works_in_a_bounded_generic_result() {
     agrees(
         &format!(
             "{SCALED}
-            fn reveal<T: Scaled>(value: T) -> T.Out ! {{panic}} {{
+            fn reveal<T: Scaled>(value: T) -> T.Out ! {{}} {{
                 value.scaled()
             }}
-            fn main() -> i64 ! {{io, panic}} {{
+            fn main() -> i64 ! {{io}} {{
                 print_i64(reveal(Point {{ x: 5 }}));
                 0
             }}"
@@ -114,10 +114,10 @@ fn associated_constant_defaults_and_checked_arithmetic() {
         trait Limits {
             const BASE: i64;
             const DOUBLE: i64 = Self.BASE * 2;
-            fn value(self: Self) -> i64 ! {panic} { Self.DOUBLE }
+            fn value(self: Self) -> i64 ! {} { Self.DOUBLE }
         }
         impl Limits for Marker { const BASE: i64 = 21; }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let marker = Marker { tag: 0 };
             print_i64(marker.value());
             print_i64(Marker.DOUBLE);
@@ -150,11 +150,11 @@ fn generic_associated_constant_projections_select_the_impl() {
         r#"
         struct A { x: i64 }
         struct B { y: i64 }
-        trait Factor { const F: i64; fn value(self: Self) -> i64 ! {panic}; }
-        impl Factor for A { const F: i64 = 3; fn value(self: Self) -> i64 ! {panic} { self.x } }
-        impl Factor for B { const F: i64 = 4; fn value(self: Self) -> i64 ! {panic} { self.y } }
-        fn scaled<T: Factor>(value: T) -> i64 ! {panic} { value.value() * T.F }
-        fn main() -> i64 ! {io, panic} {
+        trait Factor { const F: i64; fn value(self: Self) -> i64 ! {}; }
+        impl Factor for A { const F: i64 = 3; fn value(self: Self) -> i64 ! {} { self.x } }
+        impl Factor for B { const F: i64 = 4; fn value(self: Self) -> i64 ! {} { self.y } }
+        fn scaled<T: Factor>(value: T) -> i64 ! {} { value.value() * T.F }
+        fn main() -> i64 ! {io} {
             print_i64(scaled(A { x: 2 }));
             print_i64(scaled(B { y: 2 }));
             0
@@ -169,19 +169,19 @@ fn associated_items_are_required_and_must_match_declarations() {
     rejects(
         r#"
         struct Point { x: i64 }
-        trait Show { type Out; fn show(self: Self) -> Self.Out ! {panic}; }
-        impl Show for Point { fn show(self: Self) -> i64 ! {panic} { self.x } }
+        trait Show { type Out; fn show(self: Self) -> Self.Out ! {}; }
+        impl Show for Point { fn show(self: Self) -> i64 ! {} { self.x } }
         fn main() -> i64 ! {} { 0 }"#,
         "missing associated type 'Out'",
     );
     rejects(
         r#"
         struct Point { x: i64 }
-        trait Show { type Out; fn show(self: Self) -> Self.Out ! {panic}; }
+        trait Show { type Out; fn show(self: Self) -> Self.Out ! {}; }
         impl Show for Point {
             type Out = i64;
             type Extra = Bool;
-            fn show(self: Self) -> i64 ! {panic} { self.x }
+            fn show(self: Self) -> i64 ! {} { self.x }
         }
         fn main() -> i64 ! {} { 0 }"#,
         "not declared by the implemented trait",
@@ -189,11 +189,11 @@ fn associated_items_are_required_and_must_match_declarations() {
     rejects(
         r#"
         struct Point { x: i64 }
-        trait Show { type Out; const LIMIT: i64; fn show(self: Self) -> Self.Out ! {panic}; }
+        trait Show { type Out; const LIMIT: i64; fn show(self: Self) -> Self.Out ! {}; }
         impl Show for Point {
             type Out = i64;
             const LIMIT: Bool = true;
-            fn show(self: Self) -> i64 ! {panic} { self.x }
+            fn show(self: Self) -> i64 ! {} { self.x }
         }
         fn main() -> i64 ! {} { 0 }"#,
         "must have the declared type i64",
@@ -213,10 +213,10 @@ fn associated_projection_must_agree_with_the_impl_method_result() {
     rejects(
         r#"
         struct Point { x: i64 }
-        trait Show { type Out; fn show(self: Self) -> Self.Out ! {panic}; }
+        trait Show { type Out; fn show(self: Self) -> Self.Out ! {}; }
         impl Show for Point {
             type Out = Bool;
-            fn show(self: Self) -> i64 ! {panic} { self.x }
+            fn show(self: Self) -> i64 ! {} { self.x }
         }
         fn main() -> i64 ! { } { 0 }"#,
         "does not match the trait signature exactly",
@@ -228,12 +228,12 @@ fn generic_impl_headers_specialize_methods_per_receiver() {
     agrees(
         r#"
         struct W<T> { value: T }
-        trait Show { type Out; fn show(self: Self) -> Self.Out ! {panic}; }
+        trait Show { type Out; fn show(self: Self) -> Self.Out ! {}; }
         impl<T> Show for W<T> {
             type Out = T;
-            fn show(self: Self) -> T ! {panic} { self.value }
+            fn show(self: Self) -> T ! {} { self.value }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             print_i64(W { value: 7 }.show());
             print_i64(W { value: 9 }.show());
             0
@@ -249,13 +249,13 @@ fn blanket_impls_discharge_their_bounds_per_specialization() {
         r#"
         struct Point { x: i64 }
         struct W<T> { value: T }
-        trait Show { fn show(self: Self) -> i64 ! {panic}; }
-        trait Loud { fn loud(self: Self) -> i64 ! {panic}; }
-        impl Show for Point { fn show(self: Self) -> i64 ! {panic} { self.x } }
+        trait Show { fn show(self: Self) -> i64 ! {}; }
+        trait Loud { fn loud(self: Self) -> i64 ! {}; }
+        impl Show for Point { fn show(self: Self) -> i64 ! {} { self.x } }
         impl<T: Show> Loud for W<T> {
-            fn loud(self: Self) -> i64 ! {panic} { self.value.show() * 2 }
+            fn loud(self: Self) -> i64 ! {} { self.value.show() * 2 }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             print_i64(W { value: Point { x: 5 } }.loud());
             0
         }"#,
@@ -266,12 +266,12 @@ fn blanket_impls_discharge_their_bounds_per_specialization() {
         r#"
         struct Other { x: i64 }
         struct W<T> { value: T }
-        trait Show { fn show(self: Self) -> i64 ! {panic}; }
-        trait Loud { fn loud(self: Self) -> i64 ! {panic}; }
+        trait Show { fn show(self: Self) -> i64 ! {}; }
+        trait Loud { fn loud(self: Self) -> i64 ! {}; }
         impl<T: Show> Loud for W<T> {
-            fn loud(self: Self) -> i64 ! {panic} { 1 }
+            fn loud(self: Self) -> i64 ! {} { 1 }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             print_i64(W { value: Other { x: 5 } }.loud());
             0
         }"#,
@@ -284,12 +284,12 @@ fn generic_trait_arguments_are_solved_by_the_impl_header() {
     agrees(
         r#"
         struct W<T> { value: T }
-        trait Convert<T> { type Out; fn render(self: Self) -> Self.Out ! {panic}; }
+        trait Convert<T> { type Out; fn render(self: Self) -> Self.Out ! {}; }
         impl<T> Convert<T> for W<T> {
             type Out = T;
-            fn render(self: Self) -> T ! {panic} { self.value }
+            fn render(self: Self) -> T ! {} { self.value }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let value = W { value: 12 };
             print_i64(value.Convert::<i64>.render());
             0
@@ -305,13 +305,13 @@ fn generic_impls_respect_borrowed_receivers_and_defaults() {
         r#"
         struct W<T> { value: T }
         trait Doubler {
-            fn base(self: &Self) -> i64 ! {panic};
-            fn doubled(self: &Self) -> i64 ! {panic} { 5 * 2 }
+            fn base(self: &Self) -> i64 ! {};
+            fn doubled(self: &Self) -> i64 ! {} { 5 * 2 }
         }
         impl<T> Doubler for W<T> {
-            fn base(self: &Self) -> i64 ! {panic} { 5 }
+            fn base(self: &Self) -> i64 ! {} { 5 }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let value = W { value: true };
             print_i64(value.doubled());
             0
@@ -322,9 +322,9 @@ fn generic_impls_respect_borrowed_receivers_and_defaults() {
     rejects(
         r#"
         struct W<T> { value: T }
-        trait Doubler { fn base(self: &Self) -> i64 ! {panic}; }
+        trait Doubler { fn base(self: &Self) -> i64 ! {}; }
         impl<T> Doubler for W<T> {
-            fn base(self: Self) -> i64 ! {panic} { 5 }
+            fn base(self: Self) -> i64 ! {} { 5 }
         }
         fn main() -> i64 ! {} { 0 }"#,
         "does not match the trait signature",
@@ -340,7 +340,7 @@ fn generic_methods_and_linear_results_compose_with_generic_impls() {
         impl<T> Pairing<T> for W<T> {
             fn pair<U>(self: Self, value: U) -> (T, U) ! {} { (self.value, value) }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let pair = W { value: 5 }.pair(true);
             print_i64(pair.0);
             0
@@ -351,11 +351,11 @@ fn generic_methods_and_linear_results_compose_with_generic_impls() {
     let stats = agrees(
         r#"
         struct W<T> { value: T }
-        trait Make { fn make(self: Self) -> Box<i64> @[1] ! {alloc, panic}; }
+        trait Make { fn make(self: Self) -> Box<i64> @[1] ! {alloc}; }
         impl<T> Make for W<T> {
-            fn make(self: Self) -> Box<i64> @[1] ! {alloc, panic} { Box.new(self.value) }
+            fn make(self: Self) -> Box<i64> @[1] ! {alloc} { Box.new(self.value) }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let owner = W { value: 3 }.make();
             print_i64(Box.take(owner));
             0
@@ -372,15 +372,15 @@ fn effect_exclusions_are_enforced_on_generic_impl_methods() {
         r#"
         struct W<T> { value: T }
         trait Apply {
-            fn apply<e: Effects - alloc>(self: Self, f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e};
+            fn apply<e: Effects - alloc>(self: Self, f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e};
         }
         impl<T> Apply for W<T> {
-            fn apply<e: Effects - alloc>(self: Self, f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+            fn apply<e: Effects - alloc>(self: Self, f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
                 f(x)
             }
         }
-        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-        fn main() -> i64 ! {io, panic} {
+        fn inc(x: i64) -> i64 ! {} { x + 1 }
+        fn main() -> i64 ! {io} {
             print_i64(W { value: true }.apply(inc, 4));
             0
         }"#,
@@ -391,15 +391,15 @@ fn effect_exclusions_are_enforced_on_generic_impl_methods() {
         r#"
         struct W<T> { value: T }
         trait Apply {
-            fn apply<e: Effects - alloc>(self: Self, f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e};
+            fn apply<e: Effects - alloc>(self: Self, f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e};
         }
         impl<T> Apply for W<T> {
-            fn apply<e: Effects - alloc>(self: Self, f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+            fn apply<e: Effects - alloc>(self: Self, f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
                 f(x)
             }
         }
-        fn make(name: String) -> i64 ! {alloc, panic} { name.len() }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn make(name: String) -> i64 ! {alloc} { name.len() }
+        fn main() -> i64 ! {io, alloc} {
             print_i64(W { value: true }.apply(make, 4));
             0
         }"#,
@@ -413,12 +413,12 @@ fn specialization_selects_the_unique_most_specific_impl() {
         r#"
         struct Point { x: i64 }
         struct Pair<T, U> { first: T, second: U }
-        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
-        impl<T> Tag for T { fn tag(self: Self) -> i64 ! {panic} { 1 } }
-        impl Tag for Point { fn tag(self: Self) -> i64 ! {panic} { 2 } }
-        impl<T, U> Tag for Pair<T, U> { fn tag(self: Self) -> i64 ! {panic} { 3 } }
-        impl<T> Tag for Pair<T, i64> { fn tag(self: Self) -> i64 ! {panic} { 4 } }
-        fn main() -> i64 ! {io, panic} {
+        trait Tag { fn tag(self: Self) -> i64 ! {}; }
+        impl<T> Tag for T { fn tag(self: Self) -> i64 ! {} { 1 } }
+        impl Tag for Point { fn tag(self: Self) -> i64 ! {} { 2 } }
+        impl<T, U> Tag for Pair<T, U> { fn tag(self: Self) -> i64 ! {} { 3 } }
+        impl<T> Tag for Pair<T, i64> { fn tag(self: Self) -> i64 ! {} { 4 } }
+        fn main() -> i64 ! {io} {
             print_i64(Point { x: 1 }.tag());
             print_i64(Pair { first: true, second: 2 }.tag());
             print_i64(Pair { first: 1, second: true }.tag());
@@ -434,18 +434,18 @@ fn coherence_rejects_duplicate_and_incomparable_overlaps() {
     rejects(
         r#"
         struct W<T> { value: T }
-        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
-        impl<T> Tag for W<T> { fn tag(self: Self) -> i64 ! {panic} { 1 } }
-        impl<U> Tag for W<U> { fn tag(self: Self) -> i64 ! {panic} { 2 } }
+        trait Tag { fn tag(self: Self) -> i64 ! {}; }
+        impl<T> Tag for W<T> { fn tag(self: Self) -> i64 ! {} { 1 } }
+        impl<U> Tag for W<U> { fn tag(self: Self) -> i64 ! {} { 2 } }
         fn main() -> i64 ! {} { 0 }"#,
         "duplicate implementation",
     );
     rejects(
         r#"
         struct Pair<T, U> { first: T, second: U }
-        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
-        impl<T> Tag for Pair<T, i64> { fn tag(self: Self) -> i64 ! {panic} { 1 } }
-        impl<T> Tag for Pair<i64, T> { fn tag(self: Self) -> i64 ! {panic} { 2 } }
+        trait Tag { fn tag(self: Self) -> i64 ! {}; }
+        impl<T> Tag for Pair<T, i64> { fn tag(self: Self) -> i64 ! {} { 1 } }
+        impl<T> Tag for Pair<i64, T> { fn tag(self: Self) -> i64 ! {} { 2 } }
         fn main() -> i64 ! {} { 0 }"#,
         "incomparable",
     );
@@ -459,13 +459,13 @@ fn associated_type_defaults_are_inherited_and_can_chain() {
         trait Scaled {
             type Base = i64;
             type Out = Self.Base;
-            fn scaled(self: Self) -> Self.Out ! {panic};
+            fn scaled(self: Self) -> Self.Out ! {};
         }
         impl Scaled for Point {
             type Base = i64;
-            fn scaled(self: Self) -> i64 ! {panic} { self.x * 3 }
+            fn scaled(self: Self) -> i64 ! {} { self.x * 3 }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 4 };
             print_i64(point.scaled());
             0
@@ -482,20 +482,20 @@ fn associated_type_defaults_substitute_trait_arguments_and_may_be_overridden() {
         struct Point { x: i64 }
         trait Convert<T> {
             type Out = T;
-            fn render(self: Self) -> Self.Out ! {panic};
+            fn render(self: Self) -> Self.Out ! {};
         }
         impl Convert<i64> for Point {
-            fn render(self: Self) -> i64 ! {panic} { self.x }
+            fn render(self: Self) -> i64 ! {} { self.x }
         }
         trait Flagged {
             type Out = i64;
-            fn flagged(self: Self) -> Self.Out ! {panic};
+            fn flagged(self: Self) -> Self.Out ! {};
         }
         impl Flagged for Point {
             type Out = Bool;
-            fn flagged(self: Self) -> Bool ! {panic} { self.x == 0 }
+            fn flagged(self: Self) -> Bool ! {} { self.x == 0 }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 9 };
             print_i64(point.Convert::<i64>.render());
             if point.flagged() { print_i64(1); } else { print_i64(0); }
@@ -514,11 +514,11 @@ fn associated_type_defaults_agree_across_trait_object_members() {
         struct B { y: i64 }
         trait Show {
             type Out = i64;
-            fn show(self: Self) -> Self.Out ! {panic};
+            fn show(self: Self) -> Self.Out ! {};
         }
-        impl Show for A { fn show(self: Self) -> i64 ! {panic} { self.x } }
-        impl Show for B { fn show(self: Self) -> i64 ! {panic} { self.y } }
-        fn main() -> i64 ! {io, panic} {
+        impl Show for A { fn show(self: Self) -> i64 ! {} { self.x } }
+        impl Show for B { fn show(self: Self) -> i64 ! {} { self.y } }
+        fn main() -> i64 ! {io} {
             let object: dyn Show = B { y: 7 };
             print_i64(object.show());
             0
@@ -533,16 +533,16 @@ fn associated_type_default_cycles_and_invalid_defaults_are_rejected() {
     rejects(
         r#"
         struct Point { x: i64 }
-        trait Bad { type A = Self.B; type B = Self.A; fn value(self: Self) -> Self.A ! {panic}; }
-        impl Bad for Point { fn value(self: Self) -> i64 ! {panic} { self.x } }
+        trait Bad { type A = Self.B; type B = Self.A; fn value(self: Self) -> Self.A ! {}; }
+        impl Bad for Point { fn value(self: Self) -> i64 ! {} { self.x } }
         fn main() -> i64 ! {} { 0 }"#,
         "associated type default cycle",
     );
     rejects(
         r#"
         struct Point { x: i64 }
-        trait Bad { type A = Self.Missing; fn value(self: Self) -> Self.A ! {panic}; }
-        impl Bad for Point { fn value(self: Self) -> i64 ! {panic} { self.x } }
+        trait Bad { type A = Self.Missing; fn value(self: Self) -> Self.A ! {}; }
+        impl Bad for Point { fn value(self: Self) -> i64 ! {} { self.x } }
         fn main() -> i64 ! {} { 0 }"#,
         "not a declared associated type",
     );
@@ -561,16 +561,16 @@ fn impl_headers_may_carry_natural_and_grade_parameters() {
     agrees(
         r#"
         struct Buffer<N: Nat> { data: [i64; N] }
-        trait First { fn first(self: Self) -> i64 ! {panic}; }
+        trait First { fn first(self: Self) -> i64 ! {}; }
         impl<N: Nat> First for Buffer<N> {
-            fn first(self: Self) -> i64 ! {panic} { self.data[0] }
+            fn first(self: Self) -> i64 ! {} { self.data[0] }
         }
         struct Point { x: i64 }
-        trait Weighted<G: Grade> { fn weighted(self: Self) -> i64 ! {panic}; }
+        trait Weighted<G: Grade> { fn weighted(self: Self) -> i64 ! {}; }
         impl<G: Grade> Weighted<G> for Point {
-            fn weighted(self: Self) -> i64 ! {panic} { self.x }
+            fn weighted(self: Self) -> i64 ! {} { self.x }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let buffer: Buffer<3> = Buffer { data: [7, 8, 9] };
             print_i64(buffer.first());
             let point = Point { x: 5 };
@@ -588,11 +588,11 @@ fn impl_headers_solve_natural_trait_arguments_from_the_receiver() {
     agrees(
         r#"
         struct Buffer<N: Nat> { data: [i64; N] }
-        trait At<N: Nat> { fn value(self: Self) -> i64 ! {panic}; }
+        trait At<N: Nat> { fn value(self: Self) -> i64 ! {}; }
         impl<N: Nat> At<N> for Buffer<N> {
-            fn value(self: Self) -> i64 ! {panic} { self.data[0] }
+            fn value(self: Self) -> i64 ! {} { self.data[0] }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let buffer: Buffer<2> = Buffer { data: [11, 12] };
             print_i64(buffer.At::<2>.value());
             0
@@ -607,16 +607,16 @@ fn impl_parameter_categories_are_validated() {
     rejects(
         r#"
         struct Buffer<N: Nat> { data: [i64; N] }
-        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
-        impl<N: Nat, M: Nat> Tag for Buffer<N> { fn tag(self: Self) -> i64 ! {panic} { 1 } }
+        trait Tag { fn tag(self: Self) -> i64 ! {}; }
+        impl<N: Nat, M: Nat> Tag for Buffer<N> { fn tag(self: Self) -> i64 ! {} { 1 } }
         fn main() -> i64 ! {} { 0 }"#,
         "impl parameter 'M' is unconstrained",
     );
     rejects(
         r#"
         struct Point { x: i64 }
-        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
-        impl<N> Tag for Point { fn tag(self: Self) -> i64 ! {panic} { 1 } }
+        trait Tag { fn tag(self: Self) -> i64 ! {}; }
+        impl<N> Tag for Point { fn tag(self: Self) -> i64 ! {} { 1 } }
         fn main() -> i64 ! {} { 0 }"#,
         "unconstrained",
     );
@@ -629,19 +629,19 @@ fn mutable_dynamic_dispatch_writes_back_to_the_object_local() {
         struct Counter { value: i64 }
         struct Offset { value: i64 }
         trait Bump {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic};
-            fn current(self: &Self) -> i64 ! {panic};
+            fn bump(self: &mut Self, by: i64) -> Unit ! {};
+            fn current(self: &Self) -> i64 ! {};
         }
         impl Bump for Counter {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by; }
-            fn current(self: &Self) -> i64 ! {panic} { self.value }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} { self.value = self.value + by; }
+            fn current(self: &Self) -> i64 ! {} { self.value }
         }
         impl Bump for Offset {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by * 10; }
-            fn current(self: &Self) -> i64 ! {panic} { self.value }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} { self.value = self.value + by * 10; }
+            fn current(self: &Self) -> i64 ! {} { self.value }
         }
-        fn make() -> dyn Bump ! {panic} { Counter { value: 10 } }
-        fn main() -> i64 ! {io, panic} {
+        fn make() -> dyn Bump ! {} { Counter { value: 10 } }
+        fn main() -> i64 ! {io} {
             let mut object: dyn Bump = Counter { value: 1 };
             object.bump(2);
             print_i64(object.current());
@@ -664,11 +664,11 @@ fn stored_shared_borrowed_trait_objects_dispatch_read_only() {
         r#"
         struct Point { x: i64 }
         struct Flag { on: Bool }
-        trait Describe { fn describe(self: &Self) -> i64 ! {panic}; }
-        impl Describe for Point { fn describe(self: &Self) -> i64 ! {panic} { self.x } }
-        impl Describe for Flag { fn describe(self: &Self) -> i64 ! {panic} { if self.on { 1 } else { 0 } } }
-        fn read(object: &dyn Describe) -> i64 ! {panic} { object.describe() }
-        fn main() -> i64 ! {io, panic} {
+        trait Describe { fn describe(self: &Self) -> i64 ! {}; }
+        impl Describe for Point { fn describe(self: &Self) -> i64 ! {} { self.x } }
+        impl Describe for Flag { fn describe(self: &Self) -> i64 ! {} { if self.on { 1 } else { 0 } } }
+        fn read(object: &dyn Describe) -> i64 ! {} { object.describe() }
+        fn main() -> i64 ! {io} {
             let point: dyn Describe = Point { x: 7 };
             let reference: &dyn Describe = &point;
             print_i64(reference.describe());
@@ -694,22 +694,22 @@ fn stored_mutable_borrowed_trait_objects_write_through_the_reference() {
         struct Counter { value: i64 }
         struct Offset { value: i64 }
         trait Bump {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic};
-            fn current(self: &Self) -> i64 ! {panic};
+            fn bump(self: &mut Self, by: i64) -> Unit ! {};
+            fn current(self: &Self) -> i64 ! {};
         }
         impl Bump for Counter {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by; }
-            fn current(self: &Self) -> i64 ! {panic} { self.value }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} { self.value = self.value + by; }
+            fn current(self: &Self) -> i64 ! {} { self.value }
         }
         impl Bump for Offset {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by * 10; }
-            fn current(self: &Self) -> i64 ! {panic} { self.value }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} { self.value = self.value + by * 10; }
+            fn current(self: &Self) -> i64 ! {} { self.value }
         }
-        fn bump_twice(object: &mut dyn Bump) -> Unit ! {panic} {
+        fn bump_twice(object: &mut dyn Bump) -> Unit ! {} {
             object.bump(1);
             object.bump(2);
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut object: dyn Bump = Counter { value: 1 };
             let reference: &mut dyn Bump = &mut object;
             reference.bump(2);
@@ -739,10 +739,10 @@ fn borrowed_trait_object_boundaries_are_explicit() {
         r#"
         struct Text { name: String }
         struct Other { name: String }
-        trait Consume { fn consume(self: Self) -> i64 ! {panic}; }
-        impl Consume for Text { fn consume(self: Self) -> i64 ! {panic} { 1 } }
-        impl Consume for Other { fn consume(self: Self) -> i64 ! {panic} { 2 } }
-        fn main() -> i64 ! {io, alloc, panic} {
+        trait Consume { fn consume(self: Self) -> i64 ! {}; }
+        impl Consume for Text { fn consume(self: Self) -> i64 ! {} { 1 } }
+        impl Consume for Other { fn consume(self: Self) -> i64 ! {} { 2 } }
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Consume = Text { name: "x" };
             let reference: &dyn Consume = &object;
             print_i64(reference.consume());
@@ -754,10 +754,10 @@ fn borrowed_trait_object_boundaries_are_explicit() {
         r#"
         struct Counter { value: i64 }
         struct Other { value: i64 }
-        trait Bump { fn bump(self: &mut Self) -> Unit ! {panic}; }
-        impl Bump for Counter { fn bump(self: &mut Self) -> Unit ! {panic} { self.value = self.value + 1; } }
-        impl Bump for Other { fn bump(self: &mut Self) -> Unit ! {panic} { self.value = self.value + 2; } }
-        fn main() -> i64 ! {panic} {
+        trait Bump { fn bump(self: &mut Self) -> Unit ! {}; }
+        impl Bump for Counter { fn bump(self: &mut Self) -> Unit ! {} { self.value = self.value + 1; } }
+        impl Bump for Other { fn bump(self: &mut Self) -> Unit ! {} { self.value = self.value + 2; } }
+        fn main() -> i64 ! {} {
             let object: dyn Bump = Counter { value: 1 };
             let reference: &dyn Bump = &object;
             reference.bump();
@@ -769,10 +769,10 @@ fn borrowed_trait_object_boundaries_are_explicit() {
         r#"
         struct Counter { value: i64 }
         struct Other { value: i64 }
-        trait Consume { fn consume(self: Self) -> i64 ! {panic}; }
-        impl Consume for Counter { fn consume(self: Self) -> i64 ! {panic} { self.value } }
-        impl Consume for Other { fn consume(self: Self) -> i64 ! {panic} { self.value } }
-        fn main() -> i64 ! {panic} {
+        trait Consume { fn consume(self: Self) -> i64 ! {}; }
+        impl Consume for Counter { fn consume(self: Self) -> i64 ! {} { self.value } }
+        impl Consume for Other { fn consume(self: Self) -> i64 ! {} { self.value } }
+        fn main() -> i64 ! {} {
             let object: dyn Consume = Counter { value: 1 };
             let reference: &dyn Consume = &object;
             reference.consume()
@@ -788,18 +788,18 @@ fn mutable_object_dispatch_preserves_owning_member_cleanup() {
         struct Text { name: String, count: i64 }
         struct Blob { name: String, count: i64 }
         trait Bump {
-            fn bump(self: &mut Self) -> i64 ! {panic};
-            fn make(self: &mut Self) -> Box<i64> ! {alloc, panic};
+            fn bump(self: &mut Self) -> i64 ! {};
+            fn make(self: &mut Self) -> Box<i64> ! {alloc};
         }
         impl Bump for Text {
-            fn bump(self: &mut Self) -> i64 ! {panic} { self.count = self.count + 1; self.count }
-            fn make(self: &mut Self) -> Box<i64> ! {alloc, panic} { Box.new(self.count) }
+            fn bump(self: &mut Self) -> i64 ! {} { self.count = self.count + 1; self.count }
+            fn make(self: &mut Self) -> Box<i64> ! {alloc} { Box.new(self.count) }
         }
         impl Bump for Blob {
-            fn bump(self: &mut Self) -> i64 ! {panic} { self.count = self.count + 2; self.count }
-            fn make(self: &mut Self) -> Box<i64> ! {alloc, panic} { Box.new(self.count) }
+            fn bump(self: &mut Self) -> i64 ! {} { self.count = self.count + 2; self.count }
+            fn make(self: &mut Self) -> Box<i64> ! {alloc} { Box.new(self.count) }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut text: dyn Bump = Text { name: "x", count: 1 };
             print_i64(text.bump());
             print_i64(Box.take(text.make()));
@@ -825,11 +825,11 @@ fn associated_constants_may_be_tuples_and_inline_arrays() {
             const PAIR: (i64, Bool);
             const ROWS: [i64; 3] = [1, 2, 3];
             const ALIAS: [i64; 3] = Self.ROWS;
-            fn first(self: Self) -> i64 ! {panic} { let rows = Self.ALIAS; rows[0] }
-            fn flag(self: Self) -> Bool ! {panic} { let pair = Self.PAIR; pair.1 }
+            fn first(self: Self) -> i64 ! {} { let rows = Self.ALIAS; rows[0] }
+            fn flag(self: Self) -> Bool ! {} { let pair = Self.PAIR; pair.1 }
         }
         impl Table for Marker { const PAIR: (i64, Bool) = (9, true); }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let marker = Marker { tag: 0 };
             print_i64(Marker.ROWS[1]);
             print_i64(marker.first());
@@ -866,11 +866,11 @@ fn closed_world_trait_objects_dispatch_and_clean_up_ownership() {
         r#"
         struct Text { name: String }
         struct Num { value: i64 }
-        trait Size { fn size(self: Self) -> i64 ! {panic}; }
-        impl Size for Text { fn size(self: Self) -> i64 ! {panic} { let Text { name } = self; name.len() } }
-        impl Size for Num { fn size(self: Self) -> i64 ! {panic} { self.value } }
-        fn measure(object: dyn Size) -> i64 ! {panic} { object.size() }
-        fn main() -> i64 ! {io, panic, alloc} {
+        trait Size { fn size(self: Self) -> i64 ! {}; }
+        impl Size for Text { fn size(self: Self) -> i64 ! {} { let Text { name } = self; name.len() } }
+        impl Size for Num { fn size(self: Self) -> i64 ! {} { self.value } }
+        fn measure(object: dyn Size) -> i64 ! {} { object.size() }
+        fn main() -> i64 ! {io, alloc} {
             print_i64(measure(Text { name: "hello" }));
             print_i64(measure(Num { value: 8 }));
             0
@@ -888,10 +888,10 @@ fn shared_receiver_objects_are_copyable_and_reusable() {
         r#"
         struct Point { x: i64 }
         struct Flag { on: Bool }
-        trait Describe { fn describe(self: &Self) -> i64 ! {panic}; }
-        impl Describe for Point { fn describe(self: &Self) -> i64 ! {panic} { self.x } }
-        impl Describe for Flag { fn describe(self: &Self) -> i64 ! {panic} { if self.on { 1 } else { 0 } } }
-        fn main() -> i64 ! {io, panic} {
+        trait Describe { fn describe(self: &Self) -> i64 ! {}; }
+        impl Describe for Point { fn describe(self: &Self) -> i64 ! {} { self.x } }
+        impl Describe for Flag { fn describe(self: &Self) -> i64 ! {} { if self.on { 1 } else { 0 } } }
+        fn main() -> i64 ! {io} {
             let object: dyn Describe = Point { x: 4 };
             print_i64(object.describe());
             print_i64(object.describe());
@@ -908,11 +908,11 @@ fn trait_objects_with_arguments_and_effects_dispatch_by_alternative() {
         r#"
         struct P { x: i64 }
         struct Q { y: i64 }
-        trait Combine { fn combine(self: Self, other: i64) -> i64 ! {panic}; }
-        impl Combine for P { fn combine(self: Self, other: i64) -> i64 ! {panic} { self.x + other } }
-        impl Combine for Q { fn combine(self: Self, other: i64) -> i64 ! {panic} { self.y * other } }
-        fn apply(object: dyn Combine, value: i64) -> i64 ! {panic} { object.combine(value) }
-        fn main() -> i64 ! {io, panic} {
+        trait Combine { fn combine(self: Self, other: i64) -> i64 ! {}; }
+        impl Combine for P { fn combine(self: Self, other: i64) -> i64 ! {} { self.x + other } }
+        impl Combine for Q { fn combine(self: Self, other: i64) -> i64 ! {} { self.y * other } }
+        fn apply(object: dyn Combine, value: i64) -> i64 ! {} { object.combine(value) }
+        fn main() -> i64 ! {io} {
             print_i64(apply(P { x: 3 }, 4));
             print_i64(apply(Q { y: 3 }, 4));
             0
@@ -928,10 +928,10 @@ fn dynamic_methods_may_return_affine_owning_values() {
         r#"
         struct A { x: i64 }
         struct B { y: i64 }
-        trait Make { fn make(self: Self) -> Box<i64> ! {alloc, panic}; }
-        impl Make for A { fn make(self: Self) -> Box<i64> ! {alloc, panic} { Box.new(self.x) } }
-        impl Make for B { fn make(self: Self) -> Box<i64> ! {alloc, panic} { Box.new(self.y) } }
-        fn main() -> i64 ! {io, alloc, panic} {
+        trait Make { fn make(self: Self) -> Box<i64> ! {alloc}; }
+        impl Make for A { fn make(self: Self) -> Box<i64> ! {alloc} { Box.new(self.x) } }
+        impl Make for B { fn make(self: Self) -> Box<i64> ! {alloc} { Box.new(self.y) } }
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Make = A { x: 4 };
             print_i64(Box.take(object.make()));
             0
@@ -948,10 +948,10 @@ fn object_methods_may_project_a_shared_associated_type() {
         r#"
         struct A { x: i64 }
         struct B { y: i64 }
-        trait Show { type Out; fn show(self: Self) -> Self.Out ! {panic}; }
-        impl Show for A { type Out = i64; fn show(self: Self) -> i64 ! {panic} { self.x } }
-        impl Show for B { type Out = i64; fn show(self: Self) -> i64 ! {panic} { self.y } }
-        fn main() -> i64 ! {io, panic} {
+        trait Show { type Out; fn show(self: Self) -> Self.Out ! {}; }
+        impl Show for A { type Out = i64; fn show(self: Self) -> i64 ! {} { self.x } }
+        impl Show for B { type Out = i64; fn show(self: Self) -> i64 ! {} { self.y } }
+        fn main() -> i64 ! {io} {
             let a: dyn Show = A { x: 5 };
             let b: dyn Show = B { y: 6 };
             print_i64(a.show());
@@ -971,10 +971,10 @@ fn object_safety_rejections_are_explicit() {
         r#"
         struct A { x: i64 }
         struct B { y: i64 }
-        trait Convert { fn make(self: Self, value: [Self; 2]) -> i64 ! {panic}; }
-        impl Convert for A { fn make(self: Self, value: [Self; 2]) -> i64 ! {panic} { self.x } }
-        impl Convert for B { fn make(self: Self, value: [Self; 2]) -> i64 ! {panic} { self.y } }
-        fn main() -> i64 ! {panic} {
+        trait Convert { fn make(self: Self, value: [Self; 2]) -> i64 ! {}; }
+        impl Convert for A { fn make(self: Self, value: [Self; 2]) -> i64 ! {} { self.x } }
+        impl Convert for B { fn make(self: Self, value: [Self; 2]) -> i64 ! {} { self.y } }
+        fn main() -> i64 ! {} {
             let object: dyn Convert = A { x: 1 };
             0
         }"#,
@@ -984,10 +984,10 @@ fn object_safety_rejections_are_explicit() {
         r#"
         struct A { x: i64 }
         struct B { y: i64 }
-        trait Convert { type Out; fn make(self: Self) -> i64 ! {panic}; }
-        impl Convert for A { type Out = i64; fn make(self: Self) -> i64 ! {panic} { self.x } }
-        impl Convert for B { type Out = Bool; fn make(self: Self) -> i64 ! {panic} { self.y } }
-        fn main() -> i64 ! {panic} {
+        trait Convert { type Out; fn make(self: Self) -> i64 ! {}; }
+        impl Convert for A { type Out = i64; fn make(self: Self) -> i64 ! {} { self.x } }
+        impl Convert for B { type Out = Bool; fn make(self: Self) -> i64 ! {} { self.y } }
+        fn main() -> i64 ! {} {
             let object: dyn Convert = A { x: 1 };
             0
         }"#,
@@ -995,8 +995,8 @@ fn object_safety_rejections_are_explicit() {
     );
     rejects(
         r#"
-        trait Empty { fn value(self: Self) -> i64 ! {panic}; }
-        fn main() -> i64 ! {panic} {
+        trait Empty { fn value(self: Self) -> i64 ! {}; }
+        fn main() -> i64 ! {} {
             let object: dyn Empty = 1;
             0
         }"#,
@@ -1010,13 +1010,13 @@ fn object_traits_sharing_members_require_qualification_for_same_names() {
         r#"
         struct Point { x: i64 }
         struct Flag { on: Bool }
-        trait A { fn value(self: Self) -> i64 ! {panic}; }
-        trait B { fn value(self: Self) -> i64 ! {panic}; }
-        impl A for Point { fn value(self: Self) -> i64 ! {panic} { self.x } }
-        impl B for Point { fn value(self: Self) -> i64 ! {panic} { self.x + 1 } }
-        impl A for Flag { fn value(self: Self) -> i64 ! {panic} { 2 } }
-        impl B for Flag { fn value(self: Self) -> i64 ! {panic} { 3 } }
-        fn main() -> i64 ! {io, panic} {
+        trait A { fn value(self: Self) -> i64 ! {}; }
+        trait B { fn value(self: Self) -> i64 ! {}; }
+        impl A for Point { fn value(self: Self) -> i64 ! {} { self.x } }
+        impl B for Point { fn value(self: Self) -> i64 ! {} { self.x + 1 } }
+        impl A for Flag { fn value(self: Self) -> i64 ! {} { 2 } }
+        impl B for Flag { fn value(self: Self) -> i64 ! {} { 3 } }
+        fn main() -> i64 ! {io} {
             let object: dyn A = Point { x: 5 };
             print_i64(object.A.value());
             print_i64(object.B.value());
@@ -1029,13 +1029,13 @@ fn object_traits_sharing_members_require_qualification_for_same_names() {
         r#"
         struct Point { x: i64 }
         struct Flag { on: Bool }
-        trait A { fn value(self: Self) -> i64 ! {panic}; }
-        trait B { fn value(self: Self) -> i64 ! {panic}; }
-        impl A for Point { fn value(self: Self) -> i64 ! {panic} { self.x } }
-        impl B for Point { fn value(self: Self) -> i64 ! {panic} { self.x + 1 } }
-        impl A for Flag { fn value(self: Self) -> i64 ! {panic} { 2 } }
-        impl B for Flag { fn value(self: Self) -> i64 ! {panic} { 3 } }
-        fn main() -> i64 ! {panic} {
+        trait A { fn value(self: Self) -> i64 ! {}; }
+        trait B { fn value(self: Self) -> i64 ! {}; }
+        impl A for Point { fn value(self: Self) -> i64 ! {} { self.x } }
+        impl B for Point { fn value(self: Self) -> i64 ! {} { self.x + 1 } }
+        impl A for Flag { fn value(self: Self) -> i64 ! {} { 2 } }
+        impl B for Flag { fn value(self: Self) -> i64 ! {} { 3 } }
+        fn main() -> i64 ! {} {
             let object: dyn A = Point { x: 5 };
             object.value()
         }"#,
@@ -1049,10 +1049,10 @@ fn generic_trait_objects_use_one_finite_specialization() {
         r#"
         struct A { x: i64 }
         struct B { y: i64 }
-        trait Convert<T> { fn render(self: Self) -> T ! {panic}; }
-        impl Convert<i64> for A { fn render(self: Self) -> i64 ! {panic} { self.x } }
-        impl Convert<i64> for B { fn render(self: Self) -> i64 ! {panic} { self.y } }
-        fn main() -> i64 ! {io, panic} {
+        trait Convert<T> { fn render(self: Self) -> T ! {}; }
+        impl Convert<i64> for A { fn render(self: Self) -> i64 ! {} { self.x } }
+        impl Convert<i64> for B { fn render(self: Self) -> i64 ! {} { self.y } }
+        fn main() -> i64 ! {io} {
             let object: dyn Convert<i64> = A { x: 11 };
             print_i64(object.render());
             0
@@ -1068,13 +1068,13 @@ fn trait_object_result_is_an_ordinary_union_value() {
         r#"
         struct Point { x: i64 }
         struct Flag { on: Bool }
-        trait Describe { fn describe(self: Self) -> i64 ! {panic}; }
-        impl Describe for Point { fn describe(self: Self) -> i64 ! {panic} { self.x } }
-        impl Describe for Flag { fn describe(self: Self) -> i64 ! {panic} { if self.on { 1 } else { 0 } } }
-        fn make(flag: Bool) -> dyn Describe ! {panic} {
+        trait Describe { fn describe(self: Self) -> i64 ! {}; }
+        impl Describe for Point { fn describe(self: Self) -> i64 ! {} { self.x } }
+        impl Describe for Flag { fn describe(self: Self) -> i64 ! {} { if self.on { 1 } else { 0 } } }
+        fn make(flag: Bool) -> dyn Describe ! {} {
             if flag { Point { x: 6 } } else { Flag { on: true } }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             print_i64(make(true).describe());
             print_i64(make(false).describe());
             0
@@ -1117,22 +1117,22 @@ fn mutable_dynamic_receivers_require_mutable_places_and_exclude_argument_aliases
         struct Counter { value: i64 }
         struct Other { value: i64 }
         trait Bump {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic};
-            fn current(self: &Self) -> i64 ! {panic};
+            fn bump(self: &mut Self, by: i64) -> Unit ! {};
+            fn current(self: &Self) -> i64 ! {};
         }
         impl Bump for Counter {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by; }
-            fn current(self: &Self) -> i64 ! {panic} { self.value }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} { self.value = self.value + by; }
+            fn current(self: &Self) -> i64 ! {} { self.value }
         }
         impl Bump for Other {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by; }
-            fn current(self: &Self) -> i64 ! {panic} { self.value }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} { self.value = self.value + by; }
+            fn current(self: &Self) -> i64 ! {} { self.value }
         }
     "#;
     rejects(
         &format!(
             "{definitions}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let object: dyn Bump = Counter {{value: 1}};
                 object.bump(2); object.current()
             }}"
@@ -1147,7 +1147,7 @@ fn mutable_dynamic_receivers_require_mutable_places_and_exclude_argument_aliases
         rejects(
             &format!(
                 "{definitions}
-                fn main() -> i64 ! {{panic}} {{
+                fn main() -> i64 ! {{}} {{
                     let mut object: dyn Bump = Counter {{value: 1}};
                     object.bump({{{later}}}); object.current()
                 }}"
@@ -1158,7 +1158,7 @@ fn mutable_dynamic_receivers_require_mutable_places_and_exclude_argument_aliases
     rejects(
         &format!(
             "{definitions}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let mut object: dyn Bump = Counter {{value: 1}};
                 let reference: &mut dyn Bump = &mut object;
                 reference.bump({{reference.bump(10); 2}});
@@ -1170,7 +1170,7 @@ fn mutable_dynamic_receivers_require_mutable_places_and_exclude_argument_aliases
     agrees(
         &format!(
             "{definitions}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let mut object: dyn Bump = Counter {{value: 1}};
                 object.bump({{let amount = 2; amount}});
                 let reference: &mut dyn Bump = &mut object;
@@ -1188,15 +1188,15 @@ fn shared_dynamic_receivers_remain_borrowed_through_later_arguments() {
     let definitions = r#"
         struct Counter { value: i64 }
         struct Other { value: i64 }
-        trait Read { fn inspect(self: &Self, extra: i64) -> i64 ! {panic}; }
-        impl Read for Counter { fn inspect(self: &Self, extra: i64) -> i64 ! {panic} { self.value + extra } }
-        impl Read for Other { fn inspect(self: &Self, extra: i64) -> i64 ! {panic} { self.value + extra } }
+        trait Read { fn inspect(self: &Self, extra: i64) -> i64 ! {}; }
+        impl Read for Counter { fn inspect(self: &Self, extra: i64) -> i64 ! {} { self.value + extra } }
+        impl Read for Other { fn inspect(self: &Self, extra: i64) -> i64 ! {} { self.value + extra } }
     "#;
     for receiver in ["object", "reference"] {
         rejects(
             &format!(
                 "{definitions}
-                fn main() -> i64 ! {{panic}} {{
+                fn main() -> i64 ! {{}} {{
                     let mut object: dyn Read = Counter {{value: 1}};
                     let reference: &dyn Read = &object;
                     {receiver}.inspect({{object = Other {{value: 10}}; 0}})
@@ -1208,7 +1208,7 @@ fn shared_dynamic_receivers_remain_borrowed_through_later_arguments() {
     agrees(
         &format!(
             "{definitions}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let object: dyn Read = Counter {{value: 1}};
                 object.inspect(object.inspect(0))
             }}"
@@ -1225,22 +1225,22 @@ fn mutable_dynamic_dispatch_preserves_erased_argument_effects_and_writeback() {
         struct Counter { value: i64 }
         struct Other { value: i64 }
         trait Bump {
-            fn bump(self: &mut Self, ignored: i64 @[0], by: i64) -> i64 @[0] ! {io, panic};
-            fn current(self: &Self) -> i64 ! {panic};
+            fn bump(self: &mut Self, ignored: i64 @[0], by: i64) -> i64 @[0] ! {io};
+            fn current(self: &Self) -> i64 ! {};
         }
         impl Bump for Counter {
-            fn bump(self: &mut Self, ignored: i64 @[0], by: i64) -> i64 @[0] ! {io, panic} {
+            fn bump(self: &mut Self, ignored: i64 @[0], by: i64) -> i64 @[0] ! {io} {
                 self.value = self.value + by; print_i64(3); self.value
             }
-            fn current(self: &Self) -> i64 ! {panic} { self.value }
+            fn current(self: &Self) -> i64 ! {} { self.value }
         }
         impl Bump for Other {
-            fn bump(self: &mut Self, ignored: i64 @[0], by: i64) -> i64 @[0] ! {io, panic} {
+            fn bump(self: &mut Self, ignored: i64 @[0], by: i64) -> i64 @[0] ! {io} {
                 self.value = self.value + by; print_i64(3); self.value
             }
-            fn current(self: &Self) -> i64 ! {panic} { self.value }
+            fn current(self: &Self) -> i64 ! {} { self.value }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut object: dyn Bump = Counter {value: 40};
             object.bump({print_i64(1); 99}, {print_i64(2); 2});
             object.current()
@@ -1256,19 +1256,19 @@ fn projected_method_receivers_cannot_duplicate_owners_and_keep_mutations() {
         struct Text { name: String, count: i64 }
         struct Other { count: i64 }
         struct Wrap<T> { value: T }
-        trait Bump { fn bump(self: &mut Self, by: i64) -> i64 ! {panic}; }
-        impl Bump for Text { fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count } }
-        impl Bump for Other { fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count } }
-        trait Eat { fn eat(self: Self) -> i64 ! {panic}; }
-        impl Eat for Text { fn eat(self: Self) -> i64 ! {panic} { self.count } }
-        impl Eat for Other { fn eat(self: Self) -> i64 ! {panic} { self.count } }
-        impl Text { fn consume(self: Text) -> i64 ! {panic} { self.count } }
+        trait Bump { fn bump(self: &mut Self, by: i64) -> i64 ! {}; }
+        impl Bump for Text { fn bump(self: &mut Self, by: i64) -> i64 ! {} { self.count = self.count + by; self.count } }
+        impl Bump for Other { fn bump(self: &mut Self, by: i64) -> i64 ! {} { self.count = self.count + by; self.count } }
+        trait Eat { fn eat(self: Self) -> i64 ! {}; }
+        impl Eat for Text { fn eat(self: Self) -> i64 ! {} { self.count } }
+        impl Eat for Other { fn eat(self: Self) -> i64 ! {} { self.count } }
+        impl Text { fn consume(self: Text) -> i64 ! {} { self.count } }
     "#;
     // Consuming dispatch on a projected object field consumes the aggregate
     // like a destructuring; the static owned-field case below stays rejected.
     agrees(
         &format!(
-            "{definitions} fn main() -> i64 ! {{alloc, panic}} {{
+            "{definitions} fn main() -> i64 ! {{alloc}} {{
                 let pair: (dyn Eat, i64) = (Text {{name: \"x\", count: 6}}, 9); pair.0.eat()
             }}"
         ),
@@ -1282,14 +1282,14 @@ fn projected_method_receivers_cannot_duplicate_owners_and_keep_mutations() {
         "let mut wrap: Wrap<dyn Bump> = Wrap {value: Text {name: \"x\", count: 1}}; wrap.value.bump(5); wrap.value.bump(0)",
     ] {
         agrees(
-            &format!("{definitions} fn main() -> i64 ! {{alloc, panic}} {{{body}}}"),
+            &format!("{definitions} fn main() -> i64 ! {{alloc}} {{{body}}}"),
             6,
             "",
         );
     }
     rejects(
         &format!(
-            "{definitions} fn main() -> i64 ! {{alloc, panic}} {{
+            "{definitions} fn main() -> i64 ! {{alloc}} {{
                 let pair = (Text {{name: \"x\", count: 1}}, 9); pair.0.consume()
             }}"
         ),
@@ -1297,7 +1297,7 @@ fn projected_method_receivers_cannot_duplicate_owners_and_keep_mutations() {
     );
     rejects(
         &format!(
-            "{definitions} fn main() -> i64 ! {{alloc, panic}} {{
+            "{definitions} fn main() -> i64 ! {{alloc}} {{
         let pair: (dyn Bump, i64) = (Other {{count: 1}}, 9); pair.0.bump(5)
     }}"
         ),
@@ -1310,10 +1310,10 @@ fn projected_dynamic_mutation_needs_a_mutable_owner_and_destructuring_still_work
     rejects(
         r#"struct Counter { count: i64 }
         struct Other { count: i64 }
-        trait Bump { fn bump(self: &mut Self) -> Unit ! {panic}; }
-        impl Bump for Counter { fn bump(self: &mut Self) -> Unit ! {panic} { self.count = self.count + 1; } }
-        impl Bump for Other { fn bump(self: &mut Self) -> Unit ! {panic} { self.count = self.count + 1; } }
-        fn main() -> i64 ! {panic} {
+        trait Bump { fn bump(self: &mut Self) -> Unit ! {}; }
+        impl Bump for Counter { fn bump(self: &mut Self) -> Unit ! {} { self.count = self.count + 1; } }
+        impl Bump for Other { fn bump(self: &mut Self) -> Unit ! {} { self.count = self.count + 1; } }
+        fn main() -> i64 ! {} {
             let pair: (dyn Bump, i64) = (Counter {count: 1}, 9);
             pair.0.bump(); 0
         }"#,
@@ -1323,10 +1323,10 @@ fn projected_dynamic_mutation_needs_a_mutable_owner_and_destructuring_still_work
         r#"struct Text { name: String, count: i64 }
         struct Other { count: i64 }
         struct Wrap<T> { value: T }
-        trait Bump { fn bump(self: &mut Self, by: i64) -> i64 ! {panic}; }
-        impl Bump for Text { fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count } }
-        impl Bump for Other { fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count } }
-        fn main() -> i64 ! {alloc, panic} {
+        trait Bump { fn bump(self: &mut Self, by: i64) -> i64 ! {}; }
+        impl Bump for Text { fn bump(self: &mut Self, by: i64) -> i64 ! {} { self.count = self.count + by; self.count } }
+        impl Bump for Other { fn bump(self: &mut Self, by: i64) -> i64 ! {} { self.count = self.count + by; self.count } }
+        fn main() -> i64 ! {alloc} {
             let wrapper: Wrap<dyn Bump> = Wrap {value: Text {name: "x", count: 37}};
             let Wrap {value} = wrapper;
             let mut object = value;
@@ -1342,17 +1342,17 @@ fn open_generic_member_sets_use_a_checked_runtime_vtable() {
     let stats = agrees(
         r#"
         trait Describe {
-            fn describe(self: Self) -> i64 ! {panic};
+            fn describe(self: Self) -> i64 ! {};
         }
         struct Point { x: i64 }
         struct Wrapper<T> { value: T }
         impl Describe for Point {
-            fn describe(self: Self) -> i64 ! {panic} { self.x }
+            fn describe(self: Self) -> i64 ! {} { self.x }
         }
         impl<T: Describe> Describe for Wrapper<T> {
-            fn describe(self: Self) -> i64 ! {panic} { self.value.describe() + 1 }
+            fn describe(self: Self) -> i64 ! {} { self.value.describe() + 1 }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let once: dyn Describe = Point { x: 4 };
             let nested: dyn Describe = Wrapper { value: Wrapper { value: Point { x: 10 } } };
             print_i64(once.describe());
@@ -1370,15 +1370,15 @@ fn nominal_fields_may_spell_dyn_directly() {
     let stats = agrees(
         r#"
         trait Describe {
-            fn describe(self: Self) -> i64 ! {panic};
+            fn describe(self: Self) -> i64 ! {};
         }
         struct Point { x: i64 }
         struct Holder { object: dyn Describe }
         struct Boxed { object: Box<dyn Describe> }
         impl Describe for Point {
-            fn describe(self: Self) -> i64 ! {panic} { self.x }
+            fn describe(self: Self) -> i64 ! {} { self.x }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let holder = Holder { object: Point { x: 7 } };
             let Holder { object } = holder;
             print_i64(object.describe());
@@ -1400,18 +1400,18 @@ fn borrowed_objects_keep_owning_members_in_place() {
         struct Text { name: String, count: i64 }
         struct Plain { amount: i64 }
         trait Counted {
-            fn value(self: &Self) -> i64 ! {panic};
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic};
+            fn value(self: &Self) -> i64 ! {};
+            fn bump(self: &mut Self, by: i64) -> Unit ! {};
         }
         impl Counted for Text {
-            fn value(self: &Self) -> i64 ! {panic} { self.count }
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.count = self.count + by }
+            fn value(self: &Self) -> i64 ! {} { self.count }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} { self.count = self.count + by }
         }
         impl Counted for Plain {
-            fn value(self: &Self) -> i64 ! {panic} { self.amount }
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.amount = self.amount + by }
+            fn value(self: &Self) -> i64 ! {} { self.amount }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} { self.amount = self.amount + by }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Counted = Text { name: "x", count: 5 };
             let shared: &dyn Counted = &object;
             print_i64(shared.value());
@@ -1433,23 +1433,23 @@ fn object_methods_accept_lifetime_parameterized_borrows() {
     agrees(
         r#"
         trait Feed {
-            fn feed<'a>(self: &mut Self, input: &'a [i64]) -> i64 ! {panic};
+            fn feed<'a>(self: &mut Self, input: &'a [i64]) -> i64 ! {};
         }
         struct Counter { sum: i64 }
         struct Other { sum: i64 }
         impl Feed for Counter {
-            fn feed<'a>(self: &mut Self, input: &'a [i64]) -> i64 ! {panic} {
+            fn feed<'a>(self: &mut Self, input: &'a [i64]) -> i64 ! {} {
                 self.sum = self.sum + input[0];
                 self.sum
             }
         }
         impl Feed for Other {
-            fn feed<'a>(self: &mut Self, input: &'a [i64]) -> i64 ! {panic} {
+            fn feed<'a>(self: &mut Self, input: &'a [i64]) -> i64 ! {} {
                 self.sum = self.sum + input[1];
                 self.sum
             }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut counter: dyn Feed = Counter { sum: 1 };
             let values = [10, 20, 30];
             print_i64(counter.feed(&values[..]));
@@ -1468,17 +1468,17 @@ fn generic_impl_non_type_parameters_substitute_for_object_members() {
     agrees(
         r#"
         trait First {
-            fn first(self: Self) -> i64 ! {panic};
+            fn first(self: Self) -> i64 ! {};
         }
         struct Buffer<N: Nat> { data: [i64; N] }
         struct Single { n: i64 }
         impl<N: Nat> First for Buffer<N> {
-            fn first(self: Self) -> i64 ! {panic} { self.data[0] }
+            fn first(self: Self) -> i64 ! {} { self.data[0] }
         }
         impl First for Single {
-            fn first(self: Self) -> i64 ! {panic} { self.n }
+            fn first(self: Self) -> i64 ! {} { self.n }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let buffer: dyn First = Buffer { data: [7, 8, 9] };
             print_i64(buffer.first());
             let single: dyn First = Single { n: 4 };
@@ -1498,18 +1498,18 @@ fn open_objects_may_carry_linear_members_and_require_consumption() {
         enum Ticket { Live }
         struct Wrapper<T> { value: T }
         trait Consume {
-            fn consume(self: Self) -> i64 ! {panic};
+            fn consume(self: Self) -> i64 ! {};
         }
         impl Consume for Ticket {
-            fn consume(self: Self) -> i64 ! {panic} { match self { Ticket.Live => 9 } }
+            fn consume(self: Self) -> i64 ! {} { match self { Ticket.Live => 9 } }
         }
         impl<T: Consume> Consume for Wrapper<T> {
-            fn consume(self: Self) -> i64 ! {panic} {
+            fn consume(self: Self) -> i64 ! {} {
                 let Wrapper { value } = self;
                 value.consume() + 1
             }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Consume = Ticket.Live;
             print_i64(object.consume());
             let nested: dyn Consume = Wrapper { value: Ticket.Live };
@@ -1526,15 +1526,15 @@ fn open_objects_may_carry_linear_members_and_require_consumption() {
         #[linear]
         enum Ticket { Live }
         struct Wrapper<T> { value: T }
-        trait Consume { fn consume(self: Self) -> i64 ! {panic}; }
-        impl Consume for Ticket { fn consume(self: Self) -> i64 ! {panic} { match self { Ticket.Live => 9 } } }
+        trait Consume { fn consume(self: Self) -> i64 ! {}; }
+        impl Consume for Ticket { fn consume(self: Self) -> i64 ! {} { match self { Ticket.Live => 9 } } }
         impl<T: Consume> Consume for Wrapper<T> {
-            fn consume(self: Self) -> i64 ! {panic} {
+            fn consume(self: Self) -> i64 ! {} {
                 let Wrapper { value } = self;
                 value.consume() + 1
             }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let object: dyn Consume = Ticket.Live;
             0
         }"#,
@@ -1548,11 +1548,11 @@ fn open_object_membership_requires_a_concrete_impl() {
         r#"
         struct A { x: i64 }
         trait Show {
-            fn show(self: Self) -> i64 ! {panic};
+            fn show(self: Self) -> i64 ! {};
         }
-        impl Show for A { fn show(self: Self) -> i64 ! {panic} { self.x } }
-        impl<T> Show for Box<T> { fn show(self: Self) -> i64 ! {panic} { 0 } }
-        fn main() -> i64 ! {alloc, panic} {
+        impl Show for A { fn show(self: Self) -> i64 ! {} { self.x } }
+        impl<T> Show for Box<T> { fn show(self: Self) -> i64 ! {} { 0 } }
+        fn main() -> i64 ! {alloc} {
             let object: dyn Show = 7;
             0
         }"#,
@@ -1567,18 +1567,18 @@ fn open_objects_dispatch_borrowed_owning_members_in_place() {
         struct Text { name: String, count: i64 }
         struct Wrap<T> { value: T }
         trait Counted {
-            fn value(self: &Self) -> i64 ! {panic};
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic};
+            fn value(self: &Self) -> i64 ! {};
+            fn bump(self: &mut Self, by: i64) -> Unit ! {};
         }
         impl Counted for Text {
-            fn value(self: &Self) -> i64 ! {panic} { self.count }
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.count = self.count + by }
+            fn value(self: &Self) -> i64 ! {} { self.count }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} { self.count = self.count + by }
         }
         impl<T> Counted for Wrap<T> {
-            fn value(self: &Self) -> i64 ! {panic} { 7 }
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} {  }
+            fn value(self: &Self) -> i64 ! {} { 7 }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} {  }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Counted = Wrap { value: Text { name: "x", count: 1 } };
             let shared: &dyn Counted = &object;
             print_i64(shared.value());
@@ -1598,13 +1598,13 @@ fn object_methods_may_return_a_view_of_a_caller_argument() {
     agrees(
         r#"
         trait Pick {
-            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {};
         }
         struct A { tag: i64 }
         struct B { tag: i64 }
-        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl Pick for B { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        fn main() -> i64 ! {io, alloc, panic} {
+        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        impl Pick for B { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Pick = A { tag: 1 };
             let values = [5, 6, 7];
             let got = object.pick(&values[..]);
@@ -1621,13 +1621,13 @@ fn open_object_methods_may_return_a_view_of_a_caller_argument() {
     agrees(
         r#"
         trait Pick {
-            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {};
         }
         struct A { tag: i64 }
         struct W<T> { value: T }
-        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl<T> Pick for W<T> { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        fn main() -> i64 ! {io, alloc, panic} {
+        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        impl<T> Pick for W<T> { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Pick = W { value: A { tag: 1 } };
             let values = [5, 6, 7];
             let shared: &dyn Pick = &object;
@@ -1644,14 +1644,14 @@ fn borrowed_object_results_through_temporary_and_owned_receivers() {
     agrees(
         r#"
         trait Pick {
-            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {};
         }
         struct A { tag: i64 }
         struct B { tag: i64 }
-        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl Pick for B { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        fn make() -> dyn Pick ! {panic} { A { tag: 1 } }
-        fn main() -> i64 ! {alloc, panic} {
+        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        impl Pick for B { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        fn make() -> dyn Pick ! {} { A { tag: 1 } }
+        fn main() -> i64 ! {alloc} {
             let values = [1, 2];
             make().pick(&values[..])[1]
         }"#,
@@ -1661,13 +1661,13 @@ fn borrowed_object_results_through_temporary_and_owned_receivers() {
     agrees(
         r#"
         trait Owned {
-            fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {};
         }
         struct A { tag: i64 }
         struct B { tag: i64 }
-        impl Owned for A { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl Owned for B { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        fn main() -> i64 ! {io, alloc, panic} {
+        impl Owned for A { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        impl Owned for B { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Owned = A { tag: 1 };
             let values = [3, 4];
             print_i64(object.grab(&values[..])[1]);
@@ -1686,19 +1686,19 @@ fn open_objects_clean_up_fields_and_affine_owning_results() {
         struct Text { name: String, count: i64 }
         struct W<T> { value: T }
         trait Make {
-            fn value(self: &Self) -> i64 ! {panic};
-            fn make(self: Self) -> Box<i64> ! {alloc, panic};
+            fn value(self: &Self) -> i64 ! {};
+            fn make(self: Self) -> Box<i64> ! {alloc};
         }
         struct Holder { object: dyn Make }
         impl Make for Text {
-            fn value(self: &Self) -> i64 ! {panic} { self.count }
-            fn make(self: Self) -> Box<i64> ! {alloc, panic} { Box.new(self.count) }
+            fn value(self: &Self) -> i64 ! {} { self.count }
+            fn make(self: Self) -> Box<i64> ! {alloc} { Box.new(self.count) }
         }
         impl<T> Make for W<T> {
-            fn value(self: &Self) -> i64 ! {panic} { 7 }
-            fn make(self: Self) -> Box<i64> ! {alloc, panic} { Box.new(9) }
+            fn value(self: &Self) -> i64 ! {} { 7 }
+            fn make(self: Self) -> Box<i64> ! {alloc} { Box.new(9) }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let holder = Holder { object: Text { name: "x", count: 4 } };
             let Holder { object } = holder;
             print_i64(object.value());
@@ -1717,9 +1717,9 @@ fn open_objects_clean_up_fields_and_affine_owning_results() {
 const LINEAR_TICKET: &str = r#"
 #[linear]
 enum Ticket { Live }
-trait Consume { fn consume(self: Self) -> i64 ! {panic}; }
+trait Consume { fn consume(self: Self) -> i64 ! {}; }
 impl Consume for Ticket {
-    fn consume(self: Self) -> i64 ! {panic} { match self { Ticket.Live => 9 } }
+    fn consume(self: Self) -> i64 ! {} { match self { Ticket.Live => 9 } }
 }
 "#;
 
@@ -1729,7 +1729,7 @@ fn linear_dynamic_objects_stay_linear_inside_layouts() {
     rejects(
         &format!(
             "{LINEAR_TICKET}struct Holder {{ object: dyn Consume }}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn main() -> i64 ! {{io, alloc}} {{
                 let holder = Holder {{ object: Ticket.Live }};
                 0
             }}"
@@ -1738,7 +1738,7 @@ fn linear_dynamic_objects_stay_linear_inside_layouts() {
     );
     rejects(
         &format!(
-            "{LINEAR_TICKET}fn main() -> i64 ! {{io, alloc, panic}} {{
+            "{LINEAR_TICKET}fn main() -> i64 ! {{io, alloc}} {{
                 let a: [dyn Consume; 1] = [Ticket.Live];
                 0
             }}"
@@ -1748,7 +1748,7 @@ fn linear_dynamic_objects_stay_linear_inside_layouts() {
     rejects(
         &format!(
             "{LINEAR_TICKET}struct Holder {{ object: dyn Consume }}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn main() -> i64 ! {{io, alloc}} {{
                 let holder = Holder {{ object: Ticket.Live }};
                 let mut items: Vec<Holder> = Vec.new();
                 items = Vec.push(items, holder);
@@ -1760,7 +1760,7 @@ fn linear_dynamic_objects_stay_linear_inside_layouts() {
     );
     rejects(
         &format!(
-            "{LINEAR_TICKET}fn main() -> i64 ! {{io, alloc, panic}} {{
+            "{LINEAR_TICKET}fn main() -> i64 ! {{io, alloc}} {{
                 let a: DynArray<dyn Consume, 1> = DynArray.new::<dyn Consume, 1>();
                 let a = DynArray.push(a, Ticket.Live);
                 DynArray.len(&a)
@@ -1771,7 +1771,7 @@ fn linear_dynamic_objects_stay_linear_inside_layouts() {
     agrees(
         &format!(
             "{LINEAR_TICKET}struct Holder {{ object: dyn Consume }}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn main() -> i64 ! {{io, alloc}} {{
                 let holder = Holder {{ object: Ticket.Live }};
                 match holder {{ Holder {{ object }} => object.consume() }}
             }}"
@@ -1785,16 +1785,16 @@ const BUMP_TEXT: &str = r#"
 struct Text { name: String, count: i64 }
 struct Wrap<T> { value: T }
 trait Bump {
-    fn bump(self: &mut Self) -> Unit ! {panic};
-    fn current(self: &Self) -> i64 ! {panic};
+    fn bump(self: &mut Self) -> Unit ! {};
+    fn current(self: &Self) -> i64 ! {};
 }
 impl Bump for Text {
-    fn bump(self: &mut Self) -> Unit ! {panic} { self.count = self.count + 1; }
-    fn current(self: &Self) -> i64 ! {panic} { self.count }
+    fn bump(self: &mut Self) -> Unit ! {} { self.count = self.count + 1; }
+    fn current(self: &Self) -> i64 ! {} { self.count }
 }
 impl<T> Bump for Wrap<T> {
-    fn bump(self: &mut Self) -> Unit ! {panic} { }
-    fn current(self: &Self) -> i64 ! {panic} { 7 }
+    fn bump(self: &mut Self) -> Unit ! {} { }
+    fn current(self: &Self) -> i64 ! {} { 7 }
 }
 "#;
 
@@ -1802,7 +1802,7 @@ impl<T> Bump for Wrap<T> {
 fn a_live_shared_object_reference_blocks_exclusive_access() {
     rejects(
         &format!(
-            "{BUMP_TEXT}fn main() -> i64 ! {{io, alloc, panic}} {{
+            "{BUMP_TEXT}fn main() -> i64 ! {{io, alloc}} {{
                 let mut object: dyn Bump = Text {{ name: \"aaaaaaaa\", count: 1 }};
                 let shared: &dyn Bump = &object;
                 let exclusive: &mut dyn Bump = &mut object;
@@ -1815,7 +1815,7 @@ fn a_live_shared_object_reference_blocks_exclusive_access() {
     );
     rejects(
         &format!(
-            "{BUMP_TEXT}fn main() -> i64 ! {{io, alloc, panic}} {{
+            "{BUMP_TEXT}fn main() -> i64 ! {{io, alloc}} {{
                 let mut object: dyn Bump = Text {{ name: \"aaaaaaaa\", count: 1 }};
                 let shared: &dyn Bump = &object;
                 object.bump();
@@ -1827,7 +1827,7 @@ fn a_live_shared_object_reference_blocks_exclusive_access() {
     );
     agrees(
         &format!(
-            "{BUMP_TEXT}fn main() -> i64 ! {{io, alloc, panic}} {{
+            "{BUMP_TEXT}fn main() -> i64 ! {{io, alloc}} {{
                 let mut object: dyn Bump = Text {{ name: \"aaaaaaaa\", count: 1 }};
                 let exclusive: &mut dyn Bump = &mut object;
                 exclusive.bump();
@@ -1846,14 +1846,14 @@ fn single_impl_objects_dispatch_through_stored_references() {
     agrees(
         r#"struct Counter { value: i64 }
         trait Bump {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic};
-            fn current(self: &Self) -> i64 ! {panic};
+            fn bump(self: &mut Self, by: i64) -> Unit ! {};
+            fn current(self: &Self) -> i64 ! {};
         }
         impl Bump for Counter {
-            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by; }
-            fn current(self: &Self) -> i64 ! {panic} { self.value }
+            fn bump(self: &mut Self, by: i64) -> Unit ! {} { self.value = self.value + by; }
+            fn current(self: &Self) -> i64 ! {} { self.value }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut object: dyn Bump = Counter { value: 1 };
             let reference: &mut dyn Bump = &mut object;
             reference.bump(2);
@@ -1872,11 +1872,11 @@ fn traits_whose_only_impls_are_generic_are_usable_as_dyn() {
         r#"
         struct W<T> { value: T }
         struct Boxed<T> { value: Box<T> }
-        trait Size { fn size(self: &Self) -> i64 ! {panic}; }
-        impl<T> Size for W<T> { fn size(self: &Self) -> i64 ! {panic} { 4 } }
-        impl<T> Size for Boxed<T> { fn size(self: &Self) -> i64 ! {panic} { 9 } }
-        fn read(object: &dyn Size) -> i64 ! {panic} { object.size() }
-        fn main() -> i64 ! {io, alloc, panic} {
+        trait Size { fn size(self: &Self) -> i64 ! {}; }
+        impl<T> Size for W<T> { fn size(self: &Self) -> i64 ! {} { 4 } }
+        impl<T> Size for Boxed<T> { fn size(self: &Self) -> i64 ! {} { 9 } }
+        fn read(object: &dyn Size) -> i64 ! {} { object.size() }
+        fn main() -> i64 ! {io, alloc} {
             let a: dyn Size = W { value: true };
             let b: dyn Size = Boxed { value: Box.new(3) };
             print_i64(read(&a));
@@ -1893,9 +1893,9 @@ fn traits_whose_only_impls_are_generic_are_usable_as_dyn() {
     rejects(
         r#"
         struct W<T> { value: T }
-        trait Size { fn size(self: Self) -> i64 ! {panic}; }
-        impl<T> Size for W<T> { fn size(self: Self) -> i64 ! {panic} { 4 } }
-        fn main() -> i64 ! {alloc, panic} {
+        trait Size { fn size(self: Self) -> i64 ! {}; }
+        impl<T> Size for W<T> { fn size(self: Self) -> i64 ! {} { 4 } }
+        fn main() -> i64 ! {alloc} {
             let object: dyn Size = 7;
             object.size()
         }"#,
@@ -1908,10 +1908,10 @@ fn parameter_dependent_generic_associated_projection_is_fixed_by_the_member() {
     let stats = agrees(
         r#"
         struct W<T> { value: T }
-        trait Show { type Out; fn show(self: &Self) -> Self.Out ! {panic}; }
-        impl<T> Show for W<T> { type Out = T; fn show(self: &Self) -> T ! {panic} { self.value } }
-        fn read(object: &dyn Show) -> i64 ! {panic} { object.show() }
-        fn main() -> i64 ! {io, alloc, panic} {
+        trait Show { type Out; fn show(self: &Self) -> Self.Out ! {}; }
+        impl<T> Show for W<T> { type Out = T; fn show(self: &Self) -> T ! {} { self.value } }
+        fn read(object: &dyn Show) -> i64 ! {} { object.show() }
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Show = W { value: 5 };
             print_i64(read(&object));
             print_i64(object.show());
@@ -1925,9 +1925,9 @@ fn parameter_dependent_generic_associated_projection_is_fixed_by_the_member() {
     rejects(
         r#"
         struct W<T> { value: T }
-        trait Show { type Out; fn show(self: &Self) -> Self.Out ! {panic}; }
-        impl<T> Show for W<T> { type Out = T; fn show(self: &Self) -> T ! {panic} { self.value } }
-        fn main() -> i64 ! {alloc, panic} {
+        trait Show { type Out; fn show(self: &Self) -> Self.Out ! {}; }
+        impl<T> Show for W<T> { type Out = T; fn show(self: &Self) -> T ! {} { self.value } }
+        fn main() -> i64 ! {alloc} {
             let a: dyn Show = W { value: 5 };
             let b: dyn Show = W { value: true };
             print_i64(a.show());
@@ -1942,16 +1942,16 @@ fn non_type_trait_arguments_dispatch_through_dyn() {
     agrees(
         r#"
         struct Buffer<N: Nat> { data: [i64; N] }
-        trait First<N: Nat> { fn first(self: Self) -> i64 ! {panic}; }
+        trait First<N: Nat> { fn first(self: Self) -> i64 ! {}; }
         impl<N: Nat> First<N> for Buffer<N> {
-            fn first(self: Self) -> i64 ! {panic} { self.data[0] }
+            fn first(self: Self) -> i64 ! {} { self.data[0] }
         }
         struct Point { x: i64 }
-        trait Weighted<G: Grade> { fn weighted(self: Self) -> i64 ! {panic}; }
+        trait Weighted<G: Grade> { fn weighted(self: Self) -> i64 ! {}; }
         impl<G: Grade> Weighted<G> for Point {
-            fn weighted(self: Self) -> i64 ! {panic} { self.x }
+            fn weighted(self: Self) -> i64 ! {} { self.x }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let buffer: dyn First<3> = Buffer { data: [7, 8, 9] };
             print_i64(buffer.first());
             let point: dyn Weighted<1> = Point { x: 6 };
@@ -1969,14 +1969,14 @@ fn temporary_shared_receivers_of_open_objects_bind_to_a_hidden_place() {
         r#"
         struct Text { name: String, count: i64 }
         struct W<T> { value: T }
-        trait Counted { fn value(self: &Self) -> i64 ! {panic}; }
-        impl Counted for Text { fn value(self: &Self) -> i64 ! {panic} { self.count } }
-        impl<T> Counted for W<T> { fn value(self: &Self) -> i64 ! {panic} { 7 } }
-        fn make_text() -> dyn Counted ! {alloc, panic} { Text { name: "x", count: 5 } }
-        fn make_wrap() -> dyn Counted ! {alloc, panic} {
+        trait Counted { fn value(self: &Self) -> i64 ! {}; }
+        impl Counted for Text { fn value(self: &Self) -> i64 ! {} { self.count } }
+        impl<T> Counted for W<T> { fn value(self: &Self) -> i64 ! {} { 7 } }
+        fn make_text() -> dyn Counted ! {alloc} { Text { name: "x", count: 5 } }
+        fn make_wrap() -> dyn Counted ! {alloc} {
             W { value: Text { name: "y", count: 9 } }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             print_i64(make_text().value());
             print_i64(make_wrap().value());
             0
@@ -1993,14 +1993,14 @@ fn temporary_shared_receivers_return_receiver_tied_views() {
     agrees(
         r#"
         trait Pick {
-            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {};
         }
         struct A { tag: i64 }
         struct W<T> { value: T }
-        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl<T> Pick for W<T> { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        fn make() -> dyn Pick ! {alloc, panic} { W { value: A { tag: 1 } } }
-        fn main() -> i64 ! {alloc, alloc, panic} {
+        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        impl<T> Pick for W<T> { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        fn make() -> dyn Pick ! {alloc} { W { value: A { tag: 1 } } }
+        fn main() -> i64 ! {alloc, alloc} {
             let values = [1, 2];
             make().pick(&values[..])[1]
         }"#,
@@ -2014,13 +2014,13 @@ fn owned_receivers_may_return_views_of_caller_arguments_through_open_objects() {
     agrees(
         r#"
         trait Owned {
-            fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {};
         }
         struct A { tag: i64 }
         struct W<T> { value: T }
-        impl Owned for A { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl<T> Owned for W<T> { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        fn main() -> i64 ! {io, alloc, panic} {
+        impl Owned for A { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        impl<T> Owned for W<T> { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Owned = W { value: A { tag: 1 } };
             let values = [3, 4];
             print_i64(object.grab(&values[..])[1]);
@@ -2040,17 +2040,17 @@ fn generic_methods_dispatch_through_dyn_with_per_call_monomorphization() {
         struct B { y: i64 }
         trait Pairing {
             fn pair<U>(self: Self, value: U) -> (i64, U) ! {};
-            fn combine<U>(self: &Self, left: U, right: U) -> U ! {panic};
+            fn combine<U>(self: &Self, left: U, right: U) -> U ! {};
         }
         impl Pairing for A {
             fn pair<U>(self: Self, value: U) -> (i64, U) ! {} { (self.x, value) }
-            fn combine<U>(self: &Self, left: U, right: U) -> U ! {panic} { left }
+            fn combine<U>(self: &Self, left: U, right: U) -> U ! {} { left }
         }
         impl Pairing for B {
             fn pair<U>(self: Self, value: U) -> (i64, U) ! {} { (self.y, value) }
-            fn combine<U>(self: &Self, left: U, right: U) -> U ! {panic} { right }
+            fn combine<U>(self: &Self, left: U, right: U) -> U ! {} { right }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let a: dyn Pairing = A { x: 5 };
             let pair = a.pair(true);
             print_i64(pair.0);
@@ -2076,15 +2076,15 @@ fn generic_methods_may_take_natural_parameters_through_dyn() {
         struct A { x: i64 }
         struct B { y: i64 }
         trait Sizer {
-            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {panic};
+            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {};
         }
         impl Sizer for A {
-            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {panic} { self.x + data[0] }
+            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {} { self.x + data[0] }
         }
         impl Sizer for B {
-            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {panic} { self.y + data[N - 1] }
+            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {} { self.y + data[N - 1] }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let a: dyn Sizer = A { x: 5 };
             print_i64(a.gather([1, 2]));
             let b: dyn Sizer = B { y: 9 };
@@ -2109,7 +2109,7 @@ fn generic_method_member_abi_disagreement_is_rejected() {
         impl Pairing for B {
             fn pair<U>(self: Self, value: U) -> (U, U) ! {} { (value, value) }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let b: dyn Pairing = B { y: 9 };
             print_i64(b.pair(7).0);
             0
@@ -2125,13 +2125,13 @@ fn shared_dispatch_borrows_owning_projected_receivers_in_place() {
         struct Text { name: String, count: i64 }
         struct Plain { amount: i64 }
         struct W<T> { value: T }
-        trait Counted { fn value(self: &Self) -> i64 ! {panic}; }
-        impl Counted for Text { fn value(self: &Self) -> i64 ! {panic} { self.count } }
-        impl Counted for Plain { fn value(self: &Self) -> i64 ! {panic} { self.amount } }
-        impl<T> Counted for W<T> { fn value(self: &Self) -> i64 ! {panic} { 7 } }
+        trait Counted { fn value(self: &Self) -> i64 ! {}; }
+        impl Counted for Text { fn value(self: &Self) -> i64 ! {} { self.count } }
+        impl Counted for Plain { fn value(self: &Self) -> i64 ! {} { self.amount } }
+        impl<T> Counted for W<T> { fn value(self: &Self) -> i64 ! {} { 7 } }
         struct Holder { inner: dyn Counted }
-        fn read_holder(holder: Holder) -> i64 ! {panic} { holder.inner.value() }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn read_holder(holder: Holder) -> i64 ! {} { holder.inner.value() }
+        fn main() -> i64 ! {io, alloc} {
             let pair: (dyn Counted, i64) = (Text { name: "x", count: 5 }, 9);
             print_i64(pair.0.value());
             let holder = Holder { inner: Text { name: "y", count: 6 } };
@@ -2154,14 +2154,14 @@ fn projected_shared_receivers_keep_their_owner_borrowed_through_arguments() {
     let definitions = r#"
         struct Text { name: String, count: i64 }
         struct Other { count: i64 }
-        trait Read { fn inspect(self: &Self, extra: i64) -> i64 ! {panic}; }
-        impl Read for Text { fn inspect(self: &Self, extra: i64) -> i64 ! {panic} { self.count + extra } }
-        impl Read for Other { fn inspect(self: &Self, extra: i64) -> i64 ! {panic} { self.count + extra } }
+        trait Read { fn inspect(self: &Self, extra: i64) -> i64 ! {}; }
+        impl Read for Text { fn inspect(self: &Self, extra: i64) -> i64 ! {} { self.count + extra } }
+        impl Read for Other { fn inspect(self: &Self, extra: i64) -> i64 ! {} { self.count + extra } }
     "#;
     rejects(
         &format!(
             "{definitions}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let mut pair: (dyn Read, i64) = (Text {{name: \"x\", count: 1}}, 9);
                 pair.0.inspect({{pair = (Other {{count: 10}}, 0); 0}})
             }}"
@@ -2171,7 +2171,7 @@ fn projected_shared_receivers_keep_their_owner_borrowed_through_arguments() {
     agrees(
         &format!(
             "{definitions}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn main() -> i64 ! {{io, alloc}} {{
                 let pair: (dyn Read, i64) = (Text {{name: \"x\", count: 1}}, 9);
                 print_i64(pair.0.inspect(pair.1));
                 0
@@ -2187,11 +2187,11 @@ fn multi_trait_trait_objects_dispatch_both_traits() {
     agrees(
         r#"
         struct Point { x: i64 }
-        trait A { fn a(self: Self) -> i64 ! {panic}; }
-        trait B { fn b(self: Self) -> i64 ! {panic}; }
-        impl A for Point { fn a(self: Self) -> i64 ! {panic} { self.x } }
-        impl B for Point { fn b(self: Self) -> i64 ! {panic} { self.x + 1 } }
-        fn main() -> i64 ! {io, alloc, panic} {
+        trait A { fn a(self: Self) -> i64 ! {}; }
+        trait B { fn b(self: Self) -> i64 ! {}; }
+        impl A for Point { fn a(self: Self) -> i64 ! {} { self.x } }
+        impl B for Point { fn b(self: Self) -> i64 ! {} { self.x + 1 } }
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn A + B = Point { x: 5 };
             print_i64(object.a());
             0
@@ -2206,14 +2206,14 @@ fn temporary_shared_receivers_may_return_views_of_caller_arguments() {
     agrees(
         r#"
         trait Pick {
-            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {};
         }
         struct A { tag: i64 }
         struct W<T> { value: T }
-        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl<T> Pick for W<T> { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        fn make() -> dyn Pick ! {alloc, panic} { W { value: A { tag: 1 } } }
-        fn main() -> i64 ! {io, alloc, panic} {
+        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        impl<T> Pick for W<T> { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {} { values } }
+        fn make() -> dyn Pick ! {alloc} { W { value: A { tag: 1 } } }
+        fn main() -> i64 ! {io, alloc} {
             let values = [5, 6, 7];
             print_i64(make().pick(&values[..])[1]);
             0

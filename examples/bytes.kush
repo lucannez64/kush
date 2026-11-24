@@ -1,10 +1,10 @@
 module examples.bytes;
 
-fn append_digit(buffer: Bytes, digit: i64) -> Bytes ! {panic} {
+fn append_digit(buffer: Bytes, digit: i64) -> Bytes ! {} {
     Bytes.push_reserved(buffer, digit)
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let text = Bytes.from("42");
     print_i64(Bytes.len(&text));
     print_i64(Bytes.get(&text, 0));

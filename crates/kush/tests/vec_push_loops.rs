@@ -54,7 +54,7 @@ fn agree(source: &str, shadowed: usize) -> String {
 }
 
 const SUM: &str = "
-fn total_of(values: &Vec<i64>) -> i64 ! {panic} {
+fn total_of(values: &Vec<i64>) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Vec.len(values) {
@@ -72,7 +72,7 @@ fn growth_from_empty_through_every_capacity() {
     let printed = agree(
         &format!(
             "{SUM}
-        fn main() -> Unit ! {{io, alloc, panic}} {{
+        fn main() -> Unit ! {{io, alloc}} {{
             let mut values: Vec<i64> = Vec.with_capacity(0);
             let mut i = 0;
             while i < 70000 {{
@@ -93,7 +93,7 @@ fn conditional_double_and_interleaved_pushes() {
     agree(
         &format!(
             "{SUM}
-        fn main() -> Unit ! {{io, alloc, panic}} {{
+        fn main() -> Unit ! {{io, alloc}} {{
             let mut evens: Vec<i64> = Vec.with_capacity(1);
             let mut odds: Vec<i64> = Vec.with_capacity(3);
             let mut i = 0;
@@ -123,7 +123,7 @@ fn the_length_and_elements_read_in_the_loop_are_current() {
     agree(
         &format!(
             "{SUM}
-        fn main() -> Unit ! {{io, alloc, panic}} {{
+        fn main() -> Unit ! {{io, alloc}} {{
             let mut values: Vec<i64> = Vec.with_capacity(2);
             values = Vec.push(values, 1);
             let mut check = 0;
@@ -148,7 +148,7 @@ fn a_vector_lent_to_a_call_in_the_loop_is_left_alone() {
     agree(
         &format!(
             "{SUM}
-        fn main() -> Unit ! {{io, alloc, panic}} {{
+        fn main() -> Unit ! {{io, alloc}} {{
             let mut values: Vec<i64> = Vec.with_capacity(2);
             let mut check = 0;
             let mut i = 0;
@@ -169,7 +169,7 @@ fn nested_loops_and_early_exit() {
     agree(
         &format!(
             "{SUM}
-        fn main() -> Unit ! {{io, alloc, panic}} {{
+        fn main() -> Unit ! {{io, alloc}} {{
             let mut values: Vec<i64> = Vec.with_capacity(0);
             let mut row = 0;
             while row < 200 {{
@@ -196,11 +196,11 @@ fn a_vector_the_loop_also_changes_otherwise_is_left_alone() {
     agree(
         &format!(
             "{SUM}
-        fn extend(values: Vec<i64>, x: i64) -> Vec<i64> ! {{alloc, panic}} {{
+        fn extend(values: Vec<i64>, x: i64) -> Vec<i64> ! {{alloc}} {{
             let grown = Vec.push(values, x);
             Vec.push(grown, x + 1)
         }}
-        fn main() -> Unit ! {{io, alloc, panic}} {{
+        fn main() -> Unit ! {{io, alloc}} {{
             let mut values: Vec<i64> = Vec.with_capacity(0);
             let mut i = 0;
             while i < 3000 {{
@@ -221,7 +221,7 @@ fn a_vector_the_loop_also_changes_otherwise_is_left_alone() {
 fn wide_elements_and_pushes_inside_the_pushed_value() {
     agree(
         "fn pair(a: i64, b: i64) -> (i64, i64) ! {} { (a, b) }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut pairs: Vec<(i64, i64)> = Vec.with_capacity(0);
             let mut log: Vec<i64> = Vec.with_capacity(0);
             let mut i = 0;

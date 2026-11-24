@@ -28,11 +28,11 @@ fn joined_borrow_cannot_escape_in_a_closure_environment() {
     rejects(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn make<'a>(window: Window<'a>) -> once fn() -> i64 ! {panic} ! {alloc, panic, suspend} {
-            Task.scope(fn() -> once fn() -> i64 ! {panic} ! {alloc, panic, suspend} {
-                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic, suspend} { window });
+        fn make<'a>(window: Window<'a>) -> once fn() -> i64 ! {} ! {alloc, suspend} {
+            Task.scope(fn() -> once fn() -> i64 ! {} ! {alloc, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {suspend} { window });
                 let exit = Task.join(t);
-                fn() -> i64 ! {panic} {
+                fn() -> i64 ! {} {
                     match exit {
                         TaskExit.Completed(w) => Slice.get(w.view, w.start),
                         TaskExit.Cancelled => 0,
@@ -40,7 +40,7 @@ fn joined_borrow_cannot_escape_in_a_closure_environment() {
                 }
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let mut data: [i64; 3] = [1, 40, 2];
             let f = make(Window { view: &data[..], start: 1 });
             data = [9, 9, 9];
@@ -53,30 +53,30 @@ fn joined_borrow_cannot_escape_in_a_closure_environment() {
 #[test]
 fn scope_slice_results_keep_their_original_owner_loaned() {
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic, suspend} {
+        r#"fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 2] = [40, 2];
             let view = &data[..];
-            let out = Task.scope(fn() -> &[i64] ! {alloc, panic, suspend} { view });
+            let out = Task.scope(fn() -> &[i64] ! {alloc, suspend} { view });
             Slice.get(out, 0) + Slice.get(out, 1)
         }"#,
         42,
     );
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic, suspend} {
+        r#"fn main() -> i64 ! {alloc, suspend} {
             let mut data: [i64; 3] = [1, 40, 2];
             let view = &data[..];
-            let out = Task.scope(fn() -> &[i64] ! {alloc, panic, suspend} { view });
+            let out = Task.scope(fn() -> &[i64] ! {alloc, suspend} { view });
             data = [9, 9, 9];
             Slice.get(out, 1)
         }"#,
         "cannot replace an owner while a slice view or reference borrows it",
     );
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic, suspend} {
+        r#"fn main() -> i64 ! {alloc, suspend} {
             let out = {
                 let data: [i64; 2] = [40, 2];
                 let view = &data[..];
-                Task.scope(fn() -> &[i64] ! {alloc, panic, suspend} { view })
+                Task.scope(fn() -> &[i64] ! {alloc, suspend} { view })
             };
             Slice.get(out, 0)
         }"#,
@@ -87,7 +87,7 @@ fn scope_slice_results_keep_their_original_owner_loaned() {
 #[test]
 fn exclusive_reference_arguments_cannot_alias_but_shared_ones_can() {
     let prefix = r#"struct Point { x: i64, y: i64 }
-        fn swap(a: &mut Point, b: &mut Point) -> i64 ! {panic} {
+        fn swap(a: &mut Point, b: &mut Point) -> i64 ! {} {
             a.x = a.x + b.x;
             b.x = a.x + b.x;
             a.x
@@ -104,7 +104,7 @@ fn exclusive_reference_arguments_cannot_alias_but_shared_ones_can() {
         ),
     ] {
         let source = format!(
-            "{prefix} fn main() -> i64 ! {{panic}} {{
+            "{prefix} fn main() -> i64 ! {{}} {{
                 let mut p = Point {{ x: 1, y: 2 }};
                 let r = &mut p;
                 swap({arguments})
@@ -114,8 +114,8 @@ fn exclusive_reference_arguments_cannot_alias_but_shared_ones_can() {
     }
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn read(a: &Point, b: &Point) -> i64 ! {panic} { a.x + b.y }
-        fn main() -> i64 ! {panic} {
+        fn read(a: &Point, b: &Point) -> i64 ! {} { a.x + b.y }
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 2 };
             let r = &p;
             read(r, r)
@@ -127,10 +127,10 @@ fn exclusive_reference_arguments_cannot_alias_but_shared_ones_can() {
 #[test]
 fn scope_returned_split_half_keeps_its_disjoint_identity() {
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic, suspend} {
+        r#"fn main() -> i64 ! {alloc, suspend} {
             let mut data: [i64; 2] = [40, 2];
             let (left, right) = Slice.split_at_mut(&mut data[..], 1);
-            let out = Task.scope(fn() -> &mut [i64] ! {alloc, panic, suspend} { left });
+            let out = Task.scope(fn() -> &mut [i64] ! {alloc, suspend} { left });
             let right_child = &mut right[..];
             Slice.get(out, 0) + Slice.get(right_child, 0)
         }"#,
@@ -142,7 +142,7 @@ fn scope_returned_split_half_keeps_its_disjoint_identity() {
 fn reference_assignment_reserves_its_owner_through_the_right_hand_side() {
     rejects(
         r#"struct Point { x: i64, keep: Box<i64> }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut p = Point { x: 1, keep: Box.new(2) };
             let reference = &mut p;
             reference.x = { drop(p); 42 };
@@ -165,7 +165,7 @@ fn loop_results_retain_borrowed_records_and_containers() {
         };
         agrees(
             &format!(
-                "{declarations} fn main() -> i64 ! {{alloc, panic}} {{
+                "{declarations} fn main() -> i64 ! {{alloc}} {{
             let a = P {{ x: 40 }};
             let r = loop {{ break {value}; }};
             {read} + 2
@@ -175,7 +175,7 @@ fn loop_results_retain_borrowed_records_and_containers() {
         );
         rejects(
             &format!(
-                "{declarations} fn main() -> i64 ! {{alloc, panic}} {{
+                "{declarations} fn main() -> i64 ! {{alloc}} {{
             let mut a = P {{ x: 40 }};
             let r = loop {{ break {value}; }};
             a = P {{ x: 9 }};
@@ -186,7 +186,7 @@ fn loop_results_retain_borrowed_records_and_containers() {
         );
         rejects(
             &format!(
-                "{declarations} fn main() -> i64 ! {{alloc, panic}} {{
+                "{declarations} fn main() -> i64 ! {{alloc}} {{
             let r = loop {{ let a = P {{ x: 40 }}; break {value}; }};
             {read}
         }}"
@@ -196,7 +196,7 @@ fn loop_results_retain_borrowed_records_and_containers() {
     }
     rejects(
         r#"struct H<'a> { s: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: Vec<i64> = [40, 1];
             let h = H { s: &a[..] };
             let r = loop { break h; };
@@ -211,7 +211,7 @@ fn loop_results_retain_borrowed_records_and_containers() {
 fn loop_result_assignment_and_all_break_branches_keep_sources() {
     rejects(
         r#"struct P { x: i64 } struct H<'a> { p: &'a P }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a = P { x: 40 }; let b = P { x: 2 };
             let mut r = H { p: &b };
             r = loop { break H { p: &a }; };
@@ -223,7 +223,7 @@ fn loop_result_assignment_and_all_break_branches_keep_sources() {
         rejects(
             &format!(
                 r#"struct P {{ x: i64 }} struct H<'a> {{ p: &'a P }}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let mut a = P {{ x: 40 }}; let mut b = P {{ x: 2 }};
                 let r = loop {{
                     if true {{ break H {{ p: &a }}; }}
@@ -237,7 +237,7 @@ fn loop_result_assignment_and_all_break_branches_keep_sources() {
     }
     agrees(
         r#"struct P { x: i64 } struct H<'a> { p: &'a P }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a = P { x: 40 };
             let r = loop { break loop { break H { p: &a }; }; };
             r.p.x + 2
@@ -250,7 +250,7 @@ fn loop_result_assignment_and_all_break_branches_keep_sources() {
 fn replacing_box_element_releases_only_its_previous_loan() {
     agrees(
         r#"struct P { x: i64 } struct H<'a> { p: &'a P }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a = P { x: 40 }; let b = P { x: 2 };
             let mut boxed = Box.new(H { p: &a });
             Box.set(&mut boxed, H { p: &b });
@@ -270,7 +270,7 @@ fn replacing_box_element_releases_only_its_previous_loan() {
         rejects(
             &format!(
                 r#"struct P {{ x: i64 }} struct H<'a> {{ p: &'a P }}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let mut a = P {{ x: 40 }}; let mut b = P {{ x: 2 }};
                 let mut boxed = Box.new(H {{ p: &a }});
                 {read}

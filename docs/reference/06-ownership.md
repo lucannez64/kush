@@ -12,7 +12,7 @@ value has one owner; memory is released when its owner goes out of scope.
 | linear | `#[linear]` records/enums, `linear once fn`, data containing them, values graded `@[1]` | moves it; must be consumed on every path |
 
 ```kush reject
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a = Box.new(1);
     let b = a;
     Box.take(a)
@@ -22,7 +22,7 @@ fn main() -> i64 ! {alloc, panic} {
 
 Owned locals are dropped at scope exit in reverse binding order, record
 fields in reverse declaration order, unless moved. `drop(x)` drops early.
-Automatic cleanup never allocates, suspends, panics or fails.
+Automatic cleanup never allocates, suspends or fails.
 
 ```kush eval
 #[linear]
@@ -33,7 +33,7 @@ fn redeem(t: Token) -> i64 ! {} {
     id
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let t = Token { id: 4 };
     print_i64(redeem(t));
 }
@@ -58,14 +58,14 @@ A linear value must also be consumed on early exits (`return`, `?`,
 ```kush eval
 enum List { Nil, Cons(i64, Box<List>) }
 
-fn sum(list: List) -> i64 ! {panic} {
+fn sum(list: List) -> i64 ! {} {
     match list {
         List.Nil => 0,
         List.Cons(head, tail) => head + sum(Box.take(tail)),
     }
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let list = List.Cons(1, Box.new(List.Cons(2, Box.new(List.Nil))));
     print_i64(sum(list));
 }
@@ -95,17 +95,17 @@ FND-REF-*):
 ```kush eval
 struct Account { balance: i64 }
 
-fn deposit(acct: &mut Account, amount: i64) -> Unit ! {panic} {
+fn deposit(acct: &mut Account, amount: i64) -> Unit ! {} {
     acct.balance = acct.balance + amount;
 }
 
 fn balance(acct: &Account) -> i64 ! {} { acct.balance }
 
-fn add(values: &mut Vec<i64>, x: i64) -> Unit ! {alloc, panic} {
+fn add(values: &mut Vec<i64>, x: i64) -> Unit ! {alloc} {
     Vec.push(values, x);
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let mut acct = Account { balance: 40 };
     deposit(&mut acct, 2);
     print_i64(balance(&acct));
@@ -132,7 +132,7 @@ Rules:
   `Slice.split_at_mut`.
 
 ```kush eval
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let mut v: Vec<i64> = Vec.new();
     v = v.push(1);
     let view = &v[..];
@@ -155,7 +155,7 @@ fn main() -> Unit ! {io, alloc, panic} {
 ```
 
 ```kush reject
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let mut v: Vec<i64> = Vec.new();
     v = v.push(1);
     let view = &v[..];
@@ -167,7 +167,7 @@ fn main() -> i64 ! {alloc, panic} {
 
 ```kush reject
 fn both(a: &mut [i64], b: &mut [i64]) -> Unit ! {} { }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let mut a: [i64; 2] = [1, 2];
     both(&mut a[..], &mut a[..]);
     0
@@ -183,13 +183,13 @@ omitted. `<'long: 'short, 'short>` declares that one lifetime outlives
 another.
 
 ```kush eval
-fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
+fn tail(view: &[i64]) -> &[i64] ! {} { view[1..] }
 
 fn pick<'a>(left: &'a [i64], right: &'a [i64], first: Bool) -> &'a [i64] ! {} {
     if first { left } else { right }
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let a: [i64; 3] = [1, 2, 3];
     let b: [i64; 1] = [9];
     print_i64(tail(&a[..]).len());
@@ -203,7 +203,7 @@ fn main() -> Unit ! {io, panic} {
 ```
 
 ```kush reject
-fn local() -> &[i64] ! {alloc, panic} {
+fn local() -> &[i64] ! {alloc} {
     let v: Vec<i64> = Vec.new();
     &v[..]
 }
@@ -219,9 +219,9 @@ Each field keeps its own provenance.
 ```kush eval
 struct Window<'a> { view: &'a [i64], offset: i64 }
 
-fn first<'a>(w: Window<'a>) -> i64 ! {panic} { w.view.get(0) + w.offset }
+fn first<'a>(w: Window<'a>) -> i64 ! {} { w.view.get(0) + w.offset }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let a: [i64; 3] = [5, 6, 7];
     let w = Window { view: &a[1..], offset: 100 };
     print_i64(first(w));
@@ -235,7 +235,7 @@ fn main() -> Unit ! {io, panic} {
 ```kush reject
 struct Window<'a> { view: &'a [i64] }
 fn make<'a>(x: &'a [i64]) -> Window<'a> ! {} { Window { view: x } }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let w = { let v: Vec<i64> = Vec.new::<i64>(); make(&v[..]) };
     0
 }
@@ -253,7 +253,7 @@ limits are what FND-REF-POSITIONS removes.
 
 ```kush reject
 enum Holder<T> { Some(T), None }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: [i64; 1] = [1];
     let h: Holder<&[i64]> = Holder.Some(&a[..]);
     0

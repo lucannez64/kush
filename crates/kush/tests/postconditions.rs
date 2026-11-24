@@ -60,12 +60,12 @@ fn postconditions_are_proved_and_used_by_callers() {
     agrees(
         &format!(
             "{DECIDE}
-             fn next(c: i64) -> i64 ! {{panic}} ensures {{ result == c + 1 }} {{ c + 1 }}
+             fn next(c: i64) -> i64 ! {{}} ensures {{ result == c + 1 }} {{ c + 1 }}
              fn positive(x: i64) -> Bool ! {{}}
                  ensures result => {{ x >= 1 }}
                  ensures !result => {{ x <= 0 }}
              {{ x > 0 }}
-             fn caller(x: i64) -> i64 ! {{panic}} {{
+             fn caller(x: i64) -> i64 ! {{}} {{
                  let n = next(x);
                  let d = decide(n, 10);
                  match d {{
@@ -80,7 +80,7 @@ fn postconditions_are_proved_and_used_by_callers() {
              fn from_condition(x: i64) -> i64 ! {{}} {{
                  if positive(x) {{ at_most_ten(1 - x + 9, _) }} else {{ 0 }}
              }}
-             fn main() -> i64 ! {{panic}} {{
+             fn main() -> i64 ! {{}} {{
                  caller(4) + (if positive(3) {{ 1 }} else {{ 0 }}) + (if never_over(500) {{ 100 }} else {{ 0 }})
                      + from_condition(1)
              }}"
@@ -114,7 +114,7 @@ fn record_fields_returns_and_nested_tails() {
                  Verdict.Outside => 0,
              }
          }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              let f = Facts { flag: true, low: 3, high: 7 };
              match classify(f) {
                  Verdict.Inside(v) => v + width(Facts { flag: false, low: 1, high: 0 }),
@@ -128,7 +128,7 @@ fn record_fields_returns_and_nested_tails() {
 #[test]
 fn wrong_or_unjustified_postconditions_are_rejected() {
     rejects(
-        "fn next(c: i64) -> i64 ! {panic} ensures { result == c + 2 } { c + 1 }
+        "fn next(c: i64) -> i64 ! {} ensures { result == c + 2 } { c + 1 }
          fn main() -> i64 ! {} { 0 }",
         "cannot prove 'ensures { result == c + 2 }'",
     );
@@ -209,12 +209,12 @@ fn postconditions_need_a_body_and_explicit_returns() {
     );
     // A lambda's returns are not the enclosing function's.
     agrees(
-        "fn outer(x: i64) -> i64 ! {alloc, panic} ensures { result >= 0 } {
+        "fn outer(x: i64) -> i64 ! {alloc} ensures { result >= 0 } {
              let f = fn(y: i64) -> i64 ! {} { 0 - 5 };
              let z = f(x);
              if z >= 0 { z } else { 0 }
          }
-         fn main() -> i64 ! {alloc, panic} { outer(3) }",
+         fn main() -> i64 ! {alloc} { outer(3) }",
         0,
     );
 }
@@ -275,11 +275,11 @@ fn review_regressions_for_postconditions() {
             &format!(
                 "struct P {{ x: i64, y: i64 }}
                  struct W {{ p: P }}
-                 impl P {{ fn bump(&mut self, by: i64) -> Unit ! {{panic}} {{ self.x = self.x + by; }} }}
+                 impl P {{ fn bump(&mut self, by: i64) -> Unit ! {{}} {{ self.x = self.x + by; }} }}
                  fn set(r: &mut P) -> Unit ! {{}} {{ r.x = 1000; }}
                  fn mk() -> P ! {{}} ensures {{ result.x <= 10 }} {{ P {{ x: 1, y: 2 }} }}
                  fn at_most_ten(v: i64, erased p: {{ v <= 10 }}) -> i64 ! {{}} {{ v }}
-                 fn f() -> i64 ! {{panic}} {{ {body} }}
+                 fn f() -> i64 ! {{}} {{ {body} }}
                  fn main() -> i64 ! {{}} {{ 0 }}"
             ),
             "cannot prove 'v <= 10'",
@@ -312,7 +312,7 @@ fn postconditions_of_calls_in_short_circuit_operands() {
          { f.b }
          fn mid(f: F) -> Bool ! {} ensures result => { f.a && f.b && f.c } { f.a && g(f) && f.c }
          fn alt(f: F) -> Bool ! {} ensures !result => { !f.a && !f.b } { f.a || g(f) }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              let f = F { a: true, b: true, c: false };
              (if mid(f) { 1 } else { 0 }) + (if alt(f) { 2 } else { 0 })
          }",
@@ -354,7 +354,7 @@ fn bool_bindings_remember_their_condition() {
              let big = x > 10;
              if !big { at_most_ten(x, _) } else { 0 }
          }
-         fn main() -> i64 ! {panic} { pick(4, false) + other(3) }",
+         fn main() -> i64 ! {} { pick(4, false) + other(3) }",
         7,
     );
     // Only the condition's truth value: reassignment or the other branch
@@ -462,7 +462,7 @@ fn method_calls_receive_postconditions() {
     agrees(
         &format!(
             "{LIMITS}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let l = Limit {{ max: 10 }};
                 let a = match l.decide(7) {{
                     Decision.Accept(v) => at_most_ten(v, _),
@@ -482,7 +482,7 @@ fn method_calls_receive_postconditions() {
             fn never_over(x: i64) -> Bool ! {{}} ensures {{ !result }} {{
                 if x > 100 {{ Limit {{ max: 50 }}.allows(x) }} else {{ false }}
             }}
-            fn main() -> i64 ! {{panic}} {{ if never_over(150) {{ 1 }} else {{ 2 }} }}"
+            fn main() -> i64 ! {{}} {{ if never_over(150) {{ 1 }} else {{ 2 }} }}"
         ),
         2,
     );
@@ -497,7 +497,7 @@ fn method_calls_receive_postconditions() {
                 let Policy {{ limit, slack }} = p;
                 limit.allows(x)
             }}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 if admits(Policy {{ limit: Limit {{ max: 3 }}, slack: 0 }}, 2) {{ 5 }} else {{ 6 }}
             }}"
         ),
@@ -510,7 +510,7 @@ fn method_postconditions_do_not_prove_more_than_they_say() {
     rejects(
         &format!(
             "{LIMITS}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let l = Limit {{ max: 11 }};
                 match l.decide(7) {{
                     Decision.Accept(v) => at_most_ten(v + 4, _),
@@ -526,7 +526,7 @@ fn method_postconditions_do_not_prove_more_than_they_say() {
             fn wrong(x: i64) -> Bool ! {{}} ensures {{ !result }} {{
                 if x > 40 {{ Limit {{ max: 50 }}.allows(x) }} else {{ false }}
             }}
-            fn main() -> i64 ! {{panic}} {{ 0 }}"
+            fn main() -> i64 ! {{}} {{ 0 }}"
         ),
         "cannot prove",
     );
@@ -534,7 +534,7 @@ fn method_postconditions_do_not_prove_more_than_they_say() {
     rejects(
         &format!(
             "{LIMITS}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let m = Limit {{ max: 5 }};
                 if m.allows(9) {{ 0 }} else {{ at_most_ten(11, _) }}
             }}"
@@ -605,7 +605,7 @@ fn predicates_in_propositions_expand_to_their_definition() {
             {{
                 if f.has_pin && f.revision <= f.pinned {{ admitted(plan(f)) }} else {{ false }}
             }}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let f = Facts {{ authenticated: true, has_pin: false, revision: 3, pinned: 0 }};
                 let a = match plan(f) {{
                     Decision.First(r) => positive(r, _),
@@ -712,7 +712,7 @@ fn shared_reference_parameters_in_postconditions() {
     agrees(
         &format!(
             "{REFS}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let l = Limit {{ max: 10 }};
                 let a = if l.allows(9) {{ le(9, l.max, _) }} else {{ 0 }};
                 let b = if within(&l, 7) {{ le(7, l.max, _) }} else {{ 0 }};
@@ -741,7 +741,7 @@ fn reference_postconditions_stay_sound() {
     rejects(
         &format!(
             "{REFS}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let mut l = Limit {{ max: 20 }};
                 if within(&l, 15) {{ l = Limit {{ max: 3 }}; le(15, l.max, _) }} else {{ 0 }}
             }}"
@@ -753,7 +753,7 @@ fn reference_postconditions_stay_sound() {
         &format!(
             "{REFS}
             fn shrink(l: &mut Limit) -> Unit ! {{}} {{ l.max = 0; }}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let mut l = Limit {{ max: 20 }};
                 if within(&l, 15) {{ shrink(&mut l); le(15, l.max, _) }} else {{ 0 }}
             }}"

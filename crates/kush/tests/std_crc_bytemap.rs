@@ -52,7 +52,7 @@ fn agrees_scaled(source: &str, small: i64, large: i64, expected: impl Fn(i64) ->
 fn crc32_matches_known_values() {
     let output = agrees(
         "use std.crc32;
-         fn main() -> i64 ! {io, alloc, panic} {
+         fn main() -> i64 ! {io, alloc} {
              let t = crc32.table();
              let d = Bytes.from(\"123456789\");
              print_int(crc32.of(&t, &d, 0, Bytes.len(&d), _));
@@ -103,7 +103,7 @@ fn crc32_ranges_must_be_proved() {
     ] {
         let source = format!(
             "use std.crc32;
-             fn main() -> i64 ! {{io, alloc, panic}} {{
+             fn main() -> i64 ! {{io, alloc}} {{
                  let t = crc32.table(); let d = Bytes.from(\"123456789\");
                  print_int({call}); 0
              }}"
@@ -152,7 +152,7 @@ fn bytemap_agrees_with_a_hash_map() {
         "use std.option.Option;
          use std.bytemap;
          use std.text;
-         fn main() -> i64 ! {io, alloc, panic} {
+         fn main() -> i64 ! {io, alloc} {
              let mut map: bytemap.Map<i64> = bytemap.new(0);
              let mut state: u64 = 12345;
              let mut step = 0;
@@ -203,11 +203,11 @@ fn bytemap_holds_records_and_reclaims_removed_keys() {
          use std.bytemap;
          use std.text;
          struct Loc { seg: i64, off: i64, len: i64 }
-         fn key(i: i64) -> Bytes ! {alloc, panic} {
+         fn key(i: i64) -> Bytes ! {alloc} {
              // Long keys, so removals produce enough garbage to rebuild.
              text.format_i64_into(Bytes.from(\"a-long-key-prefix-so-that-removed-keys-make-enough-arena-garbage-\"), i)
          }
-         fn main() -> i64 ! {io, alloc, panic} {
+         fn main() -> i64 ! {io, alloc} {
              let mut m: bytemap.Map<Loc> = bytemap.new(Loc { seg: 0, off: 0, len: 0 });
              let mut round = 0;
              while round < 2 {
@@ -260,7 +260,7 @@ fn bytemap_holds_records_and_reclaims_removed_keys() {
 fn evaluator_vector_steps_do_not_scale_with_length() {
     let source = |length: i64| {
         format!(
-            "fn main() -> i64 ! {{io, alloc, panic}} {{
+            "fn main() -> i64 ! {{io, alloc}} {{
                 let mut v: Vec<i64> = Vec.with_capacity({length});
                 let mut b = Bytes.with_capacity({length});
                 let mut i = 0;

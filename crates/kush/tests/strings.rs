@@ -72,7 +72,7 @@ fn string_example_matches_documented_output() {
 #[test]
 fn literals_use_byte_and_scalar_indexing_explicitly() {
     agrees(
-        "fn main() -> i64 ! {io, alloc, panic} {
+        "fn main() -> i64 ! {io, alloc} {
             let text = \"héllo\";
             print_i64(String.len(&text));
             print_i64(String.scalar_len(&text));
@@ -102,7 +102,7 @@ fn literals_use_byte_and_scalar_indexing_explicitly() {
 #[test]
 fn bytes_and_string_round_trip_with_explicit_validation() {
     agrees(
-        "fn main() -> i64 ! {io, alloc, panic} {
+        "fn main() -> i64 ! {io, alloc} {
             let bytes = Bytes.from(\"hé\");
             match String.from_utf8(bytes) {
                 Result.Ok(text) => {
@@ -131,7 +131,7 @@ fn bytes_and_string_round_trip_with_explicit_validation() {
 #[test]
 fn string_from_and_method_syntax_are_explicit() {
     agrees(
-        "fn main() -> i64 ! {io, alloc, panic} {
+        "fn main() -> i64 ! {io, alloc} {
             let literal = String.from(\"abc\");
             print_i64(literal.len());
             let copied = literal.as_bytes();
@@ -147,27 +147,27 @@ fn string_from_and_method_syntax_are_explicit() {
 fn string_is_not_bytes_or_sliceable_without_conversion() {
     rejects(
         "fn take(s: String) -> Unit ! {} {}
-        fn main() -> Unit ! {alloc, panic} { let b = Bytes.from(\"x\"); take(b); }",
+        fn main() -> Unit ! {alloc} { let b = Bytes.from(\"x\"); take(b); }",
         "type mismatch",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let b = Bytes.from(\"x\"); let s = String.from(b); }",
+        "fn main() -> Unit ! {alloc} { let b = Bytes.from(\"x\"); let s = String.from(b); }",
         "requires exactly one string literal",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let s = \"abc\"; let slice = &s[..]; }",
+        "fn main() -> Unit ! {alloc} { let s = \"abc\"; let slice = &s[..]; }",
         "String does not support byte slicing",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let s = \"abc\"; s == s; }",
+        "fn main() -> Unit ! {alloc} { let s = \"abc\"; s == s; }",
         "opaque-handle equality",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let s = \"abc\"; let b = s.bytes(); String.len(&s); }",
+        "fn main() -> Unit ! {alloc} { let s = \"abc\"; let b = s.bytes(); String.len(&s); }",
         "cannot borrow a moved owner",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let s: String = 1; }",
+        "fn main() -> Unit ! {alloc} { let s: String = 1; }",
         "type mismatch",
     );
 }
@@ -175,7 +175,7 @@ fn string_is_not_bytes_or_sliceable_without_conversion() {
 #[test]
 fn string_cleanup_is_balanced_for_ok_and_invalid_conversions() {
     let source = format!(
-        "{PREFIX}fn main() -> Unit ! {{io, alloc, panic}} {{
+        "{PREFIX}fn main() -> Unit ! {{io, alloc}} {{
             let good = String.from_utf8(Bytes.from(\"ok\"));
             let bad = String.from_utf8(Bytes.push(Bytes.with_capacity(1), 255));
             drop(good);
@@ -198,7 +198,7 @@ fn string_cleanup_is_balanced_for_ok_and_invalid_conversions() {
 fn string_record_and_box_fields_cleanup_exactly_once() {
     let source = format!(
         "{PREFIX}struct Wrapped {{ text: String }}
-        fn main() -> Unit ! {{io, alloc, panic}} {{
+        fn main() -> Unit ! {{io, alloc}} {{
             let wrapped = Wrapped {{ text: \"abc\" }};
             let Wrapped {{ text }} = wrapped;
             print_i64(text.len());
@@ -222,31 +222,31 @@ fn string_record_and_box_fields_cleanup_exactly_once() {
 #[test]
 fn utf8_validation_rejects_overlong_surrogates_truncation_and_high_points() {
     agrees(
-        "fn rejected(bytes: Bytes) -> i64 ! {alloc, panic} {
+        "fn rejected(bytes: Bytes) -> i64 ! {alloc} {
             match String.from_utf8(bytes) {
                 Result.Ok(_) => 1,
                 Result.Err(_) => 0,
             }
         }
-        fn two(a: i64, b: i64) -> Bytes ! {alloc, panic} {
+        fn two(a: i64, b: i64) -> Bytes ! {alloc} {
             let mut bytes = Bytes.with_capacity(2);
             bytes = Bytes.push(bytes, a);
             Bytes.push(bytes, b)
         }
-        fn three(a: i64, b: i64, c: i64) -> Bytes ! {alloc, panic} {
+        fn three(a: i64, b: i64, c: i64) -> Bytes ! {alloc} {
             let mut bytes = Bytes.with_capacity(3);
             bytes = Bytes.push(bytes, a);
             bytes = Bytes.push(bytes, b);
             Bytes.push(bytes, c)
         }
-        fn four(a: i64, b: i64, c: i64, d: i64) -> Bytes ! {alloc, panic} {
+        fn four(a: i64, b: i64, c: i64, d: i64) -> Bytes ! {alloc} {
             let mut bytes = Bytes.with_capacity(4);
             bytes = Bytes.push(bytes, a);
             bytes = Bytes.push(bytes, b);
             bytes = Bytes.push(bytes, c);
             Bytes.push(bytes, d)
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut sum = 0;
             sum = sum + rejected(two(0xC0, 0x80));
             sum = sum + rejected(three(0xED, 0xA0, 0x80));
@@ -267,7 +267,7 @@ fn utf8_validation_rejects_overlong_surrogates_truncation_and_high_points() {
 
 #[test]
 fn string_byte_indexes_are_checked() {
-    panics("fn main() -> i64 ! {io, alloc, panic} { let s = \"abc\"; String.byte_at(&s, 3) }");
+    panics("fn main() -> i64 ! {io, alloc} { let s = \"abc\"; String.byte_at(&s, 3) }");
 }
 
 #[test]
@@ -279,7 +279,7 @@ fn owning_string_conversions_cannot_erase_linear_obligations() {
         r#"let b: Bytes @[1] = Bytes.from("hi"); let alias = b; drop(String.from_utf8(alias));"#,
     ] {
         rejects(
-            &format!("fn main() -> Unit ! {{alloc, panic}} {{ {body} }}"),
+            &format!("fn main() -> Unit ! {{alloc}} {{ {body} }}"),
             "linear",
         );
     }
@@ -303,7 +303,7 @@ fn borrowed_text_example_matches_documented_output() {
 #[test]
 fn borrowed_text_views_read_ascii_multibyte_and_empty() {
     agrees(
-        "fn main() -> i64 ! {io, alloc, panic} {
+        "fn main() -> i64 ! {io, alloc} {
             let ascii = \"abc\";
             let a = ascii.as_str();
             print_i64(Str.len(a));
@@ -344,7 +344,7 @@ fn borrowed_text_views_read_ascii_multibyte_and_empty() {
 #[test]
 fn borrowed_text_views_allocate_nothing_and_release_the_owner() {
     let source = format!(
-        "{PREFIX}fn main() -> i64 ! {{io, alloc, panic}} {{
+        "{PREFIX}fn main() -> i64 ! {{io, alloc}} {{
             let text = \"héllo\";
             let view = text.as_str();
             let part = view[1..3];
@@ -373,7 +373,7 @@ fn borrowed_text_views_allocate_nothing_and_release_the_owner() {
 #[test]
 fn nested_text_substrings_agree_and_check_scalar_boundaries() {
     agrees(
-        "fn main() -> i64 ! {io, alloc, panic} {
+        "fn main() -> i64 ! {io, alloc} {
             let text = \"αβγδ\";
             let view = text.as_str();
             let middle = view[2..6];
@@ -399,7 +399,7 @@ fn nested_text_substrings_agree_and_check_scalar_boundaries() {
         "(0, 9)",  // past the end
     ] {
         panics(&format!(
-            "fn main() -> i64 ! {{alloc, panic}} {{
+            "fn main() -> i64 ! {{alloc}} {{
                 let text = \"αβγδ\";
                 let view = text.as_str();
                 view.substr{bounds}.len()
@@ -412,10 +412,10 @@ fn nested_text_substrings_agree_and_check_scalar_boundaries() {
 fn borrowed_text_helpers_infer_elide_and_shorten_lifetimes() {
     agrees(
         "fn whole(text: &str) -> &str ! {} { text }
-        fn tail<'a>(text: &'a str) -> &'a str ! {panic} { text[1..] }
+        fn tail<'a>(text: &'a str) -> &'a str ! {} { text[1..] }
         fn shorten<'long: 'short, 'short>(text: &'long str) -> &'short str ! {} { text }
         fn pick<'a>(first: &'a str, second: &str) -> &'a str ! {} { first }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let text = \"abcdef\";
             let all = whole(text.as_str());
             print_i64(all.len());
@@ -436,16 +436,16 @@ fn borrowed_text_helpers_infer_elide_and_shorten_lifetimes() {
 fn borrowed_text_fields_and_record_references_keep_their_source_borrowed() {
     agrees(
         r#"struct Text<'a> { text: &'a str, note: i64 }
-        fn make<'a>(text: &'a str, note: i64) -> Text<'a> ! {panic} {
+        fn make<'a>(text: &'a str, note: i64) -> Text<'a> ! {} {
             Text { text: text, note: note }
         }
-        fn read<'a>(text: Text<'a>) -> i64 ! {panic} {
+        fn read<'a>(text: Text<'a>) -> i64 ! {} {
             Str.len(text.text) + text.note
         }
-        fn read_ref<'a>(text: &'a Text<'a>) -> i64 ! {panic} {
+        fn read_ref<'a>(text: &'a Text<'a>) -> i64 ! {} {
             Str.len(text.text) + text.note
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let source = "abcd";
             let text = make(source.as_str(), 2);
             read(text) + read_ref(&text) - 6
@@ -456,8 +456,8 @@ fn borrowed_text_fields_and_record_references_keep_their_source_borrowed() {
     // Returning the text view keeps the original String borrowed.
     agrees(
         r#"struct Text<'a> { text: &'a str }
-        fn get<'a>(text: &'a Text<'a>) -> &'a str ! {panic} { text.text }
-        fn main() -> i64 ! {alloc, panic} {
+        fn get<'a>(text: &'a Text<'a>) -> &'a str ! {} { text.text }
+        fn main() -> i64 ! {alloc} {
             let source = "abcd";
             let text = Text { text: source.as_str() };
             Str.len(get(&text))
@@ -470,13 +470,13 @@ fn borrowed_text_fields_and_record_references_keep_their_source_borrowed() {
 #[test]
 fn borrowed_text_containers_carry_element_lifetimes() {
     agrees(
-        r#"fn read_box<'a>(text: &'a Box<&'a str>) -> i64 ! {panic} {
+        r#"fn read_box<'a>(text: &'a Box<&'a str>) -> i64 ! {} {
             Str.len(Box.read(text))
         }
-        fn read_vec<'a>(text: &'a Vec<&'a str>) -> i64 ! {panic} {
+        fn read_vec<'a>(text: &'a Vec<&'a str>) -> i64 ! {} {
             Str.len(Vec.get(text, 0)) + Str.len(Vec.get(text, 1))
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let a = "abcd";
             let b = "wxyz";
             let boxed: Box<&str> = Box.new(a.as_str());
@@ -490,7 +490,7 @@ fn borrowed_text_containers_carry_element_lifetimes() {
     );
     // The element owner stays loaned while a read view is live.
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a = "abcd";
             let boxed: Box<&str> = Box.new(a.as_str());
             let view = Box.read(&boxed);
@@ -506,15 +506,15 @@ fn borrowed_text_escape_positions_are_rejected() {
     // `&"abc"` is an `&String` place reference; it does not implicitly become
     // a `&str` descriptor without `String.as_str`.
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let view: &str = &\"abc\"; }",
+        "fn main() -> Unit ! {alloc} { let view: &str = &\"abc\"; }",
         "type mismatch",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let view = \"abc\".as_str(); }",
+        "fn main() -> Unit ! {alloc} { let view = \"abc\".as_str(); }",
         "temporary borrows are not supported",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let view: &str = \"abc\"; }",
+        "fn main() -> Unit ! {alloc} { let view: &str = \"abc\"; }",
         "type mismatch",
     );
     rejects(
@@ -522,14 +522,14 @@ fn borrowed_text_escape_positions_are_rejected() {
         "borrowed slice result",
     );
     rejects(
-        "fn only(text: &str) -> &str ! {alloc, panic} {
+        "fn only(text: &str) -> &str ! {alloc} {
             let owned = text.to_string();
             owned.as_str()
         }",
         "outlive",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} {
+        "fn main() -> Unit ! {alloc} {
             let s = \"abc\";
             let view = s.as_str();
             let pair = (1, view);
@@ -539,12 +539,12 @@ fn borrowed_text_escape_positions_are_rejected() {
     // A temporary `String` borrowed for a call has hidden storage in the
     // enclosing block; the returned view is usable there and cannot escape.
     agrees(
-        "fn main() -> i64 ! {alloc, panic} { let view = String.as_str(&\"abc\"); Str.len(view) }",
+        "fn main() -> i64 ! {alloc} { let view = String.as_str(&\"abc\"); Str.len(view) }",
         3,
         "",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} {
+        "fn main() -> Unit ! {alloc} {
             let s = \"abc\";
             let view = s.as_str();
             let mixed = if true { 1 } else { view };
@@ -552,7 +552,7 @@ fn borrowed_text_escape_positions_are_rejected() {
         "unions cannot contain borrowed references or slice views",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} {
+        "fn main() -> Unit ! {alloc} {
             let s = \"abc\";
             let view = s.as_str();
             let values: [&str; 1] = [view];
@@ -561,11 +561,11 @@ fn borrowed_text_escape_positions_are_rejected() {
     );
     rejects(
         "enum Holder { Text(&str) }
-        fn main() -> Unit ! {alloc, panic} { }",
+        fn main() -> Unit ! {alloc} { }",
         "enums cannot store borrowed references or slice views",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} {
+        "fn main() -> Unit ! {alloc} {
             let s = \"abc\";
             let view = s.as_str();
             let closure = fn() -> i64 ! {} { Str.len(view) };
@@ -574,7 +574,7 @@ fn borrowed_text_escape_positions_are_rejected() {
         "cannot capture a borrowed '&str' text view",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} {
+        "fn main() -> Unit ! {alloc} {
             let s = \"abc\";
             let view = s.as_str();
             let f: fn(&str) -> i64 ! {} = fn(text: &str) -> i64 ! {} { Str.len(text) };
@@ -582,12 +582,12 @@ fn borrowed_text_escape_positions_are_rejected() {
         "function arrow types may borrow slice views",
     );
     rejects(
-        "fn first(text: &str) -> i64 ! {panic} { Str.len(text) }
+        "fn first(text: &str) -> i64 ! {} { Str.len(text) }
         fn main() -> Unit ! {} { let f = first; }",
         "a function value cannot carry an owner reference or &str text view",
     );
     agrees(
-        "fn main() -> i64 ! {alloc, panic} { let view = String.as_str(&\"abc\"); Str.len(view) }",
+        "fn main() -> i64 ! {alloc} { let view = String.as_str(&\"abc\"); Str.len(view) }",
         3,
         "",
     );
@@ -599,7 +599,7 @@ fn borrowed_text_escape_positions_are_rejected() {
     );
     rejects("fn take(text: str) -> Unit ! {} { }", "'str' is unsized");
     rejects(
-        "fn main() -> Unit ! {alloc, panic} {
+        "fn main() -> Unit ! {alloc} {
             let s = \"abc\";
             let view = s.as_str();
             match view { _ => () }
@@ -607,7 +607,7 @@ fn borrowed_text_escape_positions_are_rejected() {
         "cannot match a divergent",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} {
+        "fn main() -> Unit ! {alloc} {
             let s = \"abc\";
             let mut view = s.as_str();
         }",
@@ -618,7 +618,7 @@ fn borrowed_text_escape_positions_are_rejected() {
 #[test]
 fn borrowed_text_keeps_its_owner_until_the_last_view_use() {
     rejects(
-        "fn main() -> Unit ! {io, alloc, panic} {
+        "fn main() -> Unit ! {io, alloc} {
             let text = \"abc\";
             let view = text.as_str();
             let raw = text.bytes();
@@ -627,7 +627,7 @@ fn borrowed_text_keeps_its_owner_until_the_last_view_use() {
         "cannot move an owner while it is borrowed",
     );
     rejects(
-        "fn main() -> Unit ! {io, alloc, panic} {
+        "fn main() -> Unit ! {io, alloc} {
             let text = \"abc\";
             let view = text.as_str();
             drop(text);
@@ -636,7 +636,7 @@ fn borrowed_text_keeps_its_owner_until_the_last_view_use() {
         "cannot move or drop an owner or view while a slice view",
     );
     rejects(
-        "fn main() -> Unit ! {io, alloc, panic} {
+        "fn main() -> Unit ! {io, alloc} {
             let text = \"abcdef\";
             let view = text.as_str();
             let part = view[1..3];
@@ -646,7 +646,7 @@ fn borrowed_text_keeps_its_owner_until_the_last_view_use() {
         "cannot move an owner while it is borrowed",
     );
     rejects(
-        "fn main() -> Unit ! {io, alloc, panic} {
+        "fn main() -> Unit ! {io, alloc} {
             let mut text = \"abc\";
             let view = text.as_str();
             text = \"zyx\";
@@ -655,7 +655,7 @@ fn borrowed_text_keeps_its_owner_until_the_last_view_use() {
         "cannot replace an owner while a slice view or reference borrows it",
     );
     agrees(
-        "fn main() -> i64 ! {io, alloc, panic} {
+        "fn main() -> i64 ! {io, alloc} {
             let text = \"abc\";
             let view = text.as_str();
             print_i64(Str.len(view));
@@ -673,7 +673,7 @@ fn borrowed_text_keeps_its_owner_until_the_last_view_use() {
 #[test]
 fn borrowed_text_works_in_loops_branches_and_method_chains() {
     agrees(
-        "fn main() -> i64 ! {io, alloc, panic} {
+        "fn main() -> i64 ! {io, alloc} {
             let text = \"abcdef\";
             let whole = text.as_str();
             let mut i = 0;
@@ -703,11 +703,11 @@ fn borrowed_text_works_in_loops_branches_and_method_chains() {
 fn borrowed_text_reads_are_noalloc_and_nosuspend() {
     agrees(
         "
-        fn first(text: &str) -> &str ! {panic} {
+        fn first(text: &str) -> &str ! {} {
             if Str.scalar_len(text) == 0 { text } else { text[0..1] }
         }
         fn count(text: &str) -> i64 ! {} { Str.len(text) }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let text = \"abc\";
             print_i64(first(text.as_str()).len());
             print_i64(count(text.as_str()));
@@ -717,7 +717,7 @@ fn borrowed_text_reads_are_noalloc_and_nosuspend() {
         "1\n3\n",
     );
     rejects(
-        "fn copy(text: &str) -> String ! {panic} { let owned = text.to_string(); owned }
+        "fn copy(text: &str) -> String ! {} { let owned = text.to_string(); owned }
         fn main() -> Unit ! {} { }",
         "requires effects {alloc",
     );
@@ -726,7 +726,7 @@ fn borrowed_text_reads_are_noalloc_and_nosuspend() {
 #[test]
 fn borrowed_text_namespace_forms_and_scalar_bounds() {
     agrees(
-        "fn main() -> i64 ! {io, alloc, panic} {
+        "fn main() -> i64 ! {io, alloc} {
             let text = \"héllo\";
             let view = String.as_str(&text);
             let part = String.substr(&text, 1, 3);
@@ -748,14 +748,14 @@ fn borrowed_text_namespace_forms_and_scalar_bounds() {
         "6\n2\n3\n0\n0\n",
     );
     panics(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let text = \"héllo\";
             let view = text.as_str();
             Str.byte_at(view, 6)
         }",
     );
     panics(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let text = \"héllo\";
             let view = text.as_str();
             Str.byte_at(view, -1)
@@ -766,10 +766,10 @@ fn borrowed_text_namespace_forms_and_scalar_bounds() {
 #[test]
 fn borrowed_text_task_and_generic_positions_are_rejected() {
     rejects(
-        "fn main() -> Unit ! {io, alloc, panic, suspend} {
+        "fn main() -> Unit ! {io, alloc, suspend} {
             let text = \"abc\";
             let view = text.as_str();
-            Task.scope(fn() -> Unit ! {io, panic, suspend} {
+            Task.scope(fn() -> Unit ! {io, suspend} {
                 Task.yield();
                 print_i64(Str.len(view));
             });
@@ -778,7 +778,7 @@ fn borrowed_text_task_and_generic_positions_are_rejected() {
     );
     rejects(
         "fn identity<T>(value: T) -> T ! {} { value }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let text = \"abc\";
             let view = text.as_str();
             let other = identity::<&str>(view);
@@ -800,7 +800,7 @@ fn borrowed_text_task_and_generic_positions_are_rejected() {
     // outlived by every source; it cannot be named as a caller lifetime.
     check("fn ambiguous(first: &str, second: &str) -> &str ! {} { if true { first } else { second } }").unwrap();
     rejects(
-        "fn main() -> Unit ! {alloc, panic} {
+        "fn main() -> Unit ! {alloc} {
             let text = \"abc\";
             let view = text.as_str();
             let mut part = &mut view[0..1];
@@ -812,8 +812,8 @@ fn borrowed_text_task_and_generic_positions_are_rejected() {
 #[test]
 fn borrowed_text_loans_extend_through_later_arguments() {
     rejects(
-        "fn combine(view: &str, b: i64) -> i64 ! {panic} { Str.len(view) + b }
-        fn main() -> Unit ! {io, alloc, panic} {
+        "fn combine(view: &str, b: i64) -> i64 ! {} { Str.len(view) + b }
+        fn main() -> Unit ! {io, alloc} {
             let text = \"abc\";
             let view = text.as_str();
             let result = combine(view, { drop(text); 1 });
@@ -822,8 +822,8 @@ fn borrowed_text_loans_extend_through_later_arguments() {
         "cannot move or drop an owner or view while a slice view",
     );
     agrees(
-        "fn combine(view: &str, b: i64) -> i64 ! {panic} { Str.len(view) + b }
-        fn main() -> i64 ! {io, alloc, panic} {
+        "fn combine(view: &str, b: i64) -> i64 ! {} { Str.len(view) + b }
+        fn main() -> i64 ! {io, alloc} {
             let text = \"abc\";
             let view = text.as_str();
             let result = combine(view, Str.scalar_len(view));
@@ -838,9 +838,9 @@ fn borrowed_text_loans_extend_through_later_arguments() {
 #[test]
 fn borrowed_text_subview_returns_are_tied_to_the_parameter() {
     agrees(
-        "fn first<'a>(text: &'a str) -> &'a str ! {panic} { text[0..1] }
-        fn itself(text: &str) -> &str ! {panic} { text[0..] }
-        fn main() -> i64 ! {io, alloc, panic} {
+        "fn first<'a>(text: &'a str) -> &'a str ! {} { text[0..1] }
+        fn itself(text: &str) -> &str ! {} { text[0..] }
+        fn main() -> i64 ! {io, alloc} {
             let text = \"abcdef\";
             print_i64(first(text.as_str()).len());
             print_i64(itself(text.as_str()).scalar_len());

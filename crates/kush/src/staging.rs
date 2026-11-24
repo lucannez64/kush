@@ -266,7 +266,7 @@ fn check_quote_effects(
                 _ => 0,
             };
             if required & missing != 0 {
-                let ungaranteed = [(ex::IO, "io"), (ex::PANIC, "panic")]
+                let ungaranteed = [(ex::IO, "io")]
                     .into_iter()
                     .filter_map(|(bit, name)| (required & missing & bit != 0).then_some(name))
                     .collect::<Vec<_>>()
@@ -504,7 +504,7 @@ pub(crate) fn prepare(program: &Program) -> Result<Option<Prepared>> {
                     },
                     Span::new(base + 4, base + 5),
                 );
-                let effects = ["alloc", "panic"]
+                let effects = ["alloc"]
                     .into_iter()
                     .enumerate()
                     .map(|(i, name)| {

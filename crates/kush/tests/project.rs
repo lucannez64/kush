@@ -128,7 +128,7 @@ fn local_path_dependencies_resolve_and_the_lockfile_is_deterministic() {
     );
     scratch.write(
         "dep with space/src/lib.kush",
-        "module math_utils;\n\npub fn answer() -> i64 ! {panic} {\n    6 * 7\n}\n",
+        "module math_utils;\n\npub fn answer() -> i64 ! {} {\n    6 * 7\n}\n",
     );
     scratch.write(
         "app/Kush.toml",
@@ -136,7 +136,7 @@ fn local_path_dependencies_resolve_and_the_lockfile_is_deterministic() {
     );
     scratch.write(
         "app/src/main.kush",
-        "module app;\n\nuse math_utils;\n\nfn main() -> Unit ! {io, panic} {\n    print_i64(math_utils.answer());\n}\n",
+        "module app;\n\nuse math_utils;\n\nfn main() -> Unit ! {io} {\n    print_i64(math_utils.answer());\n}\n",
     );
     let app = scratch.join("app");
     let project = project::load(&app).unwrap();
@@ -177,7 +177,7 @@ fn invalid_missing_and_cyclic_dependencies_have_readable_errors() {
     );
     scratch.write(
         "missing/src/main.kush",
-        "module missing;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module missing;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     let error = project::load(&scratch.join("missing")).unwrap_err();
     assert!(error.message().contains("cannot be resolved"), "{error}");
@@ -188,7 +188,7 @@ fn invalid_missing_and_cyclic_dependencies_have_readable_errors() {
     );
     scratch.write(
         "empty-dep/src/main.kush",
-        "module empty_dep;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module empty_dep;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     fs::create_dir_all(scratch.join("other")).unwrap();
     let error = project::load(&scratch.join("empty-dep")).unwrap_err();
@@ -200,7 +200,7 @@ fn invalid_missing_and_cyclic_dependencies_have_readable_errors() {
     );
     scratch.write(
         "renamed/src/main.kush",
-        "module renamed;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module renamed;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     scratch.write(
         "actual/Kush.toml",
@@ -208,7 +208,7 @@ fn invalid_missing_and_cyclic_dependencies_have_readable_errors() {
     );
     scratch.write(
         "actual/src/main.kush",
-        "module actual;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module actual;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     let error = project::load(&scratch.join("renamed")).unwrap_err();
     assert!(
@@ -222,7 +222,7 @@ fn invalid_missing_and_cyclic_dependencies_have_readable_errors() {
     );
     scratch.write(
         "cycle-a/src/main.kush",
-        "module cycle_a;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module cycle_a;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     scratch.write(
         "cycle-b/Kush.toml",
@@ -230,7 +230,7 @@ fn invalid_missing_and_cyclic_dependencies_have_readable_errors() {
     );
     scratch.write(
         "cycle-b/src/main.kush",
-        "module cycle_b;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module cycle_b;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     let error = project::load(&scratch.join("cycle-a")).unwrap_err();
     assert!(error.message().contains("dependency cycle"), "{error}");
@@ -245,7 +245,7 @@ fn invalid_missing_and_cyclic_dependencies_have_readable_errors() {
     );
     scratch.write(
         "unknown/src/main.kush",
-        "module unknown;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module unknown;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     let error = project::load(&scratch.join("unknown")).unwrap_err();
     assert!(error.message().contains("unknown field"), "{error}");
@@ -270,7 +270,7 @@ fn invalid_missing_and_cyclic_dependencies_have_readable_errors() {
     );
     scratch.write(
         "no-test/src/main.kush",
-        "module no_test;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module no_test;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     let error = project::load(&scratch.join("no-test")).unwrap_err();
     assert!(error.message().contains("does not exist"), "{error}");
@@ -285,7 +285,7 @@ fn dependency_name_collisions_are_rejected() {
     );
     scratch.write(
         "root/src/main.kush",
-        "module root;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module root;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     scratch.write(
         "a/Kush.toml",
@@ -293,7 +293,7 @@ fn dependency_name_collisions_are_rejected() {
     );
     scratch.write(
         "a/src/main.kush",
-        "module a;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module a;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     scratch.write(
         "b/Kush.toml",
@@ -301,7 +301,7 @@ fn dependency_name_collisions_are_rejected() {
     );
     scratch.write(
         "b/src/main.kush",
-        "module b;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module b;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     for directory in ["shared-one", "shared-two"] {
         scratch.write(
@@ -310,7 +310,7 @@ fn dependency_name_collisions_are_rejected() {
         );
         scratch.write(
             &format!("{directory}/src/main.kush"),
-            "module shared;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+            "module shared;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
         );
     }
     let error = project::load(&scratch.join("root")).unwrap_err();
@@ -326,11 +326,11 @@ fn test_filtering_listing_failure_values_and_compile_diagnostics() {
     );
     scratch.write(
         "src/main.kush",
-        "module tests;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module tests;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     scratch.write(
         "tests/main.kush",
-        "module tests.tests.main;\n\nuse std.test;\n\n#[test]\nfn passes() -> Unit ! {panic} {\n    test.is_true(true);\n}\n\n#[test]\nfn fails_with_values() -> Unit ! {io, panic} {\n    test.equal_i64(1, 2);\n}\n",
+        "module tests.tests.main;\n\nuse std.test;\n\n#[test]\nfn passes() -> Unit ! {} {\n    test.is_true(true);\n}\n\n#[test]\nfn fails_with_values() -> Unit ! {io} {\n    test.equal_i64(1, 2);\n}\n",
     );
     let passed = run_in(&scratch.path, &["test", "passes"]);
     assert_success(&passed);
@@ -357,7 +357,7 @@ fn test_filtering_listing_failure_values_and_compile_diagnostics() {
 
     scratch.write(
         "tests/main.kush",
-        "module tests.tests.main;\n\n#[test]\nfn broken() -> Unit ! {panic} {\n    missing_name();\n}\n",
+        "module tests.tests.main;\n\n#[test]\nfn broken() -> Unit ! {} {\n    missing_name();\n}\n",
     );
     let broken = run_in(&scratch.path, &["test", "broken"]);
     assert_failure(&broken);
@@ -377,7 +377,7 @@ fn formatter_preserves_comments_and_strings_and_supports_check_mode() {
     let scratch = Scratch::new("format");
     let source = "module format;\n\
                   // keep this comment\t \n\
-                  fn main() -> Unit ! {io, panic} {\n\
+                  fn main() -> Unit ! {io} {\n\
                   \x20   let text = \"spaces inside  \";\t \n\
                   \x20   /* block comment with trailing   \n\
                   \x20      indentation preserved   */\n\
@@ -488,7 +488,7 @@ fn lockfile_orders_packages_and_dependency_edges_deterministically() {
         );
         scratch.write(
             &format!("{directory}/src/lib.kush"),
-            &format!("module {name};\n\npub fn value() -> i64 ! {{panic}} {{ 1 }}\n"),
+            &format!("module {name};\n\npub fn value() -> i64 ! {{}} {{ 1 }}\n"),
         );
     }
     scratch.write(
@@ -497,7 +497,7 @@ fn lockfile_orders_packages_and_dependency_edges_deterministically() {
     );
     scratch.write(
         "app/src/main.kush",
-        "module app;\n\nuse alpha;\nuse zeta;\n\nfn main() -> Unit ! {io, panic} {\n    print_i64(alpha.value() + zeta.value());\n}\n",
+        "module app;\n\nuse alpha;\nuse zeta;\n\nfn main() -> Unit ! {io} {\n    print_i64(alpha.value() + zeta.value());\n}\n",
     );
     let app = scratch.join("app");
     let project = project::load(&app).unwrap();
@@ -518,7 +518,7 @@ fn native_extension_points_build_and_test_rust_adapters() {
     );
     scratch.write(
         "bad/src/main.kush",
-        "module bad;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module bad;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     let error = project::load(&scratch.join("bad")).unwrap_err();
     assert!(error.message().contains("cannot be resolved"), "{error}");
@@ -538,7 +538,7 @@ fn native_extension_points_build_and_test_rust_adapters() {
     );
     scratch.write(
         "good/src/main.kush",
-        "module good;\n\nfn main() -> Unit ! {io, panic} { print_i64(0); }\n",
+        "module good;\n\nfn main() -> Unit ! {io} { print_i64(0); }\n",
     );
     let project = project::load(&scratch.join("good")).unwrap();
     assert_eq!(project.package.native.libraries, vec!["m".to_owned()]);
@@ -551,7 +551,7 @@ fn native_extension_points_build_and_test_rust_adapters() {
         r#"module good.tests.main;
         use std.test;
         foreign "project_add_two" fn add_two(x: i64) -> i64 ! {io};
-        #[test] fn rust_adapter_works() -> Unit ! {io, panic} {
+        #[test] fn rust_adapter_works() -> Unit ! {io} {
             test.equal_i64(add_two(40), 42);
         }"#,
     );
@@ -609,8 +609,8 @@ fn filtered_or_empty_tests_still_check_the_target() {
     let root = scratch.join("app");
     project::new::create(&root, Some("app")).unwrap();
     for body in [
-        "module app.tests.main; #[test] fn real_test() -> Unit ! {panic} { missing_name(); }",
-        "module app.tests.main; fn broken_helper() -> Unit ! {panic} { missing_name(); }",
+        "module app.tests.main; #[test] fn real_test() -> Unit ! {} { missing_name(); }",
+        "module app.tests.main; fn broken_helper() -> Unit ! {} { missing_name(); }",
     ] {
         fs::write(root.join("tests/main.kush"), body).unwrap();
         let output = run_in(&root, &["test", "absent_filter"]);
@@ -670,10 +670,7 @@ fn unreadable_lock_and_dash_prefixed_single_file_are_handled() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("cannot read"), "{error}");
     assert!(!error.contains("is missing"));
-    scratch.write(
-        "-dash.kush",
-        "fn main() -> Unit ! {io, panic} { print_i64(1); }",
-    );
+    scratch.write("-dash.kush", "fn main() -> Unit ! {io} { print_i64(1); }");
     assert_success(&run_in(&scratch.path, &["check", "-dash.kush"]));
     assert_success(&run_in(&scratch.path, &["run", "-dash.kush"]));
     assert_success(&run_in(
@@ -878,7 +875,7 @@ fn test_targets_require_their_module_header_anywhere() {
     // The language requires the header first; imports come after it.
     fs::write(
         root.join("tests/main.kush"),
-        "module app.tests.main;\n\nuse std.test;\n\n#[test]\nfn it_works() -> Unit ! {panic} { test.is_true(1 == 1); }\n",
+        "module app.tests.main;\n\nuse std.test;\n\n#[test]\nfn it_works() -> Unit ! {} { test.is_true(1 == 1); }\n",
     )
     .unwrap();
     assert_success(&run_in(&root, &["test"]));
@@ -886,7 +883,7 @@ fn test_targets_require_their_module_header_anywhere() {
     // A wrong header does not silently map the file: the mismatch is explicit.
     fs::write(
         root.join("tests/main.kush"),
-        "module other.app;\n\nuse std.test;\n\n#[test]\nfn it_works() -> Unit ! {panic} { test.is_true(1 == 1); }\n",
+        "module other.app;\n\nuse std.test;\n\n#[test]\nfn it_works() -> Unit ! {} { test.is_true(1 == 1); }\n",
     )
     .unwrap();
     let output = run_in(&root, &["test"]);
@@ -919,10 +916,7 @@ fn formatting_refuses_symlinks_and_writes_atomically() {
     let scratch = Scratch::new("fmt-symlink");
     let root = scratch.join("app");
     project::new::create(&root, Some("app")).unwrap();
-    let victim = scratch.write(
-        "victim.kush",
-        "fn main() -> Unit ! {panic} { print_i64(1); }\n",
-    );
+    let victim = scratch.write("victim.kush", "fn main() -> Unit ! {} { print_i64(1); }\n");
     let target = root.join("src/unformatted.kush");
     std::os::unix::fs::symlink(&victim, &target).unwrap();
     let output = run_in(&root, &["fmt", "src/unformatted.kush"]);
@@ -931,7 +925,7 @@ fn formatting_refuses_symlinks_and_writes_atomically() {
     assert!(error.contains("symbolic link"), "{error}");
     assert_eq!(
         fs::read_to_string(&victim).unwrap(),
-        "fn main() -> Unit ! {panic} { print_i64(1); }\n"
+        "fn main() -> Unit ! {} { print_i64(1); }\n"
     );
     let _ = fs::remove_file(&target);
     // A non-file operand (here a directory named like a source) fails the

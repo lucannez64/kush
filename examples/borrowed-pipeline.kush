@@ -2,11 +2,11 @@
 // The scoped borrowed callee stays alive while its argument joins a task.
 use std.task.TaskExit;
 
-fn after_prefix(bytes: &mut [i64]) -> &mut [i64] ! {panic} {
+fn after_prefix(bytes: &mut [i64]) -> &mut [i64] ! {} {
     &mut bytes[1..]
 }
 
-fn advance_digits(bytes: &mut [i64], by: i64) -> Unit ! {panic} {
+fn advance_digits(bytes: &mut [i64], by: i64) -> Unit ! {} {
     let mut index = 0;
     while index < Slice.len(bytes) {
         let byte = Slice.get(bytes, index);
@@ -17,7 +17,7 @@ fn advance_digits(bytes: &mut [i64], by: i64) -> Unit ! {panic} {
     }
 }
 
-fn digit_sum(bytes: &[i64]) -> i64 ! {panic} {
+fn digit_sum(bytes: &[i64]) -> i64 ! {} {
     let mut result = 0;
     let mut index = 0;
     while index < Slice.len(bytes) {
@@ -28,13 +28,13 @@ fn digit_sum(bytes: &[i64]) -> i64 ! {panic} {
     result
 }
 
-fn main() -> Unit ! {io, alloc, panic, suspend} {
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+fn main() -> Unit ! {io, alloc, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
         let mut source = Bytes.from("x12:y34");
         let body = after_prefix(&mut source[..]);
         let (left, right) = Slice.split_at_mut(body, 3);
-        let pass_left = fn(by: i64) -> Unit ! {panic} { advance_digits(left, by); };
-        let pass_right = fn(by: i64) -> Unit ! {panic} { advance_digits(right, by); };
+        let pass_left = fn(by: i64) -> Unit ! {} { advance_digits(left, by); };
+        let pass_right = fn(by: i64) -> Unit ! {} { advance_digits(right, by); };
         let task: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {
             Task.yield();
             2

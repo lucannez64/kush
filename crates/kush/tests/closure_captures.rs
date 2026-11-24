@@ -48,9 +48,9 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 fn a_mutable_scalar_capture_writes_the_callers_location() {
     agrees(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut n = 41;
-            let bump = fn() -> Unit ! {panic} { n = n + 1; };
+            let bump = fn() -> Unit ! {} { n = n + 1; };
             bump();
             n
         }
@@ -64,11 +64,11 @@ fn a_mutable_scalar_capture_writes_the_callers_location() {
 fn a_writer_then_a_fresh_reader_sees_the_updated_value() {
     agrees(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut n = 40;
-            let bump = fn(by: i64) -> Unit ! {panic} { n = n + by; };
+            let bump = fn(by: i64) -> Unit ! {} { n = n + by; };
             bump(1);
-            let read = fn() -> i64 ! {panic} { n + 1 };
+            let read = fn() -> i64 ! {} { n + 1 };
             read()
         }
         "#,
@@ -81,9 +81,9 @@ fn a_writer_then_a_fresh_reader_sees_the_updated_value() {
 fn a_shared_reader_allows_outer_reads_and_releases_at_its_last_call() {
     agrees(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut n = 41;
-            let read = fn() -> i64 ! {panic} { n };
+            let read = fn() -> i64 ! {} { n };
             let observed = n;
             let value = read();
             n = 0;
@@ -99,9 +99,9 @@ fn a_shared_reader_allows_outer_reads_and_releases_at_its_last_call() {
 fn a_reader_loan_blocks_writing_while_the_closure_is_live() {
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut n = 41;
-            let read = fn() -> i64 ! {panic} { n };
+            let read = fn() -> i64 ! {} { n };
             n = 0;
             read()
         }
@@ -114,9 +114,9 @@ fn a_reader_loan_blocks_writing_while_the_closure_is_live() {
 fn an_exclusive_writer_blocks_outer_reads_while_it_is_live() {
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut n = 41;
-            let bump = fn() -> Unit ! {panic} { n = n + 1; };
+            let bump = fn() -> Unit ! {} { n = n + 1; };
             let observed = n;
             bump();
             observed
@@ -130,9 +130,9 @@ fn an_exclusive_writer_blocks_outer_reads_while_it_is_live() {
 fn returning_a_borrowing_closure_is_rejected() {
     rejects(
         r#"
-        fn make() -> once fn() -> Unit ! {panic} ! {alloc, panic} {
+        fn make() -> once fn() -> Unit ! {} ! {alloc} {
             let mut n = 0;
-            let f = fn() -> Unit ! {panic} { n = n + 1; };
+            let f = fn() -> Unit ! {} { n = n + 1; };
             f
         }
         fn main() -> Unit ! {} {}
@@ -145,10 +145,10 @@ fn returning_a_borrowing_closure_is_rejected() {
 fn storing_a_borrowing_closure_in_an_outliving_record_is_rejected() {
     rejects(
         r#"
-        struct Holder { f: once fn() -> Unit ! {alloc, panic} }
-        fn main() -> Unit ! {alloc, panic} {
+        struct Holder { f: once fn() -> Unit ! {alloc} }
+        fn main() -> Unit ! {alloc} {
             let mut n = 0;
-            let h = Holder { f: fn() -> Unit ! {panic} { n = n + 1; } };
+            let h = Holder { f: fn() -> Unit ! {} { n = n + 1; } };
         }
         "#,
         "must be called immediately",
@@ -159,10 +159,10 @@ fn storing_a_borrowing_closure_in_an_outliving_record_is_rejected() {
 fn sending_a_borrowing_closure_to_a_task_is_rejected() {
     rejects(
         r#"
-        fn main() -> Unit ! {alloc, panic, suspend} {
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+        fn main() -> Unit ! {alloc, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let mut n = 0;
-                Task.spawn(fn() -> Unit ! {panic} { n = n + 1; });
+                Task.spawn(fn() -> Unit ! {} { n = n + 1; });
             });
         }
         "#,
@@ -174,10 +174,10 @@ fn sending_a_borrowing_closure_to_a_task_is_rejected() {
 fn a_borrowing_closure_cannot_escape_its_lexical_block() {
     rejects(
         r#"
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let f = {
                 let mut n = 0;
-                let inner = fn() -> Unit ! {panic} { n = n + 1; };
+                let inner = fn() -> Unit ! {} { n = n + 1; };
                 inner
             };
             f();
@@ -193,10 +193,10 @@ fn two_closures_may_share_one_scalar_location() {
     // turn; the owner reads it once they are done.
     agrees(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut n = 0;
-            let first = fn() -> Unit ! {panic} { n = n + 1; };
-            let second = fn() -> Unit ! {panic} { n = n + 2; };
+            let first = fn() -> Unit ! {} { n = n + 1; };
+            let second = fn() -> Unit ! {} { n = n + 2; };
             first();
             second();
             n
@@ -211,10 +211,10 @@ fn two_closures_may_share_one_scalar_location() {
 fn moving_a_captured_slice_owner_while_the_closure_is_live_is_rejected() {
     rejects(
         r#"
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let mut values: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut values[..];
-            let bump = fn() -> Unit ! {panic} { Slice.set(view, 0, 9); };
+            let bump = fn() -> Unit ! {} { Slice.set(view, 0, 9); };
             drop(values);
             bump();
         }
@@ -228,11 +228,11 @@ fn proof_facts_before_a_writer_call_cannot_be_reused_after_it() {
     rejects(
         r#"
         fn below(i: i64, n: i64, erased p: { i < n }) -> i64 ! {} { i }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut i = 0;
             let n = 10;
             if i < n {
-                let bump = fn() -> Unit ! {panic} { i = i + 1; };
+                let bump = fn() -> Unit ! {} { i = i + 1; };
                 bump();
                 below(i, n, _)
             } else {
@@ -249,11 +249,11 @@ fn proof_facts_survive_a_reader_closure_call() {
     agrees(
         r#"
         fn below(i: i64, n: i64, erased p: { i < n }) -> i64 ! {} { i }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut i = 0;
             let n = 10;
             if i < n {
-                let read = fn() -> i64 ! {panic} { i };
+                let read = fn() -> i64 ! {} { i };
                 let value = read();
                 below(i, n, _) + value
             } else {
@@ -272,7 +272,7 @@ fn rejects_stale_fact(body: &str) {
     rejects(
         &format!(
             r"fn below(i: i64, n: i64, erased p: {{ i < n }}) -> i64 ! {{}} {{ i }}
-        fn main() -> i64 ! {{alloc, panic, suspend}} {{
+        fn main() -> i64 ! {{alloc, suspend}} {{
             let mut i = 0; let n = 10;
             if i < n {{ {body} below(i, n, _) }} else {{ 0 }}
         }}"
@@ -288,8 +288,8 @@ fn nested_lambda_locals_cannot_delete_or_replace_outer_write_summaries() {
         "let a = 0; let b = 0; let c = fn() -> Unit ! {} {};",
     ] {
         rejects_stale_fact(&format!(
-            r"let w = fn() -> Unit ! {{panic}} {{ i = 20; }};
-            let unrelated = fn() -> Unit ! {{alloc, panic}} {{ {unrelated} }};
+            r"let w = fn() -> Unit ! {{}} {{ i = 20; }};
+            let unrelated = fn() -> Unit ! {{alloc}} {{ {unrelated} }};
             w();"
         ));
     }
@@ -298,8 +298,8 @@ fn nested_lambda_locals_cannot_delete_or_replace_outer_write_summaries() {
 #[test]
 fn nested_writer_summaries_propagate_to_outer_captures() {
     rejects_stale_fact(
-        r"let outer = fn() -> Unit ! {alloc, panic} {
-        let inner = fn() -> Unit ! {panic} { i = 20; }; inner();
+        r"let outer = fn() -> Unit ! {alloc} {
+        let inner = fn() -> Unit ! {} { i = 20; }; inner();
         let unrelated = fn() -> Unit ! {} { let a = 0; let b = 0; let c = 0; };
     }; outer();",
     );
@@ -308,11 +308,11 @@ fn nested_writer_summaries_propagate_to_outer_captures() {
 #[test]
 fn closure_writes_invalidate_while_loop_and_continue_headers() {
     for loop_body in [
-        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; w(); j = j + 1; }",
-        "loop { if j >= 2 { break; } result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; w(); j = j + 1; }",
-        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; w(); j = j + 1; continue; }",
-        "while j < 2 { result = below(i, n, _); Task.scope(fn() -> Unit ! {panic} { i = 20; }); j = j + 1; }",
-        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = i + 1; }; w(); i = i - 1; j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {} { i = 20; }; w(); j = j + 1; }",
+        "loop { if j >= 2 { break; } result = below(i, n, _); let w = fn() -> Unit ! {} { i = 20; }; w(); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {} { i = 20; }; w(); j = j + 1; continue; }",
+        "while j < 2 { result = below(i, n, _); Task.scope(fn() -> Unit ! {} { i = 20; }); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {} { i = i + 1; }; w(); i = i - 1; j = j + 1; }",
     ] {
         rejects_stale_fact(&format!("let mut j = 0; let mut result = 0; {loop_body}"));
     }
@@ -324,10 +324,10 @@ fn closure_writes_reached_twice_still_invalidate_loop_headers() {
     // values once. A writer reached again (a second call, an alias, a
     // callback argument) must still count, wherever it is first followed.
     for loop_body in [
-        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; w(); w(); j = j + 1; }",
-        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; let v = w; v(); w(); j = j + 1; }",
-        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; Task.scope(fn() -> Unit ! {panic} { j = j; }); w(); j = j + 1; }",
-        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; let u = fn() -> Unit ! {panic} { w(); }; u(); u(); w(); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {} { i = 20; }; w(); w(); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {} { i = 20; }; let v = w; v(); w(); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {} { i = 20; }; Task.scope(fn() -> Unit ! {} { j = j; }); w(); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {} { i = 20; }; let u = fn() -> Unit ! {} { w(); }; u(); u(); w(); j = j + 1; }",
     ] {
         rejects_stale_fact(&format!("let mut j = 0; let mut result = 0; {loop_body}"));
     }
@@ -358,10 +358,10 @@ fn long_loop_bodies_check_in_linear_time() {
 
 #[test]
 fn scope_callback_writes_invalidate_the_caller_and_enclosing_lambda() {
-    rejects_stale_fact("Task.scope(fn() -> Unit ! {panic} { i = 20; });");
+    rejects_stale_fact("Task.scope(fn() -> Unit ! {} { i = 20; });");
     rejects_stale_fact(
-        r"let outer = fn() -> Unit ! {alloc, panic, suspend} {
-        Task.scope(fn() -> Unit ! {panic} { i = 20; });
+        r"let outer = fn() -> Unit ! {alloc, suspend} {
+        Task.scope(fn() -> Unit ! {} { i = 20; });
     }; outer();",
     );
 }
@@ -372,7 +372,7 @@ fn lexical_handler_writes_invalidate_after_tail_and_non_tail_performs() {
         rejects_stale_fact(&format!(
             r"handle Op: i64 -> i64 with fn(
             x: i64, resume: linear once fn(i64) -> i64 ! {{}}
-        ) -> i64 ! {{panic}} {{ i = 20; resume(x) }} {{ {body} }};"
+        ) -> i64 ! {{}} {{ i = 20; resume(x) }} {{ {body} }};"
         ));
     }
 }
@@ -380,9 +380,9 @@ fn lexical_handler_writes_invalidate_after_tail_and_non_tail_performs() {
 #[test]
 fn mixed_captures_keep_readers_shared_and_writers_exclusive() {
     agrees(
-        r"fn main() -> i64 ! {alloc, panic} {
+        r"fn main() -> i64 ! {alloc} {
         let mut i = 41; let mut j = 0;
-        let f = fn() -> i64 ! {panic} { j = j + 1; i };
+        let f = fn() -> i64 ! {} { j = j + 1; i };
         let observed = i;
         f() + observed
     }",
@@ -390,19 +390,19 @@ fn mixed_captures_keep_readers_shared_and_writers_exclusive() {
         "",
     );
     agrees(
-        r"fn main() -> i64 ! {alloc, panic} {
+        r"fn main() -> i64 ! {alloc} {
         let mut i = 41; let mut j = 0;
-        let f = fn(x: i64) -> i64 ! {panic} { j = j + 1; i + x };
-        let reader = fn() -> i64 ! {panic} { i };
+        let f = fn(x: i64) -> i64 ! {} { j = j + 1; i + x };
+        let reader = fn() -> i64 ! {} { i };
         f(reader())
     }",
         82,
         "",
     );
     rejects(
-        r"fn main() -> i64 ! {alloc, panic} {
+        r"fn main() -> i64 ! {alloc} {
         let mut i = 41; let mut j = 0;
-        let f = fn() -> i64 ! {panic} { j = j + 1; i };
+        let f = fn() -> i64 ! {} { j = j + 1; i };
         let observed = j; f() + observed
     }",
         "exclusive",
@@ -412,19 +412,19 @@ fn mixed_captures_keep_readers_shared_and_writers_exclusive() {
 #[test]
 fn scope_and_handler_writes_agree_between_backends() {
     agrees(
-        r"fn main() -> i64 ! {alloc, panic, suspend} {
+        r"fn main() -> i64 ! {alloc, suspend} {
         let mut i = 0;
-        Task.scope(fn() -> Unit ! {panic} { i = 20; }); i
+        Task.scope(fn() -> Unit ! {} { i = 20; }); i
     }",
         20,
         "",
     );
     agrees(
-        r"fn main() -> i64 ! {alloc, panic} {
+        r"fn main() -> i64 ! {alloc} {
         let mut i = 0;
         handle Op: i64 -> i64 with fn(x: i64,
             resume: linear once fn(i64) -> i64 ! {}
-        ) -> i64 ! {panic} { i = 20; resume(x) } { perform Op(0) };
+        ) -> i64 ! {} { i = 20; resume(x) } { perform Op(0) };
         i
     }",
         20,
@@ -436,16 +436,16 @@ fn scope_and_handler_writes_agree_between_backends() {
 fn declared_operation_calls_apply_dynamically_visible_handler_writes() {
     for invocation in [
         "invoke()",
-        "(fn() -> i64 ! {Op, panic} { invoke() })()",
-        "Task.scope(fn() -> i64 ! {Op, panic} { invoke() })",
+        "(fn() -> i64 ! {Op} { invoke() })()",
+        "Task.scope(fn() -> i64 ! {Op} { invoke() })",
     ] {
         rejects(
             &format!(
                 r"
             effect Op: i64 -> i64;
-            fn invoke() -> i64 ! {{Op, panic}} {{ perform Op(0) }}
+            fn invoke() -> i64 ! {{Op}} {{ perform Op(0) }}
             fn below(i: i64, n: i64, erased p: {{ i < n }}) -> i64 ! {{}} {{ i }}
-            fn main() -> i64 ! {{alloc, panic, suspend}} {{
+            fn main() -> i64 ! {{alloc, suspend}} {{
                 let mut i = 0; let n = 10;
                 if i < n {{
                     handle Op: i64 -> i64 with fn(x: i64,
@@ -464,10 +464,10 @@ fn declared_operation_calls_apply_dynamically_visible_handler_writes() {
 #[test]
 fn nested_lambda_and_loop_writes_agree_between_backends() {
     agrees(
-        r"fn main() -> i64 ! {alloc, panic} {
+        r"fn main() -> i64 ! {alloc} {
         let mut i = 0;
-        let outer = fn() -> Unit ! {alloc, panic} {
-            let inner = fn() -> Unit ! {panic} { i = 20; };
+        let outer = fn() -> Unit ! {alloc} {
+            let inner = fn() -> Unit ! {} { i = 20; };
             let unrelated = fn() -> Unit ! {} { let a = 0; let b = 0; let c = 0; };
             inner();
         };
@@ -477,11 +477,11 @@ fn nested_lambda_and_loop_writes_agree_between_backends() {
         "",
     );
     agrees(
-        r"fn main() -> i64 ! {alloc, panic} {
+        r"fn main() -> i64 ! {alloc} {
         let mut i = 0; let mut j = 0; let mut result = 0;
         while j < 2 {
             result = i;
-            let w = fn() -> Unit ! {panic} { i = 20; }; w();
+            let w = fn() -> Unit ! {} { i = 20; }; w();
             j = j + 1;
         }
         result
@@ -495,11 +495,11 @@ fn nested_lambda_and_loop_writes_agree_between_backends() {
 fn constructing_an_unused_writer_preserves_loop_facts() {
     agrees(
         r"fn below(i: i64, n: i64, erased p: { i < n }) -> i64 ! {} { i }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut i = 0;
             let mut j = 0;
             while j < 2 {
-                let unused = fn() -> Unit ! {panic} { i = 20; };
+                let unused = fn() -> Unit ! {} { i = 20; };
                 let x = below(i, 10, _);
                 j = j + 1;
             }
@@ -513,14 +513,14 @@ fn constructing_an_unused_writer_preserves_loop_facts() {
 #[test]
 fn executing_a_writer_discards_loop_facts() {
     for invocation in [
-        "let writer = fn() -> Unit ! {panic} { i = 20; }; writer();",
-        "(fn() -> Unit ! {panic} { i = 20; })();",
-        "let writer = fn() -> Unit ! {panic} { i = 20; }; let alias = writer; alias();",
+        "let writer = fn() -> Unit ! {} { i = 20; }; writer();",
+        "(fn() -> Unit ! {} { i = 20; })();",
+        "let writer = fn() -> Unit ! {} { i = 20; }; let alias = writer; alias();",
     ] {
         rejects(
             &format!(
                 r"fn below(i: i64, n: i64, erased p: {{ i < n }}) -> i64 ! {{}} {{ i }}
-                fn main() -> i64 ! {{alloc, panic}} {{
+                fn main() -> i64 ! {{alloc}} {{
                     let mut i = 0; let mut j = 0;
                     while j < 2 {{
                         {invocation}

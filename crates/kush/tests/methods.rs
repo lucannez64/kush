@@ -53,7 +53,7 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 #[test]
 fn bytes_vec_and_slice_methods_match_namespace_calls() {
     agrees(
-        "fn main() -> i64 ! {io, alloc, panic} {
+        "fn main() -> i64 ! {io, alloc} {
             let b = Bytes.from(\"AB\");
             print_i64(b.len());
             print_i64(b.capacity());
@@ -86,7 +86,7 @@ fn bytes_vec_and_slice_methods_match_namespace_calls() {
 #[test]
 fn string_and_integer_methods_infer_from_the_receiver() {
     agrees(
-        "fn main() -> i64 ! {io, alloc, panic} {
+        "fn main() -> i64 ! {io, alloc} {
             let text = \"hé\";
             print_i64(text.len());
             print_i64(text.scalar_len());
@@ -119,7 +119,7 @@ fn string_and_integer_methods_infer_from_the_receiver() {
 fn from_utf8_and_box_methods_preserve_ownership() {
     agrees(
         "use std.result.Result;
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let bytes = Bytes.from(\"ok\");
             match bytes.from_utf8() {
                 Result.Ok(text) => print_i64(text.len()),
@@ -139,20 +139,20 @@ fn from_utf8_and_box_methods_preserve_ownership() {
 #[test]
 fn borrowing_methods_require_a_local_owner() {
     rejects(
-        "fn make() -> Bytes ! {alloc, panic} { Bytes.from(\"x\") }
-        fn main() -> Unit ! {alloc, panic} { make().len(); }",
+        "fn make() -> Bytes ! {alloc} { Bytes.from(\"x\") }
+        fn main() -> Unit ! {alloc} { make().len(); }",
         "temporary borrows are not supported",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let b = Bytes.from(\"x\"); let c = b.copy(); b = Bytes.from(\"y\"); }",
+        "fn main() -> Unit ! {alloc} { let b = Bytes.from(\"x\"); let c = b.copy(); b = Bytes.from(\"y\"); }",
         "immutable binding",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let b = Bytes.from(\"x\"); let c = b; b.len(); }",
+        "fn main() -> Unit ! {alloc} { let b = Bytes.from(\"x\"); let c = b; b.len(); }",
         "cannot borrow a moved owner",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let b = Bytes.from(\"x\"); b.get({ drop(b); 0 }); }",
+        "fn main() -> Unit ! {alloc} { let b = Bytes.from(\"x\"); b.get({ drop(b); 0 }); }",
         "cannot move or drop an owner or view",
     );
 }
@@ -162,9 +162,9 @@ fn non_builtin_record_callable_fields_keep_method_spelling() {
     // Only reserved builtin method names are intercepted. A differently named
     // callable field still uses the ordinary field-projection call path.
     agrees(
-        "struct Holder { apply: fn(i64) -> i64 ! {panic} }
-        fn main() -> i64 ! {io, panic} {
-            let holder = Holder { apply: fn(x: i64) -> i64 ! {panic} { x + 1 } };
+        "struct Holder { apply: fn(i64) -> i64 ! {} }
+        fn main() -> i64 ! {io} {
+            let holder = Holder { apply: fn(x: i64) -> i64 ! {} { x + 1 } };
             print_i64(holder.apply(41));
             print_i64(holder.apply(0));
             0
@@ -177,19 +177,19 @@ fn non_builtin_record_callable_fields_keep_method_spelling() {
 #[test]
 fn method_calls_do_not_bypass_builtin_checks() {
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let v: Vec<i64> = Vec.new(); v.at(0, _); }",
+        "fn main() -> Unit ! {alloc} { let v: Vec<i64> = Vec.new(); v.at(0, _); }",
         "cannot prove",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let s = \"abc\"; s.set(0, 1); }",
+        "fn main() -> Unit ! {alloc} { let s = \"abc\"; s.set(0, 1); }",
         "no supported builtin method 'set'",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let v: Vec<i64> = Vec.new(); v.push(); }",
+        "fn main() -> Unit ! {alloc} { let v: Vec<i64> = Vec.new(); v.push(); }",
         "after its receiver",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let b = Bytes.from(\"x\"); b.len::<i64>(); }",
+        "fn main() -> Unit ! {alloc} { let b = Bytes.from(\"x\"); b.len::<i64>(); }",
         "takes no type arguments",
     );
 }

@@ -61,11 +61,11 @@ independently of Cargo and the Kush compiler, with the system C runtime availabl
 ## Supported language
 
 ```rust
-fn twice(x: i64) -> i64 ! {panic} {
+fn twice(x: i64) -> i64 ! {} {
     x * 2
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let mut value = twice(21);
     if value == 42 { value = value + 1; }
     print_i64(value);
@@ -183,7 +183,7 @@ an interface. Unreachable short-circuit branches are still checked conservativel
 The initial builtins are:
 
 ```rust
-fn print_i64(value: i64) -> Unit ! {io, panic};
+fn print_i64(value: i64) -> Unit ! {io};
 // panic() aborts; it does not return a normal value.
 ```
 

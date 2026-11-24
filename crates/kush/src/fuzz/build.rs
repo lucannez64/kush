@@ -648,7 +648,7 @@ impl<'t, 'p> Generator<'t, 'p> {
         }
         let maker = format!("__kush_fuzz_make_{type_name}");
         let text = format!(
-            "\npub fn {maker}({}) -> {type_name} ! {{panic}} {{\n{body}}}\n",
+            "\npub fn {maker}({}) -> {type_name} ! {{}} {{\n{body}}}\n",
             parameters.join(", ")
         );
         self.add_maker(unit, &maker, text);
@@ -741,7 +741,7 @@ impl<'t, 'p> Generator<'t, 'p> {
         let (declared, applied) = self.generic_text(unit, generics);
         let maker = format!("__kush_fuzz_make_{type_name}");
         let text = format!(
-            "\npub fn {maker}{declared}({}) -> {type_name}{applied} ! {{panic}} {{\n    {type_name} {{ {} }}\n}}\n",
+            "\npub fn {maker}{declared}({}) -> {type_name}{applied} ! {{}} {{\n    {type_name} {{ {} }}\n}}\n",
             parameters.join(", "),
             assignments.join(", ")
         );
@@ -812,7 +812,7 @@ impl<'t, 'p> Generator<'t, 'p> {
             let mut effects = BTreeSet::new();
             let allowed = function.effects.iter().all(|effect| {
                 let text = self.types.text(unit, effect.span).trim().to_owned();
-                let ok = ["alloc", "panic"].contains(&text.as_str());
+                let ok = text == "alloc";
                 effects.insert(text);
                 ok
             });

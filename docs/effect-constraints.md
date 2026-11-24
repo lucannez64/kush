@@ -17,13 +17,13 @@ of the attributes in this and other design documents are history.
 fn apply<e: Effects - alloc>(
     f: fn(i64) -> i64 ! {e},
     x: i64,
-) -> i64 ! {panic, e} {
+) -> i64 ! {e} {
     f(x)
 }
 
-fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+fn inc(x: i64) -> i64 ! {} { x + 1 }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     apply(inc, 41)
 }
 ```
@@ -64,10 +64,9 @@ alias does not take arguments and cannot be used as a runtime type.
   bit selected by `io` from the row selected by `e`. Subtraction binds looser
   than `|`, so `(a | b) - c` needs parentheses when the union should be
   subtracted. Both sides may be concrete effects or row variables.
-- Row union is idempotent: `{panic, panic}` denotes the same bit as
-  `{panic}`.
+- Row union is idempotent: `{io, io}` denotes the same bit as `{io}`.
 - An alias such as `effect row IoAlloc = {io, alloc};` denotes exactly its
-  expanded elements. `{IoAlloc, panic}` and `{io, alloc, panic}` are the same
+  expanded elements. `{IoAlloc, suspend}` and `{io, alloc, suspend}` are the same
   row, and `e - IoAlloc` subtracts both alias bits.
 
 Only executable function and method binders accept the constraint. Trait
@@ -84,15 +83,15 @@ effect argument is intersected with the binder's excluded set. A nonempty
 intersection is an error:
 
 ```rust
-fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
+fn alloc_id(x: i64) -> i64 ! {alloc} { x }
 
 fn apply<e: Effects - alloc>(
     f: fn(i64) -> i64 ! {e},
     x: i64,
-) -> i64 ! {panic, e} { f(x) }
+) -> i64 ! {e} { f(x) }
 
-fn main() -> i64 ! {alloc, panic} {
-    apply(alloc_id, 1) // error: inferred row {alloc, panic} includes alloc
+fn main() -> i64 ! {alloc} {
+    apply(alloc_id, 1) // error: inferred row {alloc} includes alloc
 }
 ```
 
@@ -157,16 +156,16 @@ supported decidable fragment is:
 For example, a shared row variable receives the union of every argument:
 
 ```rust
-fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+fn inc(x: i64) -> i64 ! {} { x + 1 }
+fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
 
 fn two<e: Effects>(
     f: fn(i64) -> i64 ! {e},
     g: fn(i64) -> i64 ! {e},
     x: i64,
-) -> i64 ! {panic, e} { g(f(x)) }
+) -> i64 ! {e} { g(f(x)) }
 
-fn main() -> i64 ! {io, panic} { two(inc, io_inc, 1) }  // e = {io, panic}
+fn main() -> i64 ! {io} { two(inc, io_inc, 1) }  // e = {io}
 ```
 
 Omitting `io` from `main` is rejected; the solver cannot satisfy the second
@@ -182,12 +181,12 @@ Row subtraction is checked at each specialization rather than believed:
 
 ```rust
 fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
-    -> i64 ! {panic, e - io} { f(x) }
+    -> i64 ! {e - io} { f(x) }
 
-fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
 
-fn main() -> i64 ! {io, panic} { apply(io_inc, 1) }
-// rejected: the specialization has e = {io, panic}, so e - io = {panic},
+fn main() -> i64 ! {io} { apply(io_inc, 1) }
+// rejected: the specialization has e = {io}, so e - io = {},
 // but the body still calls f and requires the io it promised.
 ```
 
@@ -221,7 +220,7 @@ signature excludes the corresponding effect**:
 #[nosuspend]
 fn apply<e: Effects - (alloc | suspend)>(
     f: fn(i64) -> i64 ! {e},
-) -> i64 ! {panic, e} { f(1) }
+) -> i64 ! {e} { f(1) }
 ```
 
 The relaxation is deliberately conservative:

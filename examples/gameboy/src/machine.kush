@@ -69,7 +69,7 @@ pub struct Machine<M> {
     pub cycles: i64,
 }
 
-pub fn new<M: Mapper>(board: M) -> Machine<M> ! {alloc, panic} {
+pub fn new<M: Mapper>(board: M) -> Machine<M> ! {alloc} {
     let mut io = cartridge.zeroed(0x80);
     io[0x00] = 0xCF;
     io[0x40] = 0x91; // LCD on, background on
@@ -125,12 +125,12 @@ pub fn new<M: Mapper>(board: M) -> Machine<M> ! {alloc, panic} {
 /// value's range (0-255 for a byte), which the bounds proofs use.
 pub fn wide(value: u16) -> i64 ! {} ensures { result == value } { Int.convert(value) }
 
-pub fn request<M>(m: &mut Machine<M>, interrupt: u8) -> Unit ! {panic} {
+pub fn request<M>(m: &mut Machine<M>, interrupt: u8) -> Unit ! {} {
     m.io[0x0F] = m.io[0x0F] | interrupt;
 }
 
 /// A CPU read, as the bus routes it.
-pub fn read<M: Mapper>(m: &Machine<M>, address: u16) -> u8 ! {panic} {
+pub fn read<M: Mapper>(m: &Machine<M>, address: u16) -> u8 ! {} {
     let at: i64 = Int.convert(address);
     if address < 0x8000 { return m.cartridge.load(address); }
     if address < 0xA000 { return m.vram[at - 0x8000]; }
@@ -148,7 +148,7 @@ fn read_io<M>(
     m: &Machine<M>,
     register: i64,
     erased inside: { 0 <= register && register < 0x80 },
-) -> u8 ! {panic} {
+) -> u8 ! {} {
     match register {
         0x00 => joypad(m),
         0x04 => Int.truncate(m.divider >> 8),
@@ -164,7 +164,7 @@ fn read_io<M>(
 }
 
 /// P1: the selected button group, active low.
-fn joypad<M>(m: &Machine<M>) -> u8 ! {panic} {
+fn joypad<M>(m: &Machine<M>) -> u8 ! {} {
     let select = m.io[0x00] & 0x30;
     let mut pressed: u8 = 0;
     if (select & 0x10) == 0 { pressed = pressed | (m.buttons & 0x0F); }
@@ -172,14 +172,14 @@ fn joypad<M>(m: &Machine<M>) -> u8 ! {panic} {
     0xC0 | select | (!pressed & 0x0F)
 }
 
-pub fn press<M>(m: &mut Machine<M>, buttons: u8) -> Unit ! {panic} {
+pub fn press<M>(m: &mut Machine<M>, buttons: u8) -> Unit ! {} {
     let newly = buttons & !m.buttons;
     m.buttons = buttons;
     if newly != 0 { request(m, JOYPAD); }
 }
 
 /// A CPU write, as the bus routes it.
-pub fn write<M: Mapper>(m: &mut Machine<M>, address: u16, value: u8) -> Unit ! {alloc, panic} {
+pub fn write<M: Mapper>(m: &mut Machine<M>, address: u16, value: u8) -> Unit ! {alloc} {
     let at: i64 = Int.convert(address);
     if address < 0x8000 { m.cartridge.store(address, value); return; }
     if address < 0xA000 { m.vram[at - 0x8000] = value; return; }
@@ -198,7 +198,7 @@ fn write_io<M: Mapper>(
     register: i64,
     value: u8,
     erased inside: { 0 <= register && register < 0x80 },
-) -> Unit ! {alloc, panic} {
+) -> Unit ! {alloc} {
     match register {
         0x00 => { m.io[0x00] = value & 0x30; },
         0x02 => {
@@ -238,7 +238,7 @@ fn write_io<M: Mapper>(
 }
 
 /// OAM DMA: 160 bytes from `source * 0x100`, done at once.
-fn dma<M: Mapper>(m: &mut Machine<M>, source: u8) -> Unit ! {alloc, panic} {
+fn dma<M: Mapper>(m: &mut Machine<M>, source: u8) -> Unit ! {alloc} {
     m.io[0x46] = source;
     let base: u16 = Int.convert(source) << 8;
     let mut i = 0;
@@ -252,14 +252,14 @@ fn dma<M: Mapper>(m: &mut Machine<M>, source: u8) -> Unit ! {alloc, panic} {
 // --- Timer -----------------------------------------------------------------
 
 /// The divider bit TAC selects, gated by TAC's enable bit.
-fn timer_bit<M>(m: &Machine<M>) -> Bool ! {panic} {
+fn timer_bit<M>(m: &Machine<M>) -> Bool ! {} {
     let tac = m.io[0x07];
     if (tac & 0x04) == 0 { return false; }
     let shift = match tac & 0x03 { 0 => 9, 1 => 3, 2 => 5, _ => 7 };
     ((m.divider >> shift) & 1) == 1
 }
 
-fn tick_tima<M>(m: &mut Machine<M>) -> Unit ! {panic} {
+fn tick_tima<M>(m: &mut Machine<M>) -> Unit ! {} {
     if m.io[0x05] == 0xFF {
         m.io[0x05] = m.io[0x06];
         request(m, TIMER);
@@ -268,7 +268,7 @@ fn tick_tima<M>(m: &mut Machine<M>) -> Unit ! {panic} {
     }
 }
 
-fn set_divider<M>(m: &mut Machine<M>, value: i64) -> Unit ! {panic} {
+fn set_divider<M>(m: &mut Machine<M>, value: i64) -> Unit ! {} {
     let before = timer_bit(m);
     let sequencer_bit = (m.divider & 0x1000) != 0;
     m.divider = value & 0xFFFF;
@@ -278,7 +278,7 @@ fn set_divider<M>(m: &mut Machine<M>, value: i64) -> Unit ! {panic} {
 }
 
 /// Advance the timer by `cycles` clock cycles, four at a time.
-pub fn tick_timer<M>(m: &mut Machine<M>, cycles: i64) -> Unit ! {panic} {
+pub fn tick_timer<M>(m: &mut Machine<M>, cycles: i64) -> Unit ! {} {
     let mut left = cycles;
     while left > 0 {
         set_divider(m, m.divider + 4);
@@ -289,7 +289,7 @@ pub fn tick_timer<M>(m: &mut Machine<M>, cycles: i64) -> Unit ! {panic} {
 /// Four-cycle steps until the timer does more than count: the step that
 /// increments TIMA or steps the sound sequencer. Both happen on a falling
 /// edge of a divider bit, when the divider reaches a multiple of twice it.
-pub fn timer_quiet<M>(m: &Machine<M>) -> i64 ! {panic} {
+pub fn timer_quiet<M>(m: &Machine<M>) -> i64 ! {} {
     let mut steps = steps_to_fall(m.divider, 12);
     let tac = m.io[0x07];
     if (tac & 0x04) != 0 {
@@ -300,12 +300,12 @@ pub fn timer_quiet<M>(m: &Machine<M>) -> i64 ! {panic} {
     steps
 }
 
-fn steps_to_fall(divider: i64, bit: i64) -> i64 ! {panic} {
+fn steps_to_fall(divider: i64, bit: i64) -> i64 ! {} {
     let period = 2 << bit;
     (period - (divider & (period - 1)) + 3) / 4
 }
 
 /// `tick_timer` over steps that `timer_quiet` showed only count.
-pub fn skip_timer<M>(m: &mut Machine<M>, steps: i64) -> Unit ! {panic} {
+pub fn skip_timer<M>(m: &mut Machine<M>, steps: i64) -> Unit ! {} {
     m.divider = (m.divider + steps * 4) & 0xFFFF;
 }

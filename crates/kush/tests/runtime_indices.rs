@@ -45,7 +45,7 @@ fn runtime_scalars_index_equality_and_user_predicates_without_runtime_storage() 
     );
     let source = format!(
         "{PRELUDE}
-        fn main() -> i64 ! {{panic}} {{
+        fn main() -> i64 ! {{}} {{
             let five: i64 = 5;
             let b: Bool = true;
             let u: Unit = ();
@@ -87,7 +87,7 @@ fn mixed_erased_and_runtime_binders_substitute_in_source_order() {
             erased same: Eq<i64, k, k>,
             erased p: Eq<Nat, n, n>,
         ) -> i64 ! {} { k }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             mixed(0, 42, refl::<i64>(42), truth())
         }
     "#;
@@ -101,7 +101,7 @@ fn mixed_erased_and_runtime_binders_substitute_in_source_order() {
             erased same: Eq<i64, k, k>,
             erased p: Eq<Nat, n, n>,
         ) -> i64 ! {} { k }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             mixed(1, 42, refl::<i64>(42), truth())
         }
         "#,
@@ -121,7 +121,7 @@ fn recursive_logical_data_can_be_indexed_by_machine_literals() {
             Steps.More::<1>(Steps.End::<0>, Other.Mk::<0>)
         }
         fn use_steps(n: i64, erased p: Steps<n>) -> i64 ! {} { 42 }
-        fn main() -> i64 ! {panic} { use_steps(1, one_step()) }
+        fn main() -> i64 ! {} { use_steps(1, one_step()) }
     "#;
     assert_eq!(evaluate(source), 42);
     rejects(
@@ -135,7 +135,7 @@ fn recursive_logical_data_can_be_indexed_by_machine_literals() {
             Steps.More::<1>(Steps.End::<0>, Other.Mk::<0>)
         }
         fn use_steps(n: i64, erased p: Steps<n>) -> i64 ! {} { 42 }
-        fn main() -> i64 ! {panic} { use_steps(0, one_step()) }
+        fn main() -> i64 ! {} { use_steps(0, one_step()) }
         "#,
         "proof does not establish",
     );
@@ -146,14 +146,14 @@ fn symbolic_indices_are_ordinary_checked_values_not_evidence() {
     // A runtime scalar is a valid index inside a proof's type.
     let positive = r#"
         fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} { let n = 21; keep(n, refl::<i64>(n)) + 21 }
+        fn main() -> i64 ! {} { let n = 21; keep(n, refl::<i64>(n)) + 21 }
     "#;
     assert_eq!(evaluate(positive), 42);
     // It is not itself a proof, even for an erased machine-carried value.
     rejects(
         r#"
         fn consume(erased n: i64) -> i64 ! {} { 1 }
-        fn main() -> i64 ! {panic} { let n = 3; consume(n) }
+        fn main() -> i64 ! {} { let n = 3; consume(n) }
         "#,
         "runtime scalar is a symbolic index, not erased evidence",
     );
@@ -161,7 +161,7 @@ fn symbolic_indices_are_ordinary_checked_values_not_evidence() {
     rejects(
         r#"
         fn consume(erased p: Eq<i64, 0, 0>) -> i64 ! {} { 1 }
-        fn main() -> i64 ! {panic} { let n = 0; consume(n) }
+        fn main() -> i64 ! {} { let n = 0; consume(n) }
         "#,
         "runtime scalar is a symbolic index, not erased evidence",
     );
@@ -169,7 +169,7 @@ fn symbolic_indices_are_ordinary_checked_values_not_evidence() {
     rejects(
         r#"
         fn consume(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { 1 }
-        fn main() -> i64 ! {panic} { consume(1, _) }
+        fn main() -> i64 ! {} { consume(1, _) }
         "#,
         "cannot discharge a logical proposition",
     );
@@ -178,25 +178,23 @@ fn symbolic_indices_are_ordinary_checked_values_not_evidence() {
 #[test]
 fn wrong_and_false_proofs_are_rejected_by_the_kernel() {
     rejects(
-        &format!("{PRELUDE} fn main() -> i64 ! {{panic}} {{ keep(3, refl::<i64>(4)) }}"),
+        &format!("{PRELUDE} fn main() -> i64 ! {{}} {{ keep(3, refl::<i64>(4)) }}"),
         "proof does not establish",
     );
     rejects(
-        &format!(
-            "{PRELUDE} fn main() -> i64 ! {{panic}} {{ keep_bool(false, refl::<Bool>(true)) }}"
-        ),
+        &format!("{PRELUDE} fn main() -> i64 ! {{}} {{ keep_bool(false, refl::<Bool>(true)) }}"),
         "proof does not establish",
     );
     rejects(
-        &format!("{PRELUDE} fn main() -> i64 ! {{panic}} {{ keep_true(false, true_proof()) }}"),
+        &format!("{PRELUDE} fn main() -> i64 ! {{}} {{ keep_true(false, true_proof()) }}"),
         "proof does not establish",
     );
     rejects(
-        &format!("{PRELUDE} fn main() -> i64 ! {{panic}} {{ keep_zero(1, zero_proof()) }}"),
+        &format!("{PRELUDE} fn main() -> i64 ! {{}} {{ keep_zero(1, zero_proof()) }}"),
         "proof does not establish",
     );
     rejects(
-        &format!("{PRELUDE} fn main() -> i64 ! {{panic}} {{ keep_tag(1, Tag.Mk::<0>) }}"),
+        &format!("{PRELUDE} fn main() -> i64 ! {{}} {{ keep_tag(1, Tag.Mk::<0>) }}"),
         "proof does not establish",
     );
     // A false theorem is still rejected at its definition.
@@ -238,14 +236,14 @@ fn mutable_indices_use_the_current_version_at_each_call() {
     assert_eq!(
         evaluate(
             "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
-             fn main() -> i64 ! {panic} { let mut n = 3; keep(n, refl::<i64>(n)) }"
+             fn main() -> i64 ! {} { let mut n = 3; keep(n, refl::<i64>(n)) }"
         ),
         3
     );
     assert_eq!(
         evaluate(
             "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
-             fn main() -> i64 ! {panic} {
+             fn main() -> i64 ! {} {
                  let mut n = 3;
                  if true { n = 4; }
                  keep(n, refl::<i64>(n))
@@ -255,8 +253,8 @@ fn mutable_indices_use_the_current_version_at_each_call() {
     );
     assert_eq!(
         evaluate(
-            "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {panic} { n }
-             fn main() -> i64 ! {panic} {
+            "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
+             fn main() -> i64 ! {} {
                  let mut n = 0;
                  while n < 3 { n = n + 1; }
                  keep(n, refl::<i64>(n))
@@ -268,7 +266,7 @@ fn mutable_indices_use_the_current_version_at_each_call() {
     // not for the mutable binding's new value.
     rejects(
         "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              let mut n = 4;
              keep(n, refl::<i64>(3))
          }",
@@ -280,7 +278,7 @@ fn mutable_indices_use_the_current_version_at_each_call() {
         total fn truth() -> Eq<i64, 0, 0> ! {} { refl::<i64>(0) }
         fn make() -> i64 ! {} { 21 }
         fn keep_indep(n: i64, erased p: Eq<i64, 0, 0>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} { keep_indep(make(), truth()) * 2 }
+        fn main() -> i64 ! {} { keep_indep(make(), truth()) * 2 }
     "#;
     assert_eq!(evaluate(independent), 42);
     // An argument is frozen where it is written. A proof may not be checked
@@ -288,7 +286,7 @@ fn mutable_indices_use_the_current_version_at_each_call() {
     rejects(
         "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
          fn make(n: i64) -> i64 ! {} { n }
-         fn main() -> i64 ! {panic} { keep(make(3), refl::<i64>(3)) }",
+         fn main() -> i64 ! {} { keep(make(3), refl::<i64>(3)) }",
         "evaluate the expression into a named immutable local",
     );
     // ...but binding that evaluated result to an immutable local is exactly the
@@ -296,7 +294,7 @@ fn mutable_indices_use_the_current_version_at_each_call() {
     let named = r#"
         fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
         fn make(n: i64) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let x = make(42);
             keep(x, refl::<i64>(x))
         }
@@ -305,7 +303,7 @@ fn mutable_indices_use_the_current_version_at_each_call() {
     // A non-scalar runtime value is not a symbolic index at all.
     rejects(
         "fn keep(xs: Vec<i64>, erased p: Eq<i64, xs, xs>) -> i64 ! {} { 1 }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "runtime or generic binding 'xs'",
     );
 }
@@ -318,7 +316,7 @@ fn aliases_wrappers_and_cross_module_proofs_substitute_symbolic_indices() {
         total fn same(n: MyInt) -> Same<MyInt, n> ! {} { refl::<MyInt>(n) }
         fn keep(n: MyInt, erased p: Same<MyInt, n>) -> i64 ! {} { n }
         fn forward(n: MyInt, erased p: Same<MyInt, n>) -> i64 ! {} { keep(n, p) }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n: MyInt = 42;
             forward(n, same(n))
         }
@@ -340,7 +338,7 @@ fn aliases_wrappers_and_cross_module_proofs_substitute_symbolic_indices() {
         fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
         fn keep_zero(n: i64, erased p: logic.ZeroI<n>) -> i64 ! {} { 10 }
         fn keep_tag(n: i64, erased p: logic.Tag<n>) -> i64 ! {} { 31 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n: i64 = 1;
             keep(n, logic.same(n)) + keep_zero(0, logic.zero_proof()) + keep_tag(0, logic.Tag.Mk::<0>)
         }";
@@ -356,7 +354,7 @@ fn grades_propositions_and_ownership_keep_their_own_obligations() {
     let graded = r#"
         fn graded(n: i64 @[0], erased p: Eq<i64, n, n>) -> i64 ! {} { 7 }
         fn exact(n: i64 @[1], erased p: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} { graded(1, refl::<i64>(1)) + exact(35, refl::<i64>(35)) }
+        fn main() -> i64 ! {} { graded(1, refl::<i64>(1)) + exact(35, refl::<i64>(35)) }
     "#;
     assert_eq!(evaluate(graded), 42);
 
@@ -366,14 +364,14 @@ fn grades_propositions_and_ownership_keep_their_own_obligations() {
         prop IsTrue<b: Bool> { Yes: IsTrue<true>, Also: IsTrue<true> }
         prop IsFalse<b: Bool> { No: IsFalse<false> }
         fn consume(b: Bool, erased p: IsTrue<b>) -> i64 ! {} { 42 }
-        fn main() -> i64 ! {panic} { consume(true, IsTrue.Also::<true>) }
+        fn main() -> i64 ! {} { consume(true, IsTrue.Also::<true>) }
     "#;
     assert_eq!(evaluate(prop), 42);
     rejects(
         r#"
         prop IsTrue<b: Bool> { Yes: IsTrue<true>, Also: IsTrue<true> }
         fn consume(b: Bool, erased p: IsTrue<b>) -> i64 ! {} { 42 }
-        fn main() -> i64 ! {panic} { consume(false, IsTrue.Also::<true>) }
+        fn main() -> i64 ! {} { consume(false, IsTrue.Also::<true>) }
         "#,
         "proof does not establish",
     );
@@ -394,7 +392,7 @@ fn grades_propositions_and_ownership_keep_their_own_obligations() {
     rejects(
         "prop True { Trivial: True }
          fn consume(n: i64, erased p: True) -> i64 ! {} { if p { n } else { 0 } }
-         fn main() -> i64 ! {panic} { consume(3, Trivial) }",
+         fn main() -> i64 ! {} { consume(3, Trivial) }",
         "no runtime value",
     );
 }
@@ -409,7 +407,7 @@ fn machine_literals_are_range_checked_and_distinct_from_naturals() {
             refl::<i64>(9223372036854775807)
         }
         fn use_min(erased p: Eq<i64, -9223372036854775808, -9223372036854775808>) -> i64 ! {} { 0 }
-        fn main() -> i64 ! {panic} { use_min(min_refl()) }
+        fn main() -> i64 ! {} { use_min(min_refl()) }
     "#;
     assert_eq!(evaluate(extremes), 0);
     rejects(
@@ -435,7 +433,7 @@ fn machine_literals_are_range_checked_and_distinct_from_naturals() {
 fn lambda_parameters_and_frozen_mutable_captures_are_symbolic_indices() {
     let source = r#"
         fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let f: fn(i64) -> i64 ! {} = fn(n: i64) -> i64 ! {} { keep(n, refl::<i64>(n)) };
             f(42)
         }
@@ -445,10 +443,10 @@ fn lambda_parameters_and_frozen_mutable_captures_are_symbolic_indices() {
     // and can still index the lambda body's proof.
     let captured = r#"
         fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic, alloc} {
+        fn main() -> i64 ! {alloc} {
             let m = 42;
-            let f: once fn() -> i64 ! {alloc, panic} =
-                fn() -> i64 ! {alloc, panic} { keep(m, refl::<i64>(m)) };
+            let f: once fn() -> i64 ! {alloc} =
+                fn() -> i64 ! {alloc} { keep(m, refl::<i64>(m)) };
             f()
         }
     "#;
@@ -458,10 +456,10 @@ fn lambda_parameters_and_frozen_mutable_captures_are_symbolic_indices() {
     // binding may only be reassigned after the call has consumed the closure.
     let live = r#"
         fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic, alloc} {
+        fn main() -> i64 ! {alloc} {
             let mut n = 42;
-            let f: once fn() -> i64 ! {alloc, panic} =
-                fn() -> i64 ! {alloc, panic} { keep(n, refl::<i64>(n)) };
+            let f: once fn() -> i64 ! {alloc} =
+                fn() -> i64 ! {alloc} { keep(n, refl::<i64>(n)) };
             let value = f();
             n = 7;
             value + n
@@ -476,7 +474,7 @@ fn reference_and_native_agree_on_symbolic_runtime_indices() {
     use std::process::Command;
     let source = format!(
         "{PRELUDE}
-        fn main() -> i64 ! {{panic}} {{
+        fn main() -> i64 ! {{}} {{
             let five: i64 = 5;
             let b: Bool = true;
             keep(five, refl::<i64>(five))

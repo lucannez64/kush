@@ -55,8 +55,13 @@ borrowed captures bounded by a lifetime once section 1 lands.
 Decisions (user, 2026-11-24):
 
 - E1: private functions infer their row; public functions still declare it.
-- E2: `panic` is no longer an effect; any function may panic.
+- E2: `panic` is no longer an effect; any function may panic. Done
+  (FND-ROWS-PANIC): naming `panic` in a row is an error, every call tests
+  for an unwinding panic, a panic in an allocator release or arena strategy
+  aborts, and a handler whose only failure is a panic is pure, so it is
+  dynamically visible.
 - E3: `#[noalloc]` and `#[nosuspend]` are removed; the row is the contract.
+  Done (FND-ROWS-ATTRS).
 - E4: lexical capabilities are the one handler model; a declared effect becomes
   an implicit capability parameter.
 - E5: tasks (`Task.scope`, `spawn`, `yield`, `join`, `cancel`) move to std on

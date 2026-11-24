@@ -37,11 +37,11 @@ Evaluation is strict and left-to-right for operands, call arguments, record fiel
 Bindings are immutable unless declared `mut`. Assignment and mutation require exclusive access. Moving a value transfers ownership and invalidates the source binding. This rule applies equally in development and release builds.
 
 ```rust
-fn square(x: i64) -> i64 ! {panic} {
+fn square(x: i64) -> i64 ! {} {
     x * x
 }
 
-fn main() -> Result<Unit, AppError> ! {io, alloc, suspend, panic} {
+fn main() -> Result<Unit, AppError> ! {io, alloc, suspend} {
     let source = fs.read_text("example.kush")?;
     let tokens = tokenize(source.as_str())?;
     let tree = parse(tokens.as_slice())?;
@@ -253,7 +253,7 @@ Consuming a unique input permits mutation behind a functional interface:
 ```rust
 #[noalloc]
 #[nosuspend]
-fn increment_all(xs: Vec<u64>) -> Vec<u64> ! {panic} {
+fn increment_all(xs: Vec<u64>) -> Vec<u64> ! {} {
     xs.map_in_place(|x| x + 1)
 }
 ```
@@ -323,7 +323,7 @@ No suspension occurs during automatic destruction. Operations such as flushing, 
 
 ```rust
 fn read_settings(path: &Path) -> Result<Settings, ReadError>
-    ! {io, alloc, suspend, panic} {
+    ! {io, alloc, suspend} {
     let text = fs.read_text(path)?;
     parse_settings(text.as_str())
 }
@@ -409,16 +409,16 @@ Suggested interfaces:
 
 ```rust
 fn tokenize(source: &str) -> Result<Vec<Token>, LexError>
-    ! {alloc, panic};
+    ! {alloc};
 
 fn parse(tokens: &[Token], arena: &mut Arena<AstNode>)
-    -> Result<NodeId, ParseError> ! {alloc, panic};
+    -> Result<NodeId, ParseError> ! {alloc};
 
 fn check(ast: &Ast, context: &Context)
-    -> Result<TypedModule, TypeError> ! {alloc, panic};
+    -> Result<TypedModule, TypeError> ! {alloc};
 
 fn emit(module: TypedModule) -> Result<ObjectFile, CodegenError>
-    ! {alloc, panic};
+    ! {alloc};
 ```
 
 These interfaces are non-I/O computational phases; the outer driver owns file I/O. Initial arena growth can allocate. A later bounded parser API can accept fixed-capacity storage and return `CapacityExceeded` instead of acquiring memory.

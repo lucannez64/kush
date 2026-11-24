@@ -14,11 +14,11 @@ pub fn position(error: ParseError) -> i64 ! {} {
     match error { ParseError.Expected(at) | ParseError.Trailing(at) => at }
 }
 
-fn peek(tokens: &Vec<Token>, at: i64) -> Token ! {panic} {
+fn peek(tokens: &Vec<Token>, at: i64) -> Token ! {} {
     if at >= 0 && at < Vec.len(tokens) { Vec.at(tokens, at, _) } else { Token.Close }
 }
 
-fn primary(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc, panic} {
+fn primary(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc} {
     if at >= Vec.len(tokens) { return Err(ParseError.Expected(at)); }
     match peek(tokens, at) {
         Token.Number(n) => Ok(Parsed { tree: Expr.Number(n), next: at + 1 }),
@@ -50,11 +50,11 @@ fn operator(token: Token, level: i64) -> Option ! {} {
 
 enum Option { None, Some(Op) }
 
-fn operand(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> ! {alloc, panic} {
+fn operand(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> ! {alloc} {
     if level == 0 { product(tokens, at) } else { primary(tokens, at) }
 }
 
-fn chain(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> ! {alloc, panic} {
+fn chain(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> ! {alloc} {
     let Parsed { tree: first, next: start } = operand(tokens, at, level)?;
     let mut tree = first;
     let mut next = start;
@@ -71,10 +71,10 @@ fn chain(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError>
     Ok(Parsed { tree: tree, next: next })
 }
 
-fn product(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc, panic} { chain(tokens, at, 1) }
-fn sum(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc, panic} { chain(tokens, at, 0) }
+fn product(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc} { chain(tokens, at, 1) }
+fn sum(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc} { chain(tokens, at, 0) }
 
-pub fn parse(tokens: &Vec<Token>) -> Result<Expr, ParseError> ! {alloc, panic} {
+pub fn parse(tokens: &Vec<Token>) -> Result<Expr, ParseError> ! {alloc} {
     let Parsed { tree: tree, next: next } = sum(tokens, 0)?;
     if next != Vec.len(tokens) { drop(tree); return Err(ParseError.Trailing(next)); }
     Ok(tree)

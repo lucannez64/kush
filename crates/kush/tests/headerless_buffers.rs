@@ -44,7 +44,7 @@ fn compare(source: &str, expected: Option<i64>) {
 #[test]
 fn appending_crosses_headerless_and_large_storage_with_correct_contents() {
     compare(
-        r#"fn main()->i64 ! {alloc,panic} {
+        r#"fn main()->i64 ! {alloc} {
         let mut b=Bytes.with_capacity(0);let mut i=0;
         while i<2048 {b=Bytes.push(b,i%256);i=i+1;}
         let answer=Bytes.get(&b,2047)+Bytes.capacity(&b)-2048;
@@ -56,7 +56,7 @@ fn appending_crosses_headerless_and_large_storage_with_correct_contents() {
 #[test]
 fn fast_append_keeps_the_full_capacity_of_large_buffers() {
     compare(
-        r#"fn main()->i64 ! {alloc,panic} {
+        r#"fn main()->i64 ! {alloc} {
         let b=Bytes.with_capacity(65537);let b=Bytes.push_reserved(b,42);
         let answer=Bytes.get(&b,0)+Bytes.capacity(&b)-65537;drop(b);answer
     }"#,
@@ -69,7 +69,7 @@ fn byte_range_checks_run_before_the_fast_store_and_the_growth_path() {
         for value in [-1, 256] {
             compare(
                 &format!(
-                    "fn main()->Unit ! {{alloc,panic}} {{let b=Bytes.with_capacity({capacity});drop(Bytes.push(b,{value}));}}"
+                    "fn main()->Unit ! {{alloc}} {{let b=Bytes.with_capacity({capacity});drop(Bytes.push(b,{value}));}}"
                 ),
                 None,
             );
@@ -79,12 +79,12 @@ fn byte_range_checks_run_before_the_fast_store_and_the_growth_path() {
 #[test]
 fn reserved_push_checks_logical_capacity_despite_physical_slack() {
     compare(
-        r#"fn append(b:Bytes)->Bytes ! {panic} {Bytes.push_reserved(b,42)}
-    fn main()->i64 ! {alloc,panic} {let b=append(Bytes.with_capacity(1));Bytes.get(&b,0)}"#,
+        r#"fn append(b:Bytes)->Bytes ! {} {Bytes.push_reserved(b,42)}
+    fn main()->i64 ! {alloc} {let b=append(Bytes.with_capacity(1));Bytes.get(&b,0)}"#,
         Some(42),
     );
     compare(
-        r#"fn main()->Unit ! {alloc,panic} {let b=Bytes.with_capacity(1);let b=Bytes.push_reserved(b,1);drop(Bytes.push_reserved(b,2));}"#,
+        r#"fn main()->Unit ! {alloc} {let b=Bytes.with_capacity(1);let b=Bytes.push_reserved(b,1);drop(Bytes.push_reserved(b,2));}"#,
         None,
     );
 }
@@ -94,14 +94,14 @@ fn inline_byte_access_preserves_bounds_and_clear_capacity() {
     for capacity in [0, 1, 1008, 1009, 65537] {
         compare(
             &format!(
-                "fn main()->i64 ! {{alloc,panic}} {{let b=Bytes.with_capacity({capacity});let b=Bytes.push(b,255);let n=Bytes.len(&b);let x=Bytes.get(&b,0);let c=Bytes.capacity(&b);let b=Bytes.clear(b);let answer=n+x+Bytes.len(&b)+Bytes.capacity(&b)-c;drop(b);answer}}"
+                "fn main()->i64 ! {{alloc}} {{let b=Bytes.with_capacity({capacity});let b=Bytes.push(b,255);let n=Bytes.len(&b);let x=Bytes.get(&b,0);let c=Bytes.capacity(&b);let b=Bytes.clear(b);let answer=n+x+Bytes.len(&b)+Bytes.capacity(&b)-c;drop(b);answer}}"
             ),
             Some(256),
         );
         for index in [-1, 1, i64::MAX] {
             compare(
                 &format!(
-                    "fn main()->i64 ! {{alloc,panic}} {{let b=Bytes.push(Bytes.with_capacity({capacity}),42);Bytes.get(&b,{index})}}"
+                    "fn main()->i64 ! {{alloc}} {{let b=Bytes.push(Bytes.with_capacity({capacity}),42);Bytes.get(&b,{index})}}"
                 ),
                 None,
             );

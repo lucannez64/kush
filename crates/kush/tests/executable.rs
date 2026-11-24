@@ -27,7 +27,7 @@ fn scalar_types_are_not_coerced_and_function_signatures_are_checked() {
         "fn main() -> i64 ! {} { true }",
         "fn main() -> i64 ! {} {}",
         "fn main() -> Unit ! {} { 1 }",
-        "fn main() -> i64 ! {panic} { 1 + true }",
+        "fn main() -> i64 ! {} { 1 + true }",
         "fn main() -> i64 ! {} { if 1 { 2 } else { 3 } }",
         "fn main() -> i64 ! {} { if true { 1 } else { false } }",
         "fn f(x: Bool) -> Bool ! {} { x } fn main() -> Unit ! {} { f(1); }",
@@ -52,44 +52,45 @@ fn scalar_types_are_not_coerced_and_function_signatures_are_checked() {
 }
 #[test]
 fn arithmetic_io_and_callee_effects_are_enforced() {
-    rejects(
-        "fn add(x: i64) -> i64 ! {} { x + 2 } fn main() -> i64 ! {} { 0 }",
-        "requires effects {panic}",
-    );
+    kush::executable::check("fn add(x: i64) -> i64 ! {} { x + 2 } fn main() -> i64 ! {} { 0 }")
+        .unwrap();
     // Literal arithmetic is proved in range (OVERFLOW-ELIDE).
     check("fn main() -> i64 ! {} { 1 + 2 }").unwrap();
     rejects(
         "fn main() -> Unit ! {} { print_i64(1); }",
-        "requires effects {io, panic}",
+        "requires effects {io}",
     );
-    rejects(
-        "fn f() -> i64 ! {panic} { 1 } fn main() -> i64 ! {} { f() }",
-        "requires effects {panic}",
-    );
-    rejects(
-        "fn main() -> Unit ! {io} { print_i64(1); }",
-        "requires effects {panic}",
-    );
-    rejects(
-        "fn main() -> i64 ! {} { -(-1) }",
-        "requires effects {panic}",
-    );
+    kush::executable::check("fn f() -> i64 ! {} { 1 } fn main() -> i64 ! {} { f() }").unwrap();
+    kush::executable::check("fn main() -> Unit ! {io} { print_i64(1); }").unwrap();
+    kush::executable::check("fn main() -> i64 ! {} { -(-1) }").unwrap();
     rejects(
         "fn main() -> Unit ! {state} {}",
         "expected a builtin effect",
     );
+    // FND-ROWS-PANIC: any function may panic; `panic` is not an effect name
+    // in a row, an arrow, an exclusion or an explicit effect argument.
+    for source in [
+        "fn main() -> i64 ! {panic} { 0 }",
+        "fn apply(f: fn(i64) -> i64 ! {panic}) -> i64 ! {} { f(1) } fn main() -> i64 ! {} { 0 }",
+        "fn apply<e: Effects - panic>(f: fn(i64) -> i64 ! {e}) -> i64 ! {e} { f(1) } fn main() -> i64 ! {} { 0 }",
+        "fn id(x: i64) -> i64 ! {} { x }
+         fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}) -> i64 ! {e} { f(1) }
+         fn main() -> i64 ! {} { apply::<panic>(id) }",
+    ] {
+        rejects(source, "'panic' is not an effect: any function may panic");
+    }
     // Row union is idempotent in the finite effect-bit algebra: repeating a
     // concrete effect names the same bit.
-    check("fn main() -> Unit ! {panic, panic} {}").unwrap();
+    check("fn main() -> Unit ! {} {}").unwrap();
 }
 #[test]
 fn lexical_scopes_forward_calls_mutation_and_early_returns() {
     let source = "module demo;
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut x = later(2); { let x = 99; x; } if x == 4 { x = 6; }
             if x == 6 { return demo.later(x); }; -1
         }
-        fn later(x: i64) -> i64 ! {panic} { x * 2 }
+        fn later(x: i64) -> i64 ! {} { x * 2 }
     ";
     assert_eq!(evaluate(source).0, 12);
     rejects(
@@ -136,8 +137,8 @@ fn bool_and_integer_matches_require_exhaustiveness() {
 }
 #[test]
 fn left_to_right_evaluation_and_short_circuiting() {
-    let source = "fn pair(x: i64, y: i64) -> i64 ! {panic} { x * 10 + y }
-        fn main() -> i64 ! {panic} {
+    let source = "fn pair(x: i64, y: i64) -> i64 ! {} { x * 10 + y }
+        fn main() -> i64 ! {} {
             let mut n = 0;
             let value = pair({ n = 1; n }, { n = 2; n });
             false && panic(); true || panic();
@@ -157,7 +158,7 @@ fn every_checked_integer_failure_fails_in_the_reference_evaluator() {
         "-9223372036854775808 % -1",
         "-(-9223372036854775808)",
     ] {
-        let program = check(&format!("fn main() -> i64 ! {{panic}} {{ {expr} }}")).unwrap();
+        let program = check(&format!("fn main() -> i64 ! {{}} {{ {expr} }}")).unwrap();
         assert!(
             program
                 .evaluate(&mut Vec::new())
@@ -204,7 +205,7 @@ fn unsupported_runtime_features_cannot_enter_the_checked_ir() {
     );
     rejects(
         "fn main() -> Unit ! {} { let x = [1]; }",
-        "requires effects {alloc, panic}",
+        "requires effects {alloc}",
     );
     rejects("fn main() -> Bool ! {} { true }", "main must");
     rejects("fn main(n: i64) -> i64 ! {} { n }", "main must");

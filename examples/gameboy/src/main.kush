@@ -38,19 +38,19 @@ struct Options {
     save: Bytes,
 }
 
-fn say(text: &Bytes) -> Unit ! {io, alloc, panic} {
+fn say(text: &Bytes) -> Unit ! {io, alloc} {
     let _ = IO.write(IO.stdout(), text);
 }
 
-fn line(text: Bytes) -> Unit ! {io, alloc, panic} {
+fn line(text: Bytes) -> Unit ! {io, alloc} {
     say(&text.push(10));
 }
 
-fn argument(index: i64) -> Result<Bytes, i64> ! {io, alloc, panic} {
+fn argument(index: i64) -> Result<Bytes, i64> ! {io, alloc} {
     ENV.arg(index, Bytes.with_capacity(4096))
 }
 
-fn load(path: &Bytes) -> Result<Vec<u8>, i64> ! {io, alloc, panic} {
+fn load(path: &Bytes) -> Result<Vec<u8>, i64> ! {io, alloc} {
     let size = FS.size(path)?;
     let bytes = FS.read(path, Bytes.with_capacity(size))?;
     let mut rom: Vec<u8> = Vec.with_capacity(bytes.len());
@@ -63,7 +63,7 @@ fn load(path: &Bytes) -> Result<Vec<u8>, i64> ! {io, alloc, panic} {
 }
 
 /// The save file for a ROM: its path with the extension replaced by `.sav`.
-fn save_path(rom: &Bytes) -> Bytes ! {alloc, panic} {
+fn save_path(rom: &Bytes) -> Bytes ! {alloc} {
     let mut cut = rom.len();
     let mut i = rom.len();
     while i > 0 {
@@ -78,7 +78,7 @@ fn save_path(rom: &Bytes) -> Bytes ! {alloc, panic} {
 }
 
 /// Load a save into the cartridge, if there is one.
-fn load_save<M: Mapper>(board: &mut M, path: &Bytes) -> Unit ! {io, alloc, panic} {
+fn load_save<M: Mapper>(board: &mut M, path: &Bytes) -> Unit ! {io, alloc} {
     let size = match FS.size(path) { Ok(n) => n, Err(_) => { return; } };
     match FS.read(path, Bytes.with_capacity(size)) {
         Ok(saved) => board.restore(&saved),
@@ -87,7 +87,7 @@ fn load_save<M: Mapper>(board: &mut M, path: &Bytes) -> Unit ! {io, alloc, panic
 }
 
 /// Write the cartridge's battery RAM, if it has any.
-fn write_save<M: Mapper>(m: &Machine<M>, path: &Bytes) -> Unit ! {io, alloc, panic} {
+fn write_save<M: Mapper>(m: &Machine<M>, path: &Bytes) -> Unit ! {io, alloc} {
     let saved = m.cartridge.saved();
     if saved.len() == 0 { return; }
     match FS.write(path, &saved) {
@@ -96,7 +96,7 @@ fn write_save<M: Mapper>(m: &Machine<M>, path: &Bytes) -> Unit ! {io, alloc, pan
     }
 }
 
-fn play<M: Mapper>(board: M, options: &Options, title: &Bytes) -> i64 ! {io, alloc, panic} {
+fn play<M: Mapper>(board: M, options: &Options, title: &Bytes) -> i64 ! {io, alloc} {
     let mut cartridge = board;
     if options.frames <= 0 { load_save(&mut cartridge, &options.save); }
     let mut m = machine.new(cartridge);
@@ -126,7 +126,7 @@ fn play<M: Mapper>(board: M, options: &Options, title: &Bytes) -> i64 ! {io, all
 /// Run `frames` frames, stopping early once a test ROM has reported. The
 /// headless front end is three small handlers: the button handler counts
 /// frames down, and picture and sound are dropped.
-fn headless<M: Mapper>(m: &mut Machine<M>, frames: i64, screenshot: &Bytes) -> i64 ! {io, alloc, panic} {
+fn headless<M: Mapper>(m: &mut Machine<M>, frames: i64, screenshot: &Bytes) -> i64 ! {io, alloc} {
     let mut frame = 0;
     while frame < frames {
         // Run a second of game time, then look for a test report.
@@ -135,7 +135,7 @@ fn headless<M: Mapper>(m: &mut Machine<M>, frames: i64, screenshot: &Bytes) -> i
         handle Buttons: Unit -> i64 with fn(
             nothing: Unit,
             resume: linear once fn(i64) -> i64 ! {},
-        ) -> i64 ! {panic} {
+        ) -> i64 ! {} {
             if left == 0 { resume(-1) } else { left = left - 1; resume(0) }
         } {
             handle Present: Vec<u8> -> (Vec<u8>, Bool) with fn(
@@ -193,7 +193,7 @@ fn headless<M: Mapper>(m: &mut Machine<M>, frames: i64, screenshot: &Bytes) -> i
     0
 }
 
-fn same(a: &Bytes, b: &Bytes) -> Bool ! {panic} {
+fn same(a: &Bytes, b: &Bytes) -> Bool ! {} {
     if a.len() != b.len() { return false; }
     let mut i = 0;
     while i < a.len() {
@@ -203,14 +203,14 @@ fn same(a: &Bytes, b: &Bytes) -> Bool ! {panic} {
     true
 }
 
-fn usage() -> i64 ! {io, alloc, panic} {
+fn usage() -> i64 ! {io, alloc} {
     line(Bytes.from("usage: gameboy ROM [--scale N] [--fullscreen]  (play in a window, with sound)"));
     line(Bytes.from("       gameboy ROM --terminal                  (play in the terminal)"));
     line(Bytes.from("       gameboy ROM FRAMES [SCREENSHOT.ppm]     (run headless)"));
     2
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let count = match ENV.arg_count() { Ok(n) => n, Err(_) => 0 };
     if count < 2 { return usage(); }
     let path = match argument(1) { Ok(p) => p, Err(_) => { return 2; } };

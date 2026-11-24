@@ -66,7 +66,7 @@ fn method(m: Method) -> i64 ! {} {
 }
 
 /// -1 incomplete, the status of a rejection, or a summary line of numbers.
-fn show(request: &Bytes, limits: &Limits) -> Unit ! {io, alloc, panic} {
+fn show(request: &Bytes, limits: &Limits) -> Unit ! {io, alloc} {
     match http1.parse_head(request, limits) {
         Parse.Incomplete => print_i64(-1),
         Parse.Reject(status) => print_i64(status),
@@ -96,7 +96,7 @@ fn chunked(text: &Bytes, limits: &Limits) -> i64 ! {} {
     }
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let l = http1.limits();
     let small = Limits { line: 16, fields: 2, head: 200, body: 10 };
     let small_body = Limits { line: 8192, fields: 100, head: 65536, body: 10 };
@@ -216,7 +216,7 @@ use std.http1;
 use std.io;
 use std.result.Result;
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let mut out = http1.status_line(Bytes.with_capacity(64), 404);
     out = match http1.field(out, &Bytes.from("X-Id"), &Bytes.from("7\tok")) {
         Result.Ok(next) => next,

@@ -61,7 +61,7 @@ fn write_files(directory: &Path, name: &str) -> Result<(), Failure> {
         &format!(
             "module {name};\n\
              \n\
-             fn main() -> Unit ! {{io, panic}} {{\n\
+             fn main() -> Unit ! {{io}} {{\n\
              \x20   print_i64(42);\n\
              }}\n"
         ),
@@ -74,12 +74,12 @@ fn write_files(directory: &Path, name: &str) -> Result<(), Failure> {
              use std.test;\n\
              \n\
              #[test]\n\
-             fn arithmetic_works() -> Unit ! {{panic}} {{\n\
+             fn arithmetic_works() -> Unit ! {{}} {{\n\
              \x20   test.is_true(2 + 2 == 4);\n\
              }}\n\
              \n\
              #[test]\n\
-             fn multiplication_works() -> Unit ! {{io, panic}} {{\n\
+             fn multiplication_works() -> Unit ! {{io}} {{\n\
              \x20   test.equal_i64(6 * 7, 42);\n\
              }}\n"
         ),

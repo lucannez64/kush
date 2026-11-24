@@ -46,14 +46,14 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 fn borrowed_record_parameters_and_results_travel_through_function_values() {
     agrees(
         r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn len<'a>(window: Window<'a>) -> i64 ! {panic} { Slice.len(window.view) - window.start }
+        fn len<'a>(window: Window<'a>) -> i64 ! {} { Slice.len(window.view) - window.start }
         fn advance<'a>(window: Window<'a>) -> Window<'a> ! {} { window }
-        fn apply<'a>(f: fn<'b>(Window<'b>) -> i64 ! {panic}, w: Window<'a>) -> i64 ! {panic} {
+        fn apply<'a>(f: fn<'b>(Window<'b>) -> i64 ! {}, w: Window<'a>) -> i64 ! {} {
             f(w)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let data: [i64; 4] = [1, 2, 3, 4];
-            let f: fn<'x>(Window<'x>) -> i64 ! {panic} = len;
+            let f: fn<'x>(Window<'x>) -> i64 ! {} = len;
             let view = advance(Window { view: &data[..], start: 2 });
             apply(f, view)
         }"#,
@@ -65,7 +65,7 @@ fn borrowed_record_parameters_and_results_travel_through_function_values() {
     agrees(
         r#"struct Window<'a> { view: &'a [i64] }
         fn tail<'a>(window: Window<'a>) -> Window<'a> ! {} { window }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let data: [i64; 3] = [1, 40, 2];
             let f: fn<'y>(Window<'y>) -> Window<'y> ! {} = tail;
             let out = f(Window { view: &data[..] });
@@ -80,10 +80,10 @@ fn borrowed_record_parameters_and_results_travel_through_function_values() {
 fn scoped_closures_capture_borrowed_records_and_return_fields() {
     agrees(
         r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let data: [i64; 4] = [1, 2, 40, 4];
             let window = Window { view: &data[..], start: 1 };
-            let read = fn(index: i64) -> i64 ! {panic} {
+            let read = fn(index: i64) -> i64 ! {} {
                 Slice.get(window.view, index + window.start)
             };
             read(1)
@@ -95,10 +95,10 @@ fn scoped_closures_capture_borrowed_records_and_return_fields() {
     // returned view's checked last use.
     agrees(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let owner: Vec<i64> = [7, 35];
             let window = Window { view: &owner[..] };
-            let tail = fn() -> &[i64] ! {panic} { window.view[1..] };
+            let tail = fn() -> &[i64] ! {} { window.view[1..] };
             let rest = tail();
             Slice.get(rest, 0)
         }"#,
@@ -108,12 +108,12 @@ fn scoped_closures_capture_borrowed_records_and_return_fields() {
     // A capture-derived record result keeps every per-field origin.
     agrees(
         r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn read<'a>(window: Window<'a>) -> i64 ! {alloc, panic} {
-            let clone_window = fn() -> Window<'a> ! {panic} { window };
+        fn read<'a>(window: Window<'a>) -> i64 ! {alloc} {
+            let clone_window = fn() -> Window<'a> ! {} { window };
             let out = clone_window();
             Slice.get(out.view, out.start)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let data: [i64; 3] = [1, 40, 2];
             read(Window { view: &data[..], start: 1 })
         }"#,
@@ -122,10 +122,10 @@ fn scoped_closures_capture_borrowed_records_and_return_fields() {
     );
     // The same form through a captured slice rather than a record.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let data: [i64; 3] = [1, 40, 2];
             let view: &[i64] = &data[..];
-            let tail = fn() -> &[i64] ! {panic} { view[1..] };
+            let tail = fn() -> &[i64] ! {} { view[1..] };
             let rest = tail();
             Slice.get(rest, 0) + Slice.get(rest, 1)
         }"#,
@@ -138,29 +138,29 @@ fn scoped_closures_capture_borrowed_records_and_return_fields() {
 fn capture_returning_lambdas_reject_ambiguous_or_dangling_origins() {
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let data: [i64; 2] = [1, 2];
             let window = Window { view: &data[..] };
-            let f = fn(extra: &[i64]) -> &[i64] ! {panic} { window.view };
+            let f = fn(extra: &[i64]) -> &[i64] ! {} { window.view };
             0
         }"#,
         "borrowed parameters or captures",
     );
     rejects(
         r#"struct Two<'a, 'b> { first: &'a [i64], second: &'b [i64] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: [i64; 1] = [1];
             let b: [i64; 1] = [2];
             let two = Two { first: &a[..], second: &b[..] };
-            let f = fn() -> &[i64] ! {panic} { two.first };
+            let f = fn() -> &[i64] ! {} { two.first };
             0
         }"#,
         "cannot infer this lambda result's lifetime",
     );
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let data: [i64; 1] = [42];
-            let f = fn() -> &[i64] ! {panic} {
+            let f = fn() -> &[i64] ! {} {
                 let local: [i64; 1] = [1];
                 &local[..]
             };
@@ -175,11 +175,11 @@ fn borrowed_records_are_lent_to_scope_bodies_and_child_tasks() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 4] = [1, 2, 3, 40];
             let window = Window { view: &data[..], start: 1 };
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {
                     Task.yield();
                     Slice.get(window.view, window.start + 2)
                 });
@@ -194,11 +194,11 @@ fn borrowed_records_are_lent_to_scope_bodies_and_child_tasks() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [40, 1, 1];
             let window = Window { view: &data[..], start: 0 };
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {
                     Task.yield(); window.start
                 });
                 let first = Slice.get(window.view, 0);
@@ -218,9 +218,9 @@ fn borrowed_records_are_task_results_through_join_and_cancellation() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic, suspend} {
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {suspend} {
                     Task.yield();
                     window
                 });
@@ -230,7 +230,7 @@ fn borrowed_records_are_task_results_through_join_and_cancellation() {
                 }
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [1, 40, 2];
             run(Window { view: &data[..], start: 1 })
         }"#,
@@ -242,9 +242,9 @@ fn borrowed_records_are_task_results_through_join_and_cancellation() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                match Task.join(Task.spawn(fn() -> Window<'a> ! {panic, suspend} {
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                match Task.join(Task.spawn(fn() -> Window<'a> ! {suspend} {
                     Task.yield();
                     window
                 })) {
@@ -253,7 +253,7 @@ fn borrowed_records_are_task_results_through_join_and_cancellation() {
                 }
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [1, 40, 2];
             run(Window { view: &data[..], start: 1 })
         }"#,
@@ -266,9 +266,9 @@ fn borrowed_records_are_task_results_through_join_and_cancellation() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], owner: Vec<i64>, start: i64 }
-        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {alloc, panic, suspend} {
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {alloc, suspend} {
                     Task.yield();
                     Window { view: window.view, owner: [9, 8, 7], start: window.start }
                 });
@@ -279,7 +279,7 @@ fn borrowed_records_are_task_results_through_join_and_cancellation() {
                 }
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [1, 40, 2];
             run(Window { view: &data[..], owner: [5], start: 1 }) + Slice.get(&data[..], 0)
         }"#,
@@ -301,22 +301,22 @@ fn borrowed_records_are_task_results_through_join_and_cancellation() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64] }
-        fn forward<'a>(exit: TaskExit<Window<'a>>) -> i64 ! {panic} {
+        fn forward<'a>(exit: TaskExit<Window<'a>>) -> i64 ! {} {
             match exit {
                 TaskExit.Completed(w) => Slice.get(w.view, 0),
                 TaskExit.Cancelled => 0,
             }
         }
-        fn make<'a>(view: &'a [i64]) -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic, suspend} {
+        fn make<'a>(view: &'a [i64]) -> TaskExit<Window<'a>> ! {alloc, suspend} {
+            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {suspend} {
                     Task.yield();
                     Window { view: view }
                 });
                 Task.join(t)
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 2] = [40, 2];
             forward(make(&data[..]))
         }"#,
@@ -330,11 +330,11 @@ fn child_tasks_cannot_borrow_record_storage_owned_by_the_scope_body() {
     rejects(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let local: [i64; 1] = [5];
                 let window = Window { view: &local[..] };
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic} {
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {} {
                     Slice.get(window.view, 0)
                 });
                 match Task.join(t) { TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 }
@@ -349,7 +349,7 @@ fn nested_record_fields_can_be_sub_sliced_and_loaned_disjointly() {
     agrees(
         r#"struct Inner<'a> { view: &'a [i64] }
         struct Outer<'a> { inner: Inner<'a>, note: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let data: [i64; 4] = [1, 2, 40, 4];
             let outer = Outer { inner: Inner { view: &data[..] }, note: 1 };
             let view = outer.inner.view[2..];
@@ -360,7 +360,7 @@ fn nested_record_fields_can_be_sub_sliced_and_loaned_disjointly() {
     );
     agrees(
         r#"struct Pair<'a> { left: &'a mut [i64], right: &'a mut [i64] }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [1, 2];
             let mut b: [i64; 2] = [3, 4];
             let pair = Pair { left: &mut a[..], right: &mut b[..] };
@@ -379,7 +379,7 @@ fn nested_record_fields_can_be_sub_sliced_and_loaned_disjointly() {
 fn disjoint_field_loans_do_not_launder_aliases_or_whole_record_moves() {
     rejects(
         r#"struct Pair<'a> { left: &'a mut [i64], right: &'a mut [i64] }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut data: [i64; 2] = [1, 2];
             let pair = Pair { left: &mut data[..], right: &mut data[..] };
             let left = &mut pair.left[..];
@@ -389,7 +389,7 @@ fn disjoint_field_loans_do_not_launder_aliases_or_whole_record_moves() {
     );
     rejects(
         r#"struct Pair<'a> { left: &'a mut [i64], right: &'a mut [i64] }
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             let mut a: [i64; 2] = [1, 2];
             let mut b: [i64; 2] = [3, 4];
             let pair = Pair { left: &mut a[..], right: &mut b[..] };
@@ -401,7 +401,7 @@ fn disjoint_field_loans_do_not_launder_aliases_or_whole_record_moves() {
     );
     rejects(
         r#"struct Pair<'a> { left: &'a mut [i64], right: &'a mut [i64] }
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             let mut a: [i64; 2] = [1, 2];
             let mut b: [i64; 2] = [3, 4];
             let pair = Pair { left: &mut a[..], right: &mut b[..] };
@@ -418,9 +418,9 @@ fn disjoint_field_loans_do_not_launder_aliases_or_whole_record_moves() {
 fn nominal_record_reference_escape_and_reborrow_contracts() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn identity<'a>(p: &'a Point) -> &'a Point ! {panic} { p }
-        fn relay<'a>(p: &'a Point) -> &'a Point ! {panic} { identity(p) }
-        fn main() -> i64 ! {panic} {
+        fn identity<'a>(p: &'a Point) -> &'a Point ! {} { p }
+        fn relay<'a>(p: &'a Point) -> &'a Point ! {} { identity(p) }
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 2 };
             relay(&p).x + relay(&p).y
         }"#,
@@ -429,11 +429,11 @@ fn nominal_record_reference_escape_and_reborrow_contracts() {
     );
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {panic} {
+        fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {} {
             p.x = p.x + 1;
             p
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 40, y: 2 };
             let x = bump(&mut p).x;
             x + p.y
@@ -443,23 +443,23 @@ fn nominal_record_reference_escape_and_reborrow_contracts() {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn leak<'a>(p: &'a Point) -> &'a Point ! {panic} {
+        fn leak<'a>(p: &'a Point) -> &'a Point ! {} {
             let local = Point { x: 1, y: 2 };
             &local
         }
-        fn main() -> Unit ! {panic} {}"#,
+        fn main() -> Unit ! {} {}"#,
         "escapes",
     );
     rejects(
-        r#"fn leak() -> &Bytes ! {panic} { Bytes.from("x") }
+        r#"fn leak() -> &Bytes ! {} { Bytes.from("x") }
         fn main() -> Unit ! {} {}"#,
         "cannot be returned",
     );
     // A stored reference is a lexical capability, not a copy of the owner.
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn peek(p: &Point) -> i64 ! {panic} { p.x }
-        fn main() -> i64 ! {panic} {
+        fn peek(p: &Point) -> i64 ! {} { p.x }
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 2 };
             let r = &p;
             peek(r) + r.y
@@ -471,11 +471,11 @@ fn nominal_record_reference_escape_and_reborrow_contracts() {
     // caller lifetime.
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn identity<'a>(p: &'a Point) -> &'a Point ! {panic} {
+        fn identity<'a>(p: &'a Point) -> &'a Point ! {} {
             let stored = p;
             stored
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 2 };
             let r = identity(&p);
             r.x + r.y
@@ -487,12 +487,12 @@ fn nominal_record_reference_escape_and_reborrow_contracts() {
     // explicit reborrow narrows the stored capability.
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {panic} {
+        fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {} {
             p.x = p.x + 1;
             p
         }
-        fn read(p: &Point) -> i64 ! {panic} { p.x }
-        fn main() -> i64 ! {panic} {
+        fn read(p: &Point) -> i64 ! {} { p.x }
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 40, y: 2 };
             let r = &mut p;
             let a = read(&*r);
@@ -505,33 +505,33 @@ fn nominal_record_reference_escape_and_reborrow_contracts() {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn leak<'a>(p: &'a Point) -> &'a Point ! {panic} {
+        fn leak<'a>(p: &'a Point) -> &'a Point ! {} {
             let local = Point { x: 1, y: 2 };
             let stored = &local;
             stored
         }
-        fn main() -> Unit ! {panic} {}"#,
+        fn main() -> Unit ! {} {}"#,
         "escapes",
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn leak<'a>(p: &'a Point) -> &'a Point ! {panic} {
+        fn leak<'a>(p: &'a Point) -> &'a Point ! {} {
             let stored = &*p;
             let local = Point { x: 1, y: 2 };
             let other = &local;
             other
         }
-        fn main() -> Unit ! {panic} {}"#,
+        fn main() -> Unit ! {} {}"#,
         "escapes",
     );
     // Owner references have valid escape contracts too: the caller-owned
     // Box/Vec/Bytes/String stays loaned for the returned reference's use.
     agrees(
-        r#"fn box_value<'a>(b: &'a Box<i64>) -> &'a Box<i64> ! {panic} { b }
-        fn vec_value<'a>(v: &'a Vec<i64>) -> &'a Vec<i64> ! {panic} { v }
-        fn bytes_value<'a>(b: &'a Bytes) -> &'a Bytes ! {panic} { b }
-        fn text_value<'a>(s: &'a String) -> &'a String ! {panic} { s }
-        fn main() -> i64 ! {alloc, panic} {
+        r#"fn box_value<'a>(b: &'a Box<i64>) -> &'a Box<i64> ! {} { b }
+        fn vec_value<'a>(v: &'a Vec<i64>) -> &'a Vec<i64> ! {} { v }
+        fn bytes_value<'a>(b: &'a Bytes) -> &'a Bytes ! {} { b }
+        fn text_value<'a>(s: &'a String) -> &'a String ! {} { s }
+        fn main() -> i64 ! {alloc} {
             let boxed: Box<i64> = Box.new(40);
             let values: Vec<i64> = [2];
             let bytes: Bytes = Bytes.from("x");
@@ -551,8 +551,8 @@ fn nominal_record_reference_escape_and_reborrow_contracts() {
 fn result_lifetime_elision_counts_a_single_record_field_source() {
     agrees(
         r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn tail<'a>(window: Window<'a>) -> &[i64] ! {panic} { window.view[window.start..] }
-        fn main() -> i64 ! {panic} {
+        fn tail<'a>(window: Window<'a>) -> &[i64] ! {} { window.view[window.start..] }
+        fn main() -> i64 ! {} {
             let data: [i64; 3] = [1, 40, 2];
             let view = tail(Window { view: &data[..], start: 1 });
             Slice.get(view, 0) + Slice.get(view, 1)
@@ -564,8 +564,8 @@ fn result_lifetime_elision_counts_a_single_record_field_source() {
     // the record type carries several distinct field lifetimes.
     agrees(
         r#"struct Two<'a, 'b> { first: &'a [i64], second: &'b [i64] }
-        fn pick<'a, 'b>(two: Two<'a, 'b>) -> &[i64] ! {panic} { two.first }
-        fn main() -> i64 ! {panic} {
+        fn pick<'a, 'b>(two: Two<'a, 'b>) -> &[i64] ! {} { two.first }
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 2];
             let b: [i64; 2] = [9, 9];
             let view = pick(Two { first: &a[..], second: &b[..] });
@@ -579,10 +579,10 @@ fn result_lifetime_elision_counts_a_single_record_field_source() {
     // owners stay loaned through its last use.
     agrees(
         r#"struct Two<'a, 'b> { first: &'a [i64], second: &'b [i64] }
-        fn pick<'a, 'b>(two: Two<'a, 'b>, flag: Bool) -> &[i64] ! {panic} {
+        fn pick<'a, 'b>(two: Two<'a, 'b>, flag: Bool) -> &[i64] ! {} {
             if flag { two.first } else { two.second }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 2];
             let b: [i64; 2] = [9, 9];
             let view = pick(Two { first: &a[..], second: &b[..] }, true);
@@ -612,8 +612,8 @@ fn slice_element_places_read_and_write_the_viewed_storage() {
     // Array, DynArray, and Vec storage behind shared and exclusive views.
     agrees(
         r#"
-        fn bump(p: &mut i64) -> Unit ! {panic} { *p = *p + 10; }
-        fn main() -> i64 ! {alloc, panic} {
+        fn bump(p: &mut i64) -> Unit ! {} { *p = *p + 10; }
+        fn main() -> i64 ! {alloc} {
             let mut xs: [i64; 3] = [1, 2, 3];
             {
                 let view: &mut [i64] = &mut xs[..];
@@ -644,7 +644,7 @@ fn slice_element_places_read_and_write_the_viewed_storage() {
     agrees(
         r#"
         struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut v: Vec<Point> = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
             {
                 let view: &mut [Point] = &mut v[..];
@@ -671,13 +671,13 @@ fn slice_element_references_return_through_slice_parameters() {
     agrees(
         r#"
         struct Point { x: i64, y: i64 }
-        fn first<'a>(s: &'a [i64]) -> &'a i64 ! {panic} { &s[0] }
-        fn last_mut<'a>(s: &'a mut [i64]) -> &'a mut i64 ! {panic} {
+        fn first<'a>(s: &'a [i64]) -> &'a i64 ! {} { &s[0] }
+        fn last_mut<'a>(s: &'a mut [i64]) -> &'a mut i64 ! {} {
             let n = Slice.len(s);
             &mut s[n - 1]
         }
-        fn grow(s: &mut [Point]) -> Unit ! {panic} { let p = &mut s[1]; p.y = p.y + 30; }
-        fn main() -> i64 ! {panic} {
+        fn grow(s: &mut [Point]) -> Unit ! {} { let p = &mut s[1]; p.y = p.y + 30; }
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             {
                 let r = last_mut(&mut xs[..]);
@@ -693,13 +693,13 @@ fn slice_element_references_return_through_slice_parameters() {
     );
     // A shared view cannot back an exclusive result.
     rejects(
-        "fn bad<'a>(s: &'a [i64]) -> &'a mut i64 ! {panic} { &mut s[0] } fn main() -> i64 ! {} { 0 }",
+        "fn bad<'a>(s: &'a [i64]) -> &'a mut i64 ! {} { &mut s[0] } fn main() -> i64 ! {} { 0 }",
         "does not appear on any reference parameter",
     );
     // A local view's element cannot escape the frame.
     rejects(
         r#"
-        fn leak<'a>(s: &'a [i64]) -> &'a i64 ! {panic} {
+        fn leak<'a>(s: &'a [i64]) -> &'a i64 ! {} {
             let xs: [i64; 2] = [1, 2];
             let local = &xs[..];
             &local[0]
@@ -710,8 +710,8 @@ fn slice_element_references_return_through_slice_parameters() {
     // The caller keeps the owner loaned while the returned element is live.
     rejects(
         r#"
-        fn first<'a>(s: &'a [i64]) -> &'a i64 ! {panic} { &s[0] }
-        fn main() -> i64 ! {panic} {
+        fn first<'a>(s: &'a [i64]) -> &'a i64 ! {} { &s[0] }
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let r = first(&xs[..]);
             xs = [7, 8, 9];
@@ -727,7 +727,7 @@ fn slice_element_loans_root_at_the_views_owners() {
     // owner must stay loaned through the element itself.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let view: &mut [i64] = &mut xs[..];
             let p = &mut view[1];
@@ -738,7 +738,7 @@ fn slice_element_loans_root_at_the_views_owners() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let p = {
                 let view: &mut [i64] = &mut xs[..];
@@ -751,7 +751,7 @@ fn slice_element_loans_root_at_the_views_owners() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let v: Vec<i64> = [1, 2, 3];
             let view: &[i64] = &v[..];
             let p = &view[0];
@@ -765,7 +765,7 @@ fn slice_element_loans_root_at_the_views_owners() {
     // Distinct constant indices are disjoint places.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let view: &mut [i64] = &mut xs[..];
             let p = &mut view[1];
@@ -776,7 +776,7 @@ fn slice_element_loans_root_at_the_views_owners() {
     );
     agrees(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             {
                 let view: &mut [i64] = &mut xs[..];
@@ -792,7 +792,7 @@ fn slice_element_loans_root_at_the_views_owners() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let view: &mut [i64] = &mut xs[..];
             let p = &view[1];
@@ -803,7 +803,7 @@ fn slice_element_loans_root_at_the_views_owners() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let xs: [i64; 3] = [1, 2, 3];
             let view: &[i64] = &xs[..];
             let p = &mut view[1];
@@ -814,7 +814,7 @@ fn slice_element_loans_root_at_the_views_owners() {
     // Owning elements are never aliased by an element reference.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut v: Vec<Box<i64>> = [Box.new(1)];
             let view: &mut [Box<i64>] = &mut v[..];
             let p = &mut view[0];
@@ -828,7 +828,7 @@ fn slice_element_loans_root_at_the_views_owners() {
 fn slice_element_references_into_split_sides_stay_disjoint() {
     agrees(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [5, 6, 7];
             {
                 let view: &mut [i64] = &mut a[..];
@@ -845,7 +845,7 @@ fn slice_element_references_into_split_sides_stay_disjoint() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [5, 6, 7];
             let view: &mut [i64] = &mut a[..];
             let (left, right) = Slice.split_at_mut(view, 1);
@@ -860,7 +860,7 @@ fn slice_element_references_into_split_sides_stay_disjoint() {
 #[test]
 fn slice_element_places_check_the_bound_and_byte_backing_at_runtime() {
     let out_of_bounds = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let xs: [i64; 3] = [1, 2, 3];
             let view: &[i64] = &xs[..];
             let i = 3;
@@ -876,8 +876,8 @@ fn slice_element_places_check_the_bound_and_byte_backing_at_runtime() {
     // A `&[i64]` over Bytes has byte-sized elements, so it has no word-sized
     // element address.
     let bytes = r#"
-        fn peek<'a>(s: &'a [i64]) -> &'a i64 ! {panic} { &s[0] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn peek<'a>(s: &'a [i64]) -> &'a i64 ! {} { &s[0] }
+        fn main() -> i64 ! {alloc} {
             let bytes = Bytes.from("abc");
             let raw: &[i64] = &bytes[..];
             let p = peek(raw);
@@ -890,7 +890,7 @@ fn slice_element_places_check_the_bound_and_byte_backing_at_runtime() {
         "{error:?}"
     );
     // The element reference needs `panic` because its bound is checked.
-    rejects(
+    kush::executable::check(
         r#"
         fn main() -> i64 ! {} {
             let xs: [i64; 3] = [1, 2, 3];
@@ -898,8 +898,8 @@ fn slice_element_places_check_the_bound_and_byte_backing_at_runtime() {
             let p = &view[0];
             0
         }"#,
-        "operation requires effects {panic}",
-    );
+    )
+    .unwrap();
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         native_aborts(out_of_bounds);
@@ -919,7 +919,7 @@ fn slice_element_references_reject_aliasing_through_the_view_and_owner() {
     // exclusive element reference is live are aliasing errors.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut v: Vec<i64> = [1, 2, 3];
             let s: &mut [i64] = &mut v[..];
             let p = &mut s[0];
@@ -930,7 +930,7 @@ fn slice_element_references_reject_aliasing_through_the_view_and_owner() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let s: &mut [i64] = &mut xs[..];
             let p = &mut s[0];
@@ -942,7 +942,7 @@ fn slice_element_references_reject_aliasing_through_the_view_and_owner() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let s: &mut [i64] = &mut xs[..];
             let p = &mut s[0];
@@ -953,7 +953,7 @@ fn slice_element_references_reject_aliasing_through_the_view_and_owner() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let p = &mut xs[0];
             let q = &mut xs[xs[1]];
@@ -964,7 +964,7 @@ fn slice_element_references_reject_aliasing_through_the_view_and_owner() {
     // A subview and the parent view cannot both reach one element.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let s: &mut [i64] = &mut xs[..];
             let t: &mut [i64] = &mut s[1..];
@@ -978,7 +978,7 @@ fn slice_element_references_reject_aliasing_through_the_view_and_owner() {
     // Writing through a reference while a reborrow of it is live.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let s: &mut [i64] = &mut xs[..];
             let p = &mut s[0];
@@ -991,7 +991,7 @@ fn slice_element_references_reject_aliasing_through_the_view_and_owner() {
     // The parent split view is suspended while an element of one side lives.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let s: &mut [i64] = &mut xs[..];
             let (l, r) = Slice.split_at_mut(s, 2);
@@ -1008,7 +1008,7 @@ fn slice_element_references_reject_aliasing_through_the_view_and_owner() {
 fn slice_element_references_cannot_escape_their_storage() {
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = {
                 let xs: [i64; 3] = [1, 2, 3];
                 let s = &xs[..];
@@ -1023,7 +1023,7 @@ fn slice_element_references_cannot_escape_their_storage() {
     // passed twice to a helper is moved by the first call.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let v: Vec<i64> = [1, 2, 3];
             let s: &[i64] = &v[..];
             let p = &s[1];
@@ -1035,8 +1035,8 @@ fn slice_element_references_cannot_escape_their_storage() {
     );
     rejects(
         r#"
-        fn pick<'a>(s: &'a mut [i64], i: i64) -> &'a mut i64 ! {panic} { &mut s[i] }
-        fn main() -> i64 ! {panic} {
+        fn pick<'a>(s: &'a mut [i64], i: i64) -> &'a mut i64 ! {} { &mut s[i] }
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let s: &mut [i64] = &mut xs[..];
             let a = pick(s, 0);
@@ -1050,8 +1050,8 @@ fn slice_element_references_cannot_escape_their_storage() {
     // view binding is gone.
     rejects(
         r#"
-        fn pick<'a>(s: &'a [i64], i: i64) -> &'a i64 ! {panic} { &s[i] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn pick<'a>(s: &'a [i64], i: i64) -> &'a i64 ! {} { &s[i] }
+        fn main() -> i64 ! {alloc} {
             let v: Vec<i64> = [1, 2, 3];
             let p = pick(&v[..], 2);
             let moved = v;
@@ -1066,7 +1066,7 @@ fn slice_element_references_work_in_loops_tasks_and_closures() {
     // A fresh element reference per loop iteration.
     agrees(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let mut i = 0;
             let mut sum = 0;
@@ -1087,8 +1087,8 @@ fn slice_element_references_work_in_loops_tasks_and_closures() {
     // Shared element references are returned and coexist with view reads.
     agrees(
         r#"
-        fn pick<'a>(s: &'a [i64], i: i64) -> &'a i64 ! {panic} { &s[i] }
-        fn main() -> i64 ! {panic} {
+        fn pick<'a>(s: &'a [i64], i: i64) -> &'a i64 ! {} { &s[i] }
+        fn main() -> i64 ! {} {
             let xs: [i64; 3] = [1, 2, 3];
             let s = &xs[..];
             let a = pick(s, 0);
@@ -1102,11 +1102,11 @@ fn slice_element_references_work_in_loops_tasks_and_closures() {
     // A lambda parameter may take an element reference and be called twice.
     agrees(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let s: &mut [i64] = &mut xs[..];
             let p = &mut s[0];
-            let f = fn(r: &mut i64) -> Unit ! {panic} { *r = *r + 5; };
+            let f = fn(r: &mut i64) -> Unit ! {} { *r = *r + 5; };
             f(p);
             f(p);
             *p
@@ -1119,18 +1119,18 @@ fn slice_element_references_work_in_loops_tasks_and_closures() {
     agrees(
         r#"
         use std.task.TaskExit;
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let s: &mut [i64] = &mut xs[..];
             let (l, r) = Slice.split_at_mut(s, 1);
-            let got = Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t = Task.spawn(fn() -> i64 ! {panic, suspend} {
+            let got = Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t = Task.spawn(fn() -> i64 ! {suspend} {
                     let p = &mut l[0];
                     Task.yield();
                     *p = 9;
                     0
                 });
-                let u = Task.spawn(fn() -> i64 ! {panic, suspend} {
+                let u = Task.spawn(fn() -> i64 ! {suspend} {
                     let q = &mut r[1];
                     Task.yield();
                     *q = 40;
@@ -1149,12 +1149,12 @@ fn slice_element_references_work_in_loops_tasks_and_closures() {
     rejects(
         r#"
         use std.task.TaskExit;
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let s: &mut [i64] = &mut xs[..];
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let p = &mut s[1];
-                let t = Task.spawn(fn() -> i64 ! {panic, suspend} { Task.yield(); *p = 9; 0 });
+                let t = Task.spawn(fn() -> i64 ! {suspend} { Task.yield(); *p = 9; 0 });
                 match Task.join(t) { TaskExit.Completed(x) => x, TaskExit.Cancelled => 1 }
             })
         }"#,
@@ -1165,8 +1165,8 @@ fn slice_element_references_work_in_loops_tasks_and_closures() {
     agrees(
         r#"
         struct Point { x: i64, y: i64 }
-        fn bump(s: &mut [Point], i: i64) -> Unit ! {panic} { let p = &mut s[i].x; *p = *p + 100; }
-        fn main() -> i64 ! {alloc, panic} {
+        fn bump(s: &mut [Point], i: i64) -> Unit ! {} { let p = &mut s[i].x; *p = *p + 100; }
+        fn main() -> i64 ! {alloc} {
             let mut v: Vec<Point> = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
             bump(&mut v[..], 1);
             bump(&mut v[1..], 0);

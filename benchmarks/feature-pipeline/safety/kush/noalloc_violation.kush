@@ -1,2 +1,2 @@
-fn hidden_alloc() -> Box<i64> ! {panic} { Box.new(7) }
-fn main() -> i64 ! {alloc, panic} { Box.take(hidden_alloc()) }
+fn hidden_alloc() -> Box<i64> ! {} { Box.new(7) }
+fn main() -> i64 ! {alloc} { Box.take(hidden_alloc()) }

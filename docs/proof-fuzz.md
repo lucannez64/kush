@@ -247,7 +247,7 @@ does have, and the obligation is a lemma candidate (section 3).
   and calls it:
 
   ```text
-  pub fn __kush_fuzz_3(fz_tape: &Bytes) -> Unit ! {alloc, panic} {
+  pub fn __kush_fuzz_3(fz_tape: &Bytes) -> Unit ! {alloc} {
       let at: i64 = __kush_fuzz_word(fz_tape, 2, 8);
       let src_n = 0 + __kush_fuzz_word(fz_tape, 0, 2) % 65;
       ...                                                   // src's bytes
@@ -289,7 +289,7 @@ does have, and the obligation is a lemma candidate (section 3).
 
   ```text
   #[fuzz]
-  fn random_rom(input: &Bytes) -> Unit ! {alloc, panic} {
+  fn random_rom(input: &Bytes) -> Unit ! {alloc} {
       let mut m = machine.headless(rom_from(input));
       machine.step_n(&mut m, 2000);
   }
@@ -412,7 +412,7 @@ reproduction is a `kush test` case, printed under the finding:
 
 ```text
 #[test]
-fn fuzz_next_line_2() -> Unit ! {io, alloc, panic} {
+fn fuzz_next_line_2() -> Unit ! {io, alloc} {
     // kush fuzz: overflow check at src/lib.kush:2:40
     let x: i64 = 9223372036854775807;
     let _ = lib.next(x);

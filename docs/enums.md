@@ -141,7 +141,7 @@ field referring to its corresponding type parameter; merely naming an unrelated
 enum `Result` is insufficient.
 
 ```rust
-fn parse_two_digits(a: i64, b: i64) -> Result<i64, ParseError> ! {panic} {
+fn parse_two_digits(a: i64, b: i64) -> Result<i64, ParseError> ! {} {
     let first = digit(a)?;
     let second = digit(b)?;
     Ok(first * 10 + second)

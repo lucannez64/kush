@@ -46,8 +46,8 @@ fn agrees(source: &str, expected_status: i64) {
 #[test]
 fn a_direct_call_infers_a_bare_parameter_grade_from_an_annotated_argument() {
     agrees(
-        r#"fn twice<G: Grade>(x: i64 @[G]) -> i64 ! {panic} { x + x }
-        fn main() -> i64 ! {panic} { let x: i64 @[2] = 21; twice(x) }"#,
+        r#"fn twice<G: Grade>(x: i64 @[G]) -> i64 ! {} { x + x }
+        fn main() -> i64 ! {} { let x: i64 @[2] = 21; twice(x) }"#,
         42,
     );
 }
@@ -55,8 +55,8 @@ fn a_direct_call_infers_a_bare_parameter_grade_from_an_annotated_argument() {
 #[test]
 fn a_direct_call_solves_a_composite_parameter_grade() {
     agrees(
-        r#"fn twice<G: Grade>(x: i64 @[G * 2]) -> i64 ! {panic} { x + x }
-        fn main() -> i64 ! {panic} { let x: i64 @[2] = 21; twice(x) }"#,
+        r#"fn twice<G: Grade>(x: i64 @[G * 2]) -> i64 ! {} { x + x }
+        fn main() -> i64 ! {} { let x: i64 @[2] = 21; twice(x) }"#,
         42,
     );
 }
@@ -64,8 +64,8 @@ fn a_direct_call_solves_a_composite_parameter_grade() {
 #[test]
 fn conflicting_argument_grades_are_rejected() {
     rejects(
-        r#"fn pair<G: Grade>(a: i64 @[G], b: i64 @[G]) -> i64 ! {panic} { a + b }
-        fn main() -> i64 ! {panic} {
+        r#"fn pair<G: Grade>(a: i64 @[G], b: i64 @[G]) -> i64 ! {} { a + b }
+        fn main() -> i64 ! {} {
             let a: i64 @[2] = 1;
             let b: i64 @[3] = 2;
             pair(a, b)
@@ -77,8 +77,8 @@ fn conflicting_argument_grades_are_rejected() {
 #[test]
 fn ungraded_arguments_do_not_invent_a_grade() {
     rejects(
-        r#"fn twice<G: Grade>(x: i64 @[G]) -> i64 ! {panic} { x + x }
-        fn main() -> i64 ! {panic} { let x = 21; twice(x) }"#,
+        r#"fn twice<G: Grade>(x: i64 @[G]) -> i64 ! {} { x + x }
+        fn main() -> i64 ! {} { let x = 21; twice(x) }"#,
         "cannot infer usage grade parameter",
     );
 }
@@ -86,9 +86,9 @@ fn ungraded_arguments_do_not_invent_a_grade() {
 #[test]
 fn a_function_value_infers_parameter_grades_from_the_expected_arrow() {
     agrees(
-        r#"fn four<G: Grade>(x: i64 @[G * 2]) -> i64 ! {panic} { x + x + x + x }
-        fn apply(f: fn(i64 @[4]) -> i64 ! {panic}) -> i64 ! {panic} { f(10) }
-        fn main() -> i64 ! {panic} { apply(four) }"#,
+        r#"fn four<G: Grade>(x: i64 @[G * 2]) -> i64 ! {} { x + x + x + x }
+        fn apply(f: fn(i64 @[4]) -> i64 ! {}) -> i64 ! {} { f(10) }
+        fn main() -> i64 ! {} { apply(four) }"#,
         40,
     );
 }
@@ -97,8 +97,8 @@ fn a_function_value_infers_parameter_grades_from_the_expected_arrow() {
 fn a_composite_copyable_result_grade_is_inferred() {
     agrees(
         r#"fn make<G: Grade>() -> i64 @[G + 1] ! {} { 41 }
-        fn apply(f: fn() -> i64 @[1] ! {}) -> i64 ! {panic} { f() + 1 }
-        fn main() -> i64 ! {panic} { apply(make) }"#,
+        fn apply(f: fn() -> i64 @[1] ! {}) -> i64 ! {} { f() + 1 }
+        fn main() -> i64 ! {} { apply(make) }"#,
         42,
     );
 }
@@ -108,11 +108,11 @@ fn equations_without_a_unique_natural_solution_stay_explicit() {
     for grade in ["G * 2", "G + G", "G * 0"] {
         rejects(
             &format!(
-                r#"fn make<G: Grade>() -> Box<i64> @[{grade}] ! {{alloc, panic}} {{ Box.new(1) }}
-                fn apply(f: fn() -> Box<i64> @[1] ! {{alloc, panic}}) -> i64 ! {{alloc, panic}} {{
+                r#"fn make<G: Grade>() -> Box<i64> @[{grade}] ! {{alloc}} {{ Box.new(1) }}
+                fn apply(f: fn() -> Box<i64> @[1] ! {{alloc}}) -> i64 ! {{alloc}} {{
                     Box.take(f())
                 }}
-                fn main() -> i64 ! {{alloc, panic}} {{ apply(make) }}"#
+                fn main() -> i64 ! {{alloc}} {{ apply(make) }}"#
             ),
             "cannot infer usage grade parameter",
         );
@@ -122,13 +122,13 @@ fn equations_without_a_unique_natural_solution_stay_explicit() {
 #[test]
 fn simultaneous_constraints_solve_several_binders() {
     agrees(
-        r#"fn combine<G: Grade, H: Grade>(x: i64 @[G + 1], y: i64 @[H + G]) -> i64 ! {panic} {
+        r#"fn combine<G: Grade, H: Grade>(x: i64 @[G + 1], y: i64 @[H + G]) -> i64 ! {} {
             x + x + x + y + y + y + y + y
         }
-        fn apply(f: fn(i64 @[3], i64 @[5]) -> i64 ! {panic}) -> i64 ! {panic} {
+        fn apply(f: fn(i64 @[3], i64 @[5]) -> i64 ! {}) -> i64 ! {} {
             f(1, 2)
         }
-        fn main() -> i64 ! {panic} { apply(combine) }"#,
+        fn main() -> i64 ! {} { apply(combine) }"#,
         13,
     );
 }
@@ -136,17 +136,17 @@ fn simultaneous_constraints_solve_several_binders() {
 #[test]
 fn repeated_binder_occurrences_are_solved_uniquely() {
     agrees(
-        r#"fn doubled<G: Grade>(x: i64 @[G + G]) -> i64 ! {panic} { x + x + x + x }
-        fn apply(f: fn(i64 @[4]) -> i64 ! {panic}) -> i64 ! {panic} { f(21) }
-        fn main() -> i64 ! {panic} { apply(doubled) }"#,
+        r#"fn doubled<G: Grade>(x: i64 @[G + G]) -> i64 ! {} { x + x + x + x }
+        fn apply(f: fn(i64 @[4]) -> i64 ! {}) -> i64 ! {} { f(21) }
+        fn main() -> i64 ! {} { apply(doubled) }"#,
         84,
     );
     agrees(
-        r#"fn square<G: Grade>(x: i64 @[G * G]) -> i64 ! {panic} {
+        r#"fn square<G: Grade>(x: i64 @[G * G]) -> i64 ! {} {
             x + x + x + x
         }
-        fn apply(f: fn(i64 @[4]) -> i64 ! {panic}) -> i64 ! {panic} { f(10) }
-        fn main() -> i64 ! {panic} { apply(square) }"#,
+        fn apply(f: fn(i64 @[4]) -> i64 ! {}) -> i64 ! {} { f(10) }
+        fn main() -> i64 ! {} { apply(square) }"#,
         40,
     );
 }
@@ -155,11 +155,11 @@ fn repeated_binder_occurrences_are_solved_uniquely() {
 fn non_unique_polynomial_equations_stay_explicit() {
     // Every binder value satisfies `G * 0 = 0`; there is no unique solution.
     rejects(
-        r#"fn make<G: Grade>() -> Box<i64> @[G * 0] ! {alloc, panic} { Box.new(1) }
-        fn apply(f: fn() -> Box<i64> @[0] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn make<G: Grade>() -> Box<i64> @[G * 0] ! {alloc} { Box.new(1) }
+        fn apply(f: fn() -> Box<i64> @[0] ! {alloc}) -> i64 ! {alloc} {
             Box.take(f())
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         "cannot infer usage grade parameter",
     );
     // `G * G = 1` has two natural solutions (0 and 1) only if zero is a
@@ -167,11 +167,11 @@ fn non_unique_polynomial_equations_stay_explicit() {
     // `G * (G - 1)` is unavailable, so `G * 0 + (G * 0) = 0` also stays
     // ambiguous.
     rejects(
-        r#"fn make<G: Grade>() -> Box<i64> @[G * 0 + G * 0] ! {alloc, panic} { Box.new(1) }
-        fn apply(f: fn() -> Box<i64> @[0] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn make<G: Grade>() -> Box<i64> @[G * 0 + G * 0] ! {alloc} { Box.new(1) }
+        fn apply(f: fn() -> Box<i64> @[0] ! {alloc}) -> i64 ! {alloc} {
             Box.take(f())
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         "cannot infer usage grade parameter",
     );
 }
@@ -193,9 +193,9 @@ fn a_finite_algebra_equation_is_solved_by_carrier_enumeration() {
                 Twice * None = None, Twice * Once = Twice, Twice * Twice = Twice,
             }
         }
-        fn twice<G: Grade>(x: i64 @[G * Usage.Once]) -> i64 ! {panic} { x + x }
-        fn apply(f: fn(i64 @[Usage.Twice]) -> i64 ! {panic}) -> i64 ! {panic} { f(21) }
-        fn main() -> i64 ! {panic} { apply(twice) }"#,
+        fn twice<G: Grade>(x: i64 @[G * Usage.Once]) -> i64 ! {} { x + x }
+        fn apply(f: fn(i64 @[Usage.Twice]) -> i64 ! {}) -> i64 ! {} { f(21) }
+        fn main() -> i64 ! {} { apply(twice) }"#,
         42,
     );
 }
@@ -203,11 +203,11 @@ fn a_finite_algebra_equation_is_solved_by_carrier_enumeration() {
 #[test]
 fn a_binder_in_an_underlying_type_is_not_inferred() {
     rejects(
-        r#"fn make<G: Grade>() -> Box<i64 @[G]> @[1] ! {alloc, panic} { Box.new(1) }
-        fn apply(f: fn() -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn make<G: Grade>() -> Box<i64 @[G]> @[1] ! {alloc} { Box.new(1) }
+        fn apply(f: fn() -> Box<i64> @[1] ! {alloc}) -> i64 ! {alloc} {
             Box.take(f())
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         "underlying",
     );
 }

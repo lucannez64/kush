@@ -155,7 +155,7 @@ struct Words {
     expect: Bytes, chunked: Bytes, close: Bytes, keep_alive: Bytes,
 }
 
-fn words() -> Words ! {alloc, panic} {
+fn words() -> Words ! {alloc} {
     Words {
         get: Bytes.from("GET"), head: Bytes.from("HEAD"), post: Bytes.from("POST"),
         put: Bytes.from("PUT"), delete: Bytes.from("DELETE"), patch: Bytes.from("PATCH"),
@@ -216,7 +216,7 @@ fn list_has(b: &Bytes, start: i64, end: i64, token: &Bytes) -> Bool ! {} {
 }
 
 /// Parse a request head at the start of `buffer`.
-pub fn parse_head(buffer: &Bytes, limits: &Limits) -> Parse ! {alloc, panic} {
+pub fn parse_head(buffer: &Bytes, limits: &Limits) -> Parse ! {alloc} {
     let n = Bytes.len(buffer);
     // Empty lines before the request line are ignored (RFC 9112 2.2).
     let mut at = 0;
@@ -436,7 +436,7 @@ pub fn chunked_size(buffer: &Bytes, at: i64, limits: &Limits) -> Body ! {} {
 
 /// Append the decoded data of the chunked body at `at` to `out`. Call it
 /// after `chunked_size` answered `Complete`.
-pub fn chunked_copy(buffer: &Bytes, at: i64, out: Bytes) -> Bytes ! {alloc, panic} {
+pub fn chunked_copy(buffer: &Bytes, at: i64, out: Bytes) -> Bytes ! {alloc} {
     let mut out = out;
     let mut pos = at;
     loop {
@@ -466,7 +466,7 @@ pub fn chunked_copy(buffer: &Bytes, at: i64, out: Bytes) -> Bytes ! {alloc, pani
 
 // The response writer. Each function appends to `out` and returns it.
 
-fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
     let mut out = out;
     let n = Bytes.len(text);
     let mut i = 0;
@@ -479,7 +479,7 @@ fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
 
 /// The reason phrase for `status` (empty for an unknown one, which HTTP
 /// allows).
-pub fn reason(status: i64) -> Bytes ! {alloc, panic} {
+pub fn reason(status: i64) -> Bytes ! {alloc} {
     if status == 100 { Bytes.from("Continue") }
     else if status == 101 { Bytes.from("Switching Protocols") }
     else if status == 200 { Bytes.from("OK") }
@@ -520,7 +520,7 @@ pub fn reason(status: i64) -> Bytes ! {alloc, panic} {
 
 /// "HTTP/1.1 <status> <reason>\r\n". A status outside 100..=999 is written
 /// as 500.
-pub fn status_line(out: Bytes, status: i64) -> Bytes ! {alloc, panic} {
+pub fn status_line(out: Bytes, status: i64) -> Bytes ! {alloc} {
     let status = if status >= 100 && status <= 999 { status } else { 500 };
     let prefix = Bytes.from("HTTP/1.1 ");
     let mut out = append(out, &prefix);
@@ -553,7 +553,7 @@ pub fn valid_field(name: &Bytes, value: &Bytes) -> Bool ! {} {
 
 /// "name: value\r\n". EINVAL (22) when `valid_field` refuses them, so a
 /// value from a request cannot inject another header (the buffer is freed).
-pub fn field(out: Bytes, name: &Bytes, value: &Bytes) -> Result<Bytes, i64> ! {alloc, panic} {
+pub fn field(out: Bytes, name: &Bytes, value: &Bytes) -> Result<Bytes, i64> ! {alloc} {
     if !valid_field(name, value) { return Result.Err(22); }
     let mut out = append(out, name);
     out = Bytes.push(out, 58);
@@ -564,7 +564,7 @@ pub fn field(out: Bytes, name: &Bytes, value: &Bytes) -> Result<Bytes, i64> ! {a
 }
 
 /// "Content-Length: n\r\n".
-pub fn content_length(out: Bytes, length: i64) -> Bytes ! {alloc, panic} {
+pub fn content_length(out: Bytes, length: i64) -> Bytes ! {alloc} {
     let name = Bytes.from("Content-Length: ");
     let mut out = append(out, &name);
     out = text.format_i64_into(out, length);
@@ -573,13 +573,13 @@ pub fn content_length(out: Bytes, length: i64) -> Bytes ! {alloc, panic} {
 }
 
 /// The empty line that ends a head.
-pub fn end_head(out: Bytes) -> Bytes ! {alloc, panic} {
+pub fn end_head(out: Bytes) -> Bytes ! {alloc} {
     Bytes.push(Bytes.push(out, 13), 10)
 }
 
 /// One chunk of a chunked body: hex length, CRLF, data, CRLF. Empty data
 /// writes nothing (an empty chunk would end the body).
-pub fn chunk(out: Bytes, data: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn chunk(out: Bytes, data: &Bytes) -> Bytes ! {alloc} {
     let n = Bytes.len(data);
     if n == 0 { return out; }
     let mut out = out;
@@ -600,7 +600,7 @@ pub fn chunk(out: Bytes, data: &Bytes) -> Bytes ! {alloc, panic} {
 }
 
 /// The last chunk and an empty trailer section: "0\r\n\r\n".
-pub fn last_chunk(out: Bytes) -> Bytes ! {alloc, panic} {
+pub fn last_chunk(out: Bytes) -> Bytes ! {alloc} {
     let end = Bytes.from("0\r\n\r\n");
     append(out, &end)
 }

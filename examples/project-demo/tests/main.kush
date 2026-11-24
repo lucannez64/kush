@@ -5,16 +5,16 @@ use project_demo.greeting;
 use words;
 
 #[test]
-fn local_module_is_reachable() -> Unit ! {panic} {
+fn local_module_is_reachable() -> Unit ! {} {
     test.is_true(greeting.value(6) == 106);
 }
 
 #[test]
-fn local_dependency_is_reachable() -> Unit ! {panic} {
+fn local_dependency_is_reachable() -> Unit ! {} {
     test.is_true(words.answer() == 42);
 }
 
 #[test]
-fn assertion_helpers_report_values() -> Unit ! {io, panic} {
+fn assertion_helpers_report_values() -> Unit ! {io} {
     test.equal_i64(6 * 7, 42);
 }

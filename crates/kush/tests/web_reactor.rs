@@ -64,7 +64,7 @@ fn now() -> i64 ! {io} {
     match time.monotonic_ns() { Result.Ok(ns) => ns, Result.Err(_) => 0 }
 }
 
-fn show(exit: TaskExit<i64>) -> Unit ! {io, panic} {
+fn show(exit: TaskExit<i64>) -> Unit ! {io} {
     match exit {
         TaskExit.Completed(value) => print_i64(value),
         TaskExit.Cancelled => print_i64(-1),
@@ -74,7 +74,7 @@ fn show(exit: TaskExit<i64>) -> Unit ! {io, panic} {
 
 const SERVER_AND_CLIENTS: &str = r#"
 /// Read until the peer closes; the bytes read, or minus the errno.
-fn read_all(conn: &Conn) -> Result<Bytes, i64> ! {io, alloc, panic, suspend} {
+fn read_all(conn: &Conn) -> Result<Bytes, i64> ! {io, alloc, suspend} {
     let mut buffer = Bytes.with_capacity(64);
     loop {
         let before = Bytes.len(&buffer);
@@ -87,7 +87,7 @@ fn read_all(conn: &Conn) -> Result<Bytes, i64> ! {io, alloc, panic, suspend} {
 }
 
 /// Echo one request back with a '!' after it.
-fn handle(conn: Conn) -> Unit ! {io, alloc, panic, suspend} {
+fn handle(conn: Conn) -> Unit ! {io, alloc, suspend} {
     match read_all(&conn) {
         Result.Ok(request) => {
             let reply = Bytes.push(request, 33);
@@ -99,13 +99,13 @@ fn handle(conn: Conn) -> Unit ! {io, alloc, panic, suspend} {
 }
 
 /// Accept `count` connections, each served by its own task.
-fn serve(listener: Listener, count: i64) -> i64 ! {io, alloc, panic, suspend} {
-    Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
+fn serve(listener: Listener, count: i64) -> i64 ! {io, alloc, suspend} {
+    Task.scope(fn() -> i64 ! {io, alloc, suspend} {
         let mut served = 0;
         while served < count {
             match net.accept(&listener, 5000) {
                 Result.Ok(conn) => {
-                    Task.spawn(fn() -> Unit ! {io, alloc, panic, suspend} { handle(conn) });
+                    Task.spawn(fn() -> Unit ! {io, alloc, suspend} { handle(conn) });
                 },
                 Result.Err(code) => { print_i64(-code); },
             }
@@ -118,7 +118,7 @@ fn serve(listener: Listener, count: i64) -> i64 ! {io, alloc, panic, suspend} {
 
 /// Send `size` bytes, close the sending side, and return the reply's length
 /// times 1000 plus its last byte.
-fn client(port: i64, size: i64) -> i64 ! {io, alloc, panic, suspend} {
+fn client(port: i64, size: i64) -> i64 ! {io, alloc, suspend} {
     let host = Bytes.from("127.0.0.1");
     let conn = match net.connect(&host, port, 5000) {
         Result.Ok(conn) => conn,
@@ -143,19 +143,19 @@ fn client(port: i64, size: i64) -> i64 ! {io, alloc, panic, suspend} {
     result
 }
 
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let host = Bytes.from("127.0.0.1");
     let listener = match net.listen(&host, 0, 16, false) {
         Result.Ok(listener) => listener,
         Result.Err(code) => { return code; },
     };
     let port = match net.local_port(&listener) { Result.Ok(port) => port, Result.Err(_) => 0 };
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} { serve(listener, 4) });
-        let a = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} { client(port, 1) });
-        let b = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} { client(port, 2) });
-        let c = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} { client(port, 30) });
-        let d = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} { client(port, 4) });
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, suspend} { serve(listener, 4) });
+        let a = Task.spawn(fn() -> i64 ! {io, alloc, suspend} { client(port, 1) });
+        let b = Task.spawn(fn() -> i64 ! {io, alloc, suspend} { client(port, 2) });
+        let c = Task.spawn(fn() -> i64 ! {io, alloc, suspend} { client(port, 30) });
+        let d = Task.spawn(fn() -> i64 ! {io, alloc, suspend} { client(port, 4) });
         show(Task.join(a));
         show(Task.join(b));
         show(Task.join(c));
@@ -177,20 +177,20 @@ fn a_server_and_its_clients_share_one_thread() {
 }
 
 const TIMERS: &str = r#"
-fn sleeper(milliseconds: i64, mark: i64) -> i64 ! {io, panic, suspend} {
+fn sleeper(milliseconds: i64, mark: i64) -> i64 ! {io, suspend} {
     match time.wait_ms(milliseconds) {
         Result.Ok(_) => mark,
         Result.Err(code) => -code,
     }
 }
 
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let start = now();
     // Each task records when it woke; the joins print in a fixed order.
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let slow = Task.spawn(fn() -> i64 ! {io, panic, suspend} { sleeper(200, 3) });
-        let fast = Task.spawn(fn() -> i64 ! {io, panic, suspend} { let r = sleeper(100, 1); if now() - start < 190000000 { r } else { -9 } });
-        let middle = Task.spawn(fn() -> i64 ! {io, panic, suspend} { sleeper(150, 2) });
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let slow = Task.spawn(fn() -> i64 ! {io, suspend} { sleeper(200, 3) });
+        let fast = Task.spawn(fn() -> i64 ! {io, suspend} { let r = sleeper(100, 1); if now() - start < 190000000 { r } else { -9 } });
+        let middle = Task.spawn(fn() -> i64 ! {io, suspend} { sleeper(150, 2) });
         show(Task.join(fast));
         show(Task.join(middle));
         show(Task.join(slow));
@@ -211,19 +211,19 @@ fn timers_wake_tasks_concurrently_in_deadline_order() {
 }
 
 const CANCEL: &str = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let host = Bytes.from("127.0.0.1");
     let listener = match net.listen(&host, 0, 16, false) {
         Result.Ok(listener) => listener,
         Result.Err(code) => { return code; },
     };
     let start = now();
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
         // Both wait with no timeout; cancelling them wakes them.
-        let sleeping = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+        let sleeping = Task.spawn(fn() -> i64 ! {io, suspend} {
             match time.wait_ms(60000) { Result.Ok(_) => 0, Result.Err(code) => { print_i64(code); code } }
         });
-        let accepting = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+        let accepting = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             let code = match net.accept(&listener, 0) {
                 Result.Ok(conn) => { let _ = net.close(conn); 0 },
                 Result.Err(code) => code,
@@ -249,16 +249,16 @@ fn cancelling_a_waiting_task_wakes_it() {
 }
 
 const STARVATION: &str = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let start = now();
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
         // A task that only yields for 300 ms must not keep a 5 ms timer
         // from firing.
-        let busy = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+        let busy = Task.spawn(fn() -> i64 ! {io, suspend} {
             while now() - start < 300000000 { let _ = Task.yield(); }
             2
         });
-        let timer = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+        let timer = Task.spawn(fn() -> i64 ! {io, suspend} {
             let _ = time.wait_ms(5);
             if now() - start < 250000000 { 1 } else { -1 }
         });
@@ -280,18 +280,18 @@ fn a_yielding_task_does_not_starve_a_waiting_one() {
 #[test]
 fn two_hundred_connections_on_one_thread() {
     let main = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let host = Bytes.from("127.0.0.1");
     let listener = match net.listen(&host, 0, 512, false) {
         Result.Ok(listener) => listener,
         Result.Err(code) => { return code; },
     };
     let port = match net.local_port(&listener) { Result.Ok(port) => port, Result.Err(_) => 0 };
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} { serve(listener, 200) });
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, suspend} { serve(listener, 200) });
         let mut i = 0;
         while i < 200 {
-            Task.spawn(fn() -> Unit ! {io, alloc, panic, suspend} {
+            Task.spawn(fn() -> Unit ! {io, alloc, suspend} {
                 let result = client(port, 3);
                 if result != 4033 { print_i64(result); }
             });
@@ -310,16 +310,16 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
 }
 
 const PROPAGATE: &str = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let start = now();
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
         // A grandchild waiting a minute wakes when its grandparent is
         // cancelled (TASK-CANCEL-PROPAGATE).
-        let parent = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
-                let child = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
-                    Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
-                        let grandchild = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+        let parent = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
+            Task.scope(fn() -> i64 ! {io, alloc, suspend} {
+                let child = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
+                    Task.scope(fn() -> i64 ! {io, alloc, suspend} {
+                        let grandchild = Task.spawn(fn() -> i64 ! {io, suspend} {
                             match time.wait_ms(60000) { Result.Ok(_) => 0, Result.Err(code) => code }
                         });
                         match Task.join(grandchild) { TaskExit.Completed(v) => v, TaskExit.Cancelled => -1 }

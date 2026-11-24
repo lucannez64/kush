@@ -132,10 +132,10 @@ then propagates that origin. If another reachable return can use `b`, both
 origins must appear. For example, for existing slice syntax:
 
 ```kush
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     if stop { a } else { right(a, b, true) }
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     if stop { b } else { left(a, b, true) }
 }
 ```

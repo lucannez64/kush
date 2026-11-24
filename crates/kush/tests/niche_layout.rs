@@ -38,13 +38,13 @@ fn optional_boxes_match_in_both_declaration_orders_and_drop_once() {
         agrees(
             &format!(
                 r#"{declaration}
-fn make(yes: Bool) -> Maybe ! {{alloc, panic}} {{
+fn make(yes: Bool) -> Maybe ! {{alloc}} {{
     if yes {{ Maybe.Some(Box.new(41)) }} else {{ Maybe.None }}
 }}
-fn value(m: Maybe) -> i64 ! {{panic}} {{
+fn value(m: Maybe) -> i64 ! {{}} {{
     match m {{ Maybe.None => 1, Maybe.Some(b) => Box.take(b) }}
 }}
-fn main() -> i64 ! {{alloc, panic}} {{ value(make(true)) + value(make(false)) }}
+fn main() -> i64 ! {{alloc}} {{ value(make(true)) + value(make(false)) }}
 "#
             ),
             42,
@@ -56,7 +56,7 @@ fn optional_box_containers_replace_clear_and_destroy_only_present_payloads() {
     agrees(
         r#"
 enum Maybe { None, Some(Box<i64>) }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let values: Vec<Maybe> = [Maybe.Some(Box.new(3)), Maybe.None, Maybe.Some(Box.new(4))];
     let values = Vec.set(values, 0, Maybe.None);
     let values = Vec.set(values, 1, Maybe.Some(Box.new(5)));
@@ -78,7 +78,7 @@ fn lift(x: Bool) -> Option<Bool> ! {} { Option.Some(x) }
 fn read(x: Option<Bool>) -> i64 ! {} {
     match x { Option.Some(true) => 10, Option.Some(false) => 20, Option.None => 12 }
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let values: Vec<Bool> = [true, false];
     let values = Vec.map_in_place(values, lift);
     let values = Vec.push(values, Option.None);
@@ -96,7 +96,7 @@ enum Option<T> { None, Some(T) }
 fn code(x: Option<Char>) -> i64 ! {} {
     match x { Option.Some(c) => Int.convert(Char.code(c)), Option.None => 1 }
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: [Bool; 1] = [false];
     let found = match Slice.try_get(&a[..], 0) { Option.Some(false) => 20, _ => 0 };
     let missing = match Slice.try_get(&a[..], 1) { Option.None => 20, _ => 0 };
@@ -120,9 +120,9 @@ fn niches_compose_with_outer_tagged_enums_unions_records_and_callables() {
 enum Maybe { None, Some(Box<i64>) }
 enum Outer { Empty, Full(Maybe) }
 struct Holder { item: Outer, count: i64 }
-fn make(x: i64) -> Maybe ! {alloc, panic} { Maybe.Some(Box.new(x)) }
-fn main() -> i64 ! {alloc, panic} {
-    let f: fn(i64) -> Maybe ! {alloc, panic} = make;
+fn make(x: i64) -> Maybe ! {alloc} { Maybe.Some(Box.new(x)) }
+fn main() -> i64 ! {alloc} {
+    let f: fn(i64) -> Maybe ! {alloc} = make;
     let h = Holder { item: Outer.Full(f(40)), count: 2 };
     let Holder { item, count } = h;
     let sum = match item { Outer.Full(m) => match m { Maybe.Some(b) => Box.take(b), Maybe.None => 0 }, Outer.Empty => 0 };
@@ -140,7 +140,7 @@ fn optional_references_transfer_lexical_shared_and_exclusive_capabilities() {
         r#"
 struct Point { x: i64 }
 enum Maybe<T> { None, Some(T) }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let mut p = Point { x: 20 };
     let shared: Maybe<&Point> = Maybe.Some(&p);
     let first = match shared { Maybe.Some(q) => q.x, Maybe.None => 0 };
@@ -188,12 +188,12 @@ fn optional_box_moves_and_linear_payload_obligations_are_preserved() {
     rejects(
         r#"enum Maybe { None, Some(Box<i64>) }
 fn consume(m: Maybe) -> Unit ! {} { drop(m) }
-fn main() -> Unit ! {alloc, panic} { let m: Maybe = Maybe.Some(Box.new(42)); consume(m); consume(m); }"#,
+fn main() -> Unit ! {alloc} { let m: Maybe = Maybe.Some(Box.new(42)); consume(m); consume(m); }"#,
         "move",
     );
     rejects(
         r#"#[linear] struct Token { value: i64 } enum Maybe { None, Some(Box<Token>) }
-fn main() -> Unit ! {alloc, panic} { let m: Maybe = Maybe.Some(Box.new(Token { value: 42 })); drop(m); }"#,
+fn main() -> Unit ! {alloc} { let m: Maybe = Maybe.Some(Box.new(Token { value: 42 })); drop(m); }"#,
         "linear",
     );
 }
@@ -220,7 +220,7 @@ fn main() -> i64 ! {} { let p = P { x: 42 }; let reference = &p; let r: Maybe<&P
 fn optional_reference_closures_cannot_escape_their_captured_owner() {
     rejects(
         r#"struct P { x: i64 } enum Maybe<T> { None, Some(T) }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let f = { let p = P { x: 42 }; let r: Maybe<&P> = Maybe.Some(&p); fn() -> i64 ! {} { match r { Maybe.Some(q) => q.x, Maybe.None => 0 } } };
     f()
 }"#,
@@ -245,7 +245,7 @@ fn flip(x: Option<Bool>) -> Rev<Bool> ! {} {
 fn score(x: Rev<Bool>) -> i64 ! {} {
     match x { Rev.Some(true) => 4, Rev.Some(false) => 2, Rev.None => 1 }
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     // Inside: 0xD7FF, 0xE000, 0x10FFFF, 0; outside: 0xD800, 0xDFFF, 0x110000.
     let chars = some(55295) + some(57344) + some(1114111) + some(0)
         + some(55296) + some(57343) + some(1114112);

@@ -1,7 +1,7 @@
 module examples.arrays;
 
 fn pair() -> [i64; 2] ! {} { [20, 22] }
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let values = pair();
     print_i64(values[0] + values[1]);
 }

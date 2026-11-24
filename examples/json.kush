@@ -2,7 +2,7 @@
 use std.result.Result;
 use std.json;
 
-fn report(error: json.Error) -> i64 ! {io, alloc, panic} {
+fn report(error: json.Error) -> i64 ! {io, alloc} {
     let text = json.message(error);
     match IO.write(IO.stdout(), &text) { Ok(_) => {}, Err(_) => { return 1; } };
     let location = Bytes.from(" at byte ");
@@ -11,7 +11,7 @@ fn report(error: json.Error) -> i64 ! {io, alloc, panic} {
     1
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let source = match IO.read_all(IO.stdin(), Bytes.with_capacity(65536)) {
         Ok(source) => source, Err(_) => { return 2; },
     };

@@ -79,7 +79,7 @@ Illustrative syntax; the details belong to the implementation nodes.
 ```kush
 effect Db: Query -> Rows;                 // a declared operation
 
-fn list_todos(req: &Request, res: Responder) -> Unit ! {Db, io, alloc, panic} {
+fn list_todos(req: &Request, res: Responder) -> Unit ! {Db, io, alloc} {
     let rows = perform Db(Query.all_todos());
     res.json(200, &todos_to_json(&rows))  // consumes the linear Responder
 }
@@ -88,7 +88,7 @@ fn health(req: &Request, res: Responder) -> Unit ! {io, alloc} {
     res.text(200, &Bytes.from("ok"))     // no Db in the row: cannot query
 }
 
-fn main() -> Unit ! {io, alloc, panic, suspend} {
+fn main() -> Unit ! {io, alloc, suspend} {
     let app = Router.new()
         .get("/todos", list_todos)
         .get("/health", health);

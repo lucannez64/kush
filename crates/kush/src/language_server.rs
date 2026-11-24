@@ -2126,7 +2126,7 @@ mod tests {
 
     #[test]
     fn handle_total_invariant_and_where_are_keywords_only_in_place() {
-        let text = "fn f(io: &mut Vec<u8> where len >= 8) -> i64 ! {Op, panic} {\n\
+        let text = "fn f(io: &mut Vec<u8> where len >= 8) -> i64 ! {Op} {\n\
                     let handle = 1;\n\
                     let total = handle;\n\
                     let invariant = total;\n\

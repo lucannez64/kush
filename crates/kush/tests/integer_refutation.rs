@@ -59,7 +59,7 @@ fn a_tight_scaled_goal_needs_rounding() {
     let source = r#"
         fn take(x: i64, erased p: { 2 * x <= 0 }) -> i64 ! {} { x }
         fn forward(x: i64, erased p: { 2 * x <= 1 }) -> i64 ! {} { take(x, _) }
-        fn main() -> i64 ! {panic} { forward(0, _) }
+        fn main() -> i64 ! {} { forward(0, _) }
     "#;
     assert_eq!(value(source), 0);
     native_agrees(source, 0);
@@ -71,7 +71,7 @@ fn a_parity_equation_with_no_integer_solution_refutes_the_branch() {
     // body is therefore unreachable and every goal follows from its facts.
     let source = r#"
         fn take(n: i64, erased p: { n <= 0 }) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 0;
             if 2 * n == 1 { take(n, _) } else { 42 }
         }
@@ -85,7 +85,7 @@ fn a_double_sided_tight_bound_is_integer_infeasible() {
     // 1 <= 2*n <= 1 is only satisfiable at n = 1/2.
     let source = r#"
         fn take(n: i64, erased p: { n <= 0 }) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 0;
             if 1 <= 2 * n && 2 * n <= 1 { take(n, _) } else { 7 }
         }
@@ -100,7 +100,7 @@ fn a_two_variable_parity_equation_is_refuted() {
     // inequalities separately gives n - m <= 0 and n - m >= 1.
     let source = r#"
         fn take(n: i64, m: i64, erased p: { n <= m }) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 0;
             let m = 0;
             if 2 * n == 2 * m + 1 { take(n, m, _) } else { 9 }
@@ -122,7 +122,7 @@ fn a_pairwise_combination_cut_closes_the_gap() {
             erased upper: { x + y <= 1 },
             erased difference: { x - y <= 0 },
         ) -> i64 ! {} { take(x, _) }
-        fn main() -> i64 ! {panic} { forward(0, 0, _, _) }
+        fn main() -> i64 ! {} { forward(0, 0, _, _) }
     "#;
     assert_eq!(value(source), 0);
     native_agrees(source, 0);
@@ -133,7 +133,7 @@ fn emitted_integer_certificates_pass_independent_checking() {
     let source = r#"
         fn take(x: i64, erased p: { 2 * x <= 0 }) -> i64 ! {} { x }
         fn forward(x: i64, erased p: { 2 * x <= 1 }) -> i64 ! {} { take(x, _) }
-        fn main() -> i64 ! {panic} { forward(0, _) }
+        fn main() -> i64 ! {} { forward(0, _) }
     "#;
     let program = checked(source);
     assert!(!program.certificates().is_empty());
@@ -152,7 +152,7 @@ fn genuinely_feasible_systems_stay_rejected() {
         fn take(x: i64, erased p: { x <= 0 }) -> i64 ! {} { x }
         fn forward(x: i64, y: i64, erased p: { x + y <= 1 })
             -> i64 ! {} { take(x, _) }
-        fn main() -> i64 ! {panic} { forward(0, 0, _) }
+        fn main() -> i64 ! {} { forward(0, 0, _) }
         "#,
         "cannot prove",
     );
@@ -173,7 +173,7 @@ fn exceeding_the_integer_term_budget_leaves_the_obligation_unproved() {
         r#"
         fn take(x: i64, erased p: {{ 2 * x <= 0 }}) -> i64 ! {{}} {{ x }}
         fn forward({parameters}, erased p: {{ {facts} }}) -> i64 ! {{}} {{ take(x1, _) }}
-        fn main() -> i64 ! {{panic}} {{ 0 }}
+        fn main() -> i64 ! {{}} {{ 0 }}
         "#
     );
     rejects(&source, "cannot prove");
@@ -186,7 +186,7 @@ fn take(x: i64, erased p: { x >= 0 }) -> i64 ! {} { x }
 fn forward(x: i64, erased p: {
     (-170141183460469231731687303715884105727 - 1) * x <= 0
 }) -> i64 ! {} { take(x, _) }
-fn main() -> i64 ! {panic} { 0 }
+fn main() -> i64 ! {} { 0 }
 "#;
     assert!(check(source).is_err());
 }
@@ -204,7 +204,7 @@ fn forward(y: i64, x: i64, z: i64,
            erased b: { 16 * x <= 0 - 1 },
            erased c: { y <= 0 },
            erased d: { y >= 1 }) -> i64 ! {} { take(z, _) }
-fn main() -> i64 ! {panic} { 0 }
+fn main() -> i64 ! {} { 0 }
 "#;
     assert!(check(source).is_ok(), "{:?}", check(source).err());
 }

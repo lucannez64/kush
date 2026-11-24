@@ -163,12 +163,12 @@ fn generate_project(project: &Path) -> PathBuf {
 use std.result.Result;
 use app.generated;
 
-fn write_line(text: &Bytes) -> Unit ! {io, alloc, panic} {
+fn write_line(text: &Bytes) -> Unit ! {io, alloc} {
     match IO.write(IO.stdout(), text) { Ok(_) => (), Err(_) => () };
     match IO.write(IO.stdout(), &Bytes.from("\n")) { Ok(_) => (), Err(_) => () }
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     print_i64(generated.double(21));
     print_i64(if generated.scale(4.5) == 9.0 { 1 } else { 0 });
     print_i64(if generated.flip(true) == false { 1 } else { 0 });
@@ -209,13 +209,13 @@ use std.test;
 use app.generated;
 
 #[test]
-fn adapter_is_callable_from_tests() -> Unit ! {io, alloc, panic} {
+fn adapter_is_callable_from_tests() -> Unit ! {io, alloc} {
     test.equal_i64(generated.double(21), 42);
     test.equal_i64(match generated.checked_div(1, 0) { Ok(_) => 0, Err(code) => code }, 1);
 }
 
 #[test]
-fn adapter_exposes_error_text() -> Unit ! {io, alloc, panic} {
+fn adapter_exposes_error_text() -> Unit ! {io, alloc} {
     let _ = generated.checked_div(1, 0);
     let message = match generated.last_error() {
         Ok(value) => value,
@@ -651,7 +651,7 @@ fn two_generated_adapters_link_without_helper_symbol_collisions_and_include_work
          use std.result.Result;\n\
          use one;\n\
          use two;\n\
-         fn main() -> i64 ! {io, alloc, panic} {\n\
+         fn main() -> i64 ! {io, alloc} {\n\
          \x20   let first = one.answer();\n\
          \x20   let second = two.answer();\n\
          \x20   let first_error = match one.last_error() { Ok(_) => 0, Err(code) => code };\n\

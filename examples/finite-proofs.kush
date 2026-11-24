@@ -163,6 +163,6 @@ fn consume(erased f: Fin<3>, erased p: IsZero<0>) -> i64 ! {} {
     42
 }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     consume(three(), IsZero.ZeroIsZero::<0>)
 }

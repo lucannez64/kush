@@ -6,4 +6,4 @@ pub fn is_alpha(byte: i64) -> Bool ! {} {
     (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte == 95
 }
 
-pub fn digit_value(byte: i64) -> i64 ! {panic} { byte - 48 }
+pub fn digit_value(byte: i64) -> i64 ! {} { byte - 48 }

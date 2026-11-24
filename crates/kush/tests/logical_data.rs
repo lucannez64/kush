@@ -42,7 +42,7 @@ fn indexed_logical_data_is_erased_but_feeds_checked_signatures() {
     let source = format!(
         "{VECT}
         fn consume(erased v: Vect<Nat, 2>) -> i64 ! {{}} {{ 42 }}
-        fn main() -> i64 ! {{panic}} {{ consume(two()) }}"
+        fn main() -> i64 ! {{}} {{ consume(two()) }}"
     );
     let program = checked(&source);
     assert_eq!(program.function_count(), 2); // consume, main
@@ -67,7 +67,7 @@ fn dependent_erased_signatures_consume_indexed_evidence() {
         fn consume_at(erased n: Nat, erased v: Vect<Nat, n>) -> i64 ! {{}} {{ 7 }}
         fn outer(erased n: Nat, erased v: Vect<Nat, n>) -> i64 ! {{}}
             {{ consume_at(n, v) }}
-        fn main() -> i64 ! {{panic}}
+        fn main() -> i64 ! {{}}
             {{ consume_at(2, two()) + consume_at(0, zero()) + outer(0, zero()) }}"
     );
     assert_eq!(evaluate(&source), 21);
@@ -154,7 +154,7 @@ fn module_qualified_logical_data_is_checked_and_erased() {
         use app.even;
         total fn zero_even() -> even.Even ! {} { even.Even.EvenZero }
         fn consume(erased e: even.Even) -> i64 ! {} { 11 }
-        fn main() -> i64 ! {panic}
+        fn main() -> i64 ! {}
             { consume(even.two_even()) + consume(zero_even()) }";
     let program = load("main.kush", source, &modules).unwrap();
     let checked = kush::executable::check_program(&program).unwrap();
@@ -178,7 +178,7 @@ fn reference_evaluator_and_native_backend_agree_on_erased_logical_data() {
     let source = format!(
         "{VECT}
         fn consume(erased v: Vect<Nat, 2>) -> i64 ! {{}} {{ 42 }}
-        fn main() -> i64 ! {{panic}} {{ consume(two()) }}"
+        fn main() -> i64 ! {{}} {{ consume(two()) }}"
     );
     let program = checked(&source);
     assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
@@ -275,7 +275,7 @@ fn finite_index_evidence_is_erased_at_the_executable_boundary() {
     let source = format!(
         "{FIN}
         fn consume_fin(erased f: Fin<3>) -> i64 ! {{}} {{ 40 }}
-        fn main() -> i64 ! {{panic}} {{ consume_fin(three()) + 2 }}"
+        fn main() -> i64 ! {{}} {{ consume_fin(three()) + 2 }}"
     );
     let program = checked(&source);
     assert_eq!(program.function_count(), 2);
@@ -414,7 +414,7 @@ fn native_and_reference_agree_on_finite_index_evidence() {
     let source = format!(
         "{FIN}
         fn consume_fin(erased f: Fin<3>) -> i64 ! {{}} {{ 42 }}
-        fn main() -> i64 ! {{panic}} {{ consume_fin(three()) }}"
+        fn main() -> i64 ! {{}} {{ consume_fin(three()) }}"
     );
     let program = checked(&source);
     assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);

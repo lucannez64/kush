@@ -9,7 +9,7 @@ Runtime-length arrays `[T; n <= C]`, whose length is bound to an immutable
 [below](#runtime-length-arrays-t-n--c).
 
 ```rust
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let mut a: DynArray<i64, 4> = DynArray.new::<i64, 4>();
     let mut i = 0;
     while i < 3 {
@@ -27,11 +27,11 @@ is inline: no heap allocation and no hidden pointer to a dynamic stack frame.
 
 ```rust
 DynArray.new::<T, capacity>()        -> DynArray<T, capacity> ! {}
-DynArray.push(a, value)              -> DynArray<T, capacity> ! {panic}
-DynArray.set(a, index, value)        -> DynArray<T, capacity> ! {panic}
-DynArray.pop(a)                      -> (DynArray<T, capacity>, T) ! {panic}
+DynArray.push(a, value)              -> DynArray<T, capacity> ! {}
+DynArray.set(a, index, value)        -> DynArray<T, capacity> ! {}
+DynArray.pop(a)                      -> (DynArray<T, capacity>, T) ! {}
 DynArray.len(&a)                     -> i64 ! {}
-DynArray.get(&a, index)              -> T ! {panic}   // T must be copyable
+DynArray.get(&a, index)              -> T ! {}   // T must be copyable
 ```
 
 `DynArray.new` starts with length zero. `DynArray.push` evaluates the array,
@@ -124,8 +124,8 @@ record may be:
   hidden record's owning fields are dropped exactly once at block end.
 
 ```rust
-fn tail<'a>(h: &'a Holder) -> &'a [i64] ! {panic} { &h.xs[1..] }
-fn bump(h: &mut Holder) -> Unit ! {panic} {
+fn tail<'a>(h: &'a Holder) -> &'a [i64] ! {} { &h.xs[1..] }
+fn bump(h: &mut Holder) -> Unit ! {} {
     let view: &mut [i64] = &mut h.xs[1..];
     Slice.set(view, 0, 70);
 }
@@ -240,7 +240,7 @@ fn pick(n: i64, i: i64, erased ok: { 0 <= i && i < n && n <= 8 }) -> i64 ! {} {
     a[i]                                       // proved 0 <= i < n: no panic
 }
 
-fn sum_all(n: i64, erased ok: { 0 <= n && n <= 8 }) -> i64 ! {panic} {
+fn sum_all(n: i64, erased ok: { 0 <= n && n <= 8 }) -> i64 ! {} {
     let a: [i64; n <= 8] = Array.fill(n, 2);
     let mut i = 0;
     let mut acc = 0;

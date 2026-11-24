@@ -37,7 +37,7 @@ fn cranelift_builds_and_runs_first_program() {
 #[test]
 fn scalar_operator_corpus_matches_reference_execution() {
     compare(
-        "fn main() -> Unit ! {io, panic} {
+        "fn main() -> Unit ! {io} {
         print_i64(2 + 3 * 4); print_i64(8 - 3 - 1); print_i64(-7 / 3); print_i64(-7 % 3);
         print_i64(-9223372036854775808); print_i64(9223372036854775807);
         print_i64(if !false && 1 < 2 || false { 1 } else { 0 });
@@ -50,7 +50,7 @@ fn scalar_operator_corpus_matches_reference_execution() {
 #[test]
 fn forward_calls_return_edges_and_mutable_ssa_values_match_reference() {
     compare(
-        "fn main() -> Unit ! {io, panic} {
+        "fn main() -> Unit ! {io} {
         print_i64(branch(true)); print_i64(branch(false));
         print_i64(early(0)); print_i64(early(2));
         print_i64(both(true)); print_i64(both(false));
@@ -61,13 +61,13 @@ fn forward_calls_return_edges_and_mutable_ssa_values_match_reference() {
     fn branch(flag: Bool) -> i64 ! {} { let mut x = 1; if flag { x = 3; } else { x = 4; } x }
     fn early(n: i64) -> i64 ! {} { if n == 0 { return 5; } n }
     fn both(b: Bool) -> i64 ! {} { if b { return 7; } else { return 8; } }
-    fn pair(a: i64, b: i64) -> i64 ! {panic} { a * 10 + b }",
+    fn pair(a: i64, b: i64) -> i64 ! {} { a * 10 + b }",
     );
 }
 #[test]
 fn short_circuit_and_guard_side_effects_follow_source_order() {
     compare(
-        "fn main() -> Unit ! {io, panic} {
+        "fn main() -> Unit ! {io} {
         false && panic(); true || panic();
         let mut x = 0;
         let result = match 3 {
@@ -95,8 +95,7 @@ fn checked_integer_failures_abort_instead_of_wrapping_or_trapping_silently() {
         "-(-9223372036854775808)",
         "panic()",
     ] {
-        let program =
-            executable::check(&format!("fn main() -> i64 ! {{panic}} {{ {expr} }}")).unwrap();
+        let program = executable::check(&format!("fn main() -> i64 ! {{}} {{ {expr} }}")).unwrap();
         let binary = scratch.path().join("failure");
         native::build(&program, &binary).unwrap();
         let output = Command::new(binary)
@@ -214,13 +213,13 @@ fn enum_returns_nested_payloads_mutable_joins_and_recursive_calls_match_referenc
         enum Option<T> { None, Some(T) } enum Result<T,E> { Ok(T), Err(E) }
         fn choose(flag: Bool) -> E ! {} { if flag { E.Pair(true, 17) } else { E.Number(-7) } }
         fn identity(x: E) -> E ! {} { x }
-        fn recur(n: i64) -> E ! {panic} { if n == 0 { return E.Number(88); } recur(n - 1) }
+        fn recur(n: i64) -> E ! {} { if n == 0 { return E.Number(88); } recur(n - 1) }
         fn show(x: E) -> i64 ! {} { match x {
             E.Number(n) | E.Pair(_, n) => n,
             E.Nested(Some(n), Ok(true)) => n,
             E.Nested(_, _) => -1,
         } }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut x = identity(choose(true)); print_i64(show(x));
             if true { x = choose(false); } else { x = recur(3); }
             print_i64(show(identity(x))); print_i64(show(recur(3)));
@@ -239,7 +238,7 @@ fn nested_alternative_bindings_select_correct_payload_and_preserve_guards() {
             E.Left(n, _) | E.Right(_, n) => n,
             E.Unit(()) => 99,
         } }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             print_i64(f(E.Left(7, false))); print_i64(f(E.Right(true, 19)));
             print_i64(f(E.Right(true, -5))); print_i64(f(E.Unit(())));
         }",
@@ -251,37 +250,39 @@ fn try_propagates_once_between_different_success_widths_and_reordered_tags() {
     compare(
         "enum Result<T,E> { Err(E), Ok(T) } enum Error { Code(i64, Bool), Empty }
         enum Option<T> { None, Some(T) }
-        fn leaf(ok: Bool) -> Result<Bool, Error> ! {io, panic} {
+        fn leaf(ok: Bool) -> Result<Bool, Error> ! {io} {
             print_i64(1); if ok { Ok(true) } else { Err(Error.Code(71, true)) }
         }
-        fn mapped(ok: Bool) -> Result<Option<i64>, Error> ! {io, panic} {
+        fn mapped(ok: Bool) -> Result<Option<i64>, Error> ! {io} {
             let b = leaf(ok)?; print_i64(2);
             Ok(if b { Some(9) } else { None })
         }
-        fn show(x: Result<Option<i64>, Error>) -> Unit ! {io, panic} { match x {
+        fn show(x: Result<Option<i64>, Error>) -> Unit ! {io} { match x {
             Ok(Some(n)) => print_i64(n), Ok(None) => print_i64(0),
             Err(Error.Code(n, _)) => print_i64(n), Err(Error.Empty) => print_i64(-1),
         } }
-        fn main() -> Unit ! {io, panic} { show(mapped(true)); show(mapped(false)); }",
+        fn main() -> Unit ! {io} { show(mapped(true)); show(mapped(false)); }",
     );
 }
 
 #[test]
 fn constructors_evaluate_payloads_left_to_right_and_unit_forms_remain_distinct() {
-    compare("enum E { Pair(i64, i64), Empty(), Unit }
-        fn f(x: E) -> i64 ! {panic} { match x { E.Pair(a,b) => a*10+b, E.Empty() => 8, E.Unit => 9 } }
-        fn main() -> Unit ! {io, panic} {
+    compare(
+        "enum E { Pair(i64, i64), Empty(), Unit }
+        fn f(x: E) -> i64 ! {} { match x { E.Pair(a,b) => a*10+b, E.Empty() => 8, E.Unit => 9 } }
+        fn main() -> Unit ! {io} {
             let mut n = 0; print_i64(f(E.Pair({n=1;n}, {n=2;n}))); print_i64(n);
             print_i64(f(E.Empty())); print_i64(f(E.Unit));
-        }");
+        }",
+    );
 }
 
 #[test]
 fn wide_aggregate_arguments_cross_register_boundaries_and_fill_return_buffers() {
     compare("enum Wide { Tuple(i64,i64,i64,i64,i64,i64,i64,i64), Small(i64) }
-        fn pass(a: i64, x: Wide, b: i64) -> Wide ! {io,panic} { print_i64(a); print_i64(b); x }
-        fn sum(x: Wide) -> i64 ! {panic} { match x { Wide.Tuple(a,b,c,d,e,f,g,h) => a+b+c+d+e+f+g+h, Wide.Small(n) => n } }
-        fn main() -> Unit ! {io,panic} {
+        fn pass(a: i64, x: Wide, b: i64) -> Wide ! {io} { print_i64(a); print_i64(b); x }
+        fn sum(x: Wide) -> i64 ! {} { match x { Wide.Tuple(a,b,c,d,e,f,g,h) => a+b+c+d+e+f+g+h, Wide.Small(n) => n } }
+        fn main() -> Unit ! {io} {
             print_i64(sum(pass(91, Wide.Tuple(1,2,3,4,5,6,7,8), 92)));
             print_i64(sum(pass(93, Wide.Small(-9223372036854775808), 94)));
         }");
@@ -293,7 +294,7 @@ fn finite_nested_instantiations_of_the_same_generic_enum_are_not_recursive_layou
         "enum Wrap<T> { Item(T) }
         fn make() -> Wrap<Wrap<i64>> ! {} { Item(Item(17)) }
         fn get(x: Wrap<Wrap<i64>>) -> i64 ! {} { match x { Item(Item(n)) => n } }
-        fn main() -> Unit ! {io,panic} { print_i64(get(make())); }",
+        fn main() -> Unit ! {io} { print_i64(get(make())); }",
     );
 }
 
@@ -306,16 +307,16 @@ fn affine_owning_list_and_borrow_example_runs_without_live_allocations() {
 fn partial_constructors_call_arguments_and_error_payloads_are_cleaned_on_early_exit() {
     compare(
         "enum Result<T,E>{Ok(T),Err(E)} enum Pair{Both(Box<i64>,i64)}
-        fn fail()->Result<i64,Box<i64>> ! {alloc,panic} {Err(Box.new(7))}
+        fn fail()->Result<i64,Box<i64>> ! {alloc} {Err(Box.new(7))}
         fn pair(a:Box<i64>,b:i64)->i64 ! {} {Box.take(a)}
-        fn first()->Result<i64,Box<i64>> ! {alloc,panic} {
+        fn first()->Result<i64,Box<i64>> ! {alloc} {
             let local=Box.new(8); let e=Pair.Both(Box.new(1),fail()?); Ok(0)
         }
-        fn second()->Result<i64,Box<i64>> ! {alloc,panic} {
+        fn second()->Result<i64,Box<i64>> ! {alloc} {
             let n=pair(Box.new(1),fail()?); Ok(n)
         }
-        fn third()->i64 ! {alloc,panic} {let e=Pair.Both(Box.new(1),return 9);}
-        fn main()->Unit ! {io,alloc,panic} {drop(first());drop(second());print_i64(third());}",
+        fn third()->i64 ! {alloc} {let e=Pair.Both(Box.new(1),return 9);}
+        fn main()->Unit ! {io, alloc} {drop(first());drop(second());print_i64(third());}",
     );
 }
 
@@ -326,7 +327,7 @@ fn owned_match_bindings_are_borrowed_in_guards_and_ignored_fields_drop_once() {
         fn f(e:E)->i64 ! {} {match e {
             E.A(b,_) | E.B(b) if Box.read(&b)<0 => Box.take(b),
             E.A(_,b) | E.B(b) => Box.read(&b),
-        }} fn main()->Unit ! {io,alloc,panic} {
+        }} fn main()->Unit ! {io, alloc} {
             print_i64(f(E.A(Box.new(1),Box.new(2))));
             print_i64(f(E.B(Box.new(-5))));
             let unused=E.A(Box.new(3),Box.new(4));
@@ -339,11 +340,11 @@ fn owned_match_bindings_are_borrowed_in_guards_and_ignored_fields_drop_once() {
 fn conditional_moves_overwrites_and_reinitialization_have_dynamic_cleanup_flags() {
     compare(
         "fn f(b:Box<i64>,flag:Bool)->i64 ! {} {if flag{return Box.take(b);} Box.read(&b)}
-        fn branch(flag:Bool)->i64 ! {alloc,panic} {
+        fn branch(flag:Bool)->i64 ! {alloc} {
             let mut b=Box.new(1); if flag {drop(b);} b=Box.new(2); b=b;
             let c=Box.new(b); let inner=Box.take(c); Box.take(inner)
         }
-        fn main()->Unit ! {io,alloc,panic} {
+        fn main()->Unit ! {io, alloc} {
             print_i64(branch(true));print_i64(branch(false));
             print_i64(f(Box.new(7),true));print_i64(f(Box.new(8),false));
             let b=Box.new(1); false && {drop(b); true};
@@ -356,9 +357,9 @@ fn regular_recursive_generic_and_mutually_boxed_layouts_destruct_correctly() {
     compare(
         "enum List<T>{Nil,Cons(T,Box<List<T>>)}
         enum A{End,Next(Box<Wrap<A>>)} enum Wrap<T>{Item(T)}
-        fn make()->List<i64> ! {alloc,panic} {List.Cons(1,Box.new(List.Cons(2,Box.new(List.Nil))))}
-        fn sum(xs:List<i64>)->i64 ! {panic} {match xs {Nil=>0,Cons(n,tail)=>n+sum(Box.take(tail))}}
-        fn main()->Unit ! {io,alloc,panic} {
+        fn make()->List<i64> ! {alloc} {List.Cons(1,Box.new(List.Cons(2,Box.new(List.Nil))))}
+        fn sum(xs:List<i64>)->i64 ! {} {match xs {Nil=>0,Cons(n,tail)=>n+sum(Box.take(tail))}}
+        fn main()->Unit ! {io, alloc} {
             print_i64(sum(make()));let unused=make();let a=A.Next(Box.new(Wrap.Item(A.End)));
         }",
     );
@@ -368,8 +369,8 @@ fn regular_recursive_generic_and_mutually_boxed_layouts_destruct_correctly() {
 fn call_scoped_borrows_keep_owners_live_and_end_before_later_moves() {
     compare(
         "fn inspect(r:&Box<i64>)->i64 ! {} {Box.read(r)}
-        fn combine(a:i64,b:i64)->i64 ! {panic} {a+b}
-        fn main()->Unit ! {io,alloc,panic} {
+        fn combine(a:i64,b:i64)->i64 ! {} {a+b}
+        fn main()->Unit ! {io, alloc} {
             let b=Box.new(21);
             print_i64(combine(inspect({&b}),Box.take(b)));
             let b=Box.new(7);let c=Box.new(9);print_i64(inspect(if false{&b}else{&c}));
@@ -384,7 +385,7 @@ fn owning_buffers_preserve_raw_bytes_across_copy_growth_and_nested_cleanup() {
         r#"
         enum Holder{Bytes(Bytes),Nested(Box<Bytes>)}
         fn size(b:&Bytes)->i64 ! {} {Bytes.len(b)}
-        fn main()->Unit ! {alloc,panic,io} {
+        fn main()->Unit ! {alloc, io} {
             let empty=Bytes.from("");print_i64(Bytes.len(&empty));
             let source=Bytes.from("é\0");let copy=Bytes.copy(&source);drop(source);
             print_i64(size(&copy));print_i64(Bytes.get(&copy,0));print_i64(Bytes.get(&copy,1));print_i64(Bytes.get(&copy,2));
@@ -424,13 +425,13 @@ fn pending_buffer_arguments_and_error_payloads_are_cleaned_on_early_exit() {
     compare(
         r#"
         enum Result<T,E>{Ok(T),Err(E)} enum Pair{Both(Bytes,Box<Bytes>)}
-        fn fail()->Result<i64,Bytes> ! {alloc,panic} {Err(Bytes.from("error"))}
-        fn pair()->Result<Pair,Bytes> ! {alloc,panic} {
+        fn fail()->Result<i64,Bytes> ! {alloc} {Err(Bytes.from("error"))}
+        fn pair()->Result<Pair,Bytes> ! {alloc} {
             let unused=Bytes.from("local");
             Ok(Pair.Both(Bytes.from("pending"),Box.new({fail()?;Bytes.from("unreachable")})))
         }
-        fn return_early()->Unit ! {alloc,panic} { Pair.Both(Bytes.from("pending"),{return;}); }
-        fn main()->Unit ! {alloc,panic,io} {
+        fn return_early()->Unit ! {alloc} { Pair.Both(Bytes.from("pending"),{return;}); }
+        fn main()->Unit ! {alloc, io} {
             match pair() {Ok(_)=>print_i64(-1),Err(error)=>print_i64(Bytes.len(&error))}
             return_early();
             let b=Box.new(Bytes.from("boxed")); let value=Box.take(b);
@@ -454,7 +455,7 @@ fn native_byte_bounds_and_capacity_failures_abort() {
         r#"Bytes.push_reserved(Bytes.from("x"),0);"#,
     ] {
         let program =
-            executable::check(&format!("fn main()->Unit ! {{alloc,panic}} {{{body}}}")).unwrap();
+            executable::check(&format!("fn main()->Unit ! {{alloc}} {{{body}}}")).unwrap();
         let binary = scratch.path().join("failure");
         native::build(&program, &binary).unwrap();
         let result = Command::new(binary)

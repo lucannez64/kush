@@ -144,7 +144,7 @@ fn lambdas_in_logical_definitions_beside_executable_code() {
         "total fn twice(f: fn(n: Nat) -> Nat ! {}, n: Nat) -> Nat ! {} { f(f(n)) }
          total fn four_by_lambda() -> Nat ! {} { twice(fn(x) { Nat.succ(x) }, 2) }
          total fn four() -> Eq<Nat, four_by_lambda, 4> ! {} { refl::<Nat>(4) }
-         fn main() -> i64 ! {io, panic} { print_i64(7); 0 }",
+         fn main() -> i64 ! {io} { print_i64(7); 0 }",
     )
     .unwrap();
 }

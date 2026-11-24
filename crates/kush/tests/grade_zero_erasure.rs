@@ -50,7 +50,7 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) -> MemorySt
 #[test]
 fn the_initializer_is_still_evaluated_for_its_effects() {
     agrees(
-        r#"fn main() -> i64 ! {io, panic} {
+        r#"fn main() -> i64 ! {io} {
             let value: i64 @[0] = { print_i64(7); 1 };
             42
         }"#,
@@ -62,7 +62,7 @@ fn the_initializer_is_still_evaluated_for_its_effects() {
 #[test]
 fn allocation_effects_are_preserved_and_balanced() {
     let stats = agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let value: i64 @[0] = Box.take(Box.new(9));
             42
         }"#,
@@ -88,7 +88,7 @@ fn a_custom_algebra_zero_is_erased_the_same_way() {
                 Once * None = None, Once * Once = Once,
             }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let value: i64 @[Usage.None] = { print_i64(3); 1 };
             5
         }"#,
@@ -108,7 +108,7 @@ fn runtime_observation_of_an_erased_binding_is_rejected() {
         "grade @[0]",
     );
     rejects(
-        "fn main() -> i64 ! {panic} { let value: i64 @[0] = 1; value + 1 }",
+        "fn main() -> i64 ! {} { let value: i64 @[0] = 1; value + 1 }",
         "grade @[0]",
     );
     // Zero runtime observations is exactly the contract, so an unused erased
@@ -123,7 +123,7 @@ fn owning_values_cannot_be_graded_zero() {
     // An affine owner is initialized and dropped eagerly; a linear obligation
     // cannot be discarded.
     let stats = agrees(
-        "fn main() -> i64 ! {alloc, panic} { let value: Box<i64> @[0] = Box.new(1); 0 }",
+        "fn main() -> i64 ! {alloc} { let value: Box<i64> @[0] = Box.new(1); 0 }",
         0,
         "",
     );
@@ -140,8 +140,8 @@ fn owning_values_cannot_be_graded_zero() {
 fn erased_results_have_no_payload_and_cannot_be_laundered() {
     // The callee computes and erases its result; the call is a Unit value.
     agrees(
-        r#"fn compute() -> i64 @[0] ! {io, panic} { print_i64(7); 42 }
-        fn main() -> i64 ! {io, panic} {
+        r#"fn compute() -> i64 @[0] ! {io} { print_i64(7); 42 }
+        fn main() -> i64 ! {io} {
             let ignored = compute();
             9
         }"#,
@@ -150,28 +150,28 @@ fn erased_results_have_no_payload_and_cannot_be_laundered() {
     );
     // Every attempted use is a type mismatch: there is no value to observe.
     rejects(
-        "fn compute() -> i64 @[0] ! {panic} { 42 }
-         fn main() -> i64 ! {panic} { compute() + 1 }",
+        "fn compute() -> i64 @[0] ! {} { 42 }
+         fn main() -> i64 ! {} { compute() + 1 }",
         "type mismatch",
     );
     rejects(
-        "fn compute() -> i64 @[0] ! {panic} { 42 }
-         fn main() -> i64 ! {panic} { let value: i64 = compute(); value }",
+        "fn compute() -> i64 @[0] ! {} { 42 }
+         fn main() -> i64 ! {} { let value: i64 = compute(); value }",
         "type mismatch",
     );
     rejects(
-        "fn compute() -> i64 @[0] ! {panic} { 42 }
-         fn main() -> i64 ! {panic} { if true { compute() } else { compute() } }",
+        "fn compute() -> i64 @[0] ! {} { 42 }
+         fn main() -> i64 ! {} { if true { compute() } else { compute() } }",
         "type mismatch",
     );
     rejects(
-        "fn compute() -> i64 @[0] ! {panic} { 42 }
-         fn main() -> i64 ! {panic} { return compute() }",
+        "fn compute() -> i64 @[0] ! {} { 42 }
+         fn main() -> i64 ! {} { return compute() }",
         "type mismatch",
     );
     rejects(
-        "fn compute() -> i64 @[0] ! {panic} { 42 }
-         fn main() -> i64 ! {alloc, panic} { [compute(), compute()][0] }",
+        "fn compute() -> i64 @[0] ! {} { 42 }
+         fn main() -> i64 ! {alloc} { [compute(), compute()][0] }",
         "bind this owned value",
     );
 }
@@ -179,9 +179,9 @@ fn erased_results_have_no_payload_and_cannot_be_laundered() {
 #[test]
 fn erased_results_work_through_function_values_and_returns() {
     agrees(
-        r#"fn compute() -> i64 @[0] ! {panic} { 42 }
-        fn main() -> i64 ! {panic} {
-            let f: fn() -> i64 @[0] ! {panic} = compute;
+        r#"fn compute() -> i64 @[0] ! {} { 42 }
+        fn main() -> i64 ! {} {
+            let f: fn() -> i64 @[0] ! {} = compute;
             f();
             5
         }"#,
@@ -191,9 +191,9 @@ fn erased_results_work_through_function_values_and_returns() {
     // Returning an erased call from another erased-result function is
     // well-typed: both functions erase the same payload type.
     agrees(
-        r#"fn inner() -> i64 @[0] ! {panic} { 7 }
-        fn outer() -> i64 @[0] ! {panic} { inner() }
-        fn main() -> i64 ! {panic} { outer(); 3 }"#,
+        r#"fn inner() -> i64 @[0] ! {} { 7 }
+        fn outer() -> i64 @[0] ! {} { inner() }
+        fn main() -> i64 ! {} { outer(); 3 }"#,
         3,
         "",
     );
@@ -210,8 +210,8 @@ fn main_cannot_erase_its_process_result() {
 #[test]
 fn owning_and_linear_results_cannot_be_erased() {
     rejects(
-        "fn make() -> Box<i64> @[0] ! {alloc, panic} { Box.new(1) }
-         fn main() -> i64 ! {alloc, panic} { make(); 0 }",
+        "fn make() -> Box<i64> @[0] ! {alloc} { Box.new(1) }
+         fn main() -> i64 ! {alloc} { make(); 0 }",
         "silently discard the owning/linear value",
     );
     rejects(
@@ -227,8 +227,8 @@ fn grade_zero_parameters_are_physically_absent_from_the_abi() {
     // The argument is still evaluated in source order for its effects, but no
     // value crosses the call boundary for the erased positions.
     agrees(
-        r#"fn ignore3(a: i64 @[0], b: i64, c: i64 @[0]) -> i64 ! {panic} { b }
-        fn main() -> i64 ! {io, panic} {
+        r#"fn ignore3(a: i64 @[0], b: i64, c: i64 @[0]) -> i64 ! {} { b }
+        fn main() -> i64 ! {io} {
             ignore3({ print_i64(1); 10 }, { print_i64(2); 20 }, { print_i64(3); 30 })
         }"#,
         20,
@@ -250,18 +250,18 @@ fn function_value_adapters_bridge_erased_parameter_arities() {
     // arrow. The synthesized adapter accepts the physical argument and calls
     // the zero-parameter ABI of the source.
     agrees(
-        r#"fn ignore(x: i64 @[0]) -> i64 ! {panic} { 42 }
-        fn apply(f: fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(3) }
-        fn main() -> i64 ! {panic} { apply(ignore) }"#,
+        r#"fn ignore(x: i64 @[0]) -> i64 ! {} { 42 }
+        fn apply(f: fn(i64) -> i64 ! {}) -> i64 ! {} { f(3) }
+        fn main() -> i64 ! {} { apply(ignore) }"#,
         42,
         "",
     );
     // The opposite direction would have to invent an argument for a function
     // that does observe it, and stays rejected.
     rejects(
-        "fn uses(x: i64) -> i64 ! {panic} { x }
-         fn apply(f: fn(i64 @[0]) -> i64 ! {panic}) -> i64 ! {panic} { f(1) }
-         fn main() -> i64 ! {panic} { apply(uses) }",
+        "fn uses(x: i64) -> i64 ! {} { x }
+         fn apply(f: fn(i64 @[0]) -> i64 ! {}) -> i64 ! {} { f(1) }
+         fn main() -> i64 ! {} { apply(uses) }",
         "type mismatch",
     );
 }
@@ -269,9 +269,9 @@ fn function_value_adapters_bridge_erased_parameter_arities() {
 #[test]
 fn indirect_erased_parameter_calls_keep_argument_effects() {
     agrees(
-        r#"fn main() -> i64 ! {io, panic} {
-            let f: fn(i64 @[0]) -> i64 ! {panic} =
-                fn(x: i64 @[0]) -> i64 ! {panic} { 42 };
+        r#"fn main() -> i64 ! {io} {
+            let f: fn(i64 @[0]) -> i64 ! {} =
+                fn(x: i64 @[0]) -> i64 ! {} { 42 };
             f({ print_i64(9); 1 })
         }"#,
         42,
@@ -282,11 +282,11 @@ fn indirect_erased_parameter_calls_keep_argument_effects() {
 #[test]
 fn pure_to_once_adapters_bridge_erased_parameter_arities() {
     agrees(
-        r#"fn ignore(x: i64 @[0]) -> i64 ! {alloc, panic} { 42 }
-        fn apply(f: once fn(i64) -> i64 ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn ignore(x: i64 @[0]) -> i64 ! {alloc} { 42 }
+        fn apply(f: once fn(i64) -> i64 ! {alloc}) -> i64 ! {alloc} {
             f(3)
         }
-        fn main() -> i64 ! {alloc, panic} { apply(ignore) }"#,
+        fn main() -> i64 ! {alloc} { apply(ignore) }"#,
         42,
         "",
     );
@@ -296,7 +296,7 @@ fn pure_to_once_adapters_bridge_erased_parameter_arities() {
 fn vector_map_callbacks_cannot_erase_observed_elements() {
     rejects(
         r#"fn ghost(value: i64 @[0]) -> i64 ! {} { 7 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             Vec.map_in_place(values, ghost);
@@ -309,13 +309,13 @@ fn vector_map_callbacks_cannot_erase_observed_elements() {
 #[test]
 fn capturing_closure_adapters_bridge_erased_parameter_arities() {
     agrees(
-        r#"fn call(f: once fn(i64) -> i64 ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn call(f: once fn(i64) -> i64 ! {alloc}) -> i64 ! {alloc} {
             f(1)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let base = 40;
-            let f: once fn(i64 @[0]) -> i64 ! {alloc, panic} =
-                fn(x: i64 @[0]) -> i64 ! {alloc, panic} { base + 2 };
+            let f: once fn(i64 @[0]) -> i64 ! {alloc} =
+                fn(x: i64 @[0]) -> i64 ! {alloc} { base + 2 };
             call(f)
         }"#,
         42,
@@ -326,16 +326,16 @@ fn capturing_closure_adapters_bridge_erased_parameter_arities() {
 #[test]
 fn dynamic_dispatch_can_erase_a_copyable_result() {
     agrees(
-        r#"trait Compute { fn compute(self: Self) -> i64 @[0] ! {io, panic}; }
+        r#"trait Compute { fn compute(self: Self) -> i64 @[0] ! {io}; }
         struct A { n: i64 }
         struct B { n: i64 }
         impl Compute for A {
-            fn compute(self: Self) -> i64 @[0] ! {io, panic} { print_i64(self.n); self.n }
+            fn compute(self: Self) -> i64 @[0] ! {io} { print_i64(self.n); self.n }
         }
         impl Compute for B {
-            fn compute(self: Self) -> i64 @[0] ! {io, panic} { print_i64(self.n); self.n }
+            fn compute(self: Self) -> i64 @[0] ! {io} { print_i64(self.n); self.n }
         }
-        fn main() -> i64 ! {io, panic, alloc} {
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Compute = A { n: 4 };
             object.compute();
             0
@@ -348,12 +348,12 @@ fn dynamic_dispatch_can_erase_a_copyable_result() {
 #[test]
 fn dynamic_trait_dispatch_erases_parameter_slots() {
     agrees(
-        r#"trait Ignore { fn pick(self: Self, x: i64 @[0]) -> i64 ! {panic}; }
+        r#"trait Ignore { fn pick(self: Self, x: i64 @[0]) -> i64 ! {}; }
         struct A { n: i64 }
         impl Ignore for A {
-            fn pick(self: Self, x: i64 @[0]) -> i64 ! {panic} { self.n }
+            fn pick(self: Self, x: i64 @[0]) -> i64 ! {} { self.n }
         }
-        fn main() -> i64 ! {io, panic, alloc} {
+        fn main() -> i64 ! {io, alloc} {
             let object: dyn Ignore = A { n: 42 };
             object.pick({ print_i64(7); 1 })
         }"#,
@@ -365,12 +365,12 @@ fn dynamic_trait_dispatch_erases_parameter_slots() {
 #[test]
 fn trait_implementations_must_match_erased_parameter_contracts() {
     rejects(
-        r#"trait Pick { fn pick(self: Self, x: i64 @[0]) -> i64 ! {panic}; }
+        r#"trait Pick { fn pick(self: Self, x: i64 @[0]) -> i64 ! {}; }
         struct A { n: i64 }
         struct B { n: i64 }
-        impl Pick for A { fn pick(self: Self, x: i64 @[0]) -> i64 ! {panic} { self.n } }
-        impl Pick for B { fn pick(self: Self, x: i64) -> i64 ! {panic} { self.n + x } }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        impl Pick for A { fn pick(self: Self, x: i64 @[0]) -> i64 ! {} { self.n } }
+        impl Pick for B { fn pick(self: Self, x: i64) -> i64 ! {} { self.n + x } }
+        fn main() -> i64 ! {} { 0 }"#,
         "does not match the trait signature",
     );
 }

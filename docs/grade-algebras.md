@@ -28,7 +28,7 @@ algebra Usage {
 An annotation names an element with a dot path:
 
 ```kush
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let x: i64 @[Usage.Twice] = 21;
     x + x
 }

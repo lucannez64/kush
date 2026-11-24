@@ -5,31 +5,31 @@ struct Wrapper<T> { value: T }
 trait Scaled {
     type Out;
     const FACTOR: i64;
-    fn scaled(self: Self) -> Self.Out ! {panic};
+    fn scaled(self: Self) -> Self.Out ! {};
 }
 
 impl Scaled for Point {
     type Out = i64;
     const FACTOR: i64 = 3;
-    fn scaled(self: Self) -> i64 ! {panic} { self.x * Self.FACTOR }
+    fn scaled(self: Self) -> i64 ! {} { self.x * Self.FACTOR }
 }
 
 impl<T> Scaled for Wrapper<T> {
     type Out = T;
     const FACTOR: i64 = 2;
-    fn scaled(self: Self) -> T ! {panic} { self.value }
+    fn scaled(self: Self) -> T ! {} { self.value }
 }
 
 trait Describe {
-    fn describe(self: Self) -> i64 ! {panic};
+    fn describe(self: Self) -> i64 ! {};
 }
 
-impl Describe for Point { fn describe(self: Self) -> i64 ! {panic} { self.x } }
-impl Describe for Wrapper<i64> { fn describe(self: Self) -> i64 ! {panic} { self.value } }
+impl Describe for Point { fn describe(self: Self) -> i64 ! {} { self.x } }
+impl Describe for Wrapper<i64> { fn describe(self: Self) -> i64 ! {} { self.value } }
 
-fn reveal<T: Scaled>(value: T) -> T.Out ! {panic} { value.scaled() }
+fn reveal<T: Scaled>(value: T) -> T.Out ! {} { value.scaled() }
 
-fn main() -> i64 ! {io, panic} {
+fn main() -> i64 ! {io} {
     print_i64(reveal(Point { x: 4 }));
     print_i64(reveal(Wrapper { value: 7 }));
     let object: dyn Describe = Point { x: 9 };

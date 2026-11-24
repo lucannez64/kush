@@ -54,7 +54,7 @@ fn a_coefficient_bound_discharges_a_scaled_goal() {
     let source = r#"
         fn take(x: i64, erased p: { x <= 2 }) -> i64 ! {} { x }
         fn forward(x: i64, erased p: { 2 * x <= 4 }) -> i64 ! {} { take(x, _) }
-        fn main() -> i64 ! {panic} { forward(1, _) }
+        fn main() -> i64 ! {} { forward(1, _) }
     "#;
     assert_eq!(value(source), 1);
     native_agrees(source, 1);
@@ -72,7 +72,7 @@ fn multi_variable_elimination_uses_every_hypothesis() {
             erased both: { x + y <= 4 },
             erased lower: { 0 <= x },
         ) -> i64 ! {} { take(y, _) }
-        fn main() -> i64 ! {panic} { forward(1, 3, _, _) }
+        fn main() -> i64 ! {} { forward(1, 3, _, _) }
     "#;
     assert_eq!(value(source), 3);
     native_agrees(source, 3);
@@ -82,7 +82,7 @@ fn multi_variable_elimination_uses_every_hypothesis() {
 fn branch_conditions_contribute_scaled_linear_facts() {
     let source = r#"
         fn take(x: i64, erased p: { 2 * x <= 4 }) -> i64 ! {} { x }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 1;
             if 2 * n <= 4 { take(n, _) } else { 0 }
         }
@@ -99,7 +99,7 @@ fn integer_strictness_is_respected_by_the_rational_relaxation() {
     let source = r#"
         fn take(x: i64, erased p: { x <= 0 }) -> i64 ! {} { x }
         fn forward(x: i64, erased p: { 2 * x <= 1 }) -> i64 ! {} { take(x, _) }
-        fn main() -> i64 ! {panic} { forward(0, _) }
+        fn main() -> i64 ! {} { forward(0, _) }
     "#;
     assert_eq!(value(source), 0);
     native_agrees(source, 0);
@@ -113,7 +113,7 @@ fn false_or_nonlinear_obligations_stay_rejected() {
         fn take(y: i64, erased p: { y <= 4 }) -> i64 ! {} { y }
         fn forward(x: i64, y: i64, erased both: { x + y <= 4 })
             -> i64 ! {} { take(y, _) }
-        fn main() -> i64 ! {panic} { forward(1, 3, _) }
+        fn main() -> i64 ! {} { forward(1, 3, _) }
         "#,
         "cannot prove",
     );
@@ -121,7 +121,7 @@ fn false_or_nonlinear_obligations_stay_rejected() {
     rejects(
         r#"
         fn bad(x: i64, y: i64, erased p: { x * y <= 4 }) -> i64 ! {} { x + y }
-        fn main() -> i64 ! {panic} { bad(1, 2, _) }
+        fn main() -> i64 ! {} { bad(1, 2, _) }
         "#,
         "linear integer comparisons",
     );
@@ -130,7 +130,7 @@ fn false_or_nonlinear_obligations_stay_rejected() {
     rejects(
         r#"
         fn take(x: i64, erased p: { 2 * x <= 4 }) -> i64 ! {} { x }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 1;
             if 2 * n <= 4 {
                 n = 3;
@@ -152,7 +152,7 @@ fn a_constant_goal_is_proved_only_from_contradictory_facts() {
         fn absurd(erased impossible: { 0 >= 1 }) -> i64 ! {} { 7 }
         fn lemma(a: i64, erased zero: { a == 0 }, erased one: { a == 1 }) -> i64 ! {} { absurd(_) }
         fn dead(x: i64) -> i64 ! {} { if x > 5 && x < 3 { absurd(_) } else { x } }
-        fn main() -> i64 ! {panic} { dead(4) }
+        fn main() -> i64 ! {} { dead(4) }
     "#;
     assert_eq!(value(source), 4);
     native_agrees(source, 4);

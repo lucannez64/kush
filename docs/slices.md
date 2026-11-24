@@ -16,7 +16,7 @@ views are exclusive capabilities whose children suspend the parent until the
 child's last use.
 
 ```rust
-fn sum(view: &[i64]) -> i64 ! {panic} {
+fn sum(view: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(view) {
@@ -26,7 +26,7 @@ fn sum(view: &[i64]) -> i64 ! {panic} {
     acc
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let values: [i64; 5] = [10, 20, 30, 40, 50];
     let middle: &[i64] = &values[1..4];
     print_i64(Slice.len(middle));

@@ -26,7 +26,7 @@ fn plan(f: Facts) -> Decision ! {} {
     }
 }
 
-fn code(d: Decision) -> i64 ! {panic} {
+fn code(d: Decision) -> i64 ! {} {
     match d {
         Decision.First(r) => 8 + Int.truncate(r),
         Decision.Update(r) => 16 + Int.truncate(r),
@@ -34,7 +34,7 @@ fn code(d: Decision) -> i64 ! {panic} {
     }
 }
 
-fn decide(i: i64) -> i64 ! {panic} {
+fn decide(i: i64) -> i64 ! {} {
     let x = (i * 2654435761) % 4294967296;
     code(plan(Facts {
         authenticated: (x & 1) == 1,
@@ -48,11 +48,11 @@ fn decide(i: i64) -> i64 ! {panic} {
     }))
 }
 
-fn now() -> i64 ! {io, panic} {
+fn now() -> i64 ! {io} {
     match TIME.monotonic_ns() { Result.Ok(ns) => ns, Result.Err(_) => 0 }
 }
 
-fn main() -> i64 ! {io, panic} {
+fn main() -> i64 ! {io} {
     let n = 100000000;
     let t0 = now();
     let mut checksum = 0;

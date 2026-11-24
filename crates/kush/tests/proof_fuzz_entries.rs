@@ -29,7 +29,7 @@ fn project(label: &str, tests: &str) -> PathBuf {
         "module demo.lib;
 pub struct Cursor { pub at: i64 }
 // Reads one byte past the cursor: out of bounds at the last byte.
-pub fn peek(c: &Cursor, b: &Bytes) -> i64 ! {panic} { b[c.at + 1] }
+pub fn peek(c: &Cursor, b: &Bytes) -> i64 ! {} { b[c.at + 1] }
 ",
     )
     .unwrap();
@@ -43,13 +43,13 @@ use std.test;
 use demo.lib;
 
 #[test]
-fn passes() -> Unit ! {panic} { test.is_true(1 + 1 == 2); }
+fn passes() -> Unit ! {} { test.is_true(1 + 1 == 2); }
 
 #[test]
-fn adds() -> Unit ! {panic} { let a = 40; test.is_true(a + 2 == 42); }
+fn adds() -> Unit ! {} { let a = 40; test.is_true(a + 2 == 42); }
 
 #[fuzz]
-fn last_byte(input: &Bytes) -> Unit ! {panic} {
+fn last_byte(input: &Bytes) -> Unit ! {} {
     if Bytes.len(input) > 2 {
         let c = lib.Cursor { at: Bytes.len(input) - 1 };
         let _ = lib.peek(&c, input);
@@ -57,7 +57,7 @@ fn last_byte(input: &Bytes) -> Unit ! {panic} {
 }
 
 #[fuzz]
-fn magic(input: &Bytes) -> Unit ! {panic} {
+fn magic(input: &Bytes) -> Unit ! {} {
     if Bytes.len(input) >= 4 && input[0] == 201 && input[1] == 13 && input[2] == 177 && input[3] == 42 {
         let big = 9223372036854775807;
         let _ = big + Bytes.len(input);

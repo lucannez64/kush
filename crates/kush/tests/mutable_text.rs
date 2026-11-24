@@ -66,7 +66,7 @@ fn mutable_text_views_write_valid_utf8_in_place() {
     agrees(
         r#"
         fn shout<'a>(text: &'a mut str) -> Unit ! {} { Str.make_ascii_uppercase(text); }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut s = String.from("héllo wörld");
             {
                 let v = s.as_mut_str();
@@ -93,8 +93,8 @@ fn mutable_text_views_write_valid_utf8_in_place() {
     // usable again after the view's last use.
     agrees(
         r#"
-        fn rest<'a>(text: &'a mut str) -> &'a mut str ! {panic} { &mut text[1..] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn rest<'a>(text: &'a mut str) -> &'a mut str ! {} { &mut text[1..] }
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("abc");
             let r = rest(String.as_mut_str(&mut s));
             Str.make_ascii_uppercase(r);
@@ -109,7 +109,7 @@ fn mutable_text_views_write_valid_utf8_in_place() {
     agrees(
         r#"
         use std.option.Option;
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut s = String.from("a😀b");
             {
                 let v = String.as_mut_str(&mut s);
@@ -131,7 +131,7 @@ fn documented_mutable_text_example_runs() {
     agrees(
         r#"
         fn shout(text: &mut str) -> Unit ! {} { Str.make_ascii_uppercase(text); }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut s = String.from("héllo wörld");
             let v = s.as_mut_str();
             shout(&mut v[..]);
@@ -154,7 +154,7 @@ fn invalid_utf8_writes_panic_in_both_backends() {
     // A width mismatch, an offset inside a scalar, and an offset past the end.
     panics(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("hé");
             let v = String.as_mut_str(&mut s);
             Str.set_scalar(v, 1, 'x');
@@ -164,7 +164,7 @@ fn invalid_utf8_writes_panic_in_both_backends() {
     );
     panics(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("hé");
             let v = String.as_mut_str(&mut s);
             Str.set_scalar(v, 2, 'x');
@@ -174,7 +174,7 @@ fn invalid_utf8_writes_panic_in_both_backends() {
     );
     panics(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("ab");
             let v = String.as_mut_str(&mut s);
             Str.set_scalar(v, 2, 'x');
@@ -185,7 +185,7 @@ fn invalid_utf8_writes_panic_in_both_backends() {
     // Subview ends are scalar boundaries.
     panics(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("hé");
             let v = String.as_mut_str(&mut s);
             let w: &mut str = &mut v[0..2];
@@ -196,13 +196,13 @@ fn invalid_utf8_writes_panic_in_both_backends() {
     );
     // There is no raw byte write: a `&mut str` is not a byte slice.
     rejects(
-        r#"fn poke(text: &mut str) -> Unit ! {panic} { Slice.set(text, 0, 255); }
+        r#"fn poke(text: &mut str) -> Unit ! {} { Slice.set(text, 0, 255); }
         fn main() -> i64 ! {} { 0 }"#,
         "Slice.set",
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("ab");
             let v = String.as_mut_str(&mut s);
             let p = &mut v[0];
@@ -212,7 +212,7 @@ fn invalid_utf8_writes_panic_in_both_backends() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let s = String.from("ab");
             let v = String.as_str(&s);
             Str.make_ascii_uppercase(v);
@@ -226,7 +226,7 @@ fn invalid_utf8_writes_panic_in_both_backends() {
 fn mutable_text_views_hold_an_exclusive_loan() {
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("abc");
             let v = String.as_mut_str(&mut s);
             let w = String.as_str(&s);
@@ -237,7 +237,7 @@ fn mutable_text_views_hold_an_exclusive_loan() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("abc");
             let v = String.as_mut_str(&mut s);
             Str.make_ascii_uppercase(v);
@@ -249,7 +249,7 @@ fn mutable_text_views_hold_an_exclusive_loan() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("abc");
             let v = String.as_mut_str(&mut s);
             let moved = s;
@@ -261,7 +261,7 @@ fn mutable_text_views_hold_an_exclusive_loan() {
     // Two exclusive subviews of one view alias.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("abc");
             let v = String.as_mut_str(&mut s);
             let a: &mut str = &mut v[0..1];
@@ -276,7 +276,7 @@ fn mutable_text_views_hold_an_exclusive_loan() {
     // an exclusive view.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let s = String.from("abc");
             let v = String.as_str(&s);
             let w: &mut str = &mut v[..];
@@ -286,7 +286,7 @@ fn mutable_text_views_hold_an_exclusive_loan() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let s = String.from("abc");
             let v = s.as_mut_str();
             0
@@ -295,7 +295,7 @@ fn mutable_text_views_hold_an_exclusive_loan() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("abc");
             let v = String.as_mut_str(&s);
             0
@@ -317,7 +317,7 @@ fn mutable_text_views_cannot_outlive_or_escape_their_owner() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let v = {
                 let mut s = String.from("abc");
                 String.as_mut_str(&mut s)
@@ -328,7 +328,7 @@ fn mutable_text_views_cannot_outlive_or_escape_their_owner() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("abc");
             let v = String.as_mut_str(&mut s);
             let f = fn() -> Unit ! {} { Str.make_ascii_uppercase(v); };
@@ -346,7 +346,7 @@ fn mutable_text_views_cannot_outlive_or_escape_their_owner() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("abc");
             let v = String.as_mut_str(&mut s);
             let b = Box.new(v);
@@ -358,7 +358,7 @@ fn mutable_text_views_cannot_outlive_or_escape_their_owner() {
     rejects(
         r#"
         fn shout(text: &mut str) -> Unit ! {} { Str.make_ascii_uppercase(text); }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut s = String.from("abc");
             let v = String.as_mut_str(&mut s);
             shout(v);
@@ -380,7 +380,7 @@ fn review_a_view_of_a_mutable_string_parameter_is_not_returned() {
     );
     check(
         r#"
-        fn f<'a>(s: &'a mut str) -> &'a mut str ! {panic} { &mut s[0..1] }
+        fn f<'a>(s: &'a mut str) -> &'a mut str ! {} { &mut s[0..1] }
         fn main() -> i64 ! {} { 0 }"#,
     )
     .unwrap();

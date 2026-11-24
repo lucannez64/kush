@@ -52,10 +52,10 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) -> MemorySt
 fn by_value_shortening_is_covariant_and_extension_needs_a_proof() {
     agrees(
         r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn shorten<'long: 'short, 'short>(window: Window<'long>) -> Window<'short> ! {panic} {
+        fn shorten<'long: 'short, 'short>(window: Window<'long>) -> Window<'short> ! {} {
             window
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 2];
             let window = Window { view: &values[..], start: 0 };
             Slice.get(shorten(window).view, 0)
@@ -67,7 +67,7 @@ fn by_value_shortening_is_covariant_and_extension_needs_a_proof() {
     // not evidence, so the conversion must be rejected.
     rejects(
         r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn extend<'long: 'short, 'short>(window: Window<'short>) -> Window<'long> ! {panic} {
+        fn extend<'long: 'short, 'short>(window: Window<'short>) -> Window<'long> ! {} {
             window
         }
         fn main() -> Unit ! {} {}"#,
@@ -83,7 +83,7 @@ fn invariant_mutable_pointee_positions_require_identity() {
     agrees(
         r#"struct Window<'a> { view: &'a [i64] }
         struct Holder<'a> { slot: &'a mut Box<Window<'a>> }
-        fn identity<'a>(holder: Holder<'a>) -> Holder<'a> ! {panic} {
+        fn identity<'a>(holder: Holder<'a>) -> Holder<'a> ! {} {
             holder
         }
         fn main() -> Unit ! {} {}"#,
@@ -93,7 +93,7 @@ fn invariant_mutable_pointee_positions_require_identity() {
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
         struct Holder<'a> { slot: &'a mut Box<Window<'a>> }
-        fn shorten<'long: 'short, 'short>(holder: Holder<'long>) -> Holder<'short> ! {panic} {
+        fn shorten<'long: 'short, 'short>(holder: Holder<'long>) -> Holder<'short> ! {} {
             holder
         }
         fn main() -> Unit ! {} {}"#,
@@ -106,13 +106,13 @@ fn callable_arrow_direction_and_alpha_equivalence_are_preserved() {
     // Alpha-equivalent arrow labels map positionally, including a many-to-one
     // source contract that the target can instantiate.
     agrees(
-        r#"fn second<'long: 'short, 'short>(first: &'long [i64], second: &'short [i64]) -> &'short [i64] ! {panic} {
+        r#"fn second<'long: 'short, 'short>(first: &'long [i64], second: &'short [i64]) -> &'short [i64] ! {} {
             second
         }
-        fn apply(f: fn<'a>(&'a [i64], &'a [i64]) -> &'a [i64] ! {panic}, values: &[i64]) -> i64 ! {panic} {
+        fn apply(f: fn<'a>(&'a [i64], &'a [i64]) -> &'a [i64] ! {}, values: &[i64]) -> i64 ! {} {
             Slice.get(f(values, values), 0)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 2];
             apply(second, &values[..])
         }"#,
@@ -122,10 +122,10 @@ fn callable_arrow_direction_and_alpha_equivalence_are_preserved() {
     // A source contract that returns its second parameter does not fit an
     // arrow whose result is tied to the first parameter.
     rejects(
-        r#"fn install(f: fn<'a, 'b>(&'a [i64], &'b [i64]) -> &'a [i64] ! {panic}) -> Unit ! {} {
+        r#"fn install(f: fn<'a, 'b>(&'a [i64], &'b [i64]) -> &'a [i64] ! {}) -> Unit ! {} {
             let _ = f;
         }
-        fn second<'a, 'b>(first: &'a [i64], second: &'b [i64]) -> &'b [i64] ! {panic} {
+        fn second<'a, 'b>(first: &'a [i64], second: &'b [i64]) -> &'b [i64] ! {} {
             second
         }
         fn main() -> Unit ! {} {
@@ -138,10 +138,10 @@ fn callable_arrow_direction_and_alpha_equivalence_are_preserved() {
 #[test]
 fn anonymous_intersections_and_elision_still_work() {
     agrees(
-        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {panic} {
+        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {} {
             if first == 0 { left } else { right }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 1];
             let b: [i64; 2] = [2, 3];
             Slice.get(pick(&a[..], &b[..], 0), 0)
@@ -151,8 +151,8 @@ fn anonymous_intersections_and_elision_still_work() {
     );
     agrees(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn first<'a>(window: Window<'a>) -> &'a [i64] ! {panic} { window.view }
-        fn main() -> i64 ! {panic} {
+        fn first<'a>(window: Window<'a>) -> &'a [i64] ! {} { window.view }
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [9, 8];
             Slice.get(first(Window { view: &values[..] }), 0)
         }"#,
@@ -165,10 +165,10 @@ fn anonymous_intersections_and_elision_still_work() {
 fn shortening_keeps_every_source_owner_loaned() {
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn shorten<'long: 'short, 'short>(window: Window<'long>) -> Window<'short> ! {panic} {
+        fn shorten<'long: 'short, 'short>(window: Window<'long>) -> Window<'short> ! {} {
             window
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [40, 1];
             let window = shorten(Window { view: &values[..] });
             let first = Slice.get(window.view, 0);
@@ -179,10 +179,10 @@ fn shortening_keeps_every_source_owner_loaned() {
     );
     agrees(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn shorten<'long: 'short, 'short>(window: Window<'long>) -> Window<'short> ! {panic} {
+        fn shorten<'long: 'short, 'short>(window: Window<'long>) -> Window<'short> ! {} {
             window
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [40, 1];
             let window = shorten(Window { view: &values[..] });
             let first = Slice.get(window.view, 0);
@@ -197,7 +197,7 @@ fn shortening_keeps_every_source_owner_loaned() {
 #[test]
 fn destination_declared_mutable_labels_still_reject_short_writes() {
     rejects(
-        r#"fn push<'a, 'b>(values: &mut Vec<&'a i64>, value: &'b i64) -> Unit ! {alloc, panic} {
+        r#"fn push<'a, 'b>(values: &mut Vec<&'a i64>, value: &'b i64) -> Unit ! {alloc} {
             Vec.push(values, value);
         }
         fn main() -> Unit ! {} {}"#,
@@ -212,10 +212,10 @@ fn task_exit_and_structural_borrowed_leaves_stay_exact() {
     // exact and is rejected; the result gate does not loosen that rule.
     agrees(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn narrow<'a>(window: Window<'a>) -> struct { view: &'a [i64] } ! {panic} {
+        fn narrow<'a>(window: Window<'a>) -> struct { view: &'a [i64] } ! {} {
             window
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 2];
             let out = narrow(Window { view: &values[..] });
             Slice.get(out.view, 0) + 2
@@ -226,7 +226,7 @@ fn task_exit_and_structural_borrowed_leaves_stay_exact() {
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
         fn relabel<'long: 'short, 'short>(window: Window<'short>)
-            -> struct { view: &'long [i64] } ! {panic} {
+            -> struct { view: &'long [i64] } ! {} {
             window
         }
         fn main() -> Unit ! {} {}"#,
@@ -240,12 +240,12 @@ fn distinct_source_occurrences_can_share_an_interned_arrow_contract() {
     // occurrence environment must be built per conversion, not attached once to
     // the interned function-type ID.
     agrees(
-        r#"fn keep<'a>(value: &'a [i64]) -> &'a [i64] ! {panic} { value }
-        fn same<'x>(value: &'x [i64]) -> &'x [i64] ! {panic} { value }
-        fn apply(f: fn<'a>(&'a [i64]) -> &'a [i64] ! {panic}, values: &[i64]) -> i64 ! {panic} {
+        r#"fn keep<'a>(value: &'a [i64]) -> &'a [i64] ! {} { value }
+        fn same<'x>(value: &'x [i64]) -> &'x [i64] ! {} { value }
+        fn apply(f: fn<'a>(&'a [i64]) -> &'a [i64] ! {}, values: &[i64]) -> i64 ! {} {
             Slice.get(f(values), 0)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [20, 2];
             apply(keep, &values[..]) + apply(same, &values[..])
         }"#,
@@ -261,7 +261,7 @@ fn recursive_borrowed_records_are_reported_instead_of_exhausting_the_stack() {
     // overflowed the compiler stack.
     rejects(
         r#"struct Node<'a> { view: &'a [i64], next: Box<Node<'a>> }
-        fn read<'a>(node: Node<'a>) -> i64 ! {panic} {
+        fn read<'a>(node: Node<'a>) -> i64 ! {} {
             Slice.get(node.view, 0)
         }
         fn main() -> Unit ! {} {}"#,
@@ -276,7 +276,7 @@ fn result_only_declared_labels_are_classified_by_the_contextual_witness() {
     // conversion. Without `'long: 'short` the shortening has no proof.
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn bad<'long, 'short>(window: Window<'long>) -> Window<'short> ! {panic} {
+        fn bad<'long, 'short>(window: Window<'long>) -> Window<'short> ! {} {
             window
         }
         fn main() -> Unit ! {} {}"#,
@@ -286,7 +286,7 @@ fn result_only_declared_labels_are_classified_by_the_contextual_witness() {
     // shortening, not an erased comparison.
     check(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn ok<'long: 'short, 'short>(window: Window<'long>) -> Window<'short> ! {panic} {
+        fn ok<'long: 'short, 'short>(window: Window<'long>) -> Window<'short> ! {} {
             window
         }
         fn main() -> Unit ! {} {}"#,
@@ -301,7 +301,7 @@ fn nested_and_container_invariant_shortening_is_rejected() {
     // The declared-lifetime environment must still classify both labels.
     rejects(
         r#"struct Outer<'a> { cell: Box<&'a mut Vec<&'a i64>> }
-        fn bad<'long: 'short, 'short>(x: Outer<'long>) -> Outer<'short> ! {panic} {
+        fn bad<'long: 'short, 'short>(x: Outer<'long>) -> Outer<'short> ! {} {
             x
         }
         fn main() -> Unit ! {} {}"#,
@@ -310,7 +310,7 @@ fn nested_and_container_invariant_shortening_is_rejected() {
     // A nested mutable box pointee is invariant even though the outer `&mut`
     // lifetime itself could otherwise shorten.
     rejects(
-        r#"fn bad<'long: 'short + 'x, 'short, 'x>(b: &'x mut Box<&'long mut i64>) -> &'x mut Box<&'short mut i64> ! {panic} {
+        r#"fn bad<'long: 'short + 'x, 'short, 'x>(b: &'x mut Box<&'long mut i64>) -> &'x mut Box<&'short mut i64> ! {} {
             b
         }
         fn main() -> Unit ! {} {}"#,
@@ -319,7 +319,7 @@ fn nested_and_container_invariant_shortening_is_rejected() {
     // Exact identity remains accepted for the same nested shape.
     check(
         r#"struct Outer<'a> { cell: Box<&'a mut Vec<&'a i64>> }
-        fn same<'a>(x: Outer<'a>) -> Outer<'a> ! {panic} {
+        fn same<'a>(x: Outer<'a>) -> Outer<'a> ! {} {
             x
         }
         fn main() -> Unit ! {} {}"#,
@@ -333,7 +333,7 @@ fn mutable_container_writes_use_the_static_destination_label() {
     // stored provenance leaf yet. The static type is the destination
     // authority, so a short write cannot be skipped.
     rejects(
-        r#"fn attack<'long: 'short, 'short>(s: &'short i64) -> Unit ! {alloc, panic} {
+        r#"fn attack<'long: 'short, 'short>(s: &'short i64) -> Unit ! {alloc} {
             let mut values: Vec<&'long i64> = Vec.new();
             Vec.push(values, s);
         }
@@ -342,7 +342,7 @@ fn mutable_container_writes_use_the_static_destination_label() {
     );
     // The same rule applies through a `&mut Vec<&'a T>` parameter.
     rejects(
-        r#"fn attack<'long: 'short, 'short>(values: &mut Vec<&'long i64>, s: &'short i64) -> Unit ! {alloc, panic} {
+        r#"fn attack<'long: 'short, 'short>(values: &mut Vec<&'long i64>, s: &'short i64) -> Unit ! {alloc} {
             Vec.push(values, s);
         }
         fn main() -> Unit ! {} {}"#,
@@ -351,7 +351,7 @@ fn mutable_container_writes_use_the_static_destination_label() {
     // A longer source written into a shorter declared element lifetime remains
     // valid.
     check(
-        r#"fn ok<'long: 'short, 'short>(values: &mut Vec<&'short i64>, s: &'long i64) -> Unit ! {alloc, panic} {
+        r#"fn ok<'long: 'short, 'short>(values: &mut Vec<&'short i64>, s: &'long i64) -> Unit ! {alloc} {
             Vec.push(values, s);
         }
         fn main() -> Unit ! {} {}"#,
@@ -366,7 +366,7 @@ fn nested_record_leaves_inherit_enclosing_invariant_variance() {
     // positive occurrence merely because the field is not a direct borrow.
     rejects(
         r#"struct Inner<'b> { keep: &'b mut Vec<&'b i64>, cell: Box<&'b i64> }
-        fn make<'long: 'short, 'short>(long: &'long i64, keep: &'short mut Vec<&'short i64>) -> Inner<'short> ! {alloc, panic} {
+        fn make<'long: 'short, 'short>(long: &'long i64, keep: &'short mut Vec<&'short i64>) -> Inner<'short> ! {alloc} {
             Inner { keep: keep, cell: Box.new(long) }
         }
         fn main() -> Unit ! {} {}"#,
@@ -381,8 +381,8 @@ fn invariant_identity_through_calls_and_typed_locals_is_rejected() {
     // check see `'long`, not an unclassified callee placeholder.
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn make<'x>(i: Inv<'x>) -> Inv<'x> ! {panic} { i }
-        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {panic} {
+        fn make<'x>(i: Inv<'x>) -> Inv<'x> ! {} { i }
+        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {} {
             let a = make(i);
             let b: Inv<'short> = a;
             let _ = b;
@@ -393,8 +393,8 @@ fn invariant_identity_through_calls_and_typed_locals_is_rejected() {
     // The reverse extension is equally unproved.
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn make<'x>(i: Inv<'x>) -> Inv<'x> ! {panic} { i }
-        fn bad<'long: 'short, 'short>(s: Inv<'short>) -> Unit ! {panic} {
+        fn make<'x>(i: Inv<'x>) -> Inv<'x> ! {} { i }
+        fn bad<'long: 'short, 'short>(s: Inv<'short>) -> Unit ! {} {
             let a = make(s);
             let b: Inv<'long> = a;
         }
@@ -405,8 +405,8 @@ fn invariant_identity_through_calls_and_typed_locals_is_rejected() {
     // removing only the direct `Call` case would leave this hole open.
     rejects(
         r#"struct Wrap<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn idr<'x>(w: &'x Wrap<'x>) -> &'x Wrap<'x> ! {panic} { w }
-        fn bad<'long: 'short, 'short>(w: &'long Wrap<'long>) -> Unit ! {panic} {
+        fn idr<'x>(w: &'x Wrap<'x>) -> &'x Wrap<'x> ! {} { w }
+        fn bad<'long: 'short, 'short>(w: &'long Wrap<'long>) -> Unit ! {} {
             let e = idr(w);
             let y: &'short Wrap<'short> = e;
             let _ = y;
@@ -417,8 +417,8 @@ fn invariant_identity_through_calls_and_typed_locals_is_rejected() {
     // Direct coercion of the call result, with no intervening local.
     rejects(
         r#"struct Wrap<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn idr<'x>(w: &'x Wrap<'x>) -> &'x Wrap<'x> ! {panic} { w }
-        fn bad<'long: 'short, 'short>(w: &'long Wrap<'long>) -> Unit ! {panic} {
+        fn idr<'x>(w: &'x Wrap<'x>) -> &'x Wrap<'x> ! {} { w }
+        fn bad<'long: 'short, 'short>(w: &'long Wrap<'long>) -> Unit ! {} {
             let y: &'short Wrap<'short> = idr(w);
             let _ = y;
         }
@@ -428,7 +428,7 @@ fn invariant_identity_through_calls_and_typed_locals_is_rejected() {
     // A builtin container read carries the caller's element label; its result
     // must not be accepted as a different invariant element lifetime.
     rejects(
-        r#"fn bad<'long: 'short, 'short>(v: &Vec<&'long mut Box<&'long i64>>) -> Unit ! {panic} {
+        r#"fn bad<'long: 'short, 'short>(v: &Vec<&'long mut Box<&'long i64>>) -> Unit ! {} {
             let x: &'short mut Box<&'short i64> = Vec.get(v, 0);
             let _ = x;
         }
@@ -445,7 +445,7 @@ fn fresh_inferred_record_identity_must_not_launder_invariance() {
     // invariant conversion.
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {panic} {
+        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {} {
             let Inv { cell } = i;
             let w = Inv { cell: cell };
             let x: Inv<'short> = w;
@@ -457,7 +457,7 @@ fn fresh_inferred_record_identity_must_not_launder_invariance() {
     // The same fresh literal may not silently extend a short source either.
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn bad<'long: 'short, 'short>(i: Inv<'short>) -> Unit ! {panic} {
+        fn bad<'long: 'short, 'short>(i: Inv<'short>) -> Unit ! {} {
             let Inv { cell } = i;
             let w = Inv { cell: cell };
             let x: Inv<'long> = w;
@@ -471,8 +471,8 @@ fn fresh_inferred_record_identity_must_not_launder_invariance() {
     // capability error later.
     rejects(
         r#"struct V<'a> { keep: &'a mut Vec<&'a i64> }
-        fn make<'x>(v: V<'x>) -> V<'x> ! {panic} { v }
-        fn bad<'long: 'short, 'short>(s: V<'short>, out: &mut Vec<&'long i64>) -> Unit ! {alloc, panic} {
+        fn make<'x>(v: V<'x>) -> V<'x> ! {} { v }
+        fn bad<'long: 'short, 'short>(s: V<'short>, out: &mut Vec<&'long i64>) -> Unit ! {alloc} {
             let a = make(s);
             let b: V<'long> = a;
             let V { keep } = b;
@@ -490,7 +490,7 @@ fn inferred_literal_identity_and_covariance_remain_accepted() {
     // inferred literal gets its actual field provenance label.
     check(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn keep<'a>(i: Inv<'a>) -> Inv<'a> ! {panic} {
+        fn keep<'a>(i: Inv<'a>) -> Inv<'a> ! {} {
             let Inv { cell } = i;
             let w = Inv { cell: cell };
             w
@@ -502,13 +502,13 @@ fn inferred_literal_identity_and_covariance_remain_accepted() {
     // parameter lifetime.
     check(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn first<'a>(window: Window<'a>) -> i64 ! {panic} { Slice.get(window.view, 0) }
-        fn local<'short>(values: &'short [i64]) -> i64 ! {panic} {
+        fn first<'a>(window: Window<'a>) -> i64 ! {} { Slice.get(window.view, 0) }
+        fn local<'short>(values: &'short [i64]) -> i64 ! {} {
             let w = Window { view: values };
             let x: Window<'short> = w;
             first(x)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 2];
             local(&values[..])
         }"#,
@@ -522,11 +522,11 @@ fn call_wide_lifetime_constraints_follow_parameter_variance() {
     // identities, even when the call result is unused Unit.
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn take<'x>(p: Inv<'x>, q: Inv<'x>) -> Unit ! {panic} {
+        fn take<'x>(p: Inv<'x>, q: Inv<'x>) -> Unit ! {} {
             let _ = p;
             let _ = q;
         }
-        fn bad<'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+        fn bad<'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {} {
             take(p, q);
         }
         fn main() -> Unit ! {} {}"#,
@@ -534,11 +534,11 @@ fn call_wide_lifetime_constraints_follow_parameter_variance() {
     );
     check(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn take<'x>(p: Inv<'x>, q: Inv<'x>) -> Unit ! {panic} {
+        fn take<'x>(p: Inv<'x>, q: Inv<'x>) -> Unit ! {} {
             let _ = p;
             let _ = q;
         }
-        fn ok<'short>(p: Inv<'short>, q: Inv<'short>) -> Unit ! {panic} {
+        fn ok<'short>(p: Inv<'short>, q: Inv<'short>) -> Unit ! {} {
             take(p, q);
         }
         fn main() -> Unit ! {} {}"#,
@@ -549,11 +549,11 @@ fn call_wide_lifetime_constraints_follow_parameter_variance() {
     check(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
         struct View<'a> { r: &'a i64 }
-        fn relax<'x>(p: Inv<'x>, v: View<'x>) -> Unit ! {panic} {
+        fn relax<'x>(p: Inv<'x>, v: View<'x>) -> Unit ! {} {
             let _ = p;
             let _ = v;
         }
-        fn ok<'long: 'short, 'short>(p: Inv<'short>, v: View<'long>) -> Unit ! {panic} {
+        fn ok<'long: 'short, 'short>(p: Inv<'short>, v: View<'long>) -> Unit ! {} {
             relax(p, v);
         }
         fn main() -> Unit ! {} {}"#,
@@ -562,11 +562,11 @@ fn call_wide_lifetime_constraints_follow_parameter_variance() {
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
         struct View<'a> { r: &'a i64 }
-        fn relax<'x>(p: Inv<'x>, v: View<'x>) -> Unit ! {panic} {
+        fn relax<'x>(p: Inv<'x>, v: View<'x>) -> Unit ! {} {
             let _ = p;
             let _ = v;
         }
-        fn bad<'long: 'short, 'short>(p: Inv<'long>, v: View<'short>) -> Unit ! {panic} {
+        fn bad<'long: 'short, 'short>(p: Inv<'long>, v: View<'short>) -> Unit ! {} {
             relax(p, v);
         }
         fn main() -> Unit ! {} {}"#,
@@ -577,13 +577,13 @@ fn call_wide_lifetime_constraints_follow_parameter_variance() {
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
         struct Sink { n: i64 }
         impl Sink {
-            fn absorb<'x>(self: &Self, p: Inv<'x>, q: Inv<'x>) -> Unit ! {panic} {
+            fn absorb<'x>(self: &Self, p: Inv<'x>, q: Inv<'x>) -> Unit ! {} {
                 let _ = self;
                 let _ = p;
                 let _ = q;
             }
         }
-        fn ok<'short>(p: Inv<'short>, q: Inv<'short>) -> Unit ! {panic} {
+        fn ok<'short>(p: Inv<'short>, q: Inv<'short>) -> Unit ! {} {
             let sink = Sink { n: 0 };
             sink.absorb(p, q);
         }
@@ -594,13 +594,13 @@ fn call_wide_lifetime_constraints_follow_parameter_variance() {
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
         struct Sink { n: i64 }
         impl Sink {
-            fn absorb<'x>(self: &Self, p: Inv<'x>, q: Inv<'x>) -> Unit ! {panic} {
+            fn absorb<'x>(self: &Self, p: Inv<'x>, q: Inv<'x>) -> Unit ! {} {
                 let _ = self;
                 let _ = p;
                 let _ = q;
             }
         }
-        fn bad<'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+        fn bad<'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {} {
             let sink = Sink { n: 0 };
             sink.absorb(p, q);
         }
@@ -615,9 +615,9 @@ fn indirect_calls_instantiate_lifetimes_from_actual_arguments() {
     // valid for unused Unit, observable results, and nested borrowed records.
     check(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn take<'x>(i: Inv<'x>) -> Unit ! {panic} { let _ = i; }
-        fn ok<'long>(i: Inv<'long>) -> Unit ! {panic} {
-            let f: fn<'x>(Inv<'x>) -> Unit ! {panic} = take;
+        fn take<'x>(i: Inv<'x>) -> Unit ! {} { let _ = i; }
+        fn ok<'long>(i: Inv<'long>) -> Unit ! {} {
+            let f: fn<'x>(Inv<'x>) -> Unit ! {} = take;
             f(i);
         }
         fn main() -> Unit ! {} {}"#,
@@ -625,11 +625,11 @@ fn indirect_calls_instantiate_lifetimes_from_actual_arguments() {
     .unwrap();
     agrees(
         r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn first<'x>(window: Window<'x>) -> i64 ! {panic} {
+        fn first<'x>(window: Window<'x>) -> i64 ! {} {
             Slice.get(window.view, window.start)
         }
-        fn main() -> i64 ! {panic} {
-            let f: fn<'x>(Window<'x>) -> i64 ! {panic} = first;
+        fn main() -> i64 ! {} {
+            let f: fn<'x>(Window<'x>) -> i64 ! {} = first;
             let values: [i64; 2] = [40, 2];
             f(Window { view: &values[..], start: 0 })
         }"#,
@@ -639,12 +639,12 @@ fn indirect_calls_instantiate_lifetimes_from_actual_arguments() {
     // Two invariant occurrences still need one identity through the arrow.
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn take<'x>(p: Inv<'x>, q: Inv<'x>) -> Unit ! {panic} {
+        fn take<'x>(p: Inv<'x>, q: Inv<'x>) -> Unit ! {} {
             let _ = p;
             let _ = q;
         }
-        fn bad<'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
-            let f: fn<'x>(Inv<'x>, Inv<'x>) -> Unit ! {panic} = take;
+        fn bad<'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {} {
+            let f: fn<'x>(Inv<'x>, Inv<'x>) -> Unit ! {} = take;
             f(p, q);
         }
         fn main() -> Unit ! {} {}"#,
@@ -654,9 +654,9 @@ fn indirect_calls_instantiate_lifetimes_from_actual_arguments() {
     // unproved invariant conversion.
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn make<'x>(i: Inv<'x>) -> Inv<'x> ! {panic} { i }
-        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {panic} {
-            let f: fn<'x>(Inv<'x>) -> Inv<'x> ! {panic} = make;
+        fn make<'x>(i: Inv<'x>) -> Inv<'x> ! {} { i }
+        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {} {
+            let f: fn<'x>(Inv<'x>) -> Inv<'x> ! {} = make;
             let a = f(i);
             let b: Inv<'short> = a;
             let _ = b;
@@ -672,8 +672,8 @@ fn nested_argument_blocks_and_lambdas_keep_their_lifetime_checks() {
     // used as an argument still checks its own annotated conversion.
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn sink(n: i64) -> Unit ! {panic} { let _ = n; }
-        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {panic} {
+        fn sink(n: i64) -> Unit ! {} { let _ = n; }
+        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {} {
             sink({ let b: Inv<'short> = i; let _ = b; 0 });
         }
         fn main() -> Unit ! {} {}"#,
@@ -681,8 +681,8 @@ fn nested_argument_blocks_and_lambdas_keep_their_lifetime_checks() {
     );
     check(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn sink(n: i64) -> Unit ! {panic} { let _ = n; }
-        fn ok<'long>(i: Inv<'long>) -> Unit ! {panic} {
+        fn sink(n: i64) -> Unit ! {} { let _ = n; }
+        fn ok<'long>(i: Inv<'long>) -> Unit ! {} {
             sink({ let b: Inv<'long> = i; let _ = b; 0 });
         }
         fn main() -> Unit ! {} {}"#,
@@ -690,8 +690,8 @@ fn nested_argument_blocks_and_lambdas_keep_their_lifetime_checks() {
     .unwrap();
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn sink(n: i64) -> Unit ! {panic} { let _ = n; }
-        fn bad<'long: 'short, 'short>(c: Bool, i: Inv<'long>) -> Unit ! {panic} {
+        fn sink(n: i64) -> Unit ! {} { let _ = n; }
+        fn bad<'long: 'short, 'short>(c: Bool, i: Inv<'long>) -> Unit ! {} {
             sink(if c { let b: Inv<'short> = i; let _ = b; 0 } else { 0 });
         }
         fn main() -> Unit ! {} {}"#,
@@ -699,8 +699,8 @@ fn nested_argument_blocks_and_lambdas_keep_their_lifetime_checks() {
     );
     check(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn sink(n: i64) -> Unit ! {panic} { let _ = n; }
-        fn ok<'long>(c: Bool, i: Inv<'long>) -> Unit ! {panic} {
+        fn sink(n: i64) -> Unit ! {} { let _ = n; }
+        fn ok<'long>(c: Bool, i: Inv<'long>) -> Unit ! {} {
             sink(if c { let b: Inv<'long> = i; let _ = b; 0 } else { 0 });
         }
         fn main() -> Unit ! {} {}"#,
@@ -710,8 +710,8 @@ fn nested_argument_blocks_and_lambdas_keep_their_lifetime_checks() {
     // lambda itself is the callee of a call.
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {alloc, panic} {
-            let _ = (fn() -> i64 ! {alloc, panic} {
+        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {alloc} {
+            let _ = (fn() -> i64 ! {alloc} {
                 let b: Inv<'short> = i;
                 let _ = b;
                 0
@@ -722,8 +722,8 @@ fn nested_argument_blocks_and_lambdas_keep_their_lifetime_checks() {
     );
     check(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn ok<'long>(i: Inv<'long>) -> Unit ! {alloc, panic} {
-            let _ = (fn() -> i64 ! {alloc, panic} {
+        fn ok<'long>(i: Inv<'long>) -> Unit ! {alloc} {
+            let _ = (fn() -> i64 ! {alloc} {
                 let b: Inv<'long> = i;
                 let _ = b;
                 0
@@ -740,8 +740,8 @@ fn unresolved_callee_result_labels_never_alias_caller_binders() {
     // name 'x and accidentally equal the caller's own 'x.
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn make<'x>(p: Inv<'x>, q: Inv<'x>) -> Inv<'x> ! {panic} { p }
-        fn bad<'x, 'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+        fn make<'x>(p: Inv<'x>, q: Inv<'x>) -> Inv<'x> ! {} { p }
+        fn bad<'x, 'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {} {
             let r = make(p, q);
             let x: Inv<'x> = r;
             let _ = x;
@@ -751,8 +751,8 @@ fn unresolved_callee_result_labels_never_alias_caller_binders() {
     );
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn make<'x>(p: Inv<'x>, q: Inv<'x>) -> Inv<'x> ! {panic} { p }
-        fn control<'x, 'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+        fn make<'x>(p: Inv<'x>, q: Inv<'x>) -> Inv<'x> ! {} { p }
+        fn control<'x, 'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {} {
             let r = make(p, q);
             let x: Inv<'short> = r;
             let _ = x;
@@ -762,8 +762,8 @@ fn unresolved_callee_result_labels_never_alias_caller_binders() {
     );
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn make<'x>(p: Inv<'x>) -> Inv<'x> ! {panic} { p }
-        fn bad<'x, 'long>(p: Inv<'long>) -> Unit ! {panic} {
+        fn make<'x>(p: Inv<'x>) -> Inv<'x> ! {} { p }
+        fn bad<'x, 'long>(p: Inv<'long>) -> Unit ! {} {
             let r = make(p);
             let x: Inv<'x> = r;
             let _ = x;
@@ -773,9 +773,9 @@ fn unresolved_callee_result_labels_never_alias_caller_binders() {
     );
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn make<'x>(p: Inv<'x>, q: Inv<'x>) -> Inv<'x> ! {panic} { p }
-        fn bad<'x, 'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
-            let f: fn<'x>(Inv<'x>, Inv<'x>) -> Inv<'x> ! {panic} = make;
+        fn make<'x>(p: Inv<'x>, q: Inv<'x>) -> Inv<'x> ! {} { p }
+        fn bad<'x, 'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {} {
+            let f: fn<'x>(Inv<'x>, Inv<'x>) -> Inv<'x> ! {} = make;
             let r = f(p, q);
             let x: Inv<'x> = r;
             let _ = x;
@@ -793,7 +793,7 @@ fn record_literal_inference_uses_only_fields_that_mention_the_lifetime() {
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
         struct W<'a, T> { inv: Inv<'a>, extra: T }
         struct B<'b> { view: &'b i64 }
-        fn ok<'long: 'short, 'short>(i: Inv<'short>, b: B<'long>) -> Unit ! {panic} {
+        fn ok<'long: 'short, 'short>(i: Inv<'short>, b: B<'long>) -> Unit ! {} {
             let w = W { inv: i, extra: b };
             let x: W<'short, B<'long>> = w;
             let _ = x;
@@ -807,10 +807,10 @@ fn record_literal_inference_uses_only_fields_that_mention_the_lifetime() {
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
         struct W<'a, T> { inv: Inv<'a>, extra: T }
         struct B<'b> { view: &'b i64 }
-        fn loose<'a, T>(inv: Inv<'a>, extra: T) -> W<'a, T> ! {panic} {
+        fn loose<'a, T>(inv: Inv<'a>, extra: T) -> W<'a, T> ! {} {
             W { inv: inv, extra: extra }
         }
-        fn bad<'long: 'short, 'short>(i: Inv<'short>, b: B<'long>) -> Unit ! {panic} {
+        fn bad<'long: 'short, 'short>(i: Inv<'short>, b: B<'long>) -> Unit ! {} {
             let w = W { inv: i, extra: b };
             let x: W<'long, B<'long>> = w;
             let _ = x;
@@ -824,8 +824,8 @@ fn record_literal_inference_uses_only_fields_that_mention_the_lifetime() {
 fn call_argument_if_joins_preserve_actual_lifetime_obligations() {
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-fn id<'x>(p: Inv<'x>) -> Inv<'x> ! {panic} { p }
-fn bad<'long: 'short, 'short>(c: Bool, p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+fn id<'x>(p: Inv<'x>) -> Inv<'x> ! {} { p }
+fn bad<'long: 'short, 'short>(c: Bool, p: Inv<'long>, q: Inv<'short>) -> Unit ! {} {
     let r = id(if c { p } else { q });
     let x: Inv<'long> = r;
     let _ = x;
@@ -836,8 +836,8 @@ fn main() -> Unit ! {} {}
     );
     rejects(
         r#"struct View<'a> { r: &'a i64 }
-fn take<'x>(v: View<'x>) -> Unit ! {panic} { let _ = v; }
-fn bad<'long: 'short, 'short>(c: Bool, p: View<'long>, q: View<'short>) -> Unit ! {panic} {
+fn take<'x>(v: View<'x>) -> Unit ! {} { let _ = v; }
+fn bad<'long: 'short, 'short>(c: Bool, p: View<'long>, q: View<'short>) -> Unit ! {} {
     take(if c { p } else { q });
 }
 fn main() -> Unit ! {} {}
@@ -852,8 +852,8 @@ fn laundering_coverage_through_union_typed_arms() {
     // the second arm uses a structural union against the same definition.
     check(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
-        fn id<'x>(v: Inv<'x>) -> Unit ! {panic} { let _ = v; }
-        fn ok<'x>(v: Inv<'x>) -> Unit ! {panic} { id(v) }
+        fn id<'x>(v: Inv<'x>) -> Unit ! {} { let _ = v; }
+        fn ok<'x>(v: Inv<'x>) -> Unit ! {} { id(v) }
         fn main() -> Unit ! {} {}"#,
     )
     .unwrap();
@@ -867,7 +867,7 @@ fn lifetimes_inside_record_type_arguments_are_invariant() {
     rejects(
         r#"struct W<'a> { view: &'a [i64] }
         struct Outer<T> { inner: T }
-        fn launder<'long: 'short, 'short>(o: Outer<W<'short>>, mark: &'long i64) -> i64 ! {panic} {
+        fn launder<'long: 'short, 'short>(o: Outer<W<'short>>, mark: &'long i64) -> i64 ! {} {
             let x: Outer<W<'long>> = o;
             let _ = mark;
             Slice.get(x.inner.view, 0)
@@ -878,7 +878,7 @@ fn lifetimes_inside_record_type_arguments_are_invariant() {
     rejects(
         r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
         struct Wrap<T> { inner: T }
-        fn launder<'long: 'short, 'short>(w: Wrap<Inv<'short>>, mark: &'long i64) -> Unit ! {panic} {
+        fn launder<'long: 'short, 'short>(w: Wrap<Inv<'short>>, mark: &'long i64) -> Unit ! {} {
             let x: Wrap<Inv<'long>> = w;
             let _ = mark; let _ = x;
         }

@@ -7,7 +7,7 @@ fn scalar_count(text: &str) -> i64 ! {} {
     Str.scalar_len(text)
 }
 
-fn initial(text: &str) -> &str ! {panic} {
+fn initial(text: &str) -> &str ! {} {
     if Str.scalar_len(text) == 0 {
         text
     } else {
@@ -19,7 +19,7 @@ fn shorten<'long: 'short, 'short>(text: &'long str) -> &'short str ! {} {
     text
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let text = "héllo";
     let view: &str = text.as_str();
     print_i64(view.len()); // 6 UTF-8 bytes

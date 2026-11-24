@@ -17,11 +17,11 @@ a second backend; the CPU side stays on Cranelift.
 
 ```kush
 #[gpu]
-fn saxpy(id: u32, a: f32, x: &GpuBuf<f32>, y: &mut GpuBuf<f32>) -> Unit ! {panic} {
+fn saxpy(id: u32, a: f32, x: &GpuBuf<f32>, y: &mut GpuBuf<f32>) -> Unit ! {} {
     GpuBuf.set(y, id, a * GpuBuf.get(x, id) + GpuBuf.get(y, id));
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let dev = match Gpu.open() {                // Result<GpuDevice, i64>
         Result.Ok(d) => d,                      // released on drop
         Result.Err(_) => { return; },
@@ -63,7 +63,7 @@ diagnostic, anything outside this subset:
 | `let`, `let mut`, `if`, `while`, `loop`, `break` | closures, function values, `dyn`, traits with dynamic dispatch |
 | calls to other `#[gpu]` functions | calls to non-`#[gpu]` functions, foreign calls, recursion (WGSL forbids it) |
 | statically dispatched trait methods that are `#[gpu]` | generic functions in v1 (monomorphized later) |
-| effect row within `{panic}` | `io`, `alloc`, `suspend`, declared operations, handlers |
+| effect row within `{}` | `io`, `alloc`, `suspend`, declared operations, handlers |
 
 - **Entry functions** are the ones passed to `Gpu.run`. The first parameter is
   `id: u32`. The others are scalars or records of scalars (sent as a uniform
@@ -109,7 +109,7 @@ buffer while the GPU uses it, and prevent passing the same buffer as `&` and
   groups (split across dimensions past the 65535 limit) and returns early when
   `id >= n`, so user code never sees an out-of-range `id`. `n` above `u32::MAX`
   panics on the CPU side.
-- `Gpu.run` needs `{io, alloc, panic}` on the caller.
+- `Gpu.run` needs `{io, alloc}` on the caller.
 - Later (still under GPU-SCOPE): a `Gpu.scope` that queues several dispatches and
   waits once, with the scope holding the loans like `Thread.scope` does, plus
   waiting as a `suspend` point for cooperative tasks.

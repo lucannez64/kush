@@ -13,7 +13,7 @@ fn rejects(source: &str, message: &str) {
     assert!(error.message.contains(message), "{error:?}");
 }
 fn main_program(body: &str) -> String {
-    format!("fn main()->Unit ! {{io,alloc,panic}} {{ {body} }}")
+    format!("fn main()->Unit ! {{io, alloc}} {{ {body} }}")
 }
 
 #[test]
@@ -49,9 +49,9 @@ fn growth_and_reserved_append_preserve_ownership_and_capacity() {
     assert_eq!(stats.buffer_growths, 2);
     let (output, stats) = execute(
         r#"
-        fn append(b:Bytes)->Bytes ! {panic} {Bytes.push_reserved(b,0)}
+        fn append(b:Bytes)->Bytes ! {} {Bytes.push_reserved(b,0)}
         fn length(b:&Bytes)->i64 ! {} {Bytes.len(b)}
-        fn main()->Unit ! {alloc,panic,io} {
+        fn main()->Unit ! {alloc, io} {
             let b=append(Bytes.with_capacity(1)); print_i64(length(&b)); print_i64(Bytes.get(&b,0));
         }
     "#,
@@ -65,12 +65,12 @@ fn nested_buffers_and_early_exits_release_every_owner() {
     let (_, stats) = execute(
         r#"
         enum Result<T,E>{Ok(T),Err(E)} enum Pair{Both(Bytes,Box<Bytes>)}
-        fn fail()->Result<i64,Bytes> ! {alloc,panic} {Err(Bytes.from("error"))}
-        fn pair()->Result<Pair,Bytes> ! {alloc,panic} {
+        fn fail()->Result<i64,Bytes> ! {alloc} {Err(Bytes.from("error"))}
+        fn pair()->Result<Pair,Bytes> ! {alloc} {
             let unused=Bytes.from("local");
             Ok(Pair.Both(Bytes.from("pending"),Box.new({fail()?;Bytes.from("unreachable")})))
         }
-        fn main()->Unit ! {alloc,panic} {
+        fn main()->Unit ! {alloc} {
             let result=pair();
             let b=Box.new(Bytes.from("boxed")); let value=Box.take(b);
             let mut buffer=Bytes.from("old"); buffer=Bytes.from("replacement");
@@ -93,7 +93,7 @@ fn buffers_are_affine_and_borrows_cannot_be_invalidated() {
     rejects(
         r#"
         fn f(a:&Bytes,b:Bytes)->Unit ! {} {}
-        fn main()->Unit ! {alloc,panic} {let b=Bytes.from("x");f(&b,Bytes.push(b,1));}
+        fn main()->Unit ! {alloc} {let b=Bytes.from("x");f(&b,Bytes.push(b,1));}
     "#,
         "while it is borrowed",
     );
@@ -125,10 +125,11 @@ fn literal_construction_and_effect_contracts_are_checked() {
         "Bytes.copy(b)",
         "Bytes.push(Bytes.with_capacity(0),1)",
     ] {
-        assert!(check(&format!("fn f(b:&Bytes)->Bytes ! {{panic}} {{{body}}}")).is_err());
+        assert!(check(&format!("fn f(b:&Bytes)->Bytes ! {{}} {{{body}}}")).is_err());
     }
-    assert!(check("fn f(b:&Bytes)->i64 ! {} {Bytes.get(b,0)}").is_err());
-    assert!(check("fn f(b:Bytes)->Bytes ! {} {Bytes.push_reserved(b,1)}").is_err());
+    // Checked reads and reserved pushes only panic, so they are pure.
+    assert!(check("fn f(b:&Bytes)->i64 ! {} {Bytes.get(b,0)}").is_ok());
+    assert!(check("fn f(b:Bytes)->Bytes ! {} {Bytes.push_reserved(b,1)}").is_ok());
     assert!(check("fn f(b:&Bytes)->i64 ! {} {Bytes.capacity(b)}").is_ok());
 }
 

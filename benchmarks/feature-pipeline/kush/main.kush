@@ -4,12 +4,12 @@ use std.result.Result;
 use std.text;
 use feature_pipeline.pipeline;
 
-fn argument(index: i64) -> i64 ! {io, alloc, panic} {
+fn argument(index: i64) -> i64 ! {io, alloc} {
     let bytes = match ENV.arg(index, Bytes.with_capacity(64)) { Ok(value) => value, Err(_) => { return -1; } };
     match text.parse_i64(&bytes) { Ok(value) => value, Err(_) => -1 }
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let n = argument(1);
     let rounds = argument(2);
     let mode = argument(3);

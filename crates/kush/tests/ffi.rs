@@ -169,7 +169,7 @@ fn foreign_resources_move_once_and_linear_resources_need_explicit_consumption() 
         "#[foreign(\"release\")] struct Handle {}\n\
          foreign \"make\" fn make() -> Handle ! {io};\n\
          foreign \"take\" fn take(value: Handle) -> i64 ! {io};\n\
-         fn main() -> i64 ! {io, panic} { let value = make(); let first = take(value); take(value) + first }",
+         fn main() -> i64 ! {io} { let value = make(); let first = take(value); take(value) + first }",
     )
     .unwrap_err();
     assert!(
@@ -181,7 +181,7 @@ fn foreign_resources_move_once_and_linear_resources_need_explicit_consumption() 
     let dropped = check(
         "#[linear] #[foreign(\"release\")] struct Handle {}\n\
          foreign \"make\" fn make() -> Handle ! {io};\n\
-         fn main() -> i64 ! {io, panic} { let value = make(); 0 }",
+         fn main() -> i64 ! {io} { let value = make(); 0 }",
     )
     .unwrap_err();
     assert!(
@@ -234,7 +234,7 @@ fn c_static_library_round_trips_scalars_bytes_errors_and_resources() {
         foreign \"kush_test_counter_new\" fn counter_new(start: i64) -> Counter ! {{io}};
         foreign \"kush_test_counter_add\" fn counter_add(counter: &Counter, n: i64) -> i64 ! {{io}};
         foreign \"kush_test_live\" fn live() -> i64 ! {{io}};
-        fn main() -> Unit ! {{io, alloc, panic}} {{
+        fn main() -> Unit ! {{io, alloc}} {{
             print_i64(add(20, 22));
             print_i64(if mul32(6, 7) == 42 {{ 1 }} else {{ 0 }});
             print_i64(if half(9.0) == 4.5 {{ 1 }} else {{ 0 }});
@@ -510,7 +510,7 @@ fn generated_rust_adapter_checks_errors_and_contains_panics() {
         foreign \"kush_rs_counter_new\" fn counter_new(start: i64) -> Counter ! {{io}};
         foreign \"kush_rs_counter_add\" fn counter_add(counter: &Counter, n: i64) -> Result<i64, i64> ! {{io}};
         foreign \"kush_rs_live\" fn live() -> i64 ! {{io}};
-        fn main() -> Unit ! {{io, alloc, panic}} {{
+        fn main() -> Unit ! {{io, alloc}} {{
             print_i64(add(19, 23));
             print_i64(match checked_div(9, 3) {{ Ok(n) => n, Err(_) => 0 }});
             print_i64(match checked_div(1, 0) {{ Ok(_) => 0, Err(code) => code }});
@@ -691,7 +691,7 @@ fn foreign_resource_layout_matches_calls_containers_and_result_slots() {
         foreign "kush_test_live" fn live() -> i64 ! {{io}};
         struct P {{ a: H, b: i64 }}
         fn pass(h: H, x: i64) -> i64 ! {{io}} {{ x }}
-        fn main() -> Unit ! {{io, alloc, panic}} {{
+        fn main() -> Unit ! {{io, alloc}} {{
             let h = make(100);
             print_i64(take(h, 7));
             print_i64(pass(make(3), 7));

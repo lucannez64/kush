@@ -7,12 +7,12 @@ use calc.lexer;
 use calc.parser;
 use calc.eval;
 
-fn report(code: i64) -> i64 ! {io, panic} {
+fn report(code: i64) -> i64 ! {io} {
     print_i64(code);
     1
 }
 
-fn run(source: Bytes) -> i64 ! {io, alloc, panic} {
+fn run(source: Bytes) -> i64 ! {io, alloc} {
     let tokens = match lexer.tokenize(&source) {
         Ok(tokens) => tokens,
         Err(lexer.LexError.UnexpectedByte(at)) => { drop(source); return report(-100 - at); },
@@ -29,7 +29,7 @@ fn run(source: Bytes) -> i64 ! {io, alloc, panic} {
     }
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     match IO.read_all(IO.stdin(), Bytes.with_capacity(4096)) {
         Ok(source) => run(source),
         Err(code) => report(-code),

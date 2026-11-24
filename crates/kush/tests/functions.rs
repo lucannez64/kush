@@ -23,36 +23,36 @@ fn rejects(source: &str, fragment: &str) {
 fn named_and_explicitly_specialized_function_values_are_callable() {
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn apply(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(x) }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn apply(f: fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} { f(x) }
+             fn main() -> i64 ! {} { apply(inc, 41) }"
         ),
         42
     );
     assert_eq!(
         value(
-            "fn id<T>(x: T) -> T ! {panic} { x }
-             fn apply(f: fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(42) }
-             fn main() -> i64 ! {panic} { apply(id::<i64>) }"
+            "fn id<T>(x: T) -> T ! {} { x }
+             fn apply(f: fn(i64) -> i64 ! {}) -> i64 ! {} { f(42) }
+             fn main() -> i64 ! {} { apply(id::<i64>) }"
         ),
         42
     );
     // A generic function value can also be inferred from the expected arrow type.
     assert_eq!(
         value(
-            "fn id<T>(x: T) -> T ! {panic} { x }
-             fn apply(f: fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(42) }
-             fn main() -> i64 ! {panic} { apply(id) }"
+            "fn id<T>(x: T) -> T ! {} { x }
+             fn apply(f: fn(i64) -> i64 ! {}) -> i64 ! {} { f(42) }
+             fn main() -> i64 ! {} { apply(id) }"
         ),
         42
     );
     // Function-valued results and immediate calls.
     assert_eq!(
         value(
-            "type Unary = fn(i64) -> i64 ! {panic};
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn get() -> Unary ! {panic} { inc }
-             fn main() -> i64 ! {panic} { get()(41) }"
+            "type Unary = fn(i64) -> i64 ! {};
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn get() -> Unary ! {} { inc }
+             fn main() -> i64 ! {} { get()(41) }"
         ),
         42
     );
@@ -61,8 +61,8 @@ fn named_and_explicitly_specialized_function_values_are_callable() {
 #[test]
 fn explicit_noncapturing_lambdas_are_function_pointers() {
     let program = check(
-        "fn main() -> i64 ! {panic} {
-            let double = fn(x: i64) -> i64 ! {panic} { x * 2 };
+        "fn main() -> i64 ! {} {
+            let double = fn(x: i64) -> i64 ! {} { x * 2 };
             double(21)
         }",
     )
@@ -78,9 +78,9 @@ fn explicit_noncapturing_lambdas_are_function_pointers() {
 #[test]
 fn capturing_closures_move_affine_owners_into_an_owned_environment() {
     let program = check(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let n = Box.new(41);
-            let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+            let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
             f(1)
         }",
     )
@@ -96,9 +96,9 @@ fn captured_owners_are_cleaned_on_drop_return_try_and_partial_arguments() {
     // Dropped without a call.
     assert_eq!(
         balanced(
-            "fn main() -> i64 ! {alloc, panic} {
+            "fn main() -> i64 ! {alloc} {
                 let n = Box.new(1);
-                let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+                let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
                 42
             }"
         ),
@@ -107,11 +107,11 @@ fn captured_owners_are_cleaned_on_drop_return_try_and_partial_arguments() {
     // Returned, then dropped by the caller.
     assert_eq!(
         balanced(
-            "fn make() -> (once fn(i64) -> i64 ! {alloc, panic}) ! {alloc, panic} {
+            "fn make() -> (once fn(i64) -> i64 ! {alloc}) ! {alloc} {
                 let n = Box.new(1);
-                fn(x: i64) -> i64 ! {panic} { Box.take(n) + x }
+                fn(x: i64) -> i64 ! {} { Box.take(n) + x }
             }
-            fn main() -> i64 ! {alloc, panic} { let f = make(); 42 }"
+            fn main() -> i64 ! {alloc} { let f = make(); 42 }"
         ),
         42
     );
@@ -120,13 +120,13 @@ fn captured_owners_are_cleaned_on_drop_return_try_and_partial_arguments() {
         balanced(
             "enum Result<T, E> { Ok(T), Err(E) }
              fn bad() -> Result<i64, i64> ! {} { Err(7) }
-             fn useit(r: Result<i64, i64>) -> Result<i64, i64> ! {alloc, panic} {
+             fn useit(r: Result<i64, i64>) -> Result<i64, i64> ! {alloc} {
                 let n = Box.new(1);
-                let g = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+                let g = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
                 let x = r?;
                 Ok(g(x))
              }
-             fn main() -> i64 ! {alloc, panic} {
+             fn main() -> i64 ! {alloc} {
                 match useit(bad()) { Ok(v) => v, Err(e) => e + 35 }
              }"
         ),
@@ -137,15 +137,15 @@ fn captured_owners_are_cleaned_on_drop_return_try_and_partial_arguments() {
         balanced(
             "enum Result<T, E> { Ok(T), Err(E) }
              fn bad() -> Result<i64, i64> ! {} { Err(7) }
-             fn useit(r: Result<i64, i64>) -> Result<i64, i64> ! {alloc, panic} {
+             fn useit(r: Result<i64, i64>) -> Result<i64, i64> ! {alloc} {
                 let n = Box.new(1);
-                let f = fn() -> Result<i64, i64> ! {alloc, panic} {
+                let f = fn() -> Result<i64, i64> ! {alloc} {
                     let x = r?;
                     Ok(Box.take(n) + x)
                 };
                 f()
              }
-             fn main() -> i64 ! {alloc, panic} {
+             fn main() -> i64 ! {alloc} {
                 match useit(bad()) { Ok(v) => v, Err(e) => e + 35 }
              }"
         ),
@@ -154,10 +154,10 @@ fn captured_owners_are_cleaned_on_drop_return_try_and_partial_arguments() {
     // An early return inside the closure body drops its remaining captures.
     assert_eq!(
         balanced(
-            "fn call(f: once fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(1) }
-             fn main() -> i64 ! {alloc, panic} {
+            "fn call(f: once fn(i64) -> i64 ! {}) -> i64 ! {} { f(1) }
+             fn main() -> i64 ! {alloc} {
                 let n = Box.new(1);
-                let g = fn(x: i64) -> i64 ! {panic} {
+                let g = fn(x: i64) -> i64 ! {} {
                     if x > 0 { return 5; }
                     Box.take(n) + x
                 };
@@ -169,12 +169,12 @@ fn captured_owners_are_cleaned_on_drop_return_try_and_partial_arguments() {
     // An early return while evaluating a later argument still drops the callee.
     assert_eq!(
         balanced(
-            "fn call(f: once fn(i64, i64) -> i64 ! {panic}) -> i64 ! {panic} {
+            "fn call(f: once fn(i64, i64) -> i64 ! {}) -> i64 ! {} {
                 f(1, { return 5; })
              }
-             fn main() -> i64 ! {alloc, panic} {
+             fn main() -> i64 ! {alloc} {
                 let n = Box.new(1);
-                let g = fn(a: i64, b: i64) -> i64 ! {panic} { Box.take(n) + a + b };
+                let g = fn(a: i64, b: i64) -> i64 ! {} { Box.take(n) + a + b };
                 call(g)
              }"
         ),
@@ -188,11 +188,11 @@ fn arrow_subtyping_is_contravariant_covariant_and_effect_inclusive() {
     // where only a narrower argument domain is promised.
     assert_eq!(
         value(
-            "fn classify(x: i64 | Bool) -> i64 ! {panic} {
+            "fn classify(x: i64 | Bool) -> i64 ! {} {
                 match x { i64 @ n => n, Bool @ b => if b { 1 } else { 0 } }
              }
-             fn apply(g: fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { g(42) }
-             fn main() -> i64 ! {panic} { apply(classify) }"
+             fn apply(g: fn(i64) -> i64 ! {}) -> i64 ! {} { g(42) }
+             fn main() -> i64 ! {} { apply(classify) }"
         ),
         42
     );
@@ -200,44 +200,44 @@ fn arrow_subtyping_is_contravariant_covariant_and_effect_inclusive() {
     // expected.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn apply(f: fn(i64) -> i64 | Bool ! {panic}) -> i64 ! {panic} {
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn apply(f: fn(i64) -> i64 | Bool ! {}) -> i64 ! {} {
                 match f(41) { i64 @ n => n, Bool @ _ => 0 }
              }
-             fn main() -> i64 ! {panic} { apply(inc) }"
+             fn main() -> i64 ! {} { apply(inc) }"
         ),
         42
     );
     // Effect-row inclusion: fewer effects may be used where more are allowed.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn apply(f: fn(i64) -> i64 ! {alloc, panic}) -> i64 ! {alloc, panic} {
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn apply(f: fn(i64) -> i64 ! {alloc}) -> i64 ! {alloc} {
                 f(41)
              }
-             fn main() -> i64 ! {alloc, panic} { apply(inc) }"
+             fn main() -> i64 ! {alloc} { apply(inc) }"
         ),
         42
     );
     // An allocating/effectful callee may not be hidden behind a pure signature.
     rejects(
-        "fn make(x: i64) -> i64 ! {alloc, panic} { Box.take(Box.new(x)) }
-         fn apply(f: fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(42) }
-         fn main() -> i64 ! {panic} { apply(make) }",
+        "fn make(x: i64) -> i64 ! {alloc} { Box.take(Box.new(x)) }
+         fn apply(f: fn(i64) -> i64 ! {}) -> i64 ! {} { f(42) }
+         fn main() -> i64 ! {} { apply(make) }",
         "type mismatch",
     );
     // The wrong parameter direction is rejected.
     rejects(
-        "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn apply(g: fn(i64 | Bool) -> i64 ! {panic}) -> i64 ! {panic} { g(42) }
-         fn main() -> i64 ! {panic} { apply(inc) }",
+        "fn inc(x: i64) -> i64 ! {} { x + 1 }
+         fn apply(g: fn(i64 | Bool) -> i64 ! {}) -> i64 ! {} { g(42) }
+         fn main() -> i64 ! {} { apply(inc) }",
         "type mismatch",
     );
     // A wider result cannot be narrowed.
     rejects(
-        "fn choose() -> i64 | Bool ! {panic} { 1 }
-         fn apply(f: fn() -> i64 ! {panic}) -> i64 ! {panic} { f() }
-         fn main() -> i64 ! {panic} { apply(choose) }",
+        "fn choose() -> i64 | Bool ! {} { 1 }
+         fn apply(f: fn() -> i64 ! {}) -> i64 ! {} { f() }
+         fn main() -> i64 ! {} { apply(choose) }",
         "type mismatch",
     );
 }
@@ -246,28 +246,28 @@ fn arrow_subtyping_is_contravariant_covariant_and_effect_inclusive() {
 fn function_grade_contracts_reject_unsound_modality_conversions() {
     assert_eq!(
         value(
-            "fn twice(x: i64 @[2]) -> i64 ! {panic} { x + x }
-             fn apply(f: fn(i64 @[2]) -> i64 ! {panic}, x: i64 @[2]) -> i64 ! {panic} { f(x) }
-             fn main() -> i64 ! {panic} { apply(twice, 21) }"
+            "fn twice(x: i64 @[2]) -> i64 ! {} { x + x }
+             fn apply(f: fn(i64 @[2]) -> i64 ! {}, x: i64 @[2]) -> i64 ! {} { f(x) }
+             fn main() -> i64 ! {} { apply(twice, 21) }"
         ),
         42
     );
     rejects(
-        "fn once(x: i64 @[1]) -> i64 ! {panic} { x }
-         fn apply(f: fn(i64 @[2]) -> i64 ! {panic}) -> i64 ! {panic} { f(21) }
-         fn main() -> i64 ! {panic} { apply(once) }",
+        "fn once(x: i64 @[1]) -> i64 ! {} { x }
+         fn apply(f: fn(i64 @[2]) -> i64 ! {}) -> i64 ! {} { f(21) }
+         fn main() -> i64 ! {} { apply(once) }",
         "type mismatch",
     );
     rejects(
-        "fn twice(x: i64 @[2]) -> i64 ! {panic} { x + x }
-         fn apply(f: fn(i64 @[1]) -> i64 ! {panic}) -> i64 ! {panic} { f(21) }
-         fn main() -> i64 ! {panic} { apply(twice) }",
+        "fn twice(x: i64 @[2]) -> i64 ! {} { x + x }
+         fn apply(f: fn(i64 @[1]) -> i64 ! {}) -> i64 ! {} { f(21) }
+         fn main() -> i64 ! {} { apply(twice) }",
         "type mismatch",
     );
     rejects(
-        "fn any(x: i64) -> i64 ! {panic} { x + x }
-         fn apply(f: fn(i64 @[1]) -> i64 ! {panic}) -> i64 ! {panic} { f(21) }
-         fn main() -> i64 ! {panic} { apply(any) }",
+        "fn any(x: i64) -> i64 ! {} { x + x }
+         fn apply(f: fn(i64 @[1]) -> i64 ! {}) -> i64 ! {} { f(21) }
+         fn main() -> i64 ! {} { apply(any) }",
         "type mismatch",
     );
 }
@@ -276,21 +276,21 @@ fn function_grade_contracts_reject_unsound_modality_conversions() {
 fn parameter_and_result_union_repacking_uses_checked_adapters() {
     assert_eq!(
         value(
-            "fn classify(x: i64 | Bool | Bytes) -> i64 ! {panic} {
+            "fn classify(x: i64 | Bool | Bytes) -> i64 ! {} {
                 match x { i64 @ n => n, Bool @ b => if b { 41 } else { 0 }, Bytes @ _ => 0 }
              }
-             fn apply(g: fn(i64 | Bool) -> i64 ! {panic}) -> i64 ! {panic} { g(true) }
-             fn main() -> i64 ! {panic} { apply(classify) }"
+             fn apply(g: fn(i64 | Bool) -> i64 ! {}) -> i64 ! {} { g(true) }
+             fn main() -> i64 ! {} { apply(classify) }"
         ),
         41
     );
     assert_eq!(
         value(
-            "fn make() -> i64 | Bool ! {panic} { 41 }
-             fn apply(f: fn() -> i64 | Bool | Bytes ! {panic}) -> i64 ! {panic} {
+            "fn make() -> i64 | Bool ! {} { 41 }
+             fn apply(f: fn() -> i64 | Bool | Bytes ! {}) -> i64 ! {} {
                 match f() { i64 @ n => n, Bool @ _ => 0, Bytes @ _ => 0 }
              }
-             fn main() -> i64 ! {panic} { apply(make) }"
+             fn main() -> i64 ! {} { apply(make) }"
         ),
         41
     );
@@ -298,10 +298,10 @@ fn parameter_and_result_union_repacking_uses_checked_adapters() {
     // source closure and releases both environments on the call.
     assert_eq!(
         balanced(
-            "fn apply(f: once fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(42) }
-             fn main() -> i64 ! {alloc, panic} {
+            "fn apply(f: once fn(i64) -> i64 ! {}) -> i64 ! {} { f(42) }
+             fn main() -> i64 ! {alloc} {
                 let n = Box.new(1);
-                let g: once fn(i64 | Bool) -> i64 ! {panic} = fn(x: i64 | Bool) -> i64 ! {panic} {
+                let g: once fn(i64 | Bool) -> i64 ! {} = fn(x: i64 | Bool) -> i64 ! {} {
                     match x { i64 @ v => v, Bool @ b => if b { 1 } else { 0 } } + Box.take(n)
                 };
                 apply(g)
@@ -316,9 +316,9 @@ fn pure_function_pointers_require_no_allocation_and_noalloc_rejects_adapters() {
     assert_eq!(
         value(
             "
-             fn apply(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(x) }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+             fn apply(f: fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} { f(x) }
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { apply(inc, 41) }"
         ),
         42
     );
@@ -326,28 +326,28 @@ fn pure_function_pointers_require_no_allocation_and_noalloc_rejects_adapters() {
     assert_eq!(
         value(
             "
-             fn apply(f: fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(42) }
-             fn classify(x: i64 | Bool) -> i64 ! {panic} {
+             fn apply(f: fn(i64) -> i64 ! {}) -> i64 ! {} { f(42) }
+             fn classify(x: i64 | Bool) -> i64 ! {} {
                 match x { i64 @ n => n, Bool @ b => if b { 1 } else { 0 } }
              }
-             fn main() -> i64 ! {panic} { apply(classify) }"
+             fn main() -> i64 ! {} { apply(classify) }"
         ),
         42
     );
     rejects(
         "
-         fn make(n: Box<i64>) -> i64 ! {panic} {
-            let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+         fn make(n: Box<i64>) -> i64 ! {} {
+            let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
             f(41)
          }
-         fn main() -> i64 ! {alloc, panic} { make(Box.new(1)) }",
+         fn main() -> i64 ! {alloc} { make(Box.new(1)) }",
         "requires effects {alloc}",
     );
     rejects(
-        "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn use_once(f: once fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(41) }
-         fn main() -> i64 ! {panic} {
-            let g: fn(i64) -> i64 ! {panic} = inc;
+        "fn inc(x: i64) -> i64 ! {} { x + 1 }
+         fn use_once(f: once fn(i64) -> i64 ! {}) -> i64 ! {} { f(41) }
+         fn main() -> i64 ! {} {
+            let g: fn(i64) -> i64 ! {} = inc;
             use_once(g)
          }",
         "requires effects {alloc}",
@@ -360,10 +360,10 @@ fn capturing_borrows_are_scoped_and_linear_captures_are_checked() {
     // called while the owner is live. Construction allocates the environment.
     assert_eq!(
         value(
-            "fn main() -> i64 ! {alloc, panic} {
+            "fn main() -> i64 ! {alloc} {
                 let values: [i64; 3] = [10, 20, 30];
                 let view: &[i64] = &values[..];
-                let f = fn(i: i64) -> i64 ! {panic} { Slice.get(view, i) + 1 };
+                let f = fn(i: i64) -> i64 ! {} { Slice.get(view, i) + 1 };
                 f(1)
              }"
         ),
@@ -372,20 +372,20 @@ fn capturing_borrows_are_scoped_and_linear_captures_are_checked() {
     // Capturing a borrowed view cannot be used to launder it through an
     // ordinary function value or an alias.
     rejects(
-        "fn id<T>(value: T) -> T ! {panic} { value }
-         fn main() -> i64 ! {alloc, panic} {
+        "fn id<T>(value: T) -> T ! {} { value }
+         fn main() -> i64 ! {alloc} {
             let values: [i64; 2] = [1, 2];
             let view: &[i64] = &values[..];
-            let f = fn(x: i64) -> i64 ! {panic} { Slice.get(view, 0) + x };
+            let f = fn(x: i64) -> i64 ! {} { Slice.get(view, 0) + x };
             id(f)(0)
          }",
         "scoped",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let values: [i64; 2] = [1, 2];
             let view: &[i64] = &values[..];
-            let f = fn(x: i64) -> i64 ! {panic} { Slice.get(view, 0) + x };
+            let f = fn(x: i64) -> i64 ! {} { Slice.get(view, 0) + x };
             let alias = f;
             alias(0)
          }",
@@ -394,19 +394,19 @@ fn capturing_borrows_are_scoped_and_linear_captures_are_checked() {
     // A linear capture is legal, but the resulting callable is linear-once and
     // the lambda body must consume the capture on every path.
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let n: Box<i64> @[1] = Box.new(1);
-            let f = fn(x: i64) -> i64 ! {panic} { x };
+            let f = fn(x: i64) -> i64 ! {} { x };
             f(42)
          }",
         "linear value is not consumed",
     );
     assert_eq!(
         value(
-            "fn main() -> i64 ! {alloc, panic} {
+            "fn main() -> i64 ! {alloc} {
                 let n: Box<i64> @[1] = Box.new(20);
-                let f: linear once fn(i64) -> i64 ! {panic} =
-                    fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 };
+                let f: linear once fn(i64) -> i64 ! {} =
+                    fn(x: i64) -> i64 ! {} { Box.take(n) + x + 1 };
                 f(21)
              }"
         ),
@@ -425,18 +425,18 @@ fn function_values_do_not_bypass_erased_evidence_and_unions_narrow_callables() {
     // are narrowed by a checked type pattern.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn answer() -> i64 ! {panic} { 42 }
-             fn main() -> i64 ! {panic} {
-                let f: fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = inc;
-                let g: fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = answer;
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn answer() -> i64 ! {} { 42 }
+             fn main() -> i64 ! {} {
+                let f: fn(i64) -> i64 ! {} | fn() -> i64 ! {} = inc;
+                let g: fn(i64) -> i64 ! {} | fn() -> i64 ! {} = answer;
                 let a = match f {
-                    fn(i64) -> i64 ! {panic} @ h => h(41),
-                    fn() -> i64 ! {panic} @ h => h(),
+                    fn(i64) -> i64 ! {} @ h => h(41),
+                    fn() -> i64 ! {} @ h => h(),
                 };
                 let b = match g {
-                    fn(i64) -> i64 ! {panic} @ h => h(41),
-                    fn() -> i64 ! {panic} @ h => h(),
+                    fn(i64) -> i64 ! {} @ h => h(41),
+                    fn() -> i64 ! {} @ h => h(),
                 };
                 a + b - 42
              }"
@@ -445,10 +445,10 @@ fn function_values_do_not_bypass_erased_evidence_and_unions_narrow_callables() {
     );
     // Incomparable arrows need overloads, not a false claim of disjointness.
     rejects(
-        "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        "fn inc(x: i64) -> i64 ! {} { x + 1 }
          fn flag(x: Bool) -> Bool ! {} { x }
-         fn main() -> i64 ! {panic} {
-            let f: fn(i64) -> i64 ! {panic} & fn(Bool) -> Bool ! {} = inc;
+         fn main() -> i64 ! {} {
+            let f: fn(i64) -> i64 ! {} & fn(Bool) -> Bool ! {} = inc;
             0
          }",
         "incomparable callable intersections",
@@ -458,34 +458,34 @@ fn function_values_do_not_bypass_erased_evidence_and_unions_narrow_callables() {
 #[test]
 fn wrong_signatures_and_use_after_move_are_rejected() {
     rejects(
-        "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn main() -> i64 ! {panic} {
-            let f: fn(i64) -> i64 ! {panic} = inc;
+        "fn inc(x: i64) -> i64 ! {} { x + 1 }
+         fn main() -> i64 ! {} {
+            let f: fn(i64) -> i64 ! {} = inc;
             f(true)
          }",
         "type mismatch",
     );
     rejects(
         "fn zero() -> i64 ! {} { 42 }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
             let f: fn() -> i64 ! {} = zero;
             f(1)
          }",
         "wrong argument count",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let n = Box.new(1);
-            let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+            let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
             f(1);
             f(2)
          }",
         "use after move",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let n = Box.new(1);
-            let f: fn(i64) -> i64 ! {panic} = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+            let f: fn(i64) -> i64 ! {} = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
             0
          }",
         "capturing lambda",
@@ -496,42 +496,42 @@ fn wrong_signatures_and_use_after_move_are_rejected() {
 fn indirect_recursion_and_aggregate_arguments_and_results_work() {
     assert_eq!(
         value(
-            "fn apply(f: fn(i64) -> i64 ! {panic}, n: i64) -> i64 ! {panic} { f(n) }
-             fn down(n: i64) -> i64 ! {panic} {
+            "fn apply(f: fn(i64) -> i64 ! {}, n: i64) -> i64 ! {} { f(n) }
+             fn down(n: i64) -> i64 ! {} {
                 if n == 0 { 0 } else { 1 + apply(down, n - 1) }
              }
-             fn main() -> i64 ! {panic} { down(8) }"
+             fn main() -> i64 ! {} { down(8) }"
         ),
         8
     );
     assert_eq!(
         value(
             "struct Pair { left: i64, right: i64 }
-             fn make(x: i64) -> Pair ! {panic} { Pair { left: x, right: x + 2 } }
-             fn sum(p: Pair) -> i64 ! {panic} { p.left + p.right }
-             fn apply(f: fn(i64) -> Pair ! {panic}, x: i64) -> i64 ! {panic} {
+             fn make(x: i64) -> Pair ! {} { Pair { left: x, right: x + 2 } }
+             fn sum(p: Pair) -> i64 ! {} { p.left + p.right }
+             fn apply(f: fn(i64) -> Pair ! {}, x: i64) -> i64 ! {} {
                 let p = f(x);
                 sum(p)
              }
-             fn main() -> i64 ! {panic} { apply(make, 20) }"
+             fn main() -> i64 ! {} { apply(make, 20) }"
         ),
         42
     );
     assert_eq!(
         value(
-            "fn take(b: Box<i64>) -> i64 ! {panic} { Box.take(b) }
-             fn apply(f: fn(Box<i64>) -> i64 ! {panic}, b: Box<i64>) -> i64 ! {panic} { f(b) }
-             fn main() -> i64 ! {alloc, panic} { apply(take, Box.new(42)) }"
+            "fn take(b: Box<i64>) -> i64 ! {} { Box.take(b) }
+             fn apply(f: fn(Box<i64>) -> i64 ! {}, b: Box<i64>) -> i64 ! {} { f(b) }
+             fn main() -> i64 ! {alloc} { apply(take, Box.new(42)) }"
         ),
         42
     );
     assert_eq!(
         value(
-            "fn make(x: i64) -> Box<i64> ! {alloc, panic} { Box.new(x) }
-             fn apply(f: fn(i64) -> Box<i64> ! {alloc, panic}) -> i64 ! {alloc, panic} {
+            "fn make(x: i64) -> Box<i64> ! {alloc} { Box.new(x) }
+             fn apply(f: fn(i64) -> Box<i64> ! {alloc}) -> i64 ! {alloc} {
                 Box.take(f(42))
              }
-             fn main() -> i64 ! {alloc, panic} { apply(make) }"
+             fn main() -> i64 ! {alloc} { apply(make) }"
         ),
         42
     );
@@ -541,15 +541,15 @@ fn indirect_recursion_and_aggregate_arguments_and_results_work() {
 fn generic_higher_order_apply_and_map_infer_and_specialize() {
     assert_eq!(
         value(
-            "fn apply<T, U>(x: T, f: fn(T) -> U ! {panic}) -> U ! {panic} { f(x) }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { apply(41, inc) }"
+            "fn apply<T, U>(x: T, f: fn(T) -> U ! {}) -> U ! {} { f(x) }
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { apply(41, inc) }"
         ),
         42
     );
     assert_eq!(
         value(
-            "fn map<T, U>(values: Vec<T>, f: fn(T) -> U ! {alloc, panic}) -> Vec<U> ! {alloc, panic} {
+            "fn map<T, U>(values: Vec<T>, f: fn(T) -> U ! {alloc}) -> Vec<U> ! {alloc} {
                 let mut out: Vec<U> = Vec.new();
                 let mut i = 0;
                 while i < Vec.len(&values) {
@@ -558,8 +558,8 @@ fn generic_higher_order_apply_and_map_infer_and_specialize() {
                 }
                 out
              }
-             fn double(x: i64) -> i64 ! {panic} { x * 2 }
-             fn main() -> i64 ! {alloc, panic} {
+             fn double(x: i64) -> i64 ! {} { x * 2 }
+             fn main() -> i64 ! {alloc} {
                 let mut v: Vec<i64> = Vec.new();
                 v = Vec.push(v, 10); v = Vec.push(v, 11);
                 let w = map(v, double);
@@ -571,9 +571,9 @@ fn generic_higher_order_apply_and_map_infer_and_specialize() {
     // An explicit specialization produces a distinct callable value.
     assert_eq!(
         value(
-            "fn id<T>(x: T) -> T ! {panic} { x }
-             fn apply(f: fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(42) }
-             fn main() -> i64 ! {panic} { apply(id::<i64>) }"
+            "fn id<T>(x: T) -> T ! {} { x }
+             fn apply(f: fn(i64) -> i64 ! {}) -> i64 ! {} { f(42) }
+             fn main() -> i64 ! {} { apply(id::<i64>) }"
         ),
         42
     );
@@ -631,11 +631,11 @@ mod native_functions {
     fn native_and_reference_agree_on_function_values_adapters_and_closures() {
         compare(include_str!("../../../examples/functions.kush"));
         compare(
-            "fn apply(f: once fn(i64) -> i64 ! {panic}) -> i64 ! {panic} { f(42) }
-             fn classify(x: i64 | Bool) -> i64 ! {panic} {
+            "fn apply(f: once fn(i64) -> i64 ! {}) -> i64 ! {} { f(42) }
+             fn classify(x: i64 | Bool) -> i64 ! {} {
                 match x { i64 @ n => n, Bool @ b => if b { 1 } else { 0 } }
              }
-             fn main() -> i64 ! {panic} { apply(classify) }",
+             fn main() -> i64 ! {} { apply(classify) }",
         );
     }
 
@@ -643,46 +643,46 @@ mod native_functions {
     fn native_and_reference_agree_on_effect_rows_callable_unions_and_linear_closures() {
         compare(include_str!("../../../examples/effectful-functions.kush"));
         compare(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn answer() -> i64 ! {panic} { 42 }
-             fn main() -> i64 ! {panic} {
-                let f: fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = inc;
-                let w: i64 | fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = f;
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn answer() -> i64 ! {} { 42 }
+             fn main() -> i64 ! {} {
+                let f: fn(i64) -> i64 ! {} | fn() -> i64 ! {} = inc;
+                let w: i64 | fn(i64) -> i64 ! {} | fn() -> i64 ! {} = f;
                 match w {
                     i64 @ n => n,
-                    fn(i64) -> i64 ! {panic} @ h => h(41),
-                    fn() -> i64 ! {panic} @ h => h(),
+                    fn(i64) -> i64 ! {} @ h => h(41),
+                    fn() -> i64 ! {} @ h => h(),
                 }
              }",
         );
         compare(
-            "fn main() -> i64 ! {alloc, panic} {
+            "fn main() -> i64 ! {alloc} {
                 let n: Box<i64> @[1] = Box.new(20);
-                let f: linear once fn(i64) -> i64 ! {panic} =
-                    fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 };
-                let g: linear once fn(i64) -> i64 ! {panic} = f;
+                let f: linear once fn(i64) -> i64 ! {} =
+                    fn(x: i64) -> i64 ! {} { Box.take(n) + x + 1 };
+                let g: linear once fn(i64) -> i64 ! {} = f;
                 g(21)
              }",
         );
         compare(
-            "fn main() -> i64 ! {alloc, panic} {
+            "fn main() -> i64 ! {alloc} {
                 let n: Box<i64> @[1] = Box.new(20);
-                let f: linear once fn(i64 | Bool) -> i64 ! {panic} =
-                    fn(x: i64 | Bool) -> i64 ! {panic} {
+                let f: linear once fn(i64 | Bool) -> i64 ! {} =
+                    fn(x: i64 | Bool) -> i64 ! {} {
                         Box.take(n) + match x { i64 @ v => v + 1, Bool @ _ => 0 }
                     };
-                let g: linear once fn(i64) -> i64 ! {panic} = f;
+                let g: linear once fn(i64) -> i64 ! {} = f;
                 g(21)
              }",
         );
         compare(
             "struct Pair { left: i64, right: i64 }
-             fn make(x: i64) -> Pair ! {panic} { Pair { left: x, right: x + 2 } }
-             fn main() -> i64 ! {panic} {
-                let f: fn(i64) -> Pair ! {panic} | fn() -> Pair ! {panic} = make;
+             fn make(x: i64) -> Pair ! {} { Pair { left: x, right: x + 2 } }
+             fn main() -> i64 ! {} {
+                let f: fn(i64) -> Pair ! {} | fn() -> Pair ! {} = make;
                 let p = match f {
-                    fn(i64) -> Pair ! {panic} @ h => h(20),
-                    fn() -> Pair ! {panic} @ h => h(),
+                    fn(i64) -> Pair ! {} @ h => h(20),
+                    fn() -> Pair ! {} @ h => h(),
                 };
                 p.left + p.right
              }",
@@ -692,7 +692,7 @@ mod native_functions {
 
 #[test]
 fn arrow_intersection_preserves_subtype_absorption() {
-    let p=check("fn f(x:i64)->i64 ! {} {x} fn main()->i64 ! {panic} {let both:(fn(i64)->i64 ! {}) & (fn(i64)->i64 ! {panic})=f;both(42)}").unwrap();
+    let p=check("fn f(x:i64)->i64 ! {} {x} fn main()->i64 ! {} {let both:(fn(i64)->i64 ! {}) & (fn(i64)->i64 ! {})=f;both(42)}").unwrap();
     assert_eq!(p.evaluate(&mut Vec::new()).unwrap(), 42);
 }
 
@@ -700,17 +700,17 @@ fn arrow_intersection_preserves_subtype_absorption() {
 fn effect_polymorphic_higher_order_functions_infer_and_propagate() {
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} { f(x) }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} { f(x) }
+             fn main() -> i64 ! {} { apply(inc, 41) }"
         ),
         42
     );
     assert_eq!(
         value(
-            "fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
-             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} { f(x) }
-             fn main() -> i64 ! {io, panic} { apply(io_inc, 41) }"
+            "fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
+             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} { f(x) }
+             fn main() -> i64 ! {io} { apply(io_inc, 41) }"
         ),
         42
     );
@@ -718,17 +718,17 @@ fn effect_polymorphic_higher_order_functions_infer_and_propagate() {
     assert_eq!(
         value(
             "fn id(x: i64) -> i64 ! {} { x }
-             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} { f(x) }
-             fn main() -> i64 ! {panic} { apply(id, 42) }"
+             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} { f(x) }
+             fn main() -> i64 ! {} { apply(id, 42) }"
         ),
         42
     );
     // Explicit row specialization is a separate generic category.
     assert_eq!(
         value(
-            "fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
-             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} { f(x) }
-             fn main() -> i64 ! {io, panic} { apply::<io | panic>(io_inc, 41) }"
+            "fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
+             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} { f(x) }
+             fn main() -> i64 ! {io} { apply::<io>(io_inc, 41) }"
         ),
         42
     );
@@ -736,12 +736,12 @@ fn effect_polymorphic_higher_order_functions_infer_and_propagate() {
     // caller rather than being hidden by the intermediate signature.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} { f(x) }
-             fn outer<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} { f(x) }
+             fn outer<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
                 apply(f, x)
              }
-             fn main() -> i64 ! {panic} { outer(inc, 41) }"
+             fn main() -> i64 ! {} { outer(inc, 41) }"
         ),
         42
     );
@@ -749,20 +749,20 @@ fn effect_polymorphic_higher_order_functions_infer_and_propagate() {
     assert_eq!(
         value(
             "type Mapper<e: Effects> = fn(i64) -> i64 ! {e};
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn map_one<e: Effects>(f: Mapper<e>, x: i64) -> i64 ! {panic, e} { f(x) }
-             fn main() -> i64 ! {panic} { map_one(inc, 41) }"
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn map_one<e: Effects>(f: Mapper<e>, x: i64) -> i64 ! {e} { f(x) }
+             fn main() -> i64 ! {} { map_one(inc, 41) }"
         ),
         42
     );
     // Type, effect, and grade parameters can coexist in declaration order.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn mix<T, e: Effects, G: Grade>(x: T @[G], f: fn(T) -> T ! {e}) -> T ! {panic, e} {
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn mix<T, e: Effects, G: Grade>(x: T @[G], f: fn(T) -> T ! {e}) -> T ! {e} {
                 f(x)
              }
-             fn main() -> i64 ! {panic} { mix::<i64, panic, 1>(41, inc) }"
+             fn main() -> i64 ! {io} { mix::<i64, io, 1>(41, inc) }"
         ),
         42
     );
@@ -770,23 +770,23 @@ fn effect_polymorphic_higher_order_functions_infer_and_propagate() {
     // expected arrow type's effect row.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} { f(x) }
-             fn take(g: fn(fn(i64) -> i64 ! {panic}, i64) -> i64 ! {panic}) -> i64 ! {panic} {
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} { f(x) }
+             fn take(g: fn(fn(i64) -> i64 ! {}, i64) -> i64 ! {}) -> i64 ! {} {
                 g(inc, 41)
              }
-             fn main() -> i64 ! {panic} { take(apply) }"
+             fn main() -> i64 ! {} { take(apply) }"
         ),
         42
     );
     // A lambda's declared effect row may mention an enclosing row variable.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn wrap<e: Effects>(f: fn(i64) -> i64 ! {e}) -> once fn(i64) -> i64 ! {e} ! {alloc, panic} {
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn wrap<e: Effects>(f: fn(i64) -> i64 ! {e}) -> once fn(i64) -> i64 ! {e} ! {alloc} {
                 fn(x: i64) -> i64 ! {e} { f(x) }
              }
-             fn main() -> i64 ! {alloc, panic} {
+             fn main() -> i64 ! {alloc} {
                 let g = wrap(inc);
                 g(41)
              }"
@@ -797,8 +797,8 @@ fn effect_polymorphic_higher_order_functions_infer_and_propagate() {
     // through the loop and the result signature.
     assert_eq!(
         value(
-            "fn double(x: i64) -> i64 ! {panic} { x * 2 }
-             fn map<T, U, e: Effects>(values: Vec<T>, f: fn(T) -> U ! {e}) -> Vec<U> ! {alloc, panic, e} {
+            "fn double(x: i64) -> i64 ! {} { x * 2 }
+             fn map<T, U, e: Effects>(values: Vec<T>, f: fn(T) -> U ! {e}) -> Vec<U> ! {alloc, e} {
                 let mut out: Vec<U> = Vec.new();
                 let mut i = 0;
                 while i < Vec.len(&values) {
@@ -807,7 +807,7 @@ fn effect_polymorphic_higher_order_functions_infer_and_propagate() {
                 }
                 out
              }
-             fn main() -> i64 ! {alloc, panic} {
+             fn main() -> i64 ! {alloc} {
                 let mut v: Vec<i64> = Vec.new();
                 v = Vec.push(v, 10);
                 v = Vec.push(v, 11);
@@ -822,9 +822,9 @@ fn effect_polymorphic_higher_order_functions_infer_and_propagate() {
 #[test]
 fn effect_specialization_is_checked_and_stays_separate_from_other_categories() {
     rejects(
-        "fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
-         fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} { f(x) }
-         fn main() -> i64 ! {panic} { apply::<io>(alloc_id, 1) }",
+        "fn alloc_id(x: i64) -> i64 ! {alloc} { x }
+         fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} { f(x) }
+         fn main() -> i64 ! {} { apply::<io>(alloc_id, 1) }",
         "type mismatch",
     );
     // An unconstrained open row defaults to the principal (least) row `{}`.
@@ -833,20 +833,20 @@ fn effect_specialization_is_checked_and_stays_separate_from_other_categories() {
     // the body actually performs.
     assert_eq!(
         value(
-            "fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { x }
-             fn main() -> i64 ! {panic} { apply(1) }"
+            "fn apply<e: Effects>(x: i64) -> i64 ! {e} { x }
+             fn main() -> i64 ! {} { apply(1) }"
         ),
         1
     );
     rejects(
-        "fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { alloc_id(x) }
-         fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
-         fn main() -> i64 ! {alloc, panic} { apply(1) }",
+        "fn apply<e: Effects>(x: i64) -> i64 ! {e} { alloc_id(x) }
+         fn alloc_id(x: i64) -> i64 ! {alloc} { x }
+         fn main() -> i64 ! {alloc} { apply(1) }",
         "requires effects {alloc}",
     );
     rejects(
-        "fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { x }
-         fn main() -> i64 ! {panic} { apply::<i64>(1) }",
+        "fn apply<e: Effects>(x: i64) -> i64 ! {e} { x }
+         fn main() -> i64 ! {} { apply::<i64>(1) }",
         "expected a builtin effect",
     );
     // A shared row variable accumulates the union of every higher-order
@@ -854,36 +854,36 @@ fn effect_specialization_is_checked_and_stays_separate_from_other_categories() {
     // call would hide an effect introduced by a later argument.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
              fn two<e: Effects>(f: fn(i64) -> i64 ! {e}, g: fn(i64) -> i64 ! {e}, x: i64)
-                 -> i64 ! {panic, e} { g(f(x)) }
-             fn main() -> i64 ! {io, panic} { two(inc, io_inc, 1) }"
+                 -> i64 ! {e} { g(f(x)) }
+             fn main() -> i64 ! {io} { two(inc, io_inc, 1) }"
         ),
         3
     );
     rejects(
-        "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        "fn inc(x: i64) -> i64 ! {} { x + 1 }
+         fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
          fn two<e: Effects>(f: fn(i64) -> i64 ! {e}, g: fn(i64) -> i64 ! {e}, x: i64)
-             -> i64 ! {panic, e} { g(f(x)) }
-         fn main() -> i64 ! {panic} { two(inc, io_inc, 1) }",
+             -> i64 ! {e} { g(f(x)) }
+         fn main() -> i64 ! {} { two(inc, io_inc, 1) }",
         "requires effects {io}",
     );
     rejects(
-        "fn four<G: Grade>(x: i64 @[G * 2]) -> i64 ! {panic} { x + x + x + x }
-         fn main() -> i64 ! {panic} { four::<io>(1) }",
+        "fn four<G: Grade>(x: i64 @[G * 2]) -> i64 ! {} { x + x + x + x }
+         fn main() -> i64 ! {} { four::<io>(1) }",
         "grade",
     );
     rejects(
-        "fn first<N: Nat>(xs: [i64; N]) -> i64 ! {panic} { xs[0] }
-         fn main() -> i64 ! {panic} { first::<i64>([42, 0]) }",
+        "fn first<N: Nat>(xs: [i64; N]) -> i64 ! {} { xs[0] }
+         fn main() -> i64 ! {} { first::<i64>([42, 0]) }",
         "array length must be a constant",
     );
     rejects(
         "#[noalloc]
-         fn poly<e: Effects>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
-         fn main() -> i64 ! {panic} { 42 }",
+         fn poly<e: Effects>(f: fn(i64) -> i64 ! {e}) -> i64 ! {e} { f(1) }
+         fn main() -> i64 ! {} { 42 }",
         "#[noalloc] was removed",
     );
 }
@@ -893,16 +893,16 @@ fn noalloc_higher_order_contracts_are_checked_independently_of_specialization() 
     assert_eq!(
         value(
             "
-             fn apply(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(x) }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+             fn apply(f: fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} { f(x) }
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { apply(inc, 41) }"
         ),
         42
     );
     rejects(
-        "fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
-         fn apply(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(x) }
-         fn main() -> i64 ! {alloc, panic} { apply(alloc_id, 1) }",
+        "fn alloc_id(x: i64) -> i64 ! {alloc} { x }
+         fn apply(f: fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} { f(x) }
+         fn main() -> i64 ! {alloc} { apply(alloc_id, 1) }",
         "type mismatch",
     );
 }
@@ -911,18 +911,18 @@ fn noalloc_higher_order_contracts_are_checked_independently_of_specialization() 
 fn callable_values_are_heterogeneous_union_alternatives() {
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn answer() -> i64 ! {panic} { 42 }
-             fn main() -> i64 ! {panic} {
-                let f: fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = inc;
-                let g: fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = answer;
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn answer() -> i64 ! {} { 42 }
+             fn main() -> i64 ! {} {
+                let f: fn(i64) -> i64 ! {} | fn() -> i64 ! {} = inc;
+                let g: fn(i64) -> i64 ! {} | fn() -> i64 ! {} = answer;
                 let a = match f {
-                    fn(i64) -> i64 ! {panic} @ h => h(41),
-                    fn() -> i64 ! {panic} @ h => h(),
+                    fn(i64) -> i64 ! {} @ h => h(41),
+                    fn() -> i64 ! {} @ h => h(),
                 };
                 let b = match g {
-                    fn(i64) -> i64 ! {panic} @ h => h(41),
-                    fn() -> i64 ! {panic} @ h => h(),
+                    fn(i64) -> i64 ! {} @ h => h(41),
+                    fn() -> i64 ! {} @ h => h(),
                 };
                 a + b - 42
              }"
@@ -932,16 +932,16 @@ fn callable_values_are_heterogeneous_union_alternatives() {
     // Union widening repacks a callable alternative into the larger union.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn answer() -> i64 ! {panic} { 42 }
-             fn main() -> i64 ! {panic} {
-                let f: fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = inc;
-                let w: i64 | fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = f;
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn answer() -> i64 ! {} { 42 }
+             fn main() -> i64 ! {} {
+                let f: fn(i64) -> i64 ! {} | fn() -> i64 ! {} = inc;
+                let w: i64 | fn(i64) -> i64 ! {} | fn() -> i64 ! {} = f;
                 match w {
                     i64 @ n if n > 0 => n,
                     i64 @ n => n,
-                    fn(i64) -> i64 ! {panic} @ h => h(41),
-                    fn() -> i64 ! {panic} @ h => h(),
+                    fn(i64) -> i64 ! {} @ h => h(41),
+                    fn() -> i64 ! {} @ h => h(),
                 }
              }"
         ),
@@ -951,13 +951,13 @@ fn callable_values_are_heterogeneous_union_alternatives() {
     // environment exactly once.
     assert_eq!(
         value(
-            "fn main() -> i64 ! {alloc, panic} {
+            "fn main() -> i64 ! {alloc} {
                 let n = Box.new(20);
-                let c: i64 | once fn(i64) -> i64 ! {panic} =
-                    fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 };
+                let c: i64 | once fn(i64) -> i64 ! {} =
+                    fn(x: i64) -> i64 ! {} { Box.take(n) + x + 1 };
                 match c {
                     i64 @ v => v,
-                    once fn(i64) -> i64 ! {panic} @ f => f(21),
+                    once fn(i64) -> i64 ! {} @ f => f(21),
                 }
              }"
         ),
@@ -967,10 +967,10 @@ fn callable_values_are_heterogeneous_union_alternatives() {
     // still releases its captured environment.
     assert_eq!(
         value(
-            "fn main() -> i64 ! {alloc, panic} {
+            "fn main() -> i64 ! {alloc} {
                 let n = Box.new(1);
-                let c: i64 | once fn(i64) -> i64 ! {panic} =
-                    fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+                let c: i64 | once fn(i64) -> i64 ! {} =
+                    fn(x: i64) -> i64 ! {} { Box.take(n) + x };
                 42
              }"
         ),
@@ -979,13 +979,13 @@ fn callable_values_are_heterogeneous_union_alternatives() {
     // The same active-alternative cleanup happens on an early return.
     assert_eq!(
         value(
-            "fn f(flag: Bool) -> i64 ! {alloc, panic} {
+            "fn f(flag: Bool) -> i64 ! {alloc} {
                 let n = Box.new(1);
-                let c: i64 | once fn(i64) -> i64 ! {panic} =
-                    fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+                let c: i64 | once fn(i64) -> i64 ! {} =
+                    fn(x: i64) -> i64 ! {} { Box.take(n) + x };
                 if flag { return 42; } else { 0 }
              }
-             fn main() -> i64 ! {alloc, panic} { f(true) }"
+             fn main() -> i64 ! {alloc} { f(true) }"
         ),
         42
     );
@@ -993,22 +993,22 @@ fn callable_values_are_heterogeneous_union_alternatives() {
     // no-allocation null-environment thunk, never reinterpreted as a once ABI.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} {
-                let u: i64 | once fn(i64) -> i64 ! {panic} = inc;
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} {
+                let u: i64 | once fn(i64) -> i64 ! {} = inc;
                 match u {
                     i64 @ n => n,
-                    once fn(i64) -> i64 ! {panic} @ f => f(41),
+                    once fn(i64) -> i64 ! {} @ f => f(41),
                 }
              }"
         ),
         42
     );
     rejects(
-        "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn main() -> i64 ! {panic} {
-            let f: i64 | fn(i64) -> i64 ! {panic} = inc;
-            let w: i64 | once fn(i64) -> i64 ! {panic} = f;
+        "fn inc(x: i64) -> i64 ! {} { x + 1 }
+         fn main() -> i64 ! {} {
+            let f: i64 | fn(i64) -> i64 ! {} = inc;
+            let w: i64 | once fn(i64) -> i64 ! {} = f;
             42
          }",
         "would change its representation",
@@ -1016,10 +1016,10 @@ fn callable_values_are_heterogeneous_union_alternatives() {
     // A callable alternative whose representation would change is not narrowed
     // by a type pattern without an adapter.
     rejects(
-        "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn main() -> i64 ! {panic} {
-            let f: fn(i64) -> i64 ! {panic} | once fn(i64) -> i64 ! {panic} = inc;
-            match f { fn(i64) -> i64 ! {panic} @ h => h(1) }
+        "fn inc(x: i64) -> i64 ! {} { x + 1 }
+         fn main() -> i64 ! {} {
+            let f: fn(i64) -> i64 ! {} | once fn(i64) -> i64 ! {} = inc;
+            match f { fn(i64) -> i64 ! {} @ h => h(1) }
          }",
         "type patterns narrow a heterogeneous union",
     );
@@ -1031,10 +1031,10 @@ fn canonical_callable_equivalences_keep_a_deterministic_representative() {
     // They must not absorb each other into `Never`.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} {
-                let a: fn(i64) -> i64 ! {panic} | fn(i64 @[many]) -> i64 ! {panic} = inc;
-                let b: (fn(i64) -> i64 ! {panic}) & (fn(i64 @[many]) -> i64 ! {panic}) = inc;
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} {
+                let a: fn(i64) -> i64 ! {} | fn(i64 @[many]) -> i64 ! {} = inc;
+                let b: (fn(i64) -> i64 ! {}) & (fn(i64 @[many]) -> i64 ! {}) = inc;
                 a(40) + b(1)
              }"
         ),
@@ -1043,12 +1043,12 @@ fn canonical_callable_equivalences_keep_a_deterministic_representative() {
     // Reversing the written order selects the same representative, so the
     // union is not heterogeneous.
     rejects(
-        "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn main() -> i64 ! {panic} {
-            let a: fn(i64 @[many]) -> i64 ! {panic} | fn(i64) -> i64 ! {panic} = inc;
+        "fn inc(x: i64) -> i64 ! {} { x + 1 }
+         fn main() -> i64 ! {} {
+            let a: fn(i64 @[many]) -> i64 ! {} | fn(i64) -> i64 ! {} = inc;
             match a {
-                fn(i64 @[many]) -> i64 ! {panic} @ f => f(1),
-                fn(i64) -> i64 ! {panic} @ f => f(1),
+                fn(i64 @[many]) -> i64 ! {} @ f => f(1),
+                fn(i64) -> i64 ! {} @ f => f(1),
             }
          }",
         "type patterns narrow a heterogeneous union",
@@ -1057,9 +1057,9 @@ fn canonical_callable_equivalences_keep_a_deterministic_representative() {
     // contract, so a `@[1]` argument is not forced into an exact `many` demand.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} {
-                let a: fn(i64 @[many]) -> i64 ! {panic} | fn(i64) -> i64 ! {panic} = inc;
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} {
+                let a: fn(i64 @[many]) -> i64 ! {} | fn(i64) -> i64 ! {} = inc;
                 let x: i64 @[1] = 41;
                 a(x)
              }"
@@ -1072,10 +1072,10 @@ fn canonical_callable_equivalences_keep_a_deterministic_representative() {
 fn linear_once_closures_consume_captures_exactly_once_and_resist_laundering() {
     assert_eq!(
         value(
-            "fn main() -> i64 ! {alloc, panic} {
+            "fn main() -> i64 ! {alloc} {
                 let n: Box<i64> @[1] = Box.new(20);
-                let f: linear once fn(i64) -> i64 ! {panic} =
-                    fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 };
+                let f: linear once fn(i64) -> i64 ! {} =
+                    fn(x: i64) -> i64 ! {} { Box.take(n) + x + 1 };
                 f(21)
              }"
         ),
@@ -1084,10 +1084,10 @@ fn linear_once_closures_consume_captures_exactly_once_and_resist_laundering() {
     // Passing it to a linear-once parameter is a checked consumption.
     assert_eq!(
         value(
-            "fn consume(f: linear once fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(x) }
-             fn main() -> i64 ! {alloc, panic} {
+            "fn consume(f: linear once fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} { f(x) }
+             fn main() -> i64 ! {alloc} {
                 let n: Box<i64> @[1] = Box.new(20);
-                let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 };
+                let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x + 1 };
                 consume(f, 21)
              }"
         ),
@@ -1096,10 +1096,10 @@ fn linear_once_closures_consume_captures_exactly_once_and_resist_laundering() {
     // Returning a linear-once closure transfers the obligation to the caller.
     assert_eq!(
         value(
-            "fn make(n: Box<i64> @[1]) -> linear once fn(i64) -> i64 ! {panic} ! {alloc, panic} {
-                fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 }
+            "fn make(n: Box<i64> @[1]) -> linear once fn(i64) -> i64 ! {} ! {alloc} {
+                fn(x: i64) -> i64 ! {} { Box.take(n) + x + 1 }
              }
-             fn main() -> i64 ! {alloc, panic} {
+             fn main() -> i64 ! {alloc} {
                 let n: Box<i64> @[1] = Box.new(20);
                 let f = make(n);
                 f(21)
@@ -1111,10 +1111,10 @@ fn linear_once_closures_consume_captures_exactly_once_and_resist_laundering() {
     // obligation on its callable field.
     assert_eq!(
         value(
-            "struct Holder { f: linear once fn(i64) -> i64 ! {panic} }
-             fn main() -> i64 ! {alloc, panic} {
+            "struct Holder { f: linear once fn(i64) -> i64 ! {} }
+             fn main() -> i64 ! {alloc} {
                 let n: Box<i64> @[1] = Box.new(20);
-                let c = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 };
+                let c = fn(x: i64) -> i64 ! {} { Box.take(n) + x + 1 };
                 let h = Holder { f: c };
                 let Holder { f } = h;
                 f(21)
@@ -1123,80 +1123,80 @@ fn linear_once_closures_consume_captures_exactly_once_and_resist_laundering() {
         42
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let n: Box<i64> @[1] = Box.new(1);
-            let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+            let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
             42
          }",
         "linear value is not consumed",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let n: Box<i64> @[1] = Box.new(1);
-            let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+            let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
             drop(f);
             42
          }",
         "linear values cannot be dropped",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let n: Box<i64> @[1] = Box.new(1);
-            let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
-            let g: once fn(i64) -> i64 ! {panic} = f;
+            let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
+            let g: once fn(i64) -> i64 ! {} = f;
             42
          }",
         "type mismatch",
     );
     rejects(
-        "fn id<T>(x: T) -> T ! {panic} { x }
-         fn main() -> i64 ! {alloc, panic} {
+        "fn id<T>(x: T) -> T ! {} { x }
+         fn main() -> i64 ! {alloc} {
             let n: Box<i64> @[1] = Box.new(1);
-            let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+            let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
             let g = id(f);
             42
          }",
         "linear value is not consumed",
     );
     rejects(
-        "fn ignore<T>(x: T) -> i64 ! {panic} { 42 }
-         fn main() -> i64 ! {alloc, panic} {
+        "fn ignore<T>(x: T) -> i64 ! {} { 42 }
+         fn main() -> i64 ! {alloc} {
             let n: Box<i64> @[1] = Box.new(1);
-            let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+            let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
             ignore(f)
          }",
         "linear value is not consumed",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let n: Box<i64> @[1] = Box.new(1);
-            let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+            let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
             f(1);
             f(2)
          }",
         "use after move",
     );
     rejects(
-        "fn f(flag: Bool) -> i64 ! {alloc, panic} {
+        "fn f(flag: Bool) -> i64 ! {alloc} {
             let n: Box<i64> @[1] = Box.new(20);
-            let l: linear once fn(i64) -> i64 ! {panic} =
-                fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 };
+            let l: linear once fn(i64) -> i64 ! {} =
+                fn(x: i64) -> i64 ! {} { Box.take(n) + x + 1 };
             if flag { return 42; } else { l(21) }
          }
-         fn main() -> i64 ! {alloc, panic} { f(false) }",
+         fn main() -> i64 ! {alloc} { f(false) }",
         "linear value is not consumed before this return",
     );
     // A linear-once closure can be adapted without changing the calling
     // convention; the adapter remains linear.
     assert_eq!(
         value(
-            "fn main() -> i64 ! {alloc, panic} {
+            "fn main() -> i64 ! {alloc} {
                 let n: Box<i64> @[1] = Box.new(20);
-                let f: linear once fn(i64 | Bool) -> i64 ! {panic} =
-                    fn(x: i64 | Bool) -> i64 ! {panic} {
+                let f: linear once fn(i64 | Bool) -> i64 ! {} =
+                    fn(x: i64 | Bool) -> i64 ! {} {
                         Box.take(n) + match x { i64 @ v => v + 1, Bool @ _ => 0 }
                     };
-                let g: linear once fn(i64) -> i64 ! {panic} = f;
+                let g: linear once fn(i64) -> i64 ! {} = f;
                 g(21)
              }"
         ),
@@ -1205,12 +1205,12 @@ fn linear_once_closures_consume_captures_exactly_once_and_resist_laundering() {
     // Effect polymorphism and linear-once parameters compose.
     assert_eq!(
         value(
-            "fn run<e: Effects>(f: linear once fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+            "fn run<e: Effects>(f: linear once fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
                 f(x)
              }
-             fn main() -> i64 ! {alloc, panic} {
+             fn main() -> i64 ! {alloc} {
                 let n: Box<i64> @[1] = Box.new(20);
-                let f = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 };
+                let f = fn(x: i64) -> i64 ! {} { Box.take(n) + x + 1 };
                 run(f, 21)
              }"
         ),

@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn preserves_lifetime_tokens_and_crlf_line_endings() {
-        let source = "fn f<'a>(value: &'a i64) -> i64 ! {panic} {\r\n    *value   \r\n}\r\n";
+        let source = "fn f<'a>(value: &'a i64) -> i64 ! {} {\r\n    *value   \r\n}\r\n";
         let formatted = format_source("<test>", source).unwrap();
         assert!(formatted.contains("<'a>"));
         assert!(formatted.contains("&'a i64"));
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn keeps_string_and_character_contents_while_trimming_code_whitespace() {
-        let source = "fn main() -> Unit ! {panic} {\n    let text = \"a // b /* c */ \\\"  \";   \n    let ch = '\\n';   \n    let lt = 'a;   \n}\n";
+        let source = "fn main() -> Unit ! {} {\n    let text = \"a // b /* c */ \\\"  \";   \n    let ch = '\\n';   \n    let lt = 'a;   \n}\n";
         let formatted = format_source("<test>", source).unwrap();
         assert!(formatted.contains("\"a // b /* c */ \\\"  \";"));
         assert!(formatted.contains("'\\n';"));
@@ -402,11 +402,11 @@ mod tests {
 
     #[test]
     fn one_blank_line_separates_top_level_groups() {
-        let source = "module app;\nuse std.result.Result;\nfn main() -> Unit ! {panic} {}\n";
+        let source = "module app;\nuse std.result.Result;\nfn main() -> Unit ! {} {}\n";
         let formatted = format_source("<test>", source).unwrap();
         assert_eq!(
             formatted,
-            "module app;\nuse std.result.Result;\n\nfn main() -> Unit ! {panic} {}\n"
+            "module app;\nuse std.result.Result;\n\nfn main() -> Unit ! {} {}\n"
         );
         let twice = format_source("<test>", &formatted).unwrap();
         assert_eq!(twice, formatted);
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn comments_and_single_blank_lines_survive_layout() {
-        let source = "module app;\n\n// explains the entry\nfn main() -> Unit ! {panic} {\n    // body note\n    0;\n}\n";
+        let source = "module app;\n\n// explains the entry\nfn main() -> Unit ! {} {\n    // body note\n    0;\n}\n";
         let formatted = format_source("<test>", source).unwrap();
         assert!(formatted.contains("// explains the entry"));
         assert!(formatted.contains("    // body note\n"));
@@ -439,7 +439,7 @@ mod tests {
     fn refinements_invariants_and_clauses_keep_their_layout() {
         formats_to(
             "struct M { io: Vec<u8>   where len>=0x80 }\n\
-             fn f(io:&mut Vec<u8> where len>=8)->i64!{panic}\n\
+             fn f(io:&mut Vec<u8> where len>=8)->i64!{}\n\
              ensures{0<=result}\n\
              {\n\
              let mut c=0;\n\
@@ -449,7 +449,7 @@ mod tests {
              c\n\
              }\n",
             "struct M { io: Vec<u8> where len >= 0x80 }\n\
-             fn f(io: &mut Vec<u8> where len >= 8) -> i64 ! {panic}\n\
+             fn f(io: &mut Vec<u8> where len >= 8) -> i64 ! {}\n\
              \x20   ensures { 0 <= result }\n\
              {\n\
              \x20   let mut c = 0;\n\
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn a_handled_body_follows_its_handler_on_the_same_line() {
         formats_to(
-            "fn f() -> i64 ! {panic} {\n\
+            "fn f() -> i64 ! {} {\n\
              let handle = 1;\n\
              handle Op: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {\n\
              k(x)\n\
@@ -472,7 +472,7 @@ mod tests {
              go(handle)\n\
              }\n\
              }\n",
-            "fn f() -> i64 ! {panic} {\n\
+            "fn f() -> i64 ! {} {\n\
              \x20   let handle = 1;\n\
              \x20   handle Op: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {\n\
              \x20       k(x)\n\

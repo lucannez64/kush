@@ -71,14 +71,14 @@ fn reference_annotations_do_not_change_the_caller_visible_type() {
     // check while the element lifetime contract stays enforced.
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn read<'a>(b: &'a Box<&'a Point>) -> i64 ! {panic} {
+        fn read<'a>(b: &'a Box<&'a Point>) -> i64 ! {} {
             let r = Box.read(b);
             r.x + r.y
         }
-        fn first<'a>(v: &'a Vec<&'a Point>) -> i64 ! {panic} {
+        fn first<'a>(v: &'a Vec<&'a Point>) -> i64 ! {} {
             Vec.get(v, 0).x
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let p = Point { x: 40, y: 2 };
             let boxed: Box<&Point> = Box.new(&p);
             let values: Vec<&Point> = [&p];
@@ -92,11 +92,11 @@ fn reference_annotations_do_not_change_the_caller_visible_type() {
 #[test]
 fn mutable_owner_references_update_the_callers_container() {
     agrees(
-        r#"fn grow(values: &mut Vec<i64>, value: i64) -> i64 ! {alloc, panic} {
+        r#"fn grow(values: &mut Vec<i64>, value: i64) -> i64 ! {alloc} {
             Vec.push(values, value);
             Vec.len(values)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = [1, 2];
             let length = grow(&mut values, 40);
             Vec.reserve(&mut values, 1);
@@ -110,11 +110,11 @@ fn mutable_owner_references_update_the_callers_container() {
     );
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> i64 ! {panic} {
+        fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> i64 ! {} {
             Box.set(b, p);
             Box.read(b).x
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let first = Point { x: 1, y: 1 };
             let second = Point { x: 40, y: 2 };
             let mut boxed: Box<&Point> = Box.new(&first);
@@ -124,9 +124,9 @@ fn mutable_owner_references_update_the_callers_container() {
         "",
     );
     agrees(
-        r#"fn read_bytes(bytes: &mut Bytes) -> i64 ! {panic} { Bytes.get(bytes, 0) }
-        fn read_text(text: &mut String) -> i64 ! {panic} { String.len(text) }
-        fn main() -> i64 ! {io, alloc, panic} {
+        r#"fn read_bytes(bytes: &mut Bytes) -> i64 ! {} { Bytes.get(bytes, 0) }
+        fn read_text(text: &mut String) -> i64 ! {} { String.len(text) }
+        fn main() -> i64 ! {io, alloc} {
             let mut bytes = Bytes.from("abcd");
             let mut text = "wxyz";
             print_i64(read_bytes(&mut bytes));
@@ -144,10 +144,10 @@ fn mutable_container_writes_keep_written_owners_loaned() {
     // after the call returns.
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn add<'a>(values: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} {
+        fn add<'a>(values: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc} {
             Vec.push(values, p);
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let first = Point { x: 40, y: 2 };
             let mut second = Point { x: 1, y: 1 };
             let mut values: Vec<&Point> = [];
@@ -159,10 +159,10 @@ fn mutable_container_writes_keep_written_owners_loaned() {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> Unit ! {panic} {
+        fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> Unit ! {} {
             Box.set(b, p);
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let first = Point { x: 40, y: 2 };
             let mut second = Point { x: 1, y: 1 };
             let mut boxed: Box<&Point> = Box.new(&first);
@@ -175,10 +175,10 @@ fn mutable_container_writes_keep_written_owners_loaned() {
     // A block-local owner cannot be written into a longer-lived container.
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn add<'a>(values: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} {
+        fn add<'a>(values: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc} {
             Vec.push(values, p);
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<&Point> = [];
             {
                 let local = Point { x: 1, y: 1 };
@@ -191,23 +191,23 @@ fn mutable_container_writes_keep_written_owners_loaned() {
     // The written source must outlive the declared element lifetime.
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn add<'a, 'b>(values: &mut Vec<&'a Point>, p: &'b Point) -> Unit ! {alloc, panic} {
+        fn add<'a, 'b>(values: &mut Vec<&'a Point>, p: &'b Point) -> Unit ! {alloc} {
             Vec.push(values, p);
         }
-        fn main() -> Unit ! {alloc, panic} { }"#,
+        fn main() -> Unit ! {alloc} { }"#,
         "does not outlive its declared element lifetime",
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn replace<'a, 'b>(b: &mut Box<&'a Point>, p: &'b Point) -> Unit ! {panic} {
+        fn replace<'a, 'b>(b: &mut Box<&'a Point>, p: &'b Point) -> Unit ! {} {
             Box.set(b, p);
         }
-        fn main() -> Unit ! {alloc, panic} { }"#,
+        fn main() -> Unit ! {alloc} { }"#,
         "does not outlive its declared element lifetime",
     );
     // An exclusive owner borrow still excludes shared aliases.
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut values: Vec<i64> = [1, 2];
             let alias = &values;
             Vec.push(&mut values, 3);
@@ -222,13 +222,13 @@ fn reference_fields_carry_declared_lifetimes_and_read() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn wrap<'a>(p: &'a Point, note: i64) -> Holder<'a> ! {panic} {
+        fn wrap<'a>(p: &'a Point, note: i64) -> Holder<'a> ! {} {
             Holder { point: p, note: note }
         }
-        fn read<'a>(holder: Holder<'a>) -> i64 ! {panic} {
+        fn read<'a>(holder: Holder<'a>) -> i64 ! {} {
             holder.point.x + holder.note
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 2 };
             let holder = wrap(&p, 2);
             read(holder) + p.y
@@ -240,7 +240,7 @@ fn reference_fields_carry_declared_lifetimes_and_read() {
     // supplied by a caller-owned value.
     agrees(
         r#"struct Holder<'a> { owner: &'a Box<i64>, note: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let value: Box<i64> = Box.new(40);
             let holder = Holder { owner: &value, note: 2 };
             Box.read(holder.owner) + holder.note
@@ -253,10 +253,10 @@ fn reference_fields_carry_declared_lifetimes_and_read() {
         r#"struct Point { x: i64, y: i64 }
         struct Inner<'a> { point: &'a Point }
         struct Outer<'a> { inner: Inner<'a>, note: i64 }
-        fn read<'a>(outer: Outer<'a>) -> i64 ! {panic} {
+        fn read<'a>(outer: Outer<'a>) -> i64 ! {} {
             outer.inner.point.x + outer.note
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 0 };
             read(Outer { inner: Inner { point: &p }, note: 2 }) + p.y
         }"#,
@@ -270,12 +270,12 @@ fn exclusive_reference_fields_require_destructuring_but_remain_checked() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a mut Point, note: i64 }
-        fn bump<'a>(holder: Holder<'a>) -> i64 ! {panic} {
+        fn bump<'a>(holder: Holder<'a>) -> i64 ! {} {
             let Holder { point, note } = holder;
             point.x = point.x + note;
             point.x
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 40, y: 2 };
             let holder = Holder { point: &mut p, note: 2 };
             bump(holder) + p.y
@@ -287,7 +287,7 @@ fn exclusive_reference_fields_require_destructuring_but_remain_checked() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a mut Point }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 2 };
             let shared = &p;
             let holder = Holder { point: shared };
@@ -300,7 +300,7 @@ fn exclusive_reference_fields_require_destructuring_but_remain_checked() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a mut Point }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 40, y: 2 };
             let holder = Holder { point: &mut p };
             let moved = holder.point;
@@ -315,17 +315,17 @@ fn reference_field_escapes_and_owner_moves_are_rejected() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point }
-        fn leak<'a>() -> Holder<'a> ! {panic} {
+        fn leak<'a>() -> Holder<'a> ! {} {
             let p = Point { x: 1, y: 2 };
             Holder { point: &p }
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "borrowed record result lifetime",
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 40, y: 2 };
             let holder = Holder { point: &p };
             p = Point { x: 1, y: 2 };
@@ -335,7 +335,7 @@ fn reference_field_escapes_and_owner_moves_are_rejected() {
     );
     rejects(
         r#"struct Holder<'a> { owner: &'a Box<i64> }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let value: Box<i64> = Box.new(40);
             let holder = Holder { owner: &value };
             drop(value);
@@ -348,10 +348,10 @@ fn reference_field_escapes_and_owner_moves_are_rejected() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point }
-        fn read<'a>(holder: &'a Holder<'a>) -> i64 ! {panic} {
+        fn read<'a>(holder: &'a Holder<'a>) -> i64 ! {} {
             holder.point.x + holder.point.y
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 2 };
             let holder = Holder { point: &p };
             read(&holder)
@@ -364,10 +364,10 @@ fn reference_field_escapes_and_owner_moves_are_rejected() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point }
-        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {panic} {
+        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {} {
             holder.point
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 2 };
             let holder = Holder { point: &p };
             get(&holder).x + p.y
@@ -378,20 +378,20 @@ fn reference_field_escapes_and_owner_moves_are_rejected() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a mut Point }
-        fn read<'a>(holder: &'a Holder<'a>) -> i64 ! {panic} {
+        fn read<'a>(holder: &'a Holder<'a>) -> i64 ! {} {
             holder.point.x
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "cannot be read through a record reference",
     );
     // The projected field keeps the pointed-to owner loaned after the call.
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point }
-        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {panic} {
+        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {} {
             holder.point
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 40, y: 2 };
             let holder = Holder { point: &p };
             let r = get(&holder);
@@ -404,10 +404,10 @@ fn reference_field_escapes_and_owner_moves_are_rejected() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point }
-        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {panic} {
+        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {} {
             holder.point
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 2 };
             let mut holder = Holder { point: &p };
             let r = get(&holder);
@@ -422,7 +422,7 @@ fn reference_field_escapes_and_owner_moves_are_rejected() {
 fn reference_element_containers_preserve_owner_loans() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let p = Point { x: 40, y: 2 };
             let boxed: Box<&Point> = Box.new(&p);
             let r = Box.read(&boxed);
@@ -433,16 +433,16 @@ fn reference_element_containers_preserve_owner_loans() {
     );
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn first<'a>(values: Vec<&'a Point>) -> &'a Point ! {panic} {
+        fn first<'a>(values: Vec<&'a Point>) -> &'a Point ! {} {
             Vec.get(&values, 0)
         }
-        fn apply<'a>(f: fn<'b>(Vec<&'b Point>) -> &'b Point ! {panic}, values: Vec<&'a Point>) -> &'a Point ! {panic} {
+        fn apply<'a>(f: fn<'b>(Vec<&'b Point>) -> &'b Point ! {}, values: Vec<&'a Point>) -> &'a Point ! {} {
             f(values)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a = Point { x: 40, y: 2 };
             let values: Vec<&Point> = [&a];
-            let f: fn<'x>(Vec<&'x Point>) -> &'x Point ! {panic} = first;
+            let f: fn<'x>(Vec<&'x Point>) -> &'x Point ! {} = first;
             let r = apply(f, values);
             r.x + r.y
         }"#,
@@ -452,11 +452,11 @@ fn reference_element_containers_preserve_owner_loans() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Bundle<'a> { points: Vec<&'a Point>, note: i64 }
-        fn read<'a>(bundle: Bundle<'a>) -> i64 ! {panic} {
+        fn read<'a>(bundle: Bundle<'a>) -> i64 ! {} {
             let Bundle { points, note } = bundle;
             Vec.get(&points, 0).x + note
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a = Point { x: 40, y: 2 };
             let bundle = Bundle { points: [&a], note: 2 };
             read(bundle) + a.y
@@ -467,7 +467,7 @@ fn reference_element_containers_preserve_owner_loans() {
     // An unannotated container still tracks its element's actual loan.
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a = Point { x: 40, y: 0 };
             let b = Point { x: 1, y: 2 };
             let values = [&a, &b];
@@ -479,8 +479,8 @@ fn reference_element_containers_preserve_owner_loans() {
     // An exclusive box element is moved out, never copied by Box.read.
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn bump(p: &mut Point) -> i64 ! {panic} { p.x = p.x + 1; p.x }
-        fn main() -> i64 ! {alloc, panic} {
+        fn bump(p: &mut Point) -> i64 ! {} { p.x = p.x + 1; p.x }
+        fn main() -> i64 ! {alloc} {
             let mut a = Point { x: 40, y: 2 };
             let boxed: Box<&mut Point> = Box.new(&mut a);
             let r = Box.take(boxed);
@@ -496,7 +496,7 @@ fn reference_element_containers_preserve_owner_loans() {
 fn reference_element_containers_reject_aliasing_and_escapes() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a = Point { x: 40, y: 0 };
             let values: Vec<&Point> = [&a];
             a = Point { x: 1, y: 2 };
@@ -506,7 +506,7 @@ fn reference_element_containers_reject_aliasing_and_escapes() {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a = Point { x: 40, y: 0 };
             let boxed: Box<&Point> = Box.new(&a);
             a = Point { x: 1, y: 2 };
@@ -516,25 +516,25 @@ fn reference_element_containers_reject_aliasing_and_escapes() {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn leak<'a>() -> Vec<&'a Point> ! {alloc, panic} {
+        fn leak<'a>() -> Vec<&'a Point> ! {alloc} {
             let local = Point { x: 1, y: 2 };
             [&local]
         }
-        fn main() -> i64 ! {alloc, panic} { 0 }"#,
+        fn main() -> i64 ! {alloc} { 0 }"#,
         "does not appear on any parameter",
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn leak<'a>() -> Box<&'a Point> ! {alloc, panic} {
+        fn leak<'a>() -> Box<&'a Point> ! {alloc} {
             let local = Point { x: 1, y: 2 };
             Box.new(&local)
         }
-        fn main() -> i64 ! {alloc, panic} { 0 }"#,
+        fn main() -> i64 ! {alloc} { 0 }"#,
         "does not appear on any parameter",
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a = Point { x: 1, y: 2 };
             let values: Vec<&mut Point> = [&mut a];
             0
@@ -543,7 +543,7 @@ fn reference_element_containers_reject_aliasing_and_escapes() {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a = Point { x: 1, y: 2 };
             let boxed: Box<&mut Point> = Box.new(&mut a);
             Box.read(&boxed).x
@@ -552,8 +552,8 @@ fn reference_element_containers_reject_aliasing_and_escapes() {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn read(p: &Point) -> i64 ! {panic} { p.x }
-        fn main() -> i64 ! {alloc, panic} {
+        fn read(p: &Point) -> i64 ! {} { p.x }
+        fn main() -> i64 ! {alloc} {
             let a = Point { x: 1, y: 2 };
             let values: Vec<&Point> = [&a];
             let out = Vec.map_in_place(values, read);
@@ -572,10 +572,10 @@ fn field_index_and_temporary_places_are_checked_references() {
     agrees(
         r#"struct Inner { a: i64, b: i64 }
         struct Outer { inner: Inner, note: i64 }
-        fn add(left: &mut i64, right: &mut i64) -> Unit ! {panic} {
+        fn add(left: &mut i64, right: &mut i64) -> Unit ! {} {
             *left = *left + *right;
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut outer = Outer { inner: Inner { a: 3, b: 4 }, note: 10 };
             add(&mut outer.inner.a, &mut outer.inner.b);
             let note = &outer.note;
@@ -595,9 +595,9 @@ fn field_index_and_temporary_places_are_checked_references() {
     // exclusive field reference is reborrowable through a helper.
     agrees(
         r#"struct P { x: i64 }
-        fn pick(p: &P) -> &i64 ! {panic} { &p.x }
-        fn bump(p: &mut P) -> &mut i64 ! {panic} { &mut p.x }
-        fn main() -> i64 ! {panic} {
+        fn pick(p: &P) -> &i64 ! {} { &p.x }
+        fn bump(p: &mut P) -> &mut i64 ! {} { &mut p.x }
+        fn main() -> i64 ! {} {
             let mut p = P { x: 5 };
             *bump(&mut p) = 8;
             *pick(&p)
@@ -610,7 +610,7 @@ fn field_index_and_temporary_places_are_checked_references() {
     // allocation exactly once.
     agrees(
         r#"struct P { x: i64, y: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let r = &mut (P { x: 2, y: 3 });
             r.x = r.x + 1;
             let b = &mut Box.new(4);
@@ -624,7 +624,7 @@ fn field_index_and_temporary_places_are_checked_references() {
     // reference keeps the live storage identity.
     agrees(
         r#"struct Pair { a: i64, b: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = Pair { a: 1, b: 2 };
             let flag = p.a == 1;
             let r = if flag { &mut p.a } else { &mut p.b };
@@ -640,10 +640,10 @@ fn field_index_and_temporary_places_are_checked_references() {
 fn affine_reference_replacement_destroys_the_old_payload_exactly_once() {
     agrees(
         r#"struct H { b: Box<i64>, n: i64 }
-        fn replace(h: &mut H) -> Unit ! {alloc, panic} {
+        fn replace(h: &mut H) -> Unit ! {alloc} {
             *h = H { b: Box.new(9), n: 2 };
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut h = H { b: Box.new(1), n: 0 };
             replace(&mut h);
             replace(&mut h);
@@ -660,8 +660,8 @@ fn place_reference_hostile_forms_are_rejected() {
     // field through a stored reference, are rejected.
     rejects(
         r#"struct Pair { a: i64, b: i64 }
-        fn add(l: &mut i64, r: &mut i64) -> Unit ! {panic} { *l = *l + *r; }
-        fn main() -> i64 ! {panic} {
+        fn add(l: &mut i64, r: &mut i64) -> Unit ! {} { *l = *l + *r; }
+        fn main() -> i64 ! {} {
             let mut p = Pair { a: 3, b: 4 };
             add(&mut p.a, &mut p.a);
             0
@@ -670,7 +670,7 @@ fn place_reference_hostile_forms_are_rejected() {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 1, y: 2 };
             let r = &mut p.x;
             let s = &mut p.x;
@@ -682,7 +682,7 @@ fn place_reference_hostile_forms_are_rejected() {
     // A mutable element reference suspends vector growth and whole-owner
     // access until its checked last use.
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut v: Vec<i64> = [1, 2];
             let r = &mut v[0];
             Vec.push(&mut v, 3);
@@ -693,16 +693,16 @@ fn place_reference_hostile_forms_are_rejected() {
     // A field reference cannot escape the function that owns the storage.
     rejects(
         r#"struct P { x: i64 }
-        fn escape() -> &i64 ! {panic} {
+        fn escape() -> &i64 ! {} {
             let p = P { x: 1 };
             &p.x
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "cannot be returned",
     );
     // Reading through a typed reference never copies an owning payload.
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let b = Box.new(4);
             let r = &b;
             *r
@@ -711,7 +711,7 @@ fn place_reference_hostile_forms_are_rejected() {
     );
     // Replacing an owning handle uses its own operation, not a place write.
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut b = Box.new(1);
             let r = &mut b;
             *r = Box.new(2);
@@ -721,7 +721,7 @@ fn place_reference_hostile_forms_are_rejected() {
     );
     // Index references alias only non-owning elements.
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut v: Vec<Box<i64>> = [Box.new(1)];
             let r = &mut v[0];
             0
@@ -732,15 +732,15 @@ fn place_reference_hostile_forms_are_rejected() {
     rejects(
         r#"#[linear]
         struct L { x: i64 }
-        fn replace(p: &mut L) -> Unit ! {panic} { *p = L { x: 1 }; }
-        fn main() -> Unit ! {panic} {}"#,
+        fn replace(p: &mut L) -> Unit ! {} { *p = L { x: 1 }; }
+        fn main() -> Unit ! {} {}"#,
         "cannot replace a linear payload",
     );
     // A `&mut str` is not a byte slice: raw byte writes could break UTF-8,
     // so only the checked text writes accept it (see tests/mutable_text.rs).
     rejects(
-        r#"fn poke(text: &mut str) -> Unit ! {panic} { Slice.set(text, 0, 255); }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        r#"fn poke(text: &mut str) -> Unit ! {} { Slice.set(text, 0, 255); }
+        fn main() -> i64 ! {} { 0 }"#,
         "Slice.set",
     );
 }
@@ -748,7 +748,7 @@ fn place_reference_hostile_forms_are_rejected() {
 #[test]
 fn out_of_bounds_place_indices_panic_in_both_backends() {
     runtime_panic(
-        r#"fn main() -> i64 ! {panic} {
+        r#"fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [1, 2];
             let i = 5;
             let r = &mut a[i];
@@ -757,7 +757,7 @@ fn out_of_bounds_place_indices_panic_in_both_backends() {
         }"#,
     );
     runtime_panic(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut v: Vec<i64> = [1, 2];
             let i = 9;
             let r = &mut v[i];
@@ -772,24 +772,24 @@ fn borrowed_task_exit_child_and_environment_boundaries_are_rejected() {
     rejects(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<TaskExit<TaskExit<Window<'a>>>> = Task.spawn(fn() -> TaskExit<TaskExit<Window<'a>>> ! {panic, suspend} { panic() });
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t: Task<TaskExit<TaskExit<Window<'a>>>> = Task.spawn(fn() -> TaskExit<TaskExit<Window<'a>>> ! {suspend} { panic() });
                 Task.join(t);
                 0
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} { 0 }"#,
+        fn main() -> i64 ! {alloc, suspend} { 0 }"#,
         "a child task may return TaskExit<R> only for a borrowed record R",
     );
     rejects(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn run<'a>(window: Window<'a>) -> once fn() -> i64 ! {panic} ! {alloc, panic, suspend} {
-            Task.scope(fn() -> once fn() -> i64 ! {panic} ! {alloc, panic, suspend} {
-                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic, suspend} { window });
+        fn run<'a>(window: Window<'a>) -> once fn() -> i64 ! {} ! {alloc, suspend} {
+            Task.scope(fn() -> once fn() -> i64 ! {} ! {alloc, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {suspend} { window });
                 let exit = Task.join(t);
-                fn() -> i64 ! {panic} {
+                fn() -> i64 ! {} {
                     match exit {
                         TaskExit.Completed(w) => Slice.get(w.view, w.start),
                         TaskExit.Cancelled => 0,
@@ -797,7 +797,7 @@ fn borrowed_task_exit_child_and_environment_boundaries_are_rejected() {
                 }
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} { 0 }"#,
+        fn main() -> i64 ! {alloc, suspend} { 0 }"#,
         "cannot capture TaskExit",
     );
 }
@@ -810,7 +810,7 @@ fn borrowed_record_containers_preserve_per_field_element_provenance() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let p = Point { x: 40, y: 2 };
             let holders = [Holder { point: &p, note: 0 }];
             let h = Vec.get(&holders, 0);
@@ -823,7 +823,7 @@ fn borrowed_record_containers_preserve_per_field_element_provenance() {
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
         fn keep<'a>(values: Vec<Holder<'a>>) -> Vec<Holder<'a>> ! {alloc} { values }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a = Point { x: 1, y: 0 };
             let b = Point { x: 40, y: 2 };
             let values = [Holder { point: &a, note: 0 }];
@@ -841,11 +841,11 @@ fn borrowed_record_containers_preserve_per_field_element_provenance() {
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
         struct Bundle<'a> { holders: Vec<Holder<'a>>, note: i64 }
-        fn read<'a>(bundle: Bundle<'a>) -> i64 ! {panic} {
+        fn read<'a>(bundle: Bundle<'a>) -> i64 ! {} {
             let Bundle { holders, note } = bundle;
             Vec.get(&holders, 0).point.x + note
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let p = Point { x: 40, y: 2 };
             read(Bundle { holders: [Holder { point: &p, note: 0 }], note: 2 }) + p.y
         }"#,
@@ -856,9 +856,9 @@ fn borrowed_record_containers_preserve_per_field_element_provenance() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn wrap<'a>(holder: Holder<'a>) -> Box<Holder<'a>> ! {alloc, panic} { Box.new(holder) }
-        fn read<'a>(holder: Holder<'a>) -> i64 ! {panic} { holder.point.x + holder.note }
-        fn main() -> i64 ! {alloc, panic} {
+        fn wrap<'a>(holder: Holder<'a>) -> Box<Holder<'a>> ! {alloc} { Box.new(holder) }
+        fn read<'a>(holder: Holder<'a>) -> i64 ! {} { holder.point.x + holder.note }
+        fn main() -> i64 ! {alloc} {
             let p = Point { x: 40, y: 2 };
             let boxed = wrap(Holder { point: &p, note: 0 });
             let copied = Box.read(&boxed);
@@ -872,11 +872,11 @@ fn borrowed_record_containers_preserve_per_field_element_provenance() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn replace<'a>(boxed: &mut Box<Holder<'a>>, holder: Holder<'a>) -> i64 ! {panic} {
+        fn replace<'a>(boxed: &mut Box<Holder<'a>>, holder: Holder<'a>) -> i64 ! {} {
             Box.set(boxed, holder);
             Box.read(boxed).point.x
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a = Point { x: 1, y: 0 };
             let b = Point { x: 40, y: 2 };
             let mut boxed = Box.new(Holder { point: &a, note: 0 });
@@ -892,7 +892,7 @@ fn borrowed_record_containers_reject_owner_moves_and_block_escapes() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut p = Point { x: 40, y: 2 };
             let holders = [Holder { point: &p, note: 0 }];
             let h = Vec.get(&holders, 0);
@@ -904,7 +904,7 @@ fn borrowed_record_containers_reject_owner_moves_and_block_escapes() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let q = Point { x: 0, y: 0 };
             let mut values = [Holder { point: &q, note: 0 }];
             {
@@ -918,10 +918,10 @@ fn borrowed_record_containers_reject_owner_moves_and_block_escapes() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn add<'a>(values: &mut Vec<Holder<'a>>, holder: Holder<'a>) -> Unit ! {alloc, panic} {
+        fn add<'a>(values: &mut Vec<Holder<'a>>, holder: Holder<'a>) -> Unit ! {alloc} {
             Vec.push(values, holder);
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<Holder<'_>> = [];
             {
                 let p = Point { x: 40, y: 2 };
@@ -934,17 +934,17 @@ fn borrowed_record_containers_reject_owner_moves_and_block_escapes() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn leak<'a>() -> Vec<Holder<'a>> ! {alloc, panic} {
+        fn leak<'a>() -> Vec<Holder<'a>> ! {alloc} {
             let local = Point { x: 1, y: 2 };
             [Holder { point: &local, note: 0 }]
         }
-        fn main() -> i64 ! {alloc, panic} { 0 }"#,
+        fn main() -> i64 ! {alloc} { 0 }"#,
         "does not appear on any parameter",
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut p = Point { x: 40, y: 2 };
             let boxed = Box.new(Holder { point: &p, note: 0 });
             let h = Box.read(&boxed);
@@ -956,7 +956,7 @@ fn borrowed_record_containers_reject_owner_moves_and_block_escapes() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut p = Point { x: 40, y: 2 };
             let values = [Holder { point: &p, note: 0 }];
             let h = Vec.get(&values, 0);
@@ -976,11 +976,11 @@ fn borrowed_scope_records_and_task_exits_cross_boundaries() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
-            let out = Task.scope(fn() -> Window<'a> ! {alloc, panic, suspend} { window });
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, suspend} {
+            let out = Task.scope(fn() -> Window<'a> ! {alloc, suspend} { window });
             Slice.get(out.view, out.start)
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [1, 40, 2];
             run(Window { view: &data[..], start: 1 })
         }"#,
@@ -990,22 +990,22 @@ fn borrowed_scope_records_and_task_exits_cross_boundaries() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn read<'a>(exit: TaskExit<Window<'a>>) -> i64 ! {panic} {
+        fn read<'a>(exit: TaskExit<Window<'a>>) -> i64 ! {} {
             match exit {
                 TaskExit.Completed(window) => Slice.get(window.view, window.start),
                 TaskExit.Cancelled => 0,
             }
         }
-        fn make<'a>(window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic, suspend} {
+        fn make<'a>(window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, suspend} {
+            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {suspend} {
                     Task.yield();
                     window
                 });
                 Task.join(t)
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [1, 40, 2];
             read(make(Window { view: &data[..], start: 1 }))
         }"#,
@@ -1015,18 +1015,18 @@ fn borrowed_scope_records_and_task_exits_cross_boundaries() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn make<'a>(window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic, suspend} { window });
+        fn make<'a>(window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, suspend} {
+            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {suspend} { window });
                 Task.join(t)
             })
         }
-        fn apply<'a>(f: fn<'b>(Window<'b>) -> TaskExit<Window<'b>> ! {alloc, panic, suspend}, window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
+        fn apply<'a>(f: fn<'b>(Window<'b>) -> TaskExit<Window<'b>> ! {alloc, suspend}, window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, suspend} {
             f(window)
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [1, 40, 2];
-            let f: fn<'x>(Window<'x>) -> TaskExit<Window<'x>> ! {alloc, panic, suspend} = make;
+            let f: fn<'x>(Window<'x>) -> TaskExit<Window<'x>> ! {alloc, suspend} = make;
             match apply(f, Window { view: &data[..], start: 1 }) {
                 TaskExit.Completed(window) => Slice.get(window.view, window.start),
                 TaskExit.Cancelled => 0,
@@ -1042,13 +1042,13 @@ fn task_exit_boundaries_reject_dangling_and_replaced_owners() {
     rejects(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn make<'a>(window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic, suspend} { window });
+        fn make<'a>(window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, suspend} {
+            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {suspend} { window });
                 Task.join(t)
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let mut data: [i64; 3] = [1, 40, 2];
             let exit = make(Window { view: &data[..], start: 1 });
             data = [9, 9, 9];
@@ -1059,16 +1059,16 @@ fn task_exit_boundaries_reject_dangling_and_replaced_owners() {
     rejects(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn leak<'a>() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
+        fn leak<'a>() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
                 let local: [i64; 2] = [1, 2];
-                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {} {
                     Window { view: &local[..], start: 0 }
                 });
                 Task.join(t)
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} { 0 }"#,
+        fn main() -> i64 ! {alloc, suspend} { 0 }"#,
         "borrowed record result lifetime 'a' does not appear",
     );
 }
@@ -1077,13 +1077,13 @@ fn task_exit_boundaries_reject_dangling_and_replaced_owners() {
 fn reference_valued_arrows_keep_sources_borrowed() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn identity<'a>(p: &'a Point) -> &'a Point ! {panic} { p }
-        fn apply<'a>(f: fn<'b>(&'b Point) -> &'b Point ! {panic}, p: &'a Point) -> &'a Point ! {panic} {
+        fn identity<'a>(p: &'a Point) -> &'a Point ! {} { p }
+        fn apply<'a>(f: fn<'b>(&'b Point) -> &'b Point ! {}, p: &'a Point) -> &'a Point ! {} {
             f(p)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 2 };
-            let f: fn<'x>(&'x Point) -> &'x Point ! {panic} = identity;
+            let f: fn<'x>(&'x Point) -> &'x Point ! {} = identity;
             let r = apply(f, &p);
             r.x + r.y
         }"#,
@@ -1092,16 +1092,16 @@ fn reference_valued_arrows_keep_sources_borrowed() {
     );
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {panic} {
+        fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {} {
             p.x = p.x + 1;
             p
         }
-        fn apply<'a>(f: fn<'b>(&'b mut Point) -> &'b mut Point ! {panic}, p: &'a mut Point) -> &'a mut Point ! {panic} {
+        fn apply<'a>(f: fn<'b>(&'b mut Point) -> &'b mut Point ! {}, p: &'a mut Point) -> &'a mut Point ! {} {
             f(p)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 40, y: 2 };
-            let f: fn<'x>(&'x mut Point) -> &'x mut Point ! {panic} = bump;
+            let f: fn<'x>(&'x mut Point) -> &'x mut Point ! {} = bump;
             let r = apply(f, &mut p);
             r.x + r.y
         }"#,
@@ -1111,8 +1111,8 @@ fn reference_valued_arrows_keep_sources_borrowed() {
     // An arrow result with no reference source cannot name a lifetime.
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {panic} {
-            let f: fn<'a>() -> &'a Point ! {panic} = panic;
+        fn main() -> i64 ! {} {
+            let f: fn<'a>() -> &'a Point ! {} = panic;
             0
         }"#,
         "not outlived by any reference parameter",
@@ -1120,8 +1120,8 @@ fn reference_valued_arrows_keep_sources_borrowed() {
     // A shared parameter cannot supply an exclusive arrow result.
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {panic} {
-            let f: fn<'a>(&'a Point) -> &'a mut Point ! {panic} = panic;
+        fn main() -> i64 ! {} {
+            let f: fn<'a>(&'a Point) -> &'a mut Point ! {} = panic;
             0
         }"#,
         "exclusive '&mut T' arrow result",
@@ -1129,10 +1129,10 @@ fn reference_valued_arrows_keep_sources_borrowed() {
     // Replacing the owner while an indirect result is live is rejected.
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn identity<'a>(p: &'a Point) -> &'a Point ! {panic} { p }
-        fn main() -> i64 ! {panic} {
+        fn identity<'a>(p: &'a Point) -> &'a Point ! {} { p }
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 40, y: 2 };
-            let f: fn<'x>(&'x Point) -> &'x Point ! {panic} = identity;
+            let f: fn<'x>(&'x Point) -> &'x Point ! {} = identity;
             let r = f(&p);
             p = Point { x: 1, y: 2 };
             r.x
@@ -1145,8 +1145,8 @@ fn reference_valued_arrows_keep_sources_borrowed() {
 fn returned_reference_containers_keep_their_sources_borrowed() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn wrap<'a>(p: &'a Point) -> Box<&'a Point> ! {alloc, panic} { Box.new(p) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn wrap<'a>(p: &'a Point) -> Box<&'a Point> ! {alloc} { Box.new(p) }
+        fn main() -> i64 ! {alloc} {
             let mut p = Point {x: 40, y: 2};
             let boxed = wrap(&p);
             p = Point {x: 0, y: 0};
@@ -1166,7 +1166,7 @@ fn every_reference_vector_element_remains_borrowed_after_append_and_replace() {
         rejects(
             &format!(
                 "struct Point {{ x: i64, y: i64 }}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let mut a = Point {{x: 40, y: 2}};
                 let b = Point {{x: 1, y: 0}};
                 {build}
@@ -1179,7 +1179,7 @@ fn every_reference_vector_element_remains_borrowed_after_append_and_replace() {
     }
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a = Point {x: 1, y: 0};
             let mut b = Point {x: 40, y: 2};
             let values: Vec<&Point> = [&a];
@@ -1195,9 +1195,9 @@ fn every_reference_vector_element_remains_borrowed_after_append_and_replace() {
 fn reference_container_results_work_through_named_and_indirect_calls() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn wrap<'a>(p: &'a Point) -> Box<&'a Point> ! {alloc, panic} { Box.new(p) }
+        fn wrap<'a>(p: &'a Point) -> Box<&'a Point> ! {alloc} { Box.new(p) }
         fn keep<'a>(values: Vec<&'a Point>) -> Vec<&'a Point> ! {} { values }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let p = Point {x: 40, y: 2};
             let boxed = wrap(&p);
             let reference = Box.take(boxed);
@@ -1211,8 +1211,8 @@ fn reference_container_results_work_through_named_and_indirect_calls() {
     );
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn wrap<'a>(p: &'a mut Point) -> Box<&'a mut Point> ! {alloc, panic} { Box.new(p) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn wrap<'a>(p: &'a mut Point) -> Box<&'a mut Point> ! {alloc} { Box.new(p) }
+        fn main() -> i64 ! {alloc} {
             let mut p = Point {x: 40, y: 0};
             let boxed = wrap(&mut p);
             let reference = Box.take(boxed);
@@ -1228,7 +1228,7 @@ fn reference_container_results_work_through_named_and_indirect_calls() {
 fn shared_reference_vectors_can_replace_elements_and_clear_all_source_loans() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a = Point {x: 1, y: 0};
             let mut b = Point {x: 40, y: 2};
             let values: Vec<&Point> = [&a];
@@ -1247,7 +1247,7 @@ fn shared_reference_vectors_can_replace_elements_and_clear_all_source_loans() {
     rejects(
         r#"enum Result<T, E> { Ok(T), Err(E) }
         struct Point { x: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let p = Point {x: 42};
             let values: Vec<&Point> = [&p];
             drop(Vec.try_reserve(values, 1));
@@ -1264,7 +1264,7 @@ fn structural_record_coercion_keeps_per_field_borrows() {
     // reference containers, and through destructuring or projection.
     rejects(
         r#"struct Window<'a> { start: i64, view: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut data: Vec<i64> = [40];
             let w = Window { start: 0, view: &data[..] };
             let narrow: struct { view: &[i64] } = w;
@@ -1274,7 +1274,7 @@ fn structural_record_coercion_keeps_per_field_borrows() {
     );
     rejects(
         r#"struct Window<'a> { start: i64, view: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut data: Vec<i64> = [40];
             let w = Window { start: 0, view: &data[..] };
             let narrow: struct { view: &[i64] } = w;
@@ -1287,7 +1287,7 @@ fn structural_record_coercion_keeps_per_field_borrows() {
     rejects(
         r#"struct Point { x: i64, y: i64 }
         struct Bundle { note: i64, points: Vec<&Point> }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a = Point { x: 40, y: 2 };
             let b = Bundle { note: 2, points: [&a] };
             let narrow: struct { points: Vec<&Point> } = b;
@@ -1300,7 +1300,7 @@ fn structural_record_coercion_keeps_per_field_borrows() {
     );
     rejects(
         r#"struct Pair<'a> { left: &'a [i64], right: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: Vec<i64> = [1];
             let mut b: Vec<i64> = [41];
             let p = Pair { left: &a[..], right: &b[..] };
@@ -1312,7 +1312,7 @@ fn structural_record_coercion_keeps_per_field_borrows() {
     // The dropped field's loan ends with the field.
     agrees(
         r#"struct Pair<'a> { left: &'a [i64], right: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a: Vec<i64> = [1];
             let b: Vec<i64> = [41];
             let p = Pair { left: &a[..], right: &b[..] };
@@ -1328,12 +1328,12 @@ fn structural_record_coercion_keeps_per_field_borrows() {
 fn shared_reference_container_parameters_read_their_elements() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
-        fn read<'a>(b: &'a Box<&Point>) -> i64 ! {panic} {
+        fn read<'a>(b: &'a Box<&Point>) -> i64 ! {} {
             let r = Box.read(b);
             r.x + r.y
         }
-        fn first<'a>(v: &'a Vec<&Point>) -> i64 ! {panic} { Vec.get(v, 0).x }
-        fn main() -> i64 ! {alloc, panic} {
+        fn first<'a>(v: &'a Vec<&Point>) -> i64 ! {} { Vec.get(v, 0).x }
+        fn main() -> i64 ! {alloc} {
             let p = Point { x: 40, y: 2 };
             let boxed: Box<&Point> = Box.new(&p);
             let v: Vec<&Point> = [&p];
@@ -1344,8 +1344,8 @@ fn shared_reference_container_parameters_read_their_elements() {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn leak<'a, 'b>(b: &'a Box<&'b Point>) -> &'a Point ! {panic} { Box.read(b) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn leak<'a, 'b>(b: &'a Box<&'b Point>) -> &'a Point ! {} { Box.read(b) }
+        fn main() -> i64 ! {alloc} {
             let p = Point { x: 40, y: 2 };
             let boxed: Box<&Point> = Box.new(&p);
             leak(&boxed).x
@@ -1358,8 +1358,8 @@ fn shared_reference_container_parameters_read_their_elements() {
 fn writes_through_a_stored_mutable_reference_reach_the_owner_scope_check() {
     let escape = "borrow escapes the lexical scope";
     rejects(
-        r#"fn add<'a>(v: &mut Vec<&'a str>, s: &'a str) -> Unit ! {alloc, panic} { Vec.push(v, s); }
-        fn main() -> i64 ! {alloc, panic} {
+        r#"fn add<'a>(v: &mut Vec<&'a str>, s: &'a str) -> Unit ! {alloc} { Vec.push(v, s); }
+        fn main() -> i64 ! {alloc} {
             let mut v: Vec<&str> = [];
             {
                 let r = &mut v;
@@ -1372,8 +1372,8 @@ fn writes_through_a_stored_mutable_reference_reach_the_owner_scope_check() {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-        fn add<'a>(v: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} { Vec.push(v, p); }
-        fn main() -> i64 ! {alloc, panic} {
+        fn add<'a>(v: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc} { Vec.push(v, p); }
+        fn main() -> i64 ! {alloc} {
             let mut v: Vec<&Point> = [];
             {
                 let r = &mut v;
@@ -1385,8 +1385,8 @@ fn writes_through_a_stored_mutable_reference_reach_the_owner_scope_check() {
         escape,
     );
     rejects(
-        r#"fn put<'a>(b: &mut Box<&'a str>, s: &'a str) -> Unit ! {alloc, panic} { Box.set(b, s); }
-        fn main() -> i64 ! {alloc, panic} {
+        r#"fn put<'a>(b: &mut Box<&'a str>, s: &'a str) -> Unit ! {alloc} { Box.set(b, s); }
+        fn main() -> i64 ! {alloc} {
             let keep = "zz";
             let mut b: Box<&str> = Box.new(keep.as_str());
             {
@@ -1399,8 +1399,8 @@ fn writes_through_a_stored_mutable_reference_reach_the_owner_scope_check() {
         escape,
     );
     agrees(
-        r#"fn add<'a>(v: &mut Vec<&'a str>, s: &'a str) -> Unit ! {alloc, panic} { Vec.push(v, s); }
-        fn main() -> i64 ! {alloc, panic} {
+        r#"fn add<'a>(v: &mut Vec<&'a str>, s: &'a str) -> Unit ! {alloc} { Vec.push(v, s); }
+        fn main() -> i64 ! {alloc} {
             let s = "abcd";
             let mut v: Vec<&str> = [];
             {
@@ -1418,10 +1418,10 @@ fn writes_through_a_stored_mutable_reference_reach_the_owner_scope_check() {
 fn temporary_reference_initializers_preserve_argument_evaluation_order() {
     agrees(
         r#"struct P { x: i64 }
-        fn first() -> i64 ! {io, panic} { print_i64(1); 1 }
-        fn second() -> P ! {io, panic} { print_i64(2); P { x: 40 } }
-        fn read(x: i64, p: &P) -> i64 ! {panic} { x + p.x }
-        fn main() -> i64 ! {io, panic} { read(first(), &second()) }"#,
+        fn first() -> i64 ! {io} { print_i64(1); 1 }
+        fn second() -> P ! {io} { print_i64(2); P { x: 40 } }
+        fn read(x: i64, p: &P) -> i64 ! {} { x + p.x }
+        fn main() -> i64 ! {io} { read(first(), &second()) }"#,
         41,
         "1\n2\n",
     );
@@ -1431,9 +1431,9 @@ fn temporary_reference_initializers_preserve_argument_evaluation_order() {
 fn skipped_short_circuit_operands_do_not_initialize_temporary_owners() {
     agrees(
         r#"struct P { x: i64 }
-        fn make() -> P ! {io, panic} { print_i64(99); P { x: 1 } }
+        fn make() -> P ! {io} { print_i64(99); P { x: 1 } }
         fn read(p: &P) -> Bool ! {} { true }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let skipped = false && read(&make());
             if skipped { 0 } else { 42 }
         }"#,
@@ -1482,12 +1482,12 @@ fn panics_after(source: &str, expected_output: &str) {
 fn temporary_field_and_index_places_preserve_argument_order() {
     agrees(
         r#"struct P { x: i64, lane: [i64; 2] }
-        fn first() -> i64 ! {io, panic} { print_i64(1); 1 }
-        fn second() -> P ! {io, panic} { print_i64(2); P { x: 40, lane: [7, 8] } }
-        fn read(x: i64, p: &P) -> i64 ! {panic} { x + p.x }
-        fn read_field(x: i64, field: &i64) -> i64 ! {panic} { x + *field }
-        fn read_lane(x: i64, lane: &i64) -> i64 ! {panic} { x + *lane }
-        fn main() -> i64 ! {io, panic} {
+        fn first() -> i64 ! {io} { print_i64(1); 1 }
+        fn second() -> P ! {io} { print_i64(2); P { x: 40, lane: [7, 8] } }
+        fn read(x: i64, p: &P) -> i64 ! {} { x + p.x }
+        fn read_field(x: i64, field: &i64) -> i64 ! {} { x + *field }
+        fn read_lane(x: i64, lane: &i64) -> i64 ! {} { x + *lane }
+        fn main() -> i64 ! {io} {
             let a = read(first(), &second());
             let b = read_field(first(), &second().x);
             let c = read_lane(first(), &second().lane[1]);
@@ -1502,9 +1502,9 @@ fn temporary_field_and_index_places_preserve_argument_order() {
 fn skipped_short_circuit_or_operands_do_not_initialize_temporary_owners() {
     agrees(
         r#"struct P { x: i64 }
-        fn make() -> P ! {io, panic} { print_i64(99); P { x: 1 } }
+        fn make() -> P ! {io} { print_i64(99); P { x: 1 } }
         fn read(p: &P) -> Bool ! {} { true }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let skipped = true || read(&make());
             if skipped { 42 } else { 0 }
         }"#,
@@ -1520,9 +1520,9 @@ fn loop_conditions_reinitialize_temporary_owners_with_balanced_cleanup() {
     // cleaned at each body scope exit. `agrees` checks allocations against
     // deallocations in the reference evaluator.
     agrees(
-        r#"fn make(n: i64) -> Box<i64> ! {alloc, panic} { Box.new(n) }
-        fn read(b: &Box<i64>) -> i64 ! {panic} { Box.read(b) }
-        fn main() -> i64 ! {alloc, panic} {
+        r#"fn make(n: i64) -> Box<i64> ! {alloc} { Box.new(n) }
+        fn read(b: &Box<i64>) -> i64 ! {} { Box.read(b) }
+        fn main() -> i64 ! {alloc} {
             let mut i = 0;
             let mut sum = 0;
             while i < 3 && read(&make(i)) >= 0 {
@@ -1539,8 +1539,8 @@ fn loop_conditions_reinitialize_temporary_owners_with_balanced_cleanup() {
 #[test]
 fn temporary_owner_cleanup_survives_loop_continue_and_break() {
     agrees(
-        r#"fn make(n: i64) -> Box<i64> ! {alloc, panic} { Box.new(n) }
-        fn main() -> i64 ! {alloc, panic} {
+        r#"fn make(n: i64) -> Box<i64> ! {alloc} { Box.new(n) }
+        fn main() -> i64 ! {alloc} {
             let mut i = 0;
             let mut sum = 0;
             loop {
@@ -1568,14 +1568,14 @@ fn owning_temporary_owners_drop_before_a_question_mark_early_exit() {
     // early. The hidden owner must be released exactly once on that path.
     agrees(
         r#"enum Result<T, E> { Ok(T), Err(E) }
-        fn make() -> Box<i64> ! {alloc, io, panic} { print_i64(1); Box.new(5) }
-        fn fail() -> Result<i64, i64> ! {io, panic} { print_i64(2); Err(7) }
-        fn read(b: &Box<i64>, x: i64) -> i64 ! {panic} { Box.read(b) + x }
-        fn run() -> Result<i64, i64> ! {alloc, io, panic} {
+        fn make() -> Box<i64> ! {alloc, io} { print_i64(1); Box.new(5) }
+        fn fail() -> Result<i64, i64> ! {io} { print_i64(2); Err(7) }
+        fn read(b: &Box<i64>, x: i64) -> i64 ! {} { Box.read(b) + x }
+        fn run() -> Result<i64, i64> ! {alloc, io} {
             let v = read(&make(), fail()?);
             Ok(v)
         }
-        fn main() -> i64 ! {alloc, io, panic} {
+        fn main() -> i64 ! {alloc, io} {
             match run() {
                 Ok(v) => v,
                 Err(e) => e,
@@ -1590,10 +1590,10 @@ fn owning_temporary_owners_drop_before_a_question_mark_early_exit() {
 fn panicking_arguments_do_not_initialize_later_temporary_owners() {
     panics_after(
         r#"struct P { x: i64 }
-        fn first() -> i64 ! {io, panic} { print_i64(1); panic() }
-        fn second() -> P ! {io, panic} { print_i64(2); P { x: 40 } }
-        fn read(x: i64, p: &P) -> i64 ! {panic} { x + p.x }
-        fn main() -> i64 ! {io, panic} { read(first(), &second()) }"#,
+        fn first() -> i64 ! {io} { print_i64(1); panic() }
+        fn second() -> P ! {io} { print_i64(2); P { x: 40 } }
+        fn read(x: i64, p: &P) -> i64 ! {} { x + p.x }
+        fn main() -> i64 ! {io} { read(first(), &second()) }"#,
         "1\n",
     );
 }
@@ -1601,9 +1601,9 @@ fn panicking_arguments_do_not_initialize_later_temporary_owners() {
 #[test]
 fn panics_after_temporary_owner_initialization_keep_source_order() {
     panics_after(
-        r#"fn make() -> Box<i64> ! {alloc, io, panic} { print_i64(1); Box.new(5) }
-        fn boom(b: &Box<i64>) -> i64 ! {io, panic} { print_i64(2); panic() }
-        fn main() -> i64 ! {alloc, io, panic} { boom(&make()) }"#,
+        r#"fn make() -> Box<i64> ! {alloc, io} { print_i64(1); Box.new(5) }
+        fn boom(b: &Box<i64>) -> i64 ! {io} { print_i64(2); panic() }
+        fn main() -> i64 ! {alloc, io} { boom(&make()) }"#,
         "1\n2\n",
     );
 }
@@ -1615,19 +1615,19 @@ fn projected_temporary_place_initializers_may_return_early() {
     agrees(
         r#"enum Result<T, E> { Ok(T), Err(E) }
         struct P { x: i64 }
-        fn make(fail: Bool) -> Result<P, i64> ! {panic} {
+        fn make(fail: Bool) -> Result<P, i64> ! {} {
             if fail { Err(7) } else { Ok(P { x: 40 }) }
         }
-        fn read(field: &i64) -> i64 ! {panic} { *field }
-        fn ok() -> Result<i64, i64> ! {panic} {
+        fn read(field: &i64) -> i64 ! {} { *field }
+        fn ok() -> Result<i64, i64> ! {} {
             let value = read(&(make(false)?).x);
             Ok(value)
         }
-        fn early() -> Result<i64, i64> ! {panic} {
+        fn early() -> Result<i64, i64> ! {} {
             let value = read(&(make(true)?).x);
             Ok(value)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             match ok() {
                 Ok(value) => value + match early() {
                     Ok(value) => value,
@@ -1647,9 +1647,9 @@ fn loop_condition_temporary_owners_clean_up_on_continue_and_break() {
     // continue or break must release the current condition temporary before
     // the next iteration or loop exit, without double-dropping it later.
     agrees(
-        r#"fn make(n: i64) -> Box<i64> ! {alloc, panic} { Box.new(n) }
-        fn read(b: &Box<i64>) -> i64 ! {panic} { Box.read(b) }
-        fn main() -> i64 ! {alloc, panic} {
+        r#"fn make(n: i64) -> Box<i64> ! {alloc} { Box.new(n) }
+        fn read(b: &Box<i64>) -> i64 ! {} { Box.read(b) }
+        fn main() -> i64 ! {alloc} {
             let mut i = 0;
             let mut sum = 0;
             while i < 4 && read(&make(i)) >= 0 {
@@ -1673,9 +1673,9 @@ fn loop_condition_temporary_owners_clean_up_on_continue_and_break() {
 #[test]
 fn temporary_places_keep_source_order_and_single_ownership() {
     agrees(
-        r#"fn make_vec(b: &Box<i64>) -> Vec<i64> ! {alloc, panic} { [Box.read(b)] }
-fn steal(b: Box<i64>) -> i64 ! {alloc, panic} { Box.take(b); 0 }
-fn main() -> i64 ! {alloc, io, panic} {
+        r#"fn make_vec(b: &Box<i64>) -> Vec<i64> ! {alloc} { [Box.read(b)] }
+fn steal(b: Box<i64>) -> i64 ! {alloc} { Box.take(b); 0 }
+fn main() -> i64 ! {alloc, io} {
     let b = Box.new(3);
     let r = &make_vec(&b)[steal(b)];
     print_i64(*r);
@@ -1686,8 +1686,8 @@ fn main() -> i64 ! {alloc, io, panic} {
         "3\n",
     );
     agrees(
-        r#"fn make() -> Vec<i64> ! {alloc, panic} { [7, 8] }
-fn main() -> i64 ! {alloc, panic} {
+        r#"fn make() -> Vec<i64> ! {alloc} { [7, 8] }
+fn main() -> i64 ! {alloc} {
     let r = &make()[0];
     *r
 }
@@ -1697,8 +1697,8 @@ fn main() -> i64 ! {alloc, panic} {
     );
     agrees(
         r#"struct H { b: Box<i64> }
-fn make() -> H ! {alloc, panic} { H { b: Box.new(5) } }
-fn main() -> i64 ! {alloc, panic} {
+fn make() -> H ! {alloc} { H { b: Box.new(5) } }
+fn main() -> i64 ! {alloc} {
     let r = &make().b;
     Box.read(r)
 }
@@ -1708,18 +1708,18 @@ fn main() -> i64 ! {alloc, panic} {
     );
     agrees(
         r#"struct H { b: Box<i64> }
-fn make() -> H ! {alloc, panic} { H { b: Box.new(5) } }
-fn main() -> i64 ! {alloc, panic} { Box.read(&(&make()).b) }
+fn make() -> H ! {alloc} { H { b: Box.new(5) } }
+fn main() -> i64 ! {alloc} { Box.read(&(&make()).b) }
 "#,
         5,
         "",
     );
     agrees(
         r#"struct P { lane: [i64; 2] }
-fn make() -> P ! {io, panic} { print_i64(2); P { lane: [7, 8] } }
-fn idx() -> i64 ! {io, panic} { print_i64(1); 1 }
-fn read(x: &i64) -> i64 ! {panic} { *x }
-fn main() -> i64 ! {io, panic} {
+fn make() -> P ! {io} { print_i64(2); P { lane: [7, 8] } }
+fn idx() -> i64 ! {io} { print_i64(1); 1 }
+fn read(x: &i64) -> i64 ! {} { *x }
+fn main() -> i64 ! {io} {
     read(&make().lane[idx()])
 }
 "#,
@@ -1731,8 +1731,8 @@ fn main() -> i64 ! {io, panic} {
 #[test]
 fn leading_temporary_declaration_cannot_hide_block_escape() {
     rejects(
-        r#"fn make(n: i64) -> Box<i64> ! {alloc, panic} { Box.new(n) }
-fn main() -> i64 ! {alloc, io, panic} {
+        r#"fn make(n: i64) -> Box<i64> ! {alloc} { Box.new(n) }
+fn main() -> i64 ! {alloc, io} {
     let mut refs: Vec<&Box<i64>> = [];
     if true {
         let r = &make(7);

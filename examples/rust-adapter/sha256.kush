@@ -11,12 +11,12 @@ module rust_adapter_example;
 use std.result.Result;
 use rust_adapter_example.sha256_adapter;
 
-fn write_line(text: &Bytes) -> Unit ! {io, alloc, panic} {
+fn write_line(text: &Bytes) -> Unit ! {io, alloc} {
     match IO.write(IO.stdout(), text) { Ok(_) => (), Err(_) => () };
     match IO.write(IO.stdout(), &Bytes.from("\n")) { Ok(_) => (), Err(_) => () }
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let input = Bytes.from("abc");
     let direct = match sha256_adapter.sha256(&input) { Ok(value) => value, Err(_) => Bytes.from("") };
     write_line(&direct);

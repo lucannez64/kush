@@ -2,7 +2,7 @@
 // including nested sub-views and a borrowed mutable return. Run with:
 //   cargo run -p kush -- run examples/mutable-slices.kush
 
-fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {panic} {
+fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {} {
     let mut index = 0;
     while index < Slice.len(view) {
         Slice.set(view, index, value);
@@ -10,11 +10,11 @@ fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {panic} {
     }
 }
 
-fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {} {
     &mut view[1..]
 }
 
-fn add_one<'a>(view: &'a mut [i64]) -> Unit ! {panic} {
+fn add_one<'a>(view: &'a mut [i64]) -> Unit ! {} {
     let mut index = 0;
     while index < Slice.len(view) {
         Slice.set(view, index, Slice.get(view, index) + 1);
@@ -22,7 +22,7 @@ fn add_one<'a>(view: &'a mut [i64]) -> Unit ! {panic} {
     }
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let mut numbers: [i64; 4] = [0, 0, 0, 0];
     fill(&mut numbers[..], 3);
     add_one(&mut numbers[..]);

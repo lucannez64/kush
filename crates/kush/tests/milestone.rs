@@ -15,14 +15,14 @@ fn generic_functions_specialize_and_records_destructure() {
 #[test]
 fn vectors_and_loop_control_preserve_ownership() {
     value(
-        "fn main()->i64 ! {alloc,panic} {let mut v:Vec<i64> =Vec.new();let mut i=0;while i<4 {v=Vec.push(v,i);i=i+1;} Vec.get(&v,3)}",
+        "fn main()->i64 ! {alloc} {let mut v:Vec<i64> =Vec.new();let mut i=0;while i<4 {v=Vec.push(v,i);i=i+1;} Vec.get(&v,3)}",
         3,
     );
 }
 #[test]
 fn proved_reads_erase_bounds_obligations() {
     value(
-        "fn main()->i64 ! {alloc,panic} {let b=Bytes.from(\"a\");if Bytes.len(&b)>0 {Bytes.at(&b,0,_)} else {0}}",
+        "fn main()->i64 ! {alloc} {let b=Bytes.from(\"a\");if Bytes.len(&b)>0 {Bytes.at(&b,0,_)} else {0}}",
         97,
     );
     assert!(check("fn f(b:&Bytes,i:i64)->i64 ! {} {Bytes.at(b,i,_)}").is_err());
@@ -30,10 +30,10 @@ fn proved_reads_erase_bounds_obligations() {
 #[test]
 fn sibling_branch_versions_are_independent_but_joined_values_lose_old_bounds() {
     value(
-        "fn main()->i64 ! {alloc,panic} {let b=Bytes.from(\"a\");let mut i=0;if false {i=2;} else {if i>=0 && i<Bytes.len(&b) {return Bytes.at(&b,i,_);}} 0}",
+        "fn main()->i64 ! {alloc} {let b=Bytes.from(\"a\");let mut i=0;if false {i=2;} else {if i>=0 && i<Bytes.len(&b) {return Bytes.at(&b,i,_);}} 0}",
         97,
     );
-    assert!(check("fn main()->i64 ! {alloc,panic} {let b=Bytes.from(\"a\");let mut i=0;if true {i=2;} Bytes.at(&b,i,_)}").is_err());
+    assert!(check("fn main()->i64 ! {alloc} {let b=Bytes.from(\"a\");let mut i=0;if true {i=2;} Bytes.at(&b,i,_)}").is_err());
 }
 #[test]
 fn linear_bindings_must_be_consumed_exactly_once() {
@@ -141,7 +141,7 @@ fn modules_enforce_visibility_and_supply_standard_result() {
 #[test]
 fn fixed_arrays_are_inline_typed_and_checked() {
     value(
-        "fn pair()->[i64;2] ! {} {[20,22]} fn main()->i64 ! {panic} {let a=pair();a[0]+a[1]}",
+        "fn pair()->[i64;2] ! {} {[20,22]} fn main()->i64 ! {} {let a=pair();a[0]+a[1]}",
         42,
     );
     value("fn main()->i64 ! {} {let a:[i64;0]=[];42}", 42);
@@ -153,12 +153,12 @@ fn fixed_arrays_are_inline_typed_and_checked() {
         "fn main()->i64 ! {} {let a:[i64;2]=[1];a[0]}",
         "fn main()->i64 ! {} {let a:[i64;1]=[1];a[1]}",
         "fn main()->i64 ! {} {let a:[i64;32]=[];0}",
-        "fn main()->i64 ! {alloc,panic} {let a:[Bytes;1]=[Bytes.from(\"x\")];let b=a[0];0}",
+        "fn main()->i64 ! {alloc} {let a:[Bytes;1]=[Bytes.from(\"x\")];let b=a[0];0}",
     ] {
         assert!(check(source).is_err(), "{source}");
     }
-    let p = check("fn main()->i64 ! {alloc,panic} {let a:[Box<i64>;2]=[Box.new(1),Box.new(2)];0}")
-        .unwrap();
+    let p =
+        check("fn main()->i64 ! {alloc} {let a:[Box<i64>;2]=[Box.new(1),Box.new(2)];0}").unwrap();
     let (_, stats) = p.evaluate_with_stats(&mut Vec::new()).unwrap();
     assert_eq!(stats.allocations, 2);
     assert_eq!(stats.deallocations, 2);
@@ -167,7 +167,7 @@ fn fixed_arrays_are_inline_typed_and_checked() {
 #[test]
 fn array_destructuring_moves_owning_elements() {
     value(
-        "fn main()->i64 ! {alloc,panic} {let a:[Box<i64>;2]=[Box.new(20),Box.new(22)];let [x,y]=a;Box.take(x)+Box.take(y)}",
+        "fn main()->i64 ! {alloc} {let a:[Box<i64>;2]=[Box.new(20),Box.new(22)];let [x,y]=a;Box.take(x)+Box.take(y)}",
         42,
     );
     assert!(check("fn main()->Unit ! {} {let a:[i64;2]=[1,2];let [x]=a;}").is_err());
@@ -176,7 +176,7 @@ fn array_destructuring_moves_owning_elements() {
 #[test]
 fn inline_arrays_execute_natively_with_owning_cleanup() {
     use std::process::Command;
-    let source = "fn pair()->[i64;2] ! {} {[20,22]} fn main()->i64 ! {alloc,panic} {let p=pair();let a:[Box<i64>;2]=[Box.new(p[0]),Box.new(p[1])];let [x,y]=a;let unused:[Box<i64>;1]=[Box.new(0)];Box.take(x)+Box.take(y)}";
+    let source = "fn pair()->[i64;2] ! {} {[20,22]} fn main()->i64 ! {alloc} {let p=pair();let a:[Box<i64>;2]=[Box.new(p[0]),Box.new(p[1])];let [x,y]=a;let unused:[Box<i64>;1]=[Box.new(0)];Box.take(x)+Box.take(y)}";
     let p = check(source).unwrap();
     let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
     let binary = scratch.path().join("arrays");

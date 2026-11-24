@@ -106,6 +106,6 @@ fn proof_required(erased v: Vect<Nat, 2>) -> i64 ! {} {
     42
 }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     proof_required(two_items())
 }

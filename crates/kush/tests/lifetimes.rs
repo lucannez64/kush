@@ -6,10 +6,10 @@ use kush::executable::{MemoryStats, check};
 #[test]
 fn early_exits_cannot_abandon_pending_linear_callees_or_arguments() {
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let owner: Box<i64> @[1] = Box.new(40);
-            let f: linear once fn(i64) -> i64 ! {panic} =
-                fn(n: i64) -> i64 ! {panic} { Box.take(owner) + n };
+            let f: linear once fn(i64) -> i64 ! {} =
+                fn(n: i64) -> i64 ! {} { Box.take(owner) + n };
             f(loop {
                 let mut n = 0;
                 while n < 2 { n = n + 1; continue; }
@@ -21,11 +21,11 @@ fn early_exits_cannot_abandon_pending_linear_callees_or_arguments() {
     );
     for exit in ["return 0;", "break 0;", "continue;"] {
         let source = format!(
-            "fn main() -> i64 ! {{alloc, panic}} {{
+            "fn main() -> i64 ! {{alloc}} {{
                 loop {{
                     let owner: Box<i64> @[1] = Box.new(40);
-                    let f: linear once fn(i64) -> i64 ! {{panic}} =
-                        fn(n: i64) -> i64 ! {{panic}} {{ Box.take(owner) + n }};
+                    let f: linear once fn(i64) -> i64 ! {{}} =
+                        fn(n: i64) -> i64 ! {{}} {{ Box.take(owner) + n }};
                     let result = f({{ if true {{ {exit} }} 2 }});
                     break result;
                 }}
@@ -34,10 +34,10 @@ fn early_exits_cannot_abandon_pending_linear_callees_or_arguments() {
         rejects(&source, "pending linear value");
     }
     rejects(
-        r#"fn consume(value: Box<i64> @[1], n: i64) -> i64 ! {panic} {
+        r#"fn consume(value: Box<i64> @[1], n: i64) -> i64 ! {} {
             Box.take(value) + n
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let owner: Box<i64> @[1] = Box.new(40);
             consume(owner, { return 0; })
         }"#,
@@ -45,21 +45,21 @@ fn early_exits_cannot_abandon_pending_linear_callees_or_arguments() {
     );
     rejects(
         r#"use std.result.Result;
-        fn run() -> Result<i64, i64> ! {alloc, panic} {
+        fn run() -> Result<i64, i64> ! {alloc} {
             let owner: Box<i64> @[1] = Box.new(40);
-            let f: linear once fn(i64) -> i64 ! {panic} =
-                fn(n: i64) -> i64 ! {panic} { Box.take(owner) + n };
+            let f: linear once fn(i64) -> i64 ! {} =
+                fn(n: i64) -> i64 ! {} { Box.take(owner) + n };
             let failure: Result<i64, i64> = Err(9);
             Ok(f(failure?))
         }
-        fn main() -> Unit ! {alloc, panic} { let _ = run(); }"#,
+        fn main() -> Unit ! {alloc} { let _ = run(); }"#,
         "pending linear value",
     );
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let owner: Box<i64> @[1] = Box.new(40);
-            let f: linear once fn(i64) -> i64 ! {panic} =
-                fn(n: i64) -> i64 ! {panic} { Box.take(owner) + n };
+            let f: linear once fn(i64) -> i64 ! {} =
+                fn(n: i64) -> i64 ! {} { Box.take(owner) + n };
             f(if true { 2 } else { 3 })
         }"#,
         42,
@@ -76,11 +76,11 @@ fn borrowed_pipeline_retains_split_callees_across_join_argument_suspension() {
     );
     rejects(
         r#"use std.task.TaskExit;
-        fn main() -> Unit ! {alloc, panic, suspend} {
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+        fn main() -> Unit ! {alloc, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let mut source = Bytes.from("abc");
                 let view = &source[..];
-                let read = fn(by: i64) -> i64 ! {panic} { Slice.get(view, 0) + by };
+                let read = fn(by: i64) -> i64 ! {} { Slice.get(view, 0) + by };
                 let child: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {
                     Task.yield(); 1
                 });
@@ -111,10 +111,10 @@ fn local_borrowed_callees_retain_captures_through_argument_evaluation() {
         for mutable in ["", "mut "] {
             for mutation in [replacement, "drop(v);"] {
                 let source = format!(
-                    "fn main() -> i64 ! {{alloc, panic}} {{
+                    "fn main() -> i64 ! {{alloc}} {{
                         {setup}
                         let view: &{mutable}[i64] = &{mutable}v[..];
-                        let f = fn(n: i64) -> i64 ! {{panic}} {{ Slice.get(view, 0) + n }};
+                        let f = fn(n: i64) -> i64 ! {{}} {{ Slice.get(view, 0) + n }};
                         f({{ {{ {mutation} }} 0 }})
                     }}"
                 );
@@ -123,10 +123,10 @@ fn local_borrowed_callees_retain_captures_through_argument_evaluation() {
         }
         for other in ["", "mut "] {
             let source = format!(
-                "fn main() -> i64 ! {{alloc, panic}} {{
+                "fn main() -> i64 ! {{alloc}} {{
                     {setup}
                     let view: &mut [i64] = &mut v[..];
-                    let f = fn(other: &{other}[i64]) -> i64 ! {{panic}} {{
+                    let f = fn(other: &{other}[i64]) -> i64 ! {{}} {{
                         Slice.set(view, 0, 9); Slice.get(other, 0)
                     }};
                     f(&{other}v[..])
@@ -136,10 +136,10 @@ fn local_borrowed_callees_retain_captures_through_argument_evaluation() {
         }
     }
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [5, 6];
             let view = &mut a[..];
-            let f = fn(n: i64) -> i64 ! {panic} {
+            let f = fn(n: i64) -> i64 ! {} {
                 Slice.set(view, 0, Slice.get(view, 0) + n);
                 Slice.get(view, 0)
             };
@@ -155,10 +155,10 @@ fn local_borrowed_callees_retain_captures_through_argument_evaluation() {
 #[test]
 fn mutable_views_can_read_their_own_length_in_subview_bounds() {
     agrees(
-        r#"fn trim<'a>(v: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        r#"fn trim<'a>(v: &'a mut [i64]) -> &'a mut [i64] ! {} {
             &mut v[0..Slice.len(v)]
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: [i64; 4] = [1, 2, 3, 4];
             let (left, right) = Slice.split_at_mut(&mut a[..], 2);
             let shared = &left[0..Slice.len(left)];
@@ -173,8 +173,8 @@ fn mutable_views_can_read_their_own_length_in_subview_bounds() {
         "",
     );
     rejects(
-        r#"fn consume(v: &mut [i64]) -> i64 ! {panic} { Slice.len(v) }
-        fn main() -> Unit ! {panic} {
+        r#"fn consume(v: &mut [i64]) -> i64 ! {} { Slice.len(v) }
+        fn main() -> Unit ! {} {
             let mut a: [i64; 2] = [1, 2];
             let view = &mut a[..];
             let child = &mut view[0..consume(view)];
@@ -183,7 +183,7 @@ fn mutable_views_can_read_their_own_length_in_subview_bounds() {
         "borrowed",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 2] = [1, 2];
             let view = &mut a[..];
             let child = &mut view[0..{ Slice.set(view, 0, 9); 1 }];
@@ -197,12 +197,12 @@ fn mutable_views_can_read_their_own_length_in_subview_bounds() {
 fn borrowed_slice_captures_are_scoped_and_callable() {
     // Immutable view capture: the closure reads the original owner storage.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 5);
             v = Vec.push(v, 7);
             let view: &[i64] = &v[..];
-            let sum = fn() -> i64 ! {panic} { Slice.get(view, 0) + Slice.get(view, 1) };
+            let sum = fn() -> i64 ! {} { Slice.get(view, 0) + Slice.get(view, 1) };
             sum()
         }"#,
         12,
@@ -212,11 +212,11 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // owner can be borrowed again afterwards. Native and reference agree on
     // both the write and the allocation balance.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let view: &mut [i64] = &mut v[..];
-            let bump = fn(by: i64) -> Unit ! {panic} {
+            let bump = fn(by: i64) -> Unit ! {} {
                 Slice.set(view, 0, Slice.get(view, 0) + by);
             };
             bump(41);
@@ -227,10 +227,10 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     );
     // Byte-buffer views use the same capture rules and write the real buffer.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut b = Bytes.from("ab");
             let view: &mut [i64] = &mut b[..];
-            let f = fn() -> Unit ! {panic} { Slice.set(view, 1, 90); };
+            let f = fn() -> Unit ! {} { Slice.set(view, 1, 90); };
             f();
             Bytes.get(&b, 1)
         }"#,
@@ -240,11 +240,11 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // Split siblings keep opposite-side certificates while their closures are
     // live, so both can mutate without reopening the parent.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 4] = [1, 2, 3, 4];
             let (left, right) = Slice.split_at_mut(&mut a[..], 2);
-            let l = fn() -> Unit ! {panic} { Slice.set(left, 0, Slice.get(left, 0) + 1); };
-            let r = fn() -> Unit ! {panic} { Slice.set(right, 0, Slice.get(right, 0) + 10); };
+            let l = fn() -> Unit ! {} { Slice.set(left, 0, Slice.get(left, 0) + 1); };
+            let r = fn() -> Unit ! {} { Slice.set(right, 0, Slice.get(right, 0) + 10); };
             l();
             r();
             a[0] + a[2]
@@ -254,12 +254,12 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     );
     // A closure may be rebuilt and called on every loop iteration.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [0, 0];
             let mut i = 0;
             while i < 2 {
                 let view: &mut [i64] = &mut a[..];
-                let f = fn() -> Unit ! {panic} { Slice.set(view, i, Slice.get(view, i) + 1); };
+                let f = fn() -> Unit ! {} { Slice.set(view, i, Slice.get(view, i) + 1); };
                 f();
                 i = i + 1;
             }
@@ -270,10 +270,10 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     );
     // Branch-local consumption releases the owner on both paths.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let f = fn(at: i64) -> Unit ! {panic} { Slice.set(view, at, 9); };
+            let f = fn(at: i64) -> Unit ! {} { Slice.set(view, at, 9); };
             if true { f(0); } else { f(1); }
             a[0]
         }"#,
@@ -282,11 +282,11 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     );
     // A nested closure captures the outer closure's borrow and parameter.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let a: [i64; 2] = [3, 4];
             let s: &[i64] = &a[..];
-            let outer = fn(x: i64) -> i64 ! {alloc, panic} {
-                let inner = fn(y: i64) -> i64 ! {panic} { Slice.get(s, 0) + x + y };
+            let outer = fn(x: i64) -> i64 ! {alloc} {
+                let inner = fn(y: i64) -> i64 ! {} { Slice.get(s, 0) + x + y };
                 inner(1)
             };
             outer(10)
@@ -297,12 +297,12 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // An immediate callee is a valid scoped construction position, and an
     // exact same-layout `once fn` annotation keeps the same loan tracking.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let a: [i64; 2] = [1, 2];
             let s: &[i64] = &a[..];
-            let first = (fn() -> i64 ! {panic} { Slice.get(s, 0) + 1 })();
-            let g: once fn() -> i64 ! {panic} =
-                fn() -> i64 ! {panic} { Slice.get(s, 1) + 1 };
+            let first = (fn() -> i64 ! {} { Slice.get(s, 0) + 1 })();
+            let g: once fn() -> i64 ! {} =
+                fn() -> i64 ! {} { Slice.get(s, 1) + 1 };
             first + g()
         }"#,
         5,
@@ -311,11 +311,11 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // A borrowed capture can also target a borrowed parameter; the closure
     // operates on the caller's storage, not a callee snapshot.
     agrees(
-        r#"fn write_through(view: &mut [i64], value: i64) -> Unit ! {alloc, panic} {
-            let f = fn() -> Unit ! {panic} { Slice.set(view, 0, value); };
+        r#"fn write_through(view: &mut [i64], value: i64) -> Unit ! {alloc} {
+            let f = fn() -> Unit ! {} { Slice.set(view, 0, value); };
             f()
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             write_through(&mut a[..], 7);
             a[0]
@@ -326,29 +326,29 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // Mixed ownership: an uncalled closure releases its affine Box exactly
     // once and never drops the borrowed owner. The call path consumes both.
     agrees(
-        r#"fn choose(flag: Bool) -> i64 ! {alloc, panic} {
+        r#"fn choose(flag: Bool) -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
             let n = Box.new(41);
-            let f = fn() -> i64 ! {panic} {
+            let f = fn() -> i64 ! {} {
                 Slice.set(view, 0, 0);
                 Box.take(n) + 1
             };
             if flag { return 0; }
             f()
         }
-        fn main() -> i64 ! {alloc, panic} { choose(true) + choose(false) }"#,
+        fn main() -> i64 ! {alloc} { choose(true) + choose(false) }"#,
         42,
         "",
     );
     // An uncalled closure releases only its environment at scope end; the
     // owner remains unchanged and usable.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             {
                 let view: &mut [i64] = &mut a[..];
-                let unused = fn() -> Unit ! {panic} { Slice.set(view, 0, 9); };
+                let unused = fn() -> Unit ! {} { Slice.set(view, 0, 9); };
             }
             a[0]
         }"#,
@@ -357,10 +357,10 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     );
     // Capturing a mutable view moves its capability: the old name is gone.
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let f = fn() -> Unit ! {panic} { Slice.set(view, 0, 9); };
+            let f = fn() -> Unit ! {} { Slice.set(view, 0, 9); };
             Slice.len(view)
         }"#,
         "use after move",
@@ -369,17 +369,17 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // once while never dropping the borrowed owner.
     agrees(
         r#"use std.result.Result;
-        fn choose(flag: Bool) -> Result<i64, i64> ! {alloc, panic} {
+        fn choose(flag: Bool) -> Result<i64, i64> ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let read = fn() -> Result<i64, i64> ! {panic} {
+            let read = fn() -> Result<i64, i64> ! {} {
                 Ok(Slice.get(view, 0))
             };
             if flag { return Err(9); }
             let base = read()?;
             Ok(base + 1)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let left = match choose(true) { Ok(n) => n, Err(e) => e };
             let right = match choose(false) { Ok(n) => n, Err(e) => e };
             left + right
@@ -390,12 +390,12 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // A borrowed capture composes with an existing linear capture: the
     // callable remains linear-once and must be consumed by its call.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
             let n: Box<i64> @[1] = Box.new(40);
-            let f: linear once fn() -> i64 ! {panic} =
-                fn() -> i64 ! {panic} {
+            let f: linear once fn() -> i64 ! {} =
+                fn() -> i64 ! {} {
                     Slice.set(view, 0, 0);
                     Box.take(n) + Slice.get(view, 0) + 2
                 };
@@ -407,27 +407,27 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // An early return while a later argument evaluates abandons the immediate
     // call: the environment is reclaimed and the borrowed owner is untouched.
     agrees(
-        r#"fn partial(flag: Bool) -> i64 ! {alloc, panic} {
+        r#"fn partial(flag: Bool) -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            (fn(x: i64) -> i64 ! {panic} {
+            (fn(x: i64) -> i64 ! {} {
                 Slice.set(view, 0, x);
                 Slice.get(view, 0)
             })({ if flag { return 7; } 1 })
         }
-        fn main() -> i64 ! {alloc, panic} { partial(true) + partial(false) }"#,
+        fn main() -> i64 ! {alloc} { partial(true) + partial(false) }"#,
         8,
         "",
     );
     // Shared captures behave like ordinary shared views: the owner may still
     // be read while the closure is live.
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 3);
             v = Vec.push(v, 4);
             let view: &[i64] = &v[..];
-            let f = fn() -> i64 ! {panic} { Slice.get(view, 1) };
+            let f = fn() -> i64 ! {} { Slice.get(view, 1) };
             let direct = Slice.get(&v[..], 0);
             direct + f()
         }"#,
@@ -437,21 +437,21 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // But a shared closure still freezes the owner against moves and
     // exclusive borrows.
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 3);
             let view: &[i64] = &v[..];
-            let f = fn() -> i64 ! {panic} { Slice.get(view, 0) };
+            let f = fn() -> i64 ! {} { Slice.get(view, 0) };
             v = Vec.push(v, 4);
             f()
         }"#,
         "borrows it",
     );
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &[i64] = &a[..];
-            let f = fn() -> i64 ! {panic} { Slice.get(view, 0) };
+            let f = fn() -> i64 ! {} { Slice.get(view, 0) };
             let wide: &mut [i64] = &mut a[..];
             f() + Slice.len(wide)
         }"#,
@@ -460,11 +460,11 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // The loan stays active across a same-task suspension point and is then
     // consumed by the call before the owner is read.
     agrees_balanced(
-        r#"fn main() -> i64 ! {io, alloc, panic, suspend} {
+        r#"fn main() -> i64 ! {io, alloc, suspend} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let f = fn() -> Unit ! {panic} { Slice.set(view, 1, 9); };
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} { Task.yield(); });
+            let f = fn() -> Unit ! {} { Slice.set(view, 1, 9); };
+            Task.scope(fn() -> Unit ! {alloc, suspend} { Task.yield(); });
             f();
             a[1]
         }"#,
@@ -472,10 +472,10 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
         "",
     );
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            (fn(x: i64) -> i64 ! {panic} { Slice.set(view, 0, x); Slice.get(view, 0) })(
+            (fn(x: i64) -> i64 ! {} { Slice.set(view, 0, x); Slice.get(view, 0) })(
                 { a = [8, 8]; 5 }
             )
         }"#,
@@ -483,12 +483,12 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     );
     agrees_balanced(
         r#"use std.task.TaskExit;
-        fn main() -> Unit ! {io, alloc, panic, suspend} {
+        fn main() -> Unit ! {io, alloc, suspend} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let f = fn() -> i64 ! {panic} { Slice.set(view, 0, 9); Slice.get(view, 0) };
-            Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-                let child: Task<i64> = Task.spawn(fn() -> i64 ! {panic} { 5 });
+            let f = fn() -> i64 ! {} { Slice.set(view, 0, 9); Slice.get(view, 0) };
+            Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+                let child: Task<i64> = Task.spawn(fn() -> i64 ! {} { 5 });
                 match Task.join(child) {
                     TaskExit.Completed(value) => print_i64(value),
                     TaskExit.Cancelled => print_i64(-1),
@@ -503,10 +503,10 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     // While a borrowing closure is live, its owner and ancestors stay
     // suspended, even though the capture is not an owning move.
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let f = fn() -> Unit ! {panic} { Slice.set(view, 0, 9); };
+            let f = fn() -> Unit ! {} { Slice.set(view, 0, 9); };
             let observed = a[0];
             f();
             observed
@@ -514,11 +514,11 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
         "exclusive '&mut [T]' view",
     );
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let parent: &mut [i64] = &mut a[..];
             let child: &mut [i64] = &mut parent[..];
-            let f = fn() -> Unit ! {panic} { Slice.set(child, 0, 9); };
+            let f = fn() -> Unit ! {} { Slice.set(child, 0, 9); };
             let n = Slice.len(parent);
             f();
             n
@@ -527,76 +527,76 @@ fn borrowed_slice_captures_are_scoped_and_callable() {
     );
     // Borrowed captures do not erase through escapes.
     rejects(
-        r#"fn make(v: &mut [i64]) -> once fn() -> Unit ! {panic} ! {alloc, panic} {
-            let f = fn() -> Unit ! {panic} { Slice.set(v, 0, 1); };
+        r#"fn make(v: &mut [i64]) -> once fn() -> Unit ! {} ! {alloc} {
+            let f = fn() -> Unit ! {} { Slice.set(v, 0, 1); };
             f
         }
         fn main() -> Unit ! {} {}"#,
         "scoped",
     );
     rejects(
-        r#"struct Holder { f: once fn() -> Unit ! {alloc, panic} }
-        fn main() -> Unit ! {alloc, panic} {
+        r#"struct Holder { f: once fn() -> Unit ! {alloc} }
+        fn main() -> Unit ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let h = Holder { f: fn() -> Unit ! {panic} { Slice.set(view, 0, 9); } };
+            let h = Holder { f: fn() -> Unit ! {} { Slice.set(view, 0, 9); } };
         }"#,
         "must be called immediately",
     );
     rejects(
         r#"
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let f = fn() -> Unit ! {panic} { Slice.set(view, 0, 9); };
+            let f = fn() -> Unit ! {} { Slice.set(view, 0, 9); };
             f()
         }"#,
         "requires effects {alloc}",
     );
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let a: [i64; 2] = [1, 2];
             let view: &[i64] = &a[..];
-            let u: i64 | once fn() -> i64 ! {panic} =
-                fn() -> i64 ! {panic} { Slice.get(view, 0) };
+            let u: i64 | once fn() -> i64 ! {} =
+                fn() -> i64 ! {} { Slice.get(view, 0) };
             0
         }"#,
         "union",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let a: [i64; 2] = [1, 2];
             let view: &[i64] = &a[..];
-            let wide: once fn(i64) -> i64 ! {panic} =
-                fn(x: i64 | Bool) -> i64 ! {panic} { Slice.get(view, 0) };
+            let wide: once fn(i64) -> i64 ! {} =
+                fn(x: i64 | Bool) -> i64 ! {} { Slice.get(view, 0) };
         }"#,
         "must be called immediately",
     );
     rejects(
-        r#"fn apply(f: once fn() -> Unit ! {panic}) -> Unit ! {alloc, panic} { f() }
-        fn main() -> Unit ! {alloc, panic} {
+        r#"fn apply(f: once fn() -> Unit ! {}) -> Unit ! {alloc} { f() }
+        fn main() -> Unit ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let f = fn() -> Unit ! {panic} { Slice.set(view, 0, 9); };
+            let f = fn() -> Unit ! {} { Slice.set(view, 0, 9); };
             apply(f);
         }"#,
         "scoped",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let f = fn() -> Unit ! {panic} { Slice.set(view, 0, 9); };
+            let f = fn() -> Unit ! {} { Slice.set(view, 0, 9); };
             let boxed = Box.new(f);
         }"#,
         "scoped",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic, suspend} {
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+        r#"fn main() -> Unit ! {alloc, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let mut a: [i64; 2] = [1, 2];
                 let view: &mut [i64] = &mut a[..];
-                Task.spawn(fn() -> Unit ! {panic} { Slice.set(view, 0, 9); });
+                Task.spawn(fn() -> Unit ! {} { Slice.set(view, 0, 9); });
             });
         }"#,
         "captured from outside the scope",
@@ -634,8 +634,8 @@ fn retained_call_arguments_keep_their_owner_borrowed() {
                     let alias = if indirect { "let call = consume;" } else { "" };
                     let call = if indirect { "call" } else { "consume" };
                     let source = format!(
-                        "fn consume(s: &{mutable}[i64], n: i64) -> Unit ! {{panic}} {{ Slice.get(s, 0); }}
-                        fn main() -> Unit ! {{alloc, panic}} {{
+                        "fn consume(s: &{mutable}[i64], n: i64) -> Unit ! {{}} {{ Slice.get(s, 0); }}
+                        fn main() -> Unit ! {{alloc}} {{
                             {setup}
                             let view: &{mutable}[i64] = &{mutable}v[..];
                             {alias}
@@ -656,7 +656,7 @@ fn builtin_reborrows_protect_all_later_arguments() {
         "{ Slice.set(&mut v[..], 0, 3); 0 }",
     ] {
         let source = format!(
-            "fn main() -> Unit ! {{alloc, panic}} {{
+            "fn main() -> Unit ! {{alloc}} {{
                 let mut v: Vec<i64> = Vec.new(); v = Vec.push(v, 1);
                 let view: &mut [i64] = &mut v[..];
                 Slice.set(view, {later}, 9);
@@ -664,7 +664,7 @@ fn builtin_reborrows_protect_all_later_arguments() {
         );
         assert!(check(&source).is_err(), "{source}");
     }
-    let source = "fn main() -> Unit ! {alloc, panic} {
+    let source = "fn main() -> Unit ! {alloc} {
         let mut v = Bytes.from(\"abc\");
         let view: &mut [i64] = &mut v[..];
         Slice.set(view, 0, { v = Bytes.from(\"zzzz\"); 9 });
@@ -681,10 +681,10 @@ fn temporary_views_obey_shared_and_exclusive_alias_rules() {
     ] {
         for (left, right) in [("mut ", ""), ("", "mut "), ("mut ", "mut ")] {
             let source = format!(
-                "fn both(a: &{left}[i64], b: &{right}[i64]) -> Unit ! {{panic}} {{
+                "fn both(a: &{left}[i64], b: &{right}[i64]) -> Unit ! {{}} {{
                     Slice.get(a, 0); Slice.get(b, 0);
                 }}
-                fn main() -> Unit ! {{alloc, panic}} {{
+                fn main() -> Unit ! {{alloc}} {{
                     {setup}
                     both(&{left}v[..], &{right}v[..]);
                 }}"
@@ -698,10 +698,10 @@ fn temporary_views_obey_shared_and_exclusive_alias_rules() {
         "read(&v[..], write(&mut v[..]));",
     ] {
         let source = format!(
-            "fn both(a: &mut [i64], b: &[i64]) -> Unit ! {{panic}} {{ Slice.set(a, 0, Slice.get(b, 0)); }}
-            fn read(a: &[i64], n: i64) -> Unit ! {{panic}} {{ Slice.get(a, 0); }}
-            fn write(a: &mut [i64]) -> i64 ! {{panic}} {{ Slice.set(a, 0, 9); 0 }}
-            fn main() -> Unit ! {{panic}} {{ let mut v: [i64; 2] = [1, 2]; {body} }}"
+            "fn both(a: &mut [i64], b: &[i64]) -> Unit ! {{}} {{ Slice.set(a, 0, Slice.get(b, 0)); }}
+            fn read(a: &[i64], n: i64) -> Unit ! {{}} {{ Slice.get(a, 0); }}
+            fn write(a: &mut [i64]) -> i64 ! {{}} {{ Slice.set(a, 0, 9); 0 }}
+            fn main() -> Unit ! {{}} {{ let mut v: [i64; 2] = [1, 2]; {body} }}"
         );
         assert!(check(&source).is_err(), "{source}");
     }
@@ -710,10 +710,10 @@ fn temporary_views_obey_shared_and_exclusive_alias_rules() {
 #[test]
 fn call_loans_release_after_calls_and_preserve_disjoint_owners() {
     agrees(
-        "fn fill(a: &mut [i64], b: &[i64]) -> Unit ! {panic} {
+        "fn fill(a: &mut [i64], b: &[i64]) -> Unit ! {} {
             Slice.set(a, 0, Slice.get(b, 0));
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [1, 2];
             let b: [i64; 2] = [9, 8];
             fill(&mut a[..], &b[..]);
@@ -726,10 +726,10 @@ fn call_loans_release_after_calls_and_preserve_disjoint_owners() {
         "",
     );
     agrees(
-        "fn update(v: &mut [i64]) -> Unit ! {panic} {
+        "fn update(v: &mut [i64]) -> Unit ! {} {
             Slice.set(v, Slice.get(v, 1), Slice.get(v, 0) + 1);
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [4, 0];
             update(&mut a[..]);
             a[0]
@@ -838,14 +838,14 @@ fn borrowed_return_helpers_keep_original_storage_and_release_on_last_use() {
     // owner may move only after the view's checked last use.
     agrees(
         r#"
-        fn tail<'a>(s: &'a [i64]) -> &'a [i64] ! {panic} { s[1..] }
-        fn sum(s: &[i64]) -> i64 ! {panic} {
+        fn tail<'a>(s: &'a [i64]) -> &'a [i64] ! {} { s[1..] }
+        fn sum(s: &[i64]) -> i64 ! {} {
             let mut acc = 0;
             let mut i = 0;
             while i < Slice.len(s) { acc = acc + Slice.get(s, i); i = i + 1; }
             acc
         }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             values = Vec.push(values, 2);
@@ -870,11 +870,11 @@ fn mutable_slice_views_over_arrays_vectors_and_bytes_agree() {
     );
     let stats = agrees(
         r#"
-        fn fill<'a>(v: &'a mut [i64], x: i64) -> Unit ! {panic} {
+        fn fill<'a>(v: &'a mut [i64], x: i64) -> Unit ! {} {
             let mut i = 0;
             while i < Slice.len(v) { Slice.set(v, i, x); i = i + 1; }
         }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut a: [i64; 3] = [0, 0, 0];
             fill(&mut a[..], 5);
             let mut v: Vec<i64> = Vec.new();
@@ -896,7 +896,7 @@ fn mutable_slice_views_over_arrays_vectors_and_bytes_agree() {
 #[test]
 fn mutable_views_are_exclusive_and_shared_upgrades_are_rejected() {
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             let shared: &[i64] = &v[..];
             let exclusive: &mut [i64] = &mut v[..];
@@ -905,7 +905,7 @@ fn mutable_views_are_exclusive_and_shared_upgrades_are_rejected() {
         "exclusive",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             let exclusive: &mut [i64] = &mut v[..];
             v = Vec.push(v, 1);
@@ -914,7 +914,7 @@ fn mutable_views_are_exclusive_and_shared_upgrades_are_rejected() {
         "slice view",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             let exclusive: &mut [i64] = &mut v[..];
             let n = Vec.len(&v);
@@ -923,7 +923,7 @@ fn mutable_views_are_exclusive_and_shared_upgrades_are_rejected() {
         "exclusive",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             let first: &mut [i64] = &mut v[..];
             let second: &mut [i64] = &mut v[..];
@@ -932,7 +932,7 @@ fn mutable_views_are_exclusive_and_shared_upgrades_are_rejected() {
         "exclusive",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             let exclusive: &mut [i64] = &mut v[..];
             let shared: &[i64] = &v[..];
@@ -943,7 +943,7 @@ fn mutable_views_are_exclusive_and_shared_upgrades_are_rejected() {
     // Mutable sub-views and mutable borrowed returns are implemented in the
     // next milestone; positive coverage lives in the returned-subview tests.
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let v: Vec<i64> = Vec.new();
             let exclusive: &mut [i64] = &mut v[..];
             Slice.len(exclusive);
@@ -951,7 +951,7 @@ fn mutable_views_are_exclusive_and_shared_upgrades_are_rejected() {
         "let mut",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let shared: &[i64] = &v[..];
@@ -970,22 +970,22 @@ fn elided_borrowed_returns_infer_only_unambiguous_input_lifetimes() {
     // agree for inline arrays, Vec, and Bytes.
     let stats = agrees(
         r#"
-        fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
-        fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {panic} { &mut view[1..] }
-        fn reborrow(view: &mut [i64]) -> &[i64] ! {panic} { &view[1..] }
-        fn twice(view: &[i64]) -> &[i64] ! {panic} { tail(tail(view)) }
-        fn twice_mut(view: &mut [i64]) -> &mut [i64] ! {panic} {
+        fn tail(view: &[i64]) -> &[i64] ! {} { view[1..] }
+        fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {} { &mut view[1..] }
+        fn reborrow(view: &mut [i64]) -> &[i64] ! {} { &view[1..] }
+        fn twice(view: &[i64]) -> &[i64] ! {} { tail(tail(view)) }
+        fn twice_mut(view: &mut [i64]) -> &mut [i64] ! {} {
             tail_mut(tail_mut(view))
         }
-        fn choose<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &[i64] ! {panic} {
+        fn choose<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &[i64] ! {} {
             if flag { left } else { right }
         }
-        fn tail_generic<T>(view: &[T]) -> &[T] ! {panic} { view[1..] }
-        fn tail_after<N: Nat>(view: &[i64], padding: [i64; N]) -> &[i64] ! {panic} {
+        fn tail_generic<T>(view: &[T]) -> &[T] ! {} { view[1..] }
+        fn tail_after<N: Nat>(view: &[i64], padding: [i64; N]) -> &[i64] ! {} {
             padding[0];
             view[1..]
         }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let array: [i64; 4] = [1, 2, 3, 4];
             print_i64(Slice.get(tail(&array[..]), 0));
             print_i64(Slice.get(twice(&array[..]), 0));
@@ -1025,14 +1025,14 @@ fn borrowed_closures_retain_elided_helper_result_loans() {
     // The loan survives until the call, then the owner is usable again.
     let stats = agrees(
         r#"
-        fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn tail(view: &[i64]) -> &[i64] ! {} { view[1..] }
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 10);
             values = Vec.push(values, 20);
             values = Vec.push(values, 30);
             let view = tail(&values[..]);
-            let read = fn() -> i64 ! {panic} { Slice.get(view, 1) };
+            let read = fn() -> i64 ! {} { Slice.get(view, 1) };
             let result = read();
             values = Vec.push(values, 40);
             result + Vec.len(&values)
@@ -1044,13 +1044,13 @@ fn borrowed_closures_retain_elided_helper_result_loans() {
     assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
     rejects(
         r#"
-        fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
-        fn main() -> Unit ! {alloc, panic} {
+        fn tail(view: &[i64]) -> &[i64] ! {} { view[1..] }
+        fn main() -> Unit ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 10);
             values = Vec.push(values, 20);
             let view = tail(&values[..]);
-            let read = fn() -> i64 ! {panic} { Slice.get(view, 0) };
+            let read = fn() -> i64 ! {} { Slice.get(view, 0) };
             values = Vec.push(values, 30);
             Slice.len(view);
         }
@@ -1059,13 +1059,13 @@ fn borrowed_closures_retain_elided_helper_result_loans() {
     );
     rejects(
         r#"
-        fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {panic} { &mut view[1..] }
-        fn main() -> Unit ! {alloc, panic} {
+        fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {} { &mut view[1..] }
+        fn main() -> Unit ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 10);
             values = Vec.push(values, 20);
             let view = tail_mut(&mut values[..]);
-            let write = fn() -> Unit ! {panic} { Slice.set(view, 0, 9); };
+            let write = fn() -> Unit ! {} { Slice.set(view, 0, 9); };
             values = Vec.push(values, 30);
             write();
         }
@@ -1079,8 +1079,8 @@ fn elided_result_lifetimes_use_body_origins_and_reject_ambiguity() {
     // Two independent anonymous inputs stay distinct, but a body that returns
     // one directly resolves the result soundly.
     agrees(
-        "fn pick(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { a }
-         fn main() -> i64 ! {panic} {
+        "fn pick(a: &[i64], b: &[i64]) -> &[i64] ! {} { a }
+         fn main() -> i64 ! {} {
             let x: [i64; 2] = [40, 1];
             let y: [i64; 1] = [2];
             Slice.get(pick(&x[..], &y[..]), 0)
@@ -1092,8 +1092,8 @@ fn elided_result_lifetimes_use_body_origins_and_reject_ambiguity() {
     // source owner stays loaned, and the result cannot be named as a caller
     // lifetime.
     agrees(
-        "fn pick(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { if true { a } else { b } }
-         fn main() -> i64 ! {panic} {
+        "fn pick(a: &[i64], b: &[i64]) -> &[i64] ! {} { if true { a } else { b } }
+         fn main() -> i64 ! {} {
             let x: [i64; 2] = [40, 1];
             let y: [i64; 1] = [2];
             Slice.get(pick(&x[..], &y[..]), 0)
@@ -1104,19 +1104,19 @@ fn elided_result_lifetimes_use_body_origins_and_reject_ambiguity() {
     // An unrelated owner-reference input participates in the candidate list,
     // but a body returning only the slice input resolves to that slice.
     check(
-        "fn take(owner: &Bytes, view: &[i64]) -> &[i64] ! {panic} { view }
+        "fn take(owner: &Bytes, view: &[i64]) -> &[i64] ! {} { view }
          fn main() -> Unit ! {} {}",
     )
     .unwrap();
     // A borrowed slice result with no borrowed input has no source lifetime.
     rejects(
-        "fn bad() -> &[i64] ! {panic} { panic() }
+        "fn bad() -> &[i64] ! {} { panic() }
          fn main() -> Unit ! {} {}",
         "no borrowed input",
     );
     // One input is not provenance for a local owner.
     rejects(
-        r#"fn bad(view: &[i64]) -> &[i64] ! {panic} {
+        r#"fn bad(view: &[i64]) -> &[i64] ! {} {
             let local: [i64; 2] = [1, 2];
             &local[..]
         }
@@ -1126,31 +1126,31 @@ fn elided_result_lifetimes_use_body_origins_and_reject_ambiguity() {
     // An explicit output lifetime is related to the returned input's
     // lifetime by an inferred outlives bound.
     check(
-        "fn bad<'a>(view: &[i64]) -> &'a [i64] ! {panic} { view }
+        "fn bad<'a>(view: &[i64]) -> &'a [i64] ! {} { view }
          fn main() -> Unit ! {} {}",
     )
     .unwrap();
     check(
-        "fn bad<'a, 'b>(view: &'a [i64]) -> &'b [i64] ! {panic} { view }
+        "fn bad<'a, 'b>(view: &'a [i64]) -> &'b [i64] ! {} { view }
          fn main() -> Unit ! {} {}",
     )
     .unwrap();
     // A mutable result still requires an exclusive input.
     rejects(
-        "fn bad(view: &[i64]) -> &mut [i64] ! {panic} { panic() }
+        "fn bad(view: &[i64]) -> &mut [i64] ! {} { panic() }
          fn main() -> Unit ! {} {}",
         "exclusive '&mut [T]' parameter",
     );
     // Aliases do not silently supply or erase borrow provenance.
     rejects(
         "type Borrowed = &[i64];
-         fn bad(view: Borrowed) -> &[i64] ! {panic} { view }
+         fn bad(view: Borrowed) -> &[i64] ! {} { view }
          fn main() -> Unit ! {} {}",
         "no borrowed input",
     );
     rejects(
         "type Borrowed = &[i64];
-         fn bad(view: &[i64]) -> Borrowed ! {panic} { view }
+         fn bad(view: &[i64]) -> Borrowed ! {} { view }
          fn main() -> Unit ! {} {}",
         "cannot be returned without an explicit lifetime",
     );
@@ -1161,9 +1161,9 @@ fn helper_calls_and_explicit_results_infer_lifetime_bounds() {
     // A body that delegates to a helper follows the helper's result source.
     let stats = agrees(
         r#"
-        fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
-        fn alias(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { tail(a) }
-        fn main() -> i64 ! {io, panic} {
+        fn tail(view: &[i64]) -> &[i64] ! {} { view[1..] }
+        fn alias(a: &[i64], b: &[i64]) -> &[i64] ! {} { tail(a) }
+        fn main() -> i64 ! {io} {
             let x: [i64; 3] = [40, 1, 2];
             let y: [i64; 2] = [7, 8];
             print_i64(Slice.get(alias(&x[..], &y[..]), 0));
@@ -1178,8 +1178,8 @@ fn helper_calls_and_explicit_results_infer_lifetime_bounds() {
     // from the returned source.
     agrees(
         r#"
-        fn shorten<'long, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} { view }
-        fn main() -> i64 ! {panic} {
+        fn shorten<'long, 'short>(view: &'long [i64]) -> &'short [i64] ! {} { view }
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 1];
             Slice.get(shorten(&values[..]), 0)
         }
@@ -1189,10 +1189,10 @@ fn helper_calls_and_explicit_results_infer_lifetime_bounds() {
     );
     agrees(
         r#"
-        fn shorten<'long, 'short>(view: &'long mut [i64]) -> &'short mut [i64] ! {panic} {
+        fn shorten<'long, 'short>(view: &'long mut [i64]) -> &'short mut [i64] ! {} {
             &mut view[..]
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 40];
             Slice.set(shorten(&mut values[..]), 0, 9);
             values[0] * 4 + values[1]
@@ -1203,7 +1203,7 @@ fn helper_calls_and_explicit_results_infer_lifetime_bounds() {
     );
     // A result lifetime longer than the returned source cannot be inferred.
     rejects(
-        r#"fn widen<'long: 'short, 'short>(view: &'short [i64]) -> &'long [i64] ! {panic} { view }
+        r#"fn widen<'long: 'short, 'short>(view: &'short [i64]) -> &'long [i64] ! {} { view }
         fn main() -> Unit ! {} {}"#,
         "cannot infer an outlives bound",
     );
@@ -1211,9 +1211,9 @@ fn helper_calls_and_explicit_results_infer_lifetime_bounds() {
     // first one.
     agrees(
         r#"
-        fn tail<'a>(view: &'a [i64]) -> &'a [i64] ! {panic} { view[1..] }
-        fn alias(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { tail(b) }
-        fn main() -> i64 ! {panic} {
+        fn tail<'a>(view: &'a [i64]) -> &'a [i64] ! {} { view[1..] }
+        fn alias(a: &[i64], b: &[i64]) -> &[i64] ! {} { tail(b) }
+        fn main() -> i64 ! {} {
             let x: [i64; 3] = [40, 1, 2];
             let y: [i64; 2] = [7, 8];
             Slice.get(alias(&x[..], &y[..]), 0)
@@ -1226,11 +1226,11 @@ fn helper_calls_and_explicit_results_infer_lifetime_bounds() {
     // form an anonymous intersection result.
     agrees(
         r#"
-        fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
-        fn alias(a: &[i64], b: &[i64]) -> &[i64] ! {panic} {
+        fn tail(view: &[i64]) -> &[i64] ! {} { view[1..] }
+        fn alias(a: &[i64], b: &[i64]) -> &[i64] ! {} {
             if true { tail(a) } else { tail(b) }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let x: [i64; 3] = [40, 1, 2];
             let y: [i64; 2] = [7, 8];
             Slice.get(alias(&x[..], &y[..]), 0)
@@ -1247,8 +1247,8 @@ fn elided_helper_results_keep_split_side_provenance() {
     // sibling stays disjoint; collapsing labels would reject this valid use.
     agrees(
         r#"
-        fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {panic} { &mut view[1..] }
-        fn main() -> i64 ! {panic} {
+        fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {} { &mut view[1..] }
+        fn main() -> i64 ! {} {
             let mut values: [i64; 4] = [1, 2, 3, 4];
             let (left, right) = Slice.split_at_mut(&mut values[..], 2);
             let tail = tail_mut(left);
@@ -1267,14 +1267,14 @@ fn elided_results_work_across_modules_and_same_task_suspension() {
     let sources = kush::program::Memory(vec![(
         "helper".into(),
         "module helper;
-         pub fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }"
+         pub fn tail(view: &[i64]) -> &[i64] ! {} { view[1..] }"
             .into(),
     )]);
     let program = kush::program::load(
         "app.kush",
         "module app;
          use helper;
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              let values: [i64; 3] = [10, 20, 30];
              Slice.get(helper.tail(&values[..]), 0)
          }",
@@ -1285,8 +1285,8 @@ fn elided_results_work_across_modules_and_same_task_suspension() {
     assert_eq!(checked.evaluate(&mut Vec::new()).unwrap(), 20);
     agrees(
         r#"
-        fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
-        fn main() -> Unit ! {io, panic, suspend} {
+        fn tail(view: &[i64]) -> &[i64] ! {} { view[1..] }
+        fn main() -> Unit ! {io, suspend} {
             let values: [i64; 4] = [10, 20, 30, 40];
             let rest = tail(&values[..]);
             let cancelled = Task.yield();
@@ -1302,7 +1302,7 @@ fn elided_results_work_across_modules_and_same_task_suspension() {
 #[test]
 fn borrowed_returns_reject_dangling_storage_and_unrelated_lifetimes() {
     rejects(
-        r#"fn f<'a>(v: &'a [i64]) -> &'a [i64] ! {panic} {
+        r#"fn f<'a>(v: &'a [i64]) -> &'a [i64] ! {} {
             let local: [i64; 2] = [1, 2];
             &local[..]
         }
@@ -1310,7 +1310,7 @@ fn borrowed_returns_reject_dangling_storage_and_unrelated_lifetimes() {
         "outlive",
     );
     rejects(
-        r#"fn f<'a>(v: &'a [i64]) -> &'a [i64] ! {panic} {
+        r#"fn f<'a>(v: &'a [i64]) -> &'a [i64] ! {} {
             if Slice.len(v) > 0 { return &v[..]; }
             let local: [i64; 2] = [1, 2];
             &local[..]
@@ -1343,7 +1343,7 @@ fn borrowed_returns_reject_dangling_storage_and_unrelated_lifetimes() {
 fn lifetime_erasure_through_generics_unions_and_closures_stays_rejected() {
     rejects(
         r#"fn id<T>(value: T) -> T ! {} { value }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [1, 2];
             let s: &[i64] = &a[..];
             Slice.len(id(s))
@@ -1358,10 +1358,10 @@ fn lifetime_erasure_through_generics_unions_and_closures_stays_rejected() {
     );
     rejects(
         r#"fn id<T>(value: T) -> T ! {} { value }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: [i64; 2] = [1, 2];
             let s: &[i64] = &a[..];
-            let read = fn() -> i64 ! {panic} { Slice.len(s) };
+            let read = fn() -> i64 ! {} { Slice.len(s) };
             let escaped = id(read);
             0
         }"#,
@@ -1383,7 +1383,7 @@ fn lifetime_erasure_through_generics_unions_and_closures_stays_rejected() {
 fn loans_across_branches_loops_breaks_calls_and_suspension_are_checked() {
     // A view used on a later loop iteration is live across the owner move.
     rejects(
-        r#"fn main() -> Unit ! {io, alloc, panic} {
+        r#"fn main() -> Unit ! {io, alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let s: &[i64] = &v[..];
@@ -1394,7 +1394,7 @@ fn loans_across_branches_loops_breaks_calls_and_suspension_are_checked() {
     );
     // A view that is not used after the loop no longer loans the owner.
     agrees(
-        r#"fn main() -> Unit ! {io, alloc, panic} {
+        r#"fn main() -> Unit ! {io, alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let s: &[i64] = &v[..];
@@ -1408,7 +1408,7 @@ fn loans_across_branches_loops_breaks_calls_and_suspension_are_checked() {
     );
     // Branch-created views join their loans; a move on one path is rejected.
     rejects(
-        r#"fn main() -> Unit ! {io, alloc, panic} {
+        r#"fn main() -> Unit ! {io, alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let s: &[i64] = if true { &v[..] } else { &v[..] };
@@ -1420,7 +1420,7 @@ fn loans_across_branches_loops_breaks_calls_and_suspension_are_checked() {
     // Short-circuit right operands are still under the loan if the view is
     // used afterwards, and early returns cannot release it unsafely.
     rejects(
-        r#"fn main() -> Unit ! {io, alloc, panic} {
+        r#"fn main() -> Unit ! {io, alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let s: &[i64] = &v[..];
@@ -1439,16 +1439,14 @@ fn loans_across_branches_loops_breaks_calls_and_suspension_are_checked() {
         "outlive",
     );
     // Views and borrowed returns survive a same-task suspension point.
-    let (status, output, _) = run(
-        r#"fn tail<'a>(s: &'a [i64]) -> &'a [i64] ! {panic} { s[1..] }
-        fn main() -> Unit ! {io, panic, suspend} {
+    let (status, output, _) = run(r#"fn tail<'a>(s: &'a [i64]) -> &'a [i64] ! {} { s[1..] }
+        fn main() -> Unit ! {io, suspend} {
             let a: [i64; 4] = [10, 20, 30, 40];
             let rest = tail(&a[..]);
             let cancelled = Task.yield();
             print_i64(Slice.get(rest, 0));
             print_i64(if cancelled { 0 } else { Slice.len(rest) });
-        }"#,
-    );
+        }"#);
     assert_eq!(status, 0);
     assert_eq!(output, "20\n3\n");
 }
@@ -1456,7 +1454,7 @@ fn loans_across_branches_loops_breaks_calls_and_suspension_are_checked() {
 #[test]
 fn aliases_cannot_launder_a_loan_after_the_owner_moves() {
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let first: &[i64] = &v[..];
@@ -1468,7 +1466,7 @@ fn aliases_cannot_launder_a_loan_after_the_owner_moves() {
     );
     // Releasing one alias while another is still live keeps the owner loaned.
     agrees(
-        r#"fn main() -> Unit ! {io, alloc, panic} {
+        r#"fn main() -> Unit ! {io, alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let first: &[i64] = &v[..];
@@ -1486,11 +1484,11 @@ fn aliases_cannot_launder_a_loan_after_the_owner_moves() {
 #[test]
 fn views_survive_task_join_and_views_do_not_allocate() {
     let (status, output, _) = run(r#"use std.task.TaskExit;
-        fn main() -> Unit ! {io, alloc, panic, suspend} {
+        fn main() -> Unit ! {io, alloc, suspend} {
             let a: [i64; 3] = [4, 5, 6];
             let view: &[i64] = &a[..];
-            Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic} { 7 });
+            Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {} { 7 });
                 match Task.join(t) {
                     TaskExit.Completed(v) => print_i64(v),
                     TaskExit.Cancelled => print_i64(-1),
@@ -1500,14 +1498,12 @@ fn views_survive_task_join_and_views_do_not_allocate() {
         }"#);
     assert_eq!(status, 0);
     assert_eq!(output, "7\n6\n");
-    let (_, _, stats) = run(
-        r#"fn tail<'a>(s: &'a [i64]) -> &'a [i64] ! {panic} { s[1..] }
-        fn main() -> i64 ! {panic} {
+    let (_, _, stats) = run(r#"fn tail<'a>(s: &'a [i64]) -> &'a [i64] ! {} { s[1..] }
+        fn main() -> i64 ! {} {
             let a: [i64; 4] = [1, 2, 3, 4];
             let rest = tail(&a[..]);
             rest[0] + rest[2]
-        }"#,
-    );
+        }"#);
     assert_eq!(stats.allocations, 0, "{stats:?}");
     assert_eq!(stats.deallocations, 0, "{stats:?}");
 }
@@ -1516,10 +1512,10 @@ fn views_survive_task_join_and_views_do_not_allocate() {
 fn mutable_borrowed_returns_and_nested_reborrow_chains_agree() {
     agrees(
         r#"
-        fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {} {
             &mut s[1..]
         }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             values = Vec.push(values, 2);
@@ -1545,10 +1541,10 @@ fn mutable_borrowed_returns_and_nested_reborrow_chains_agree() {
     // storage, including the byte write/read rule for Bytes.
     agrees(
         r#"
-        fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {} {
             &mut s[1..]
         }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut array: [i64; 4] = [1, 2, 3, 4];
             let head = &mut array[1..];
             Slice.set(head, 0, 20);
@@ -1577,10 +1573,10 @@ fn mutable_borrowed_returns_and_nested_reborrow_chains_agree() {
     // nested through several helpers.
     let stats = agrees(
         r#"
-        fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {} {
             &mut s[1..]
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut array: [i64; 5] = [1, 2, 3, 4, 5];
             let a = tail_mut(&mut array[..]);
             let b = tail_mut(&mut a[..]);
@@ -1600,21 +1596,21 @@ fn mutable_borrowed_returns_and_nested_reborrow_chains_agree() {
 fn mutable_views_release_parents_after_branches_loops_breaks_and_early_returns() {
     agrees(
         r#"
-        fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {} {
             &mut s[1..]
         }
         fn pick_mut<'a>(
             a: &'a mut [i64],
             b: &'a mut [i64],
             flag: Bool,
-        ) -> &'a mut [i64] ! {panic} {
+        ) -> &'a mut [i64] ! {} {
             if flag { a } else { b }
         }
-        fn ret_mut<'a>(s: &'a mut [i64], stop: Bool) -> &'a mut [i64] ! {panic} {
+        fn ret_mut<'a>(s: &'a mut [i64], stop: Bool) -> &'a mut [i64] ! {} {
             if stop { return &mut s[..]; }
             &mut s[1..]
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut a: [i64; 3] = [1, 2, 3];
             let mut b: [i64; 3] = [4, 5, 6];
             let chosen = pick_mut(&mut a[..], &mut b[..], true);
@@ -1659,17 +1655,17 @@ fn mutable_views_survive_same_task_yields_and_joins() {
     agrees_balanced(
         r#"
         use std.task.TaskExit;
-        fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {} {
             &mut s[1..]
         }
-        fn narrowed<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        fn narrowed<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {} {
             tail_mut(s)
         }
-        fn main() -> Unit ! {io, alloc, panic, suspend} {
+        fn main() -> Unit ! {io, alloc, suspend} {
             let mut array: [i64; 3] = [1, 2, 3];
             let child = narrowed(&mut array[..]);
-            Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-                let task: Task<i64> = Task.spawn(fn() -> i64 ! {panic} { 7 });
+            Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+                let task: Task<i64> = Task.spawn(fn() -> i64 ! {} { 7 });
                 match Task.join(task) {
                     TaskExit.Completed(value) => print_i64(value),
                     TaskExit.Cancelled => print_i64(-1),
@@ -1690,13 +1686,13 @@ fn mutable_views_survive_same_task_yields_and_joins() {
 #[test]
 fn shared_reborrows_coexist_and_temporarily_freeze_the_owner() {
     agrees(
-        r#"fn update(parent: &mut [i64]) -> i64 ! {panic} {
+        r#"fn update(parent: &mut [i64]) -> i64 ! {} {
             let child = &parent[..];
             let old = Slice.get(child, 0);
             Slice.set(parent, 0, old + 1);
             Slice.get(parent, 0)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [4, 5];
             update(&mut a[..])
         }"#,
@@ -1705,7 +1701,7 @@ fn shared_reborrows_coexist_and_temporarily_freeze_the_owner() {
     );
     agrees(
         r#"
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut array: [i64; 4] = [1, 2, 3, 4];
             let first: &[i64] = &array[..];
             let second: &[i64] = &array[..];
@@ -1721,7 +1717,7 @@ fn shared_reborrows_coexist_and_temporarily_freeze_the_owner() {
     // parent until both children are dead.
     agrees(
         r#"
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             v = Vec.push(v, 2);
@@ -1737,7 +1733,7 @@ fn shared_reborrows_coexist_and_temporarily_freeze_the_owner() {
         "3\n5\n",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             let first: &[i64] = &v[..];
             let second: &mut [i64] = &mut v[..];
@@ -1746,7 +1742,7 @@ fn shared_reborrows_coexist_and_temporarily_freeze_the_owner() {
         "exclusive",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let parent: &mut [i64] = &mut v[..];
@@ -1763,7 +1759,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
     // Parameters are capabilities too: a shared child freezes a mutable
     // parameter just as it freezes a mutable view bound inside the function.
     rejects(
-        r#"fn invalid(parent: &mut [i64]) -> Unit ! {panic} {
+        r#"fn invalid(parent: &mut [i64]) -> Unit ! {} {
             let child = &parent[..];
             Slice.set(parent, 0, 9);
             Slice.get(child, 0);
@@ -1773,7 +1769,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
     );
     // Using a suspended parent is rejected.
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             v = Vec.push(v, 2);
@@ -1785,7 +1781,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
         "child view derived from it",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let parent: &mut [i64] = &mut v[..];
@@ -1797,7 +1793,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
     );
     // Competing siblings and disjoint ranges remain conservative.
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             v = Vec.push(v, 2);
@@ -1809,7 +1805,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
         "exclusive",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut a: [i64; 3] = [1, 2, 3];
             let left = &mut a[0..1];
             let right = &mut a[1..2];
@@ -1818,7 +1814,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
         "split siblings",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut a: [i64; 3] = [1, 2, 3];
             let child = &mut a[1..];
             a = [4, 5, 6];
@@ -1827,8 +1823,8 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
         "slice view or reference borrows it",
     );
     rejects(
-        r#"fn consume(s: &mut [i64]) -> Unit ! {panic} { Slice.len(s); }
-        fn main() -> Unit ! {alloc, panic} {
+        r#"fn consume(s: &mut [i64]) -> Unit ! {} { Slice.len(s); }
+        fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             v = Vec.push(v, 2);
@@ -1840,7 +1836,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
         "borrowed",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             v = Vec.push(v, 2);
@@ -1852,7 +1848,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
     );
     // A returned child cannot outlive its owner or a local block.
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let view = {
                 let mut local: [i64; 2] = [1, 2];
                 &mut local[..]
@@ -1862,7 +1858,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
         "outlive",
     );
     rejects(
-        r#"fn bad<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        r#"fn bad<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {} {
             let mut local: [i64; 2] = [1, 2];
             &mut local[..]
         }
@@ -1881,7 +1877,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
         r#"fn bad<'a, 'b>(
             a: &'a mut [i64],
             b: &'b mut [i64],
-        ) -> &'a mut [i64] ! {panic} {
+        ) -> &'a mut [i64] ! {} {
             let child = &mut b[1..];
             child
         }
@@ -1892,11 +1888,11 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
         r#"fn bad<'a, 'b>(
             a: &'a mut [i64],
             b: &'b mut [i64],
-        ) -> &'a mut [i64] ! {panic} {
+        ) -> &'a mut [i64] ! {} {
             let child = &mut b[1..];
             child
         }
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             let mut x: [i64; 2] = [1, 2];
             let mut y: [i64; 2] = [3, 4];
             bad(&mut x[..], &mut y[..]);
@@ -1905,7 +1901,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
     );
     // Mutable views stay move-only: there is no implicit alias duplication.
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let child = &mut a[1..];
             let alias = child;
@@ -1917,8 +1913,8 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
     // Ordinary passing consumes the mutable view; retaining the original
     // requires an explicit '&mut parent[..]' reborrow.
     rejects(
-        r#"fn consume(s: &mut [i64]) -> Unit ! {panic} { Slice.len(s); }
-        fn main() -> Unit ! {panic} {
+        r#"fn consume(s: &mut [i64]) -> Unit ! {} { Slice.len(s); }
+        fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let parent: &mut [i64] = &mut a[..];
             consume(parent);
@@ -1929,7 +1925,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
     // A sub-view reserves its parent while its bounds evaluate, so a nested
     // rival view cannot be derived from the same capability there.
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let parent = &mut a[..];
             let child = &mut parent[0..{
@@ -1945,7 +1941,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
 #[test]
 fn mutable_borrow_aliases_cannot_launder_through_calls_generics_data_closures_or_tasks() {
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let shared: &[i64] = &v[..];
@@ -1961,7 +1957,7 @@ fn mutable_borrow_aliases_cannot_launder_through_calls_generics_data_closures_or
     );
     rejects(
         r#"fn id<T>(value: T) -> T ! {} { value }
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
             Slice.len(id(view))
@@ -1979,10 +1975,10 @@ fn mutable_borrow_aliases_cannot_launder_through_calls_generics_data_closures_or
         "enums cannot store borrowed",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            let read = fn() -> i64 ! {panic} { Slice.len(view) };
+            let read = fn() -> i64 ! {} { Slice.len(view) };
             let alias = read;
             alias();
         }"#,
@@ -1990,12 +1986,12 @@ fn mutable_borrow_aliases_cannot_launder_through_calls_generics_data_closures_or
     );
     rejects(
         r#"use std.task.TaskExit;
-        fn main() -> Unit ! {alloc, panic, suspend} {
+        fn main() -> Unit ! {alloc, suspend} {
             let mut a: [i64; 2] = [1, 2];
             let view: &mut [i64] = &mut a[..];
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let (left, right) = Slice.split_at_mut(view, 1);
-                Task.spawn(fn() -> Unit ! {panic} { Slice.set(left, 0, 9); });
+                Task.spawn(fn() -> Unit ! {} { Slice.set(left, 0, 9); });
                 Slice.set(view, 0, 7);
             });
         }"#,
@@ -2004,9 +2000,9 @@ fn mutable_borrow_aliases_cannot_launder_through_calls_generics_data_closures_or
     // A later argument cannot replace storage retained by an earlier returned
     // child or by a nested builtin receiver.
     rejects(
-        r#"fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} { &mut s[1..] }
-        fn consume(s: &mut [i64], n: i64) -> Unit ! {panic} { Slice.len(s); }
-        fn main() -> Unit ! {alloc, panic} {
+        r#"fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {} { &mut s[1..] }
+        fn consume(s: &mut [i64], n: i64) -> Unit ! {} { Slice.len(s); }
+        fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             v = Vec.push(v, 2);
@@ -2015,7 +2011,7 @@ fn mutable_borrow_aliases_cannot_launder_through_calls_generics_data_closures_or
         "borrows it",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             let parent: &mut [i64] = &mut v[..];
@@ -2032,8 +2028,8 @@ fn returned_mutable_subviews_check_runtime_bounds() {
         r#"let mut b = Bytes.from("a"); let bad = tail_mut(&mut b[..]); Slice.len(bad);"#,
     ] {
         let source = format!(
-            "fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {{panic}} {{ &mut s[2..] }}
-            fn main() -> Unit ! {{alloc, panic}} {{ {body} }}"
+            "fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {{}} {{ &mut s[2..] }}
+            fn main() -> Unit ! {{alloc}} {{ {body} }}"
         );
         let program = check(&source).unwrap();
         let error = program.evaluate(&mut Vec::new()).unwrap_err();
@@ -2056,7 +2052,7 @@ fn returned_mutable_subviews_check_runtime_bounds() {
 #[test]
 fn view_locals_are_single_assignment() {
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 2] = [1, 2];
             let mut b: [i64; 2] = [3, 4];
             let mut view: &mut [i64] = &mut a[..];
@@ -2066,7 +2062,7 @@ fn view_locals_are_single_assignment() {
         "cannot be reassigned",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 2] = [1, 2];
             let mut b: [i64; 2] = [3, 4];
             let flag = true;
@@ -2082,15 +2078,15 @@ fn view_locals_are_single_assignment() {
 fn checked_mutable_splits_allow_disjoint_siblings() {
     let stats = agrees(
         r#"
-        fn bump(left: &mut [i64], right: &mut [i64]) -> Unit ! {panic} {
+        fn bump(left: &mut [i64], right: &mut [i64]) -> Unit ! {} {
             Slice.set(left, 0, Slice.get(left, 0) + 1);
             Slice.set(right, 0, Slice.get(right, 0) + 10);
         }
-        fn fill<'a>(view: &'a mut [i64]) -> Unit ! {panic} {
+        fn fill<'a>(view: &'a mut [i64]) -> Unit ! {} {
             let (left, right) = Slice.split_at_mut(view, 2);
             bump(left, right);
         }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut array: [i64; 4] = [1, 2, 3, 4];
             let parent = &mut array[..];
             let (left, right) = Slice.split_at_mut(parent, 2);
@@ -2120,7 +2116,7 @@ fn checked_mutable_splits_allow_disjoint_siblings() {
 fn mutable_splits_alias_arrays_vectors_and_bytes_at_their_real_edges() {
     agrees(
         r#"
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut array: [i64; 3] = [1, 2, 3];
             let (empty, all) = Slice.split_at_mut(&mut array[..], 0);
             print_i64(Slice.len(empty));
@@ -2162,7 +2158,7 @@ fn mutable_splits_alias_arrays_vectors_and_bytes_at_their_real_edges() {
     agrees(
         r#"
         struct Cell { a: i64, b: i64 }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut cells: [Cell; 3] = [
                 Cell { a: 1, b: 2 },
                 Cell { a: 3, b: 4 },
@@ -2184,7 +2180,7 @@ fn mutable_splits_alias_arrays_vectors_and_bytes_at_their_real_edges() {
     );
     agrees(
         r#"
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut values: [i64; 4] = [1, 2, 3, 4];
             let (left, right) = Slice.split_at_mut(&mut values[..], 2);
             let child = &mut left[0..Slice.len(right)];
@@ -2204,10 +2200,10 @@ fn mutable_splits_alias_arrays_vectors_and_bytes_at_their_real_edges() {
 fn mutable_split_siblings_release_the_parent_only_after_both_last_uses() {
     agrees(
         r#"
-        fn tail<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        fn tail<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {} {
             &mut view[1..]
         }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut array: [i64; 6] = [1, 2, 3, 4, 5, 6];
             let parent = &mut array[..];
             let (left, right) = Slice.split_at_mut(parent, 3);
@@ -2226,7 +2222,7 @@ fn mutable_split_siblings_release_the_parent_only_after_both_last_uses() {
     );
     agrees(
         r#"
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut array: [i64; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
             let (left, right) = Slice.split_at_mut(&mut array[..], 4);
             let (ll, lr) = Slice.split_at_mut(left, 2);
@@ -2248,11 +2244,11 @@ fn mutable_split_siblings_release_the_parent_only_after_both_last_uses() {
     );
     agrees(
         r#"
-        fn choose<'a>(a: &'a mut [i64], b: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        fn choose<'a>(a: &'a mut [i64], b: &'a mut [i64]) -> &'a mut [i64] ! {} {
             Slice.len(b);
             a
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut array: [i64; 4] = [1, 2, 3, 4];
             let (left, right) = Slice.split_at_mut(&mut array[..], 2);
             let chosen = choose(&mut left[..], &mut right[..]);
@@ -2269,7 +2265,7 @@ fn mutable_split_siblings_release_the_parent_only_after_both_last_uses() {
     );
     agrees(
         r#"
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut array: [i64; 4] = [1, 2, 3, 4];
             let parent = &mut array[..];
             let (left, right) = Slice.split_at_mut(&mut parent[..], 2);
@@ -2289,12 +2285,12 @@ fn mutable_split_siblings_release_the_parent_only_after_both_last_uses() {
 fn split_children_can_be_returned_only_through_matching_parameter_lifetimes() {
     let stats = agrees(
         r#"
-        fn first_half<'a>(view: &'a mut [i64], mid: i64) -> &'a mut [i64] ! {panic} {
+        fn first_half<'a>(view: &'a mut [i64], mid: i64) -> &'a mut [i64] ! {} {
             let (left, right) = Slice.split_at_mut(view, mid);
             Slice.set(right, 0, Slice.get(right, 0) + 1);
             left
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut values: [i64; 4] = [1, 2, 3, 4];
             let half = first_half(&mut values[..], 2);
             Slice.set(half, 0, 9);
@@ -2308,12 +2304,12 @@ fn split_children_can_be_returned_only_through_matching_parameter_lifetimes() {
     assert_eq!(stats.allocations, 0, "{stats:?}");
     agrees(
         r#"
-        fn right_half<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        fn right_half<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {} {
             let (left, right) = Slice.split_at_mut(view, 1);
             Slice.set(left, 0, Slice.get(left, 0) + 1);
             right
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut values: [i64; 3] = [1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut values[..], 2);
             let chosen = right_half(left);
@@ -2329,10 +2325,10 @@ fn split_children_can_be_returned_only_through_matching_parameter_lifetimes() {
     );
     agrees(
         r#"
-        fn shared<'a>(view: &'a mut [i64]) -> &'a [i64] ! {panic} {
+        fn shared<'a>(view: &'a mut [i64]) -> &'a [i64] ! {} {
             &view[..]
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut values: [i64; 4] = [1, 2, 3, 4];
             let (left, right) = Slice.split_at_mut(&mut values[..], 2);
             let read = shared(left);
@@ -2349,7 +2345,7 @@ fn split_children_can_be_returned_only_through_matching_parameter_lifetimes() {
     // than directly from the parameter, so the body-origin inference cannot
     // relate it to `'a`; the explicit-bound requirement still applies.
     rejects(
-        r#"fn bad<'a, 'b>(view: &'a mut [i64]) -> &'b mut [i64] ! {panic} {
+        r#"fn bad<'a, 'b>(view: &'a mut [i64]) -> &'b mut [i64] ! {} {
             let (left, right) = Slice.split_at_mut(view, 1);
             Slice.len(right);
             left
@@ -2358,7 +2354,7 @@ fn split_children_can_be_returned_only_through_matching_parameter_lifetimes() {
         "does not appear on any parameter",
     );
     rejects(
-        r#"fn bad<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        r#"fn bad<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {} {
             let mut local: [i64; 3] = [1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut local[..], 1);
             Slice.len(right);
@@ -2383,13 +2379,13 @@ fn mutable_split_example_agrees_and_does_not_allocate() {
 #[test]
 fn mutable_split_midpoints_are_checked_and_side_effects_run_once() {
     for source in [
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 2] = [1, 2];
             let (l, r) = Slice.split_at_mut(&mut a[..], 3);
             Slice.set(l, 0, 9);
             Slice.len(r);
         }"#,
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 2] = [1, 2];
             let (l, r) = Slice.split_at_mut(&mut a[..], -1);
             Slice.len(l) + Slice.len(r);
@@ -2413,11 +2409,11 @@ fn mutable_split_midpoints_are_checked_and_side_effects_run_once() {
     }
     agrees(
         r#"
-        fn midpoint(x: i64) -> i64 ! {io, panic} {
+        fn midpoint(x: i64) -> i64 ! {io} {
             print_i64(x);
             x + 1
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut a: [i64; 4] = [1, 2, 3, 4];
             let (left, right) = Slice.split_at_mut(&mut a[..], midpoint(1));
             Slice.set(left, 0, 8);
@@ -2436,16 +2432,16 @@ fn mutable_split_siblings_remain_disjoint_through_calls_reborrows_and_suspension
     agrees_balanced(
         r#"
         use std.task.TaskExit;
-        fn write_both(a: &mut [i64], b: &mut [i64], value: i64) -> Unit ! {panic} {
+        fn write_both(a: &mut [i64], b: &mut [i64], value: i64) -> Unit ! {} {
             Slice.set(a, 0, value);
             Slice.set(b, 0, value + 1);
         }
-        fn main() -> Unit ! {io, alloc, panic, suspend} {
+        fn main() -> Unit ! {io, alloc, suspend} {
             let mut array: [i64; 4] = [0, 1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut array[..], 2);
             write_both(&mut left[..], &mut right[..], 9);
-            Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-                let task: Task<i64> = Task.spawn(fn() -> i64 ! {panic} { 7 });
+            Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+                let task: Task<i64> = Task.spawn(fn() -> i64 ! {} { 7 });
                 match Task.join(task) {
                     TaskExit.Completed(value) => print_i64(value),
                     TaskExit.Cancelled => print_i64(-1),
@@ -2464,8 +2460,8 @@ fn mutable_split_siblings_remain_disjoint_through_calls_reborrows_and_suspension
     );
     agrees_balanced(
         r#"
-        fn main() -> Unit ! {io, alloc, panic, suspend} {
-            Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+        fn main() -> Unit ! {io, alloc, suspend} {
+            Task.scope(fn() -> Unit ! {io, alloc, suspend} {
                 let mut local: [i64; 2] = [1, 2];
                 let (left, right) = Slice.split_at_mut(&mut local[..], 1);
                 Slice.set(left, 0, 3);
@@ -2486,7 +2482,7 @@ fn mutable_split_siblings_remain_disjoint_through_calls_reborrows_and_suspension
 fn mutable_split_survives_loop_and_branch_last_use_joins() {
     agrees(
         r#"
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut array: [i64; 6] = [0, 0, 0, 0, 0, 0];
             let mut i = 0;
             while i < 3 {
@@ -2513,7 +2509,7 @@ fn mutable_split_survives_loop_and_branch_last_use_joins() {
     );
     agrees(
         r#"
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut array: [i64; 4] = [0, 0, 0, 0];
             let mut i = 0;
             loop {
@@ -2536,7 +2532,7 @@ fn mutable_split_survives_loop_and_branch_last_use_joins() {
 #[test]
 fn mutable_split_rejections_are_specific_and_conservative() {
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let left = &mut a[0..1];
             let right = &mut a[1..2];
@@ -2545,7 +2541,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "split siblings",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let pair = Slice.split_at_mut(&mut a[..], 1);
             Slice.len(pair);
@@ -2553,7 +2549,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "nonescaping borrow pair",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let view: &[i64] = &a[..];
             let (left, right) = Slice.split_at_mut(view, 1);
@@ -2562,7 +2558,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "exclusive",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut a[..], 1);
             a = [4, 5, 6];
@@ -2571,7 +2567,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "slice view or reference borrows it",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut a[..], 1);
             let rival = &mut a[2..];
@@ -2580,7 +2576,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "exclusive",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut a[..], 1);
             Slice.set(left, 0, 9);
@@ -2591,7 +2587,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "exclusive",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut a[..], 1);
             let (left2, right2) = Slice.split_at_mut(left, 1);
@@ -2602,7 +2598,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "child view derived from it",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let parent = &mut a[..];
             let (left, right) = Slice.split_at_mut(parent, 1);
@@ -2614,7 +2610,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "use after move",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut a[..], 1);
             let rival = &mut left[..];
@@ -2626,11 +2622,11 @@ fn mutable_split_rejections_are_specific_and_conservative() {
     // A helper result whose declared lifetime can flow from both siblings is
     // conservatively tied to both, so using either parent while it lives fails.
     rejects(
-        r#"fn choose<'a>(a: &'a mut [i64], b: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+        r#"fn choose<'a>(a: &'a mut [i64], b: &'a mut [i64]) -> &'a mut [i64] ! {} {
             Slice.len(b);
             a
         }
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             let mut a: [i64; 4] = [1, 2, 3, 4];
             let (left, right) = Slice.split_at_mut(&mut a[..], 2);
             let chosen = choose(&mut left[..], &mut right[..]);
@@ -2641,7 +2637,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "child view derived from it",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let parent = &mut a[..];
             let (left, right) = Slice.split_at_mut(parent, 2);
@@ -2652,7 +2648,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "child view derived from it",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 4] = [1, 2, 3, 4];
             let parent = &mut a[..];
             let (left, right) = Slice.split_at_mut(parent, 2);
@@ -2663,7 +2659,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "exclusive",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let parent = &mut a[..];
             let (left, right) = Slice.split_at_mut(&mut parent[..], 1);
@@ -2673,8 +2669,8 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "child view derived from it",
     );
     rejects(
-        r#"fn consume(view: &mut [i64], n: i64) -> Unit ! {panic} { Slice.len(view); }
-        fn main() -> Unit ! {panic} {
+        r#"fn consume(view: &mut [i64], n: i64) -> Unit ! {} { Slice.len(view); }
+        fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut a[..], 1);
             consume(left, { a = [4, 5, 6]; 0 });
@@ -2683,7 +2679,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "borrows it",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut a[..], 1);
             Slice.set(left, { a = [4, 5, 6]; 0 }, Slice.get(right, 0));
@@ -2691,17 +2687,17 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "borrows it",
     );
     rejects(
-        r#"fn main() -> Unit ! {alloc, panic} {
+        r#"fn main() -> Unit ! {alloc} {
             let mut a: [i64; 3] = [1, 2, 3];
             let (left, right) = Slice.split_at_mut(&mut a[..], 1);
-            let read = fn() -> i64 ! {panic} { Slice.len(left) };
+            let read = fn() -> i64 ! {} { Slice.len(left) };
             let alias = read;
             alias() + Slice.len(right);
         }"#,
         "scoped",
     );
     rejects(
-        r#"fn bad(view: &mut [Box<i64>]) -> Unit ! {panic} {
+        r#"fn bad(view: &mut [Box<i64>]) -> Unit ! {} {
             let (left, right) = Slice.split_at_mut(view, 0);
             Slice.len(left) + Slice.len(right);
         }
@@ -2709,7 +2705,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "owning or linear elements",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let mut (left, right) = Slice.split_at_mut(&mut a[..], 1);
             Slice.len(left) + Slice.len(right);
@@ -2717,7 +2713,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "let mut",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let (left, _) = Slice.split_at_mut(&mut a[..], 1);
             Slice.len(left);
@@ -2725,7 +2721,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
         "exactly two simple local names",
     );
     rejects(
-        r#"fn main() -> Unit ! {panic} {
+        r#"fn main() -> Unit ! {} {
             let mut a: [i64; 3] = [1, 2, 3];
             let (left, right): (&mut [i64], &mut [i64]) = Slice.split_at_mut(&mut a[..], 1);
             Slice.len(left) + Slice.len(right);
@@ -2742,13 +2738,13 @@ fn mutable_split_rejections_are_specific_and_conservative() {
 #[test]
 fn explicit_outlives_bounds_shorten_shared_mutable_and_transitive_views() {
     agrees(
-        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} { view }
-        fn shorten_mut<'long: 'short, 'short>(view: &'long mut [i64]) -> &'short mut [i64] ! {panic} { view }
-        fn transit<'long: 'middle, 'middle: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} { view }
-        fn relay<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} {
+        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} { view }
+        fn shorten_mut<'long: 'short, 'short>(view: &'long mut [i64]) -> &'short mut [i64] ! {} { view }
+        fn transit<'long: 'middle, 'middle: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} { view }
+        fn relay<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} {
             shorten(view)
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut values: [i64; 4] = [10, 20, 30, 40];
             let short = shorten(&values[..]);
             print_i64(Slice.get(short, 1));
@@ -2778,12 +2774,12 @@ fn outlives_bounds_instantiate_borrowed_record_returns_and_keep_owners() {
             let Window { view, .. } = window;
             view
         }
-        fn read<'long: 'short, 'short>(window: Window<'long>) -> i64 ! {panic} {
+        fn read<'long: 'short, 'short>(window: Window<'long>) -> i64 ! {} {
             let narrowed = narrow(window);
             let Window { view, start } = narrowed;
             Slice.get(view, 0) + start
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let values: [i64; 3] = [4, 5, 6];
             let window = make(&values[..]);
             print_i64(Slice.get(first(window), 0));
@@ -2798,13 +2794,13 @@ fn outlives_bounds_instantiate_borrowed_record_returns_and_keep_owners() {
 #[test]
 fn call_sites_must_establish_declared_outlives_constraints() {
     agrees(
-        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {panic} {
+        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {} {
             Slice.get(long, 0) + Slice.get(short, 0)
         }
-        fn caller<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {panic} {
+        fn caller<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {} {
             pair(long, short)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 0];
             caller(&a[..], &a[..])
         }"#,
@@ -2813,10 +2809,10 @@ fn call_sites_must_establish_declared_outlives_constraints() {
     );
     // The same storage satisfies the constraint reflexively.
     agrees(
-        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {panic} {
+        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {} {
             Slice.get(long, 0) + Slice.get(short, 1)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 2];
             pair(&a[..], &a[..])
         }"#,
@@ -2825,33 +2821,33 @@ fn call_sites_must_establish_declared_outlives_constraints() {
     );
     // The caller's declared relation points the other way.
     rejects(
-        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {panic} {
+        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {} {
             Slice.len(long) + Slice.len(short)
         }
-        fn caller<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {panic} {
+        fn caller<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {} {
             pair(short, long)
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "cannot establish",
     );
     // A local owner cannot outlive a caller parameter, and two distinct local
     // owners cannot establish a non-reflexive relation.
     rejects(
-        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {panic} {
+        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {} {
             Slice.len(long) + Slice.len(short)
         }
-        fn caller<'short>(short: &'short [i64]) -> i64 ! {panic} {
+        fn caller<'short>(short: &'short [i64]) -> i64 ! {} {
             let local: [i64; 2] = [1, 2];
             pair(&local[..], short)
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "cannot establish",
     );
     rejects(
-        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {panic} {
+        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {} {
             Slice.len(long) + Slice.len(short)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let first: [i64; 2] = [1, 2];
             let second: [i64; 2] = [3, 4];
             pair(&first[..], &second[..])
@@ -2864,14 +2860,14 @@ fn call_sites_must_establish_declared_outlives_constraints() {
 fn caller_lifetimes_outlive_frame_owned_locals_only() {
     // A caller parameter's storage outlives every local owned by this frame.
     agrees(
-        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {panic} {
+        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {} {
             Slice.get(long, 0) + Slice.get(short, 1)
         }
-        fn caller<'p>(outer: &'p [i64]) -> i64 ! {panic} {
+        fn caller<'p>(outer: &'p [i64]) -> i64 ! {} {
             let local: [i64; 2] = [0, 2];
             pair(outer, &local[..])
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 1] = [40];
             caller(&a[..])
         }"#,
@@ -2880,26 +2876,26 @@ fn caller_lifetimes_outlive_frame_owned_locals_only() {
     );
     // A shortened result that mixes caller and local storage stays local.
     rejects(
-        r#"fn keep<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> &'short [i64] ! {panic} {
+        r#"fn keep<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> &'short [i64] ! {} {
             short
         }
-        fn caller<'p>(outer: &'p [i64]) -> &'p [i64] ! {panic} {
+        fn caller<'p>(outer: &'p [i64]) -> &'p [i64] ! {} {
             let local: [i64; 2] = [0, 2];
             keep(outer, &local[..])
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "outlive",
     );
     // A view merged from two caller parameters is not frame-owned storage.
     rejects(
-        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {panic} {
+        r#"fn pair<'long: 'short, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {} {
             Slice.len(long) + Slice.len(short)
         }
-        fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64], flag: Bool) -> i64 ! {panic} {
+        fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64], flag: Bool) -> i64 ! {} {
             let merged = if flag { a } else { b };
             pair(a, merged)
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "cannot establish",
     );
 }
@@ -2907,23 +2903,23 @@ fn caller_lifetimes_outlive_frame_owned_locals_only() {
 #[test]
 fn outlives_bounds_reject_wrong_way_shortening_and_mutability_upgrades() {
     rejects(
-        r#"fn widen<'long: 'short, 'short>(view: &'short [i64]) -> &'long [i64] ! {panic} { view }
+        r#"fn widen<'long: 'short, 'short>(view: &'short [i64]) -> &'long [i64] ! {} { view }
         fn main() -> Unit ! {} {}"#,
         "cannot infer an outlives bound",
     );
     rejects(
-        r#"fn widen_mut<'long: 'short, 'short>(view: &'short mut [i64]) -> &'long mut [i64] ! {panic} { view }
+        r#"fn widen_mut<'long: 'short, 'short>(view: &'short mut [i64]) -> &'long mut [i64] ! {} { view }
         fn main() -> Unit ! {} {}"#,
         "cannot infer an outlives bound",
     );
     rejects(
-        r#"fn upgrade<'long: 'short, 'short>(view: &'long [i64]) -> &'short mut [i64] ! {panic} { panic() }
+        r#"fn upgrade<'long: 'short, 'short>(view: &'long [i64]) -> &'short mut [i64] ! {} { panic() }
         fn main() -> Unit ! {} {}"#,
         "exclusive '&mut [T]' result lifetime",
     );
     rejects(
         r#"struct Window<'a> { view: &'a mut [i64] }
-        fn upgrade<'long: 'short, 'short>(view: &'long [i64]) -> Window<'short> ! {panic} { panic() }
+        fn upgrade<'long: 'short, 'short>(view: &'long [i64]) -> Window<'short> ! {} { panic() }
         fn main() -> Unit ! {} {}"#,
         "outlive",
     );
@@ -2933,8 +2929,8 @@ fn outlives_bounds_reject_wrong_way_shortening_and_mutability_upgrades() {
 fn outlives_binders_are_resolved_and_cycles_are_rejected() {
     // A self bound is satisfied by reflexivity.
     agrees(
-        r#"fn same<'a: 'a>(view: &'a [i64]) -> &'a [i64] ! {panic} { view }
-        fn main() -> Unit ! {io, panic} {
+        r#"fn same<'a: 'a>(view: &'a [i64]) -> &'a [i64] ! {} { view }
+        fn main() -> Unit ! {io} {
             let a: [i64; 1] = [5];
             print_i64(Slice.get(same(&a[..]), 0));
         }"#,
@@ -2942,22 +2938,22 @@ fn outlives_binders_are_resolved_and_cycles_are_rejected() {
         "5\n",
     );
     rejects(
-        r#"fn f<'a: 'missing>(view: &'a [i64]) -> &'a [i64] ! {panic} { view }
+        r#"fn f<'a: 'missing>(view: &'a [i64]) -> &'a [i64] ! {} { view }
         fn main() -> Unit ! {} {}"#,
         "outlives bound refers to undeclared lifetime",
     );
     rejects(
-        r#"fn f<'a: 'b + 'b, 'b>(view: &'a [i64]) -> &'b [i64] ! {panic} { view }
+        r#"fn f<'a: 'b + 'b, 'b>(view: &'a [i64]) -> &'b [i64] ! {} { view }
         fn main() -> Unit ! {} {}"#,
         "duplicate outlives bound",
     );
     rejects(
-        r#"fn f<'a: 'b, 'b: 'a>(view: &'a [i64]) -> &'b [i64] ! {panic} { view }
+        r#"fn f<'a: 'b, 'b: 'a>(view: &'a [i64]) -> &'b [i64] ! {} { view }
         fn main() -> Unit ! {} {}"#,
         "cyclic outlives bounds",
     );
     rejects(
-        r#"fn f<'a, 'a>(view: &'a [i64]) -> &'a [i64] ! {panic} { view }
+        r#"fn f<'a, 'a>(view: &'a [i64]) -> &'a [i64] ! {} { view }
         fn main() -> Unit ! {} {}"#,
         "duplicate lifetime parameter",
     );
@@ -2976,8 +2972,8 @@ fn outlives_binders_are_resolved_and_cycles_are_rejected() {
 #[test]
 fn shortened_results_keep_every_source_owner_borrowed_and_cannot_escape() {
     rejects(
-        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} { view }
-        fn main() -> i64 ! {panic} {
+        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} { view }
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let view = shorten(&values[..]);
             let first = Slice.get(view, 0);
@@ -2987,8 +2983,8 @@ fn shortened_results_keep_every_source_owner_borrowed_and_cannot_escape() {
         "replace",
     );
     agrees(
-        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} { view }
-        fn main() -> i64 ! {panic} {
+        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} { view }
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let view = shorten(&values[..]);
             let first = Slice.get(view, 0);
@@ -2999,8 +2995,8 @@ fn shortened_results_keep_every_source_owner_borrowed_and_cannot_escape() {
         "",
     );
     rejects(
-        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} { view }
-        fn bad<'a>(input: &'a [i64]) -> &'a [i64] ! {panic} {
+        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} { view }
+        fn bad<'a>(input: &'a [i64]) -> &'a [i64] ! {} {
             let local: [i64; 2] = [1, 2];
             shorten(&local[..])
         }
@@ -3008,9 +3004,9 @@ fn shortened_results_keep_every_source_owner_borrowed_and_cannot_escape() {
         "outlive",
     );
     rejects(
-        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} { view }
-        fn read(view: &[i64], n: i64) -> i64 ! {panic} { Slice.len(view) + n }
-        fn main() -> i64 ! {panic} {
+        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} { view }
+        fn read(view: &[i64], n: i64) -> i64 ! {} { Slice.len(view) + n }
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let view = shorten(&values[..]);
             read(view, { values = [3, 4]; 0 })
@@ -3018,8 +3014,8 @@ fn shortened_results_keep_every_source_owner_borrowed_and_cannot_escape() {
         "borrows it",
     );
     rejects(
-        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} { view }
-        fn main() -> i64 ! {panic} {
+        r#"fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} { view }
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [1, 2];
             let view = shorten(&values[..]);
             drop(values);
@@ -3044,14 +3040,14 @@ fn outlives_bounds_stay_directional_for_borrowed_record_fields() {
         fn good<'long: 'short, 'short>(first: &'long [i64], second: &'short [i64]) -> Two<'long, 'short> ! {} {
             Two { first: first, second: second }
         }
-        fn read<'long: 'short, 'short>(two: Two<'long, 'short>) -> i64 ! {panic} {
+        fn read<'long: 'short, 'short>(two: Two<'long, 'short>) -> i64 ! {} {
             let Two { first, second } = two;
             Slice.get(first, 0) + Slice.get(second, 1)
         }
-        fn relay<'long: 'short, 'short>(a: &'long [i64], b: &'short [i64]) -> i64 ! {panic} {
+        fn relay<'long: 'short, 'short>(a: &'long [i64], b: &'short [i64]) -> i64 ! {} {
             read(good(a, b))
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 2];
             relay(&a[..], &a[..])
         }"#,
@@ -3063,16 +3059,16 @@ fn outlives_bounds_stay_directional_for_borrowed_record_fields() {
 #[test]
 fn result_lifetime_claims_the_shortest_provable_source() {
     agrees(
-        r#"fn pick<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &'a [i64] ! {panic} {
+        r#"fn pick<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &'a [i64] ! {} {
             if flag { left } else { right }
         }
-        fn narrow<'long: 'short, 'short>(left: &'long [i64], right: &'short [i64], flag: Bool) -> &'short [i64] ! {panic} {
+        fn narrow<'long: 'short, 'short>(left: &'long [i64], right: &'short [i64], flag: Bool) -> &'short [i64] ! {} {
             pick(left, right, flag)
         }
-        fn relay<'long: 'short, 'short>(left: &'long [i64], right: &'short [i64], flag: Bool) -> &'short [i64] ! {panic} {
+        fn relay<'long: 'short, 'short>(left: &'long [i64], right: &'short [i64], flag: Bool) -> &'short [i64] ! {} {
             narrow(left, right, flag)
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let a: [i64; 2] = [1, 2];
             print_i64(Slice.get(relay(&a[..], &a[..], false), 0));
         }"#,
@@ -3080,10 +3076,10 @@ fn result_lifetime_claims_the_shortest_provable_source() {
         "1\n",
     );
     rejects(
-        r#"fn pick<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &'a [i64] ! {panic} {
+        r#"fn pick<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &'a [i64] ! {} {
             if flag { left } else { right }
         }
-        fn widen<'long: 'short, 'short>(left: &'long [i64], right: &'short [i64], flag: Bool) -> &'long [i64] ! {panic} {
+        fn widen<'long: 'short, 'short>(left: &'long [i64], right: &'short [i64], flag: Bool) -> &'long [i64] ! {} {
             pick(left, right, flag)
         }
         fn main() -> Unit ! {} {}"#,
@@ -3094,10 +3090,10 @@ fn result_lifetime_claims_the_shortest_provable_source() {
 #[test]
 fn multiple_result_sources_form_an_anonymous_intersection() {
     agrees(
-        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {panic} {
+        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {} {
             if first == 0 { left } else { right }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 1];
             let b: [i64; 2] = [2, 3];
             Slice.get(pick(&a[..], &b[..], 0), 0)
@@ -3107,10 +3103,10 @@ fn multiple_result_sources_form_an_anonymous_intersection() {
     );
     agrees(
         r#"struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-        fn pick<'a, 'b>(pair: Pair<'a, 'b>, first: i64) -> &[i64] ! {panic} {
+        fn pick<'a, 'b>(pair: Pair<'a, 'b>, first: i64) -> &[i64] ! {} {
             if first == 0 { pair.left } else { pair.right }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 1];
             let b: [i64; 2] = [2, 3];
             Slice.get(pick(Pair { left: &a[..], right: &b[..] }, 0), 0)
@@ -3120,10 +3116,10 @@ fn multiple_result_sources_form_an_anonymous_intersection() {
     );
     // Either source owner is still loaned while the anonymous result is live.
     rejects(
-        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {panic} {
+        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {} {
             if first == 0 { left } else { right }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [40, 1];
             let mut b: [i64; 2] = [2, 3];
             let view = pick(&a[..], &b[..], 0);
@@ -3135,13 +3131,13 @@ fn multiple_result_sources_form_an_anonymous_intersection() {
     // An explicit caller result can still select one source when the caller
     // proves the outlives relation.
     agrees(
-        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {panic} {
+        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {} {
             if first == 0 { left } else { right }
         }
-        fn choose<'a, 'b: 'a>(left: &'a [i64], right: &'b [i64]) -> &'a [i64] ! {panic} {
+        fn choose<'a, 'b: 'a>(left: &'a [i64], right: &'b [i64]) -> &'a [i64] ! {} {
             pick(left, right, 0)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 1];
             Slice.get(choose(&a[..], &a[..]), 0)
         }"#,
@@ -3154,11 +3150,11 @@ fn multiple_result_sources_form_an_anonymous_intersection() {
 fn destructuring_bindings_carry_result_lifetime_sources() {
     agrees(
         r#"struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-        fn pick<'a, 'b>(pair: Pair<'a, 'b>, first: i64) -> &[i64] ! {panic} {
+        fn pick<'a, 'b>(pair: Pair<'a, 'b>, first: i64) -> &[i64] ! {} {
             let Pair { left, right } = pair;
             if first == 0 { left } else { right }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 1];
             let b: [i64; 2] = [2, 3];
             Slice.get(pick(Pair { left: &a[..], right: &b[..] }, 0), 0)
@@ -3169,12 +3165,12 @@ fn destructuring_bindings_carry_result_lifetime_sources() {
     agrees(
         r#"struct Inner<'a, 'b> { left: &'a [i64], right: &'b [i64] }
         struct Outer<'a, 'b> { inner: Inner<'a, 'b>, note: i64 }
-        fn pick<'a, 'b>(outer: Outer<'a, 'b>, first: i64) -> &[i64] ! {panic} {
+        fn pick<'a, 'b>(outer: Outer<'a, 'b>, first: i64) -> &[i64] ! {} {
             let Outer { inner, .. } = outer;
             let Inner { left, right } = inner;
             if first == 0 { left } else { right }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 1];
             let b: [i64; 2] = [2, 3];
             let outer = Outer { inner: Inner { left: &a[..], right: &b[..] }, note: 0 };
@@ -3187,11 +3183,11 @@ fn destructuring_bindings_carry_result_lifetime_sources() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point, note: i64 }
-        fn pick<'a>(holder: Holder<'a>) -> &Point ! {panic} {
+        fn pick<'a>(holder: Holder<'a>) -> &Point ! {} {
             let Holder { point, .. } = holder;
             point
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Point { x: 40, y: 1 };
             pick(Holder { point: &p, note: 0 }).x
         }"#,
@@ -3227,8 +3223,8 @@ fn lifetime_graph_diagnostics_explain_cycles_and_missing_call_paths() {
                 && s.contains("'c")),
         "{error:?}"
     );
-    let error=check(r#"fn f<'a,'b>(a: &'a mut [i64], b: &'b mut [i64])->&'a mut [i64] ! {panic} { let child=&mut b[1..]; child }
-    fn main()->Unit ! {panic} {let mut a:[i64;2]=[1,2];let mut b:[i64;2]=[3,4];f(&mut a[..],&mut b[..]);}"#).unwrap_err();
+    let error=check(r#"fn f<'a,'b>(a: &'a mut [i64], b: &'b mut [i64])->&'a mut [i64] ! {} { let child=&mut b[1..]; child }
+    fn main()->Unit ! {} {let mut a:[i64;2]=[1,2];let mut b:[i64;2]=[3,4];f(&mut a[..],&mut b[..]);}"#).unwrap_err();
     assert!(
         error
             .message

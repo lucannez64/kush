@@ -54,7 +54,7 @@ fn rejects(source: &str, fragment: &str) {
 const HANDLE: &str = "handle Ask: i64 -> i64 as ask with fn(
     x: i64,
     resume: linear once fn(i64) -> i64 ! {},
-) -> i64 ! {panic} { resume(x + 100) }";
+) -> i64 ! {} { resume(x + 100) }";
 
 fn program(helpers: &str, row: &str, body: &str) -> String {
     format!(
@@ -68,20 +68,16 @@ fn program(helpers: &str, row: &str, body: &str) -> String {
 fn a_capability_reaches_its_handler_through_calls() {
     agrees(
         &program(
-            "fn step(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} { perform op(x) + 1 }
-             fn twice(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} { step(op, step(op, x)) }",
-            "panic",
+            "fn step(op: cap Ask ! {}, x: i64) -> i64 ! {} { perform op(x) + 1 }
+             fn twice(op: cap Ask ! {}, x: i64) -> i64 ! {} { step(op, step(op, x)) }",
+            "",
             "twice(ask, 1)",
         ),
         203,
         "",
     );
     // The capability in its own body behaves like the lexical perform.
-    agrees(
-        &program("", "panic", "perform ask(2) + perform Ask(3)"),
-        205,
-        "",
-    );
+    agrees(&program("", "", "perform ask(2) + perform Ask(3)"), 205, "");
 }
 
 #[test]
@@ -103,8 +99,8 @@ fn a_capability_perform_needs_no_operation_row_or_panic() {
     // The handler's row is added to the performer's row.
     rejects(
         "effect Ask: i64 -> i64;
-         fn step(op: cap Ask ! {io, panic}, x: i64) -> i64 ! {panic} { perform op(x) }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn step(op: cap Ask ! {io}, x: i64) -> i64 ! {} { perform op(x) }
+         fn main() -> i64 ! {} { 0 }",
         "operation requires effects {io}",
     );
 }
@@ -115,9 +111,9 @@ fn capabilities_name_one_activation_not_the_innermost_handler() {
     // capability, while a dynamic perform by name sees the inner one.
     agrees(
         &program(
-            "fn via_cap(op: cap Ask ! {panic}) -> i64 ! {panic} { perform op(1) }
-             fn via_name() -> i64 ! {Ask, panic} { perform Ask(1) }",
-            "panic",
+            "fn via_cap(op: cap Ask ! {}) -> i64 ! {} { perform op(1) }
+             fn via_name() -> i64 ! {Ask} { perform Ask(1) }",
+            "",
             "handle Ask: i64 -> i64 with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
@@ -133,8 +129,8 @@ fn only_pure_capability_handlers_are_dynamically_visible() {
     // A pure handler bound `as ask` is also the dynamic handler for Ask.
     agrees(
         "effect Ask: i64 -> i64;
-         fn via_name() -> i64 ! {Ask, panic} { perform Ask(2) }
-         fn main() -> i64 ! {panic} {
+         fn via_name() -> i64 ! {Ask} { perform Ask(2) }
+         fn main() -> i64 ! {} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
@@ -148,12 +144,12 @@ fn only_pure_capability_handlers_are_dynamically_visible() {
     // appear in the enclosing row instead of aborting at run time.
     rejects(
         "effect Ask: i64 -> i64;
-         fn via_name() -> i64 ! {Ask, panic} { perform Ask(2) }
-         fn main() -> i64 ! {io, panic} {
+         fn via_name() -> i64 ! {Ask} { perform Ask(2) }
+         fn main() -> i64 ! {io} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
-             ) -> i64 ! {io, panic} { print_i64(x); resume(x) } { perform ask(1) + via_name() }
+             ) -> i64 ! {io} { print_i64(x); resume(x) } { perform ask(1) + via_name() }
          }",
         "operation requires effects {Ask}",
     );
@@ -163,12 +159,12 @@ fn only_pure_capability_handlers_are_dynamically_visible() {
 fn capability_rows_are_subeffects() {
     agrees(
         "effect Ask: i64 -> i64;
-         fn wide(op: cap Ask ! {io, panic}, x: i64) -> i64 ! {io, panic} { perform op(x) }
-         fn main() -> i64 ! {io, panic} {
+         fn wide(op: cap Ask ! {io}, x: i64) -> i64 ! {io} { perform op(x) }
+         fn main() -> i64 ! {io} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
-             ) -> i64 ! {panic} { resume(x * 2) } { wide(ask, 21) }
+             ) -> i64 ! {} { resume(x * 2) } { wide(ask, 21) }
          }",
         42,
         "",
@@ -176,11 +172,11 @@ fn capability_rows_are_subeffects() {
     rejects(
         "effect Ask: i64 -> i64;
          fn narrow(op: cap Ask ! {}, x: i64) -> i64 ! {} { perform op(x) }
-         fn main() -> i64 ! {io, panic} {
+         fn main() -> i64 ! {io} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
-             ) -> i64 ! {io, panic} { print_i64(x); resume(x) } { narrow(ask, 21) }
+             ) -> i64 ! {io} { print_i64(x); resume(x) } { narrow(ask, 21) }
          }",
         "type mismatch",
     );
@@ -192,13 +188,13 @@ fn capabilities_are_second_class() {
         ("", "let c = ask; 0", "second-class"),
         // Lambda captures: `a_lambda_capturing_a_capability_is_scoped`.
         (
-            "fn leak(op: cap Ask ! {panic}) -> cap Ask ! {panic} ! {panic} { op }",
+            "fn leak(op: cap Ask ! {}) -> cap Ask ! {} ! {} { op }",
             "0",
             "capability",
         ),
-        ("struct Holder { op: cap Ask ! {panic} }", "0", "capability"),
+        ("struct Holder { op: cap Ask ! {} }", "0", "capability"),
         (
-            "fn call(op: cap Ask ! {panic}) -> i64 ! {panic} { op(1, 2) }",
+            "fn call(op: cap Ask ! {}) -> i64 ! {} { op(1, 2) }",
             "0",
             "second-class",
         ),
@@ -208,12 +204,12 @@ fn capabilities_are_second_class() {
             "second-class",
         ),
         (
-            "fn step(op: cap Ask ! {panic}) -> i64 ! {panic} { perform op(1) }",
+            "fn step(op: cap Ask ! {}) -> i64 ! {} { perform op(1) }",
             "let g = step; 0",
             "capability parameter",
         ),
     ] {
-        rejects(&program(helpers, "panic", body), fragment);
+        rejects(&program(helpers, "", body), fragment);
     }
     // Only declared operations have capability types.
     rejects(
@@ -251,7 +247,7 @@ fn non_tail_capability_handlers_resume_in_their_own_body() {
          sum + Box.take(b)";
     same_as_by_name(
         "fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { let r = resume(x | 16); r ^ 1 }",
-        "alloc, panic",
+        "alloc",
         stats_body,
         // (16 + 17 + 18 + 7) with the low bit flipped by three activations.
         ((16 + 17 + 18 + 7) ^ 1) as i64,
@@ -262,7 +258,7 @@ fn non_tail_capability_handlers_resume_in_their_own_body() {
 fn multishot_capability_handlers_copy_the_continuation() {
     same_as_by_name(
         "fn(x: i64, resume: fn(i64) -> i64 ! {}) -> i64 ! {} { let a = resume(1); let b = resume(2); a ^ (b | 1024) }",
-        "panic",
+        "",
         "let base = 40; let v = perform TARGET(0); v + base",
         41 ^ (42 | 1024),
     );
@@ -272,15 +268,33 @@ fn multishot_capability_handlers_copy_the_continuation() {
 fn capturing_capability_handlers_run_in_their_own_body() {
     agrees(
         "effect Ask: i64 -> i64;
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
              let k = 100;
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
-             ) -> i64 ! {panic} { resume(x + k) } { perform ask(1) + 2 }
+             ) -> i64 ! {} { resume(x + k) } { perform ask(1) + 2 }
          }",
         103,
         "",
+    );
+    // The pure handler lives in its dynamic frame, which a nested handle for
+    // the same operation would hide.
+    rejects(
+        "effect Ask: i64 -> i64;
+         fn main() -> i64 ! {alloc} {
+             let k = 100;
+             handle Ask: i64 -> i64 as ask with fn(
+                 x: i64,
+                 resume: linear once fn(i64) -> i64 ! {},
+             ) -> i64 ! {} { resume(x + k) } {
+                 handle Ask: i64 -> i64 with fn(
+                     y: i64,
+                     resume: linear once fn(i64) -> i64 ! {},
+                 ) -> i64 ! {} { resume(y) } { perform ask(1) }
+             }
+         }",
+        "nested 'handle Ask' hides",
     );
 }
 
@@ -293,17 +307,19 @@ fn capturing_and_multishot_capabilities_stay_in_their_body() {
         &format!(
             "effect Ask: i64 -> i64;
              {step}
-             fn main() -> i64 ! {{panic}} {{
+             fn main() -> i64 ! {{}} {{
                  handle Ask: i64 -> i64 as ask with fn(x: i64, resume: fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{ resume(x) }} {{ step(ask, 1) }}
              }}"
         ),
         "capturing or multishot",
     );
-    rejects(
+    // EFF-CAP-RESUME-CAPTURING: a capturing one-shot handler crosses calls
+    // through its frame.
+    agrees(
         &format!(
             "effect Ask: i64 -> i64;
              {step}
-             fn main() -> i64 ! {{alloc, panic}} {{
+             fn main() -> i64 ! {{alloc}} {{
                  let k = 4;
                  handle Ask: i64 -> i64 as ask with fn(
                      x: i64,
@@ -311,8 +327,8 @@ fn capturing_and_multishot_capabilities_stay_in_their_body() {
                  ) -> i64 ! {{}} {{ resume(x | k) }} {{ step(ask, 1) }}
              }}"
         ),
-        // EFF-CAP-RESUME-CAPTURING: it may cross calls, to `cap Ask ! {panic}`.
-        "pass it to a 'cap Op ! {panic}' parameter",
+        5,
+        "",
     );
 }
 
@@ -322,7 +338,7 @@ fn a_non_tail_capability_names_its_activation_inside_a_nested_handle() {
     // the same operation would have to reinstate the inner handler.
     rejects(
         "effect Ask: i64 -> i64;
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
@@ -338,17 +354,17 @@ fn a_non_tail_capability_names_its_activation_inside_a_nested_handle() {
     );
     rejects(
         "effect Ask: i64 -> i64;
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              handle Ask: i64 -> i64 as op with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
              ) -> i64 ! {} { resume(x) } { 0 }
          }
-         fn other() -> i64 ! {panic} {
+         fn other() -> i64 ! {} {
              handle Local: i64 -> i64 as op with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
-             ) -> i64 ! {panic} { resume(x) } { perform op(1) }
+             ) -> i64 ! {} { resume(x) } { perform op(1) }
          }",
         "declared effect operation",
     );
@@ -358,7 +374,7 @@ fn a_non_tail_capability_names_its_activation_inside_a_nested_handle() {
 fn identifiers_named_cap_and_as_still_work() {
     agrees(
         "struct Pair { cap: i64, as: i64 }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              let cap = 40;
              let as = 2;
              let p = Pair { cap: cap, as: as };
@@ -373,12 +389,12 @@ fn identifiers_named_cap_and_as_still_work() {
 fn capability_performs_clean_up_owned_values() {
     let stats = agrees(
         &program(
-            "fn boxed(op: cap Ask ! {panic}, b: Box<i64>) -> i64 ! {alloc, panic} {
+            "fn boxed(op: cap Ask ! {}, b: Box<i64>) -> i64 ! {alloc} {
                  let v = Box.take(b);
                  let w = Box.new(v);
                  perform op(Box.take(w))
              }",
-            "alloc, panic",
+            "alloc",
             "let keep = Box.new(5); let r = boxed(ask, Box.new(1)); r + Box.take(keep)",
         ),
         106,
@@ -395,22 +411,22 @@ fn a_capability_only_handler_does_not_discharge_called_performs() {
     // function's `Ask` must stay in the enclosing row.
     rejects(
         "effect Ask: i64 -> i64;
-         fn g() -> i64 ! {Ask, panic} { perform Ask(1) }
-         fn h() -> i64 ! {panic} {
+         fn g() -> i64 ! {Ask} { perform Ask(1) }
+         fn h() -> i64 ! {io} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
-             ) -> i64 ! {panic} { resume(x + 100) } { g() }
+             ) -> i64 ! {io} { print_i64(x); resume(x + 100) } { g() }
          }
-         fn main() -> i64 ! {panic} { h() }",
+         fn main() -> i64 ! {io} { h() }",
         "operation requires effects {Ask}",
     );
     // With the outer handler in scope the row is honest and the outer
     // handler serves the call.
     agrees(
         "effect Ask: i64 -> i64;
-         fn g() -> i64 ! {Ask, panic} { perform Ask(1) }
-         fn main() -> i64 ! {panic} {
+         fn g() -> i64 ! {Ask} { perform Ask(1) }
+         fn main() -> i64 ! {io} {
              handle Ask: i64 -> i64 with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
@@ -418,11 +434,11 @@ fn a_capability_only_handler_does_not_discharge_called_performs() {
                  handle Ask: i64 -> i64 as ask with fn(
                      x: i64,
                      resume: linear once fn(i64) -> i64 ! {},
-                 ) -> i64 ! {panic} { resume(x + 100) } { g() + perform ask(1) }
+                 ) -> i64 ! {io} { print_i64(x); resume(x + 100) } { g() + perform ask(1) }
              }
          }",
         108,
-        "",
+        "1\n",
     );
 }
 
@@ -432,8 +448,8 @@ fn a_capability_whose_handler_performs_declared_operations_stays_local() {
     rejects(
         "effect Ask: i64 -> i64;
          effect Log: i64 -> i64;
-         fn f(op: cap Ask ! {Log, panic}) -> i64 ! {Log, panic} { perform op(1) }
-         fn main() -> i64 ! {panic} {
+         fn f(op: cap Ask ! {Log}) -> i64 ! {Log} { perform op(1) }
+         fn main() -> i64 ! {} {
              handle Log: i64 -> i64 with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
@@ -441,7 +457,7 @@ fn a_capability_whose_handler_performs_declared_operations_stays_local() {
                  handle Ask: i64 -> i64 as ask with fn(
                      x: i64,
                      resume: linear once fn(i64) -> i64 ! {},
-                 ) -> i64 ! {Log, panic} { resume(perform Log(x)) } { f(ask) }
+                 ) -> i64 ! {Log} { resume(perform Log(x)) } { f(ask) }
              }
          }",
         "performs declared operations",
@@ -449,12 +465,12 @@ fn a_capability_whose_handler_performs_declared_operations_stays_local() {
     // Builtin effects travel with a passed capability.
     agrees(
         "effect Ask: i64 -> i64;
-         fn f(op: cap Ask ! {io, panic}) -> i64 ! {io, panic} { perform op(2) }
-         fn main() -> i64 ! {io, panic} {
+         fn f(op: cap Ask ! {io}) -> i64 ! {io} { perform op(2) }
+         fn main() -> i64 ! {io} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
-             ) -> i64 ! {io, panic} { print_i64(x); resume(x) } { f(ask) }
+             ) -> i64 ! {io} { print_i64(x); resume(x) } { f(ask) }
          }",
         2,
         "2\n",
@@ -471,19 +487,19 @@ fn capability_resumption_across_calls() {
     const NON_TAIL: &str = "handle Ask: i64 -> i64 as ask with fn(
         x: i64,
         k: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {panic} { let r = k(x * 10); r ^ 1 }";
+    ) -> i64 ! {} { let r = k(x * 10); r ^ 1 }";
     // Two calls deep, with an owned value live across the first perform.
     agrees(
         &format!(
             "effect Ask: i64 -> i64;
-             fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform op(x) + 1 }}
-             fn twice(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{alloc, panic}} {{
+             fn step(op: cap Ask ! {{}}, x: i64) -> i64 ! {{}} {{ perform op(x) + 1 }}
+             fn twice(op: cap Ask ! {{}}, x: i64) -> i64 ! {{alloc}} {{
                  let b = Box.new(x);
                  let y = step(op, Box.take(b));
                  let c = Box.new(y);
                  step(op, Box.take(c))
              }}
-             fn main() -> i64 ! {{alloc, panic}} {{ {NON_TAIL} {{ twice(ask, 1) }} }}"
+             fn main() -> i64 ! {{alloc}} {{ {NON_TAIL} {{ twice(ask, 1) }} }}"
         ),
         111,
         "",
@@ -491,26 +507,26 @@ fn capability_resumption_across_calls() {
     const PLUS_ONE: &str = "handle Ask: i64 -> i64 as ask with fn(
         x: i64,
         k: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {panic} { let r = k(x + 1); r }";
+    ) -> i64 ! {} { let r = k(x + 1); r }";
     // Points in a callee loop, recursion, and a callee that only forwards.
     agrees(
         &format!(
             "effect Ask: i64 -> i64;
-             fn sum(op: cap Ask ! {{panic}}, n: i64) -> i64 ! {{alloc, panic}} {{
+             fn sum(op: cap Ask ! {{}}, n: i64) -> i64 ! {{alloc}} {{
                  let mut acc = 0;
                  let mut i = 0;
                  while i < n {{ let t = Box.new(i); acc = acc + perform op(Box.take(t)); i = i + 1; }}
                  acc
              }}
-             fn rec(op: cap Ask ! {{panic}}, n: i64) -> i64 ! {{alloc, panic}} {{
+             fn rec(op: cap Ask ! {{}}, n: i64) -> i64 ! {{alloc}} {{
                  if n == 0 {{ 0 }} else {{
                      let keep = Box.new(n);
                      perform op(n) + rec(op, n - 1) + Box.take(keep) - n
                  }}
              }}
-             fn ignore(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ x * 2 }}
-             fn forward(op: cap Ask ! {{panic}}, n: i64) -> i64 ! {{alloc, panic}} {{ sum(op, n) }}
-             fn main() -> i64 ! {{alloc, panic}} {{
+             fn ignore(op: cap Ask ! {{}}, x: i64) -> i64 ! {{}} {{ x * 2 }}
+             fn forward(op: cap Ask ! {{}}, n: i64) -> i64 ! {{alloc}} {{ sum(op, n) }}
+             fn main() -> i64 ! {{alloc}} {{
                  {PLUS_ONE} {{
                      let held = Box.new(100);
                      let a = forward(ask, 3);
@@ -525,12 +541,12 @@ fn capability_resumption_across_calls() {
     // A capability-only handler with effects runs its code after `resume`.
     agrees(
         "effect Ask: i64 -> i64;
-         fn f(op: cap Ask ! {io, panic}) -> i64 ! {io, panic} { perform op(2) + perform op(3) }
-         fn main() -> i64 ! {io, alloc, panic} {
+         fn f(op: cap Ask ! {io}) -> i64 ! {io} { perform op(2) + perform op(3) }
+         fn main() -> i64 ! {io, alloc} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  k: linear once fn(i64) -> i64 ! {},
-             ) -> i64 ! {io, panic} { print_i64(x); let r = k(x); print_i64(r); r + 100 } { f(ask) }
+             ) -> i64 ! {io} { print_i64(x); let r = k(x); print_i64(r); r + 100 } { f(ask) }
          }",
         205,
         "2\n3\n5\n105\n",
@@ -540,8 +556,8 @@ fn capability_resumption_across_calls() {
     agrees(
         "effect Ask: i64 -> i64;
          fn by_cap(op: cap Ask ! {}, x: i64) -> i64 ! {} { perform op(x) }
-         fn by_name(x: i64) -> i64 ! {Ask, panic} { perform Ask(x) }
-         fn main() -> i64 ! {alloc, panic} {
+         fn by_name(x: i64) -> i64 ! {Ask} { perform Ask(x) }
+         fn main() -> i64 ! {alloc} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  k: linear once fn(i64) -> i64 ! {},
@@ -557,14 +573,14 @@ fn capability_resumption_across_calls_is_checked() {
     const NON_TAIL: &str = "handle Ask: i64 -> i64 as ask with fn(
         x: i64,
         k: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {panic} { let r = k(x); r ^ 1 }";
+    ) -> i64 ! {} { let r = k(x); r ^ 1 }";
     // A call given the capability inside a nested dynamic handle.
     rejects(
         &format!(
             "effect Ask: i64 -> i64;
              effect Log: i64 -> i64;
-             fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform op(x) }}
-             fn main() -> i64 ! {{panic}} {{
+             fn step(op: cap Ask ! {{}}, x: i64) -> i64 ! {{}} {{ perform op(x) }}
+             fn main() -> i64 ! {{}} {{
                  {NON_TAIL} {{
                      handle Log: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{ k(x) }} {{ step(ask, 1) }}
                  }}
@@ -577,10 +593,10 @@ fn capability_resumption_across_calls_is_checked() {
         &format!(
             "effect Ask: i64 -> i64;
              effect Log: i64 -> i64;
-             fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{
+             fn step(op: cap Ask ! {{}}, x: i64) -> i64 ! {{}} {{
                  handle Log: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{ k(x) }} {{ perform op(x) }}
              }}
-             fn main() -> i64 ! {{panic}} {{ {NON_TAIL} {{ step(ask, 1) }} }}"
+             fn main() -> i64 ! {{}} {{ {NON_TAIL} {{ step(ask, 1) }} }}"
         ),
         "nested handler or handled body",
     );
@@ -588,8 +604,8 @@ fn capability_resumption_across_calls_is_checked() {
     rejects(
         &format!(
             "effect Ask: i64 -> i64;
-             fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform op(x) }}
-             fn f() -> Bool ! {{panic}} {{ {NON_TAIL} {{ step(ask, 1) == 1 }} }}
+             fn step(op: cap Ask ! {{}}, x: i64) -> i64 ! {{}} {{ perform op(x) }}
+             fn f() -> Bool ! {{}} {{ {NON_TAIL} {{ step(ask, 1) == 1 }} }}
              fn main() -> i64 ! {{}} {{ 0 }}"
         ),
         "must produce the operation result type",
@@ -604,13 +620,13 @@ fn capability_resumption_across_calls_is_checked() {
 const IN_PLACE: &str = "handle Ask: i64 -> i64 as ask with fn(
     x: i64,
     k: linear once fn(i64) -> i64 ! {},
-) -> i64 ! {panic} { k(x + 100) }";
+) -> i64 ! {} { k(x + 100) }";
 
 fn in_place(helpers: &str, body: &str) -> String {
     format!(
         "effect Ask: i64 -> i64;
          {helpers}
-         fn main() -> i64 ! {{alloc, panic}} {{ {IN_PLACE} {{ {body} }} }}"
+         fn main() -> i64 ! {{alloc}} {{ {IN_PLACE} {{ {body} }} }}"
     )
 }
 
@@ -618,9 +634,9 @@ fn in_place(helpers: &str, body: &str) -> String {
 fn a_lambda_performs_through_a_captured_capability() {
     agrees(
         &in_place(
-            "fn step(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} { perform op(x) * 2 + 1 }",
-            "let g = fn(y: i64) -> i64 ! {alloc, panic} {
-                 let h = fn(z: i64) -> i64 ! {panic} { step(ask, z) };
+            "fn step(op: cap Ask ! {}, x: i64) -> i64 ! {} { perform op(x) * 2 + 1 }",
+            "let g = fn(y: i64) -> i64 ! {alloc} {
+                 let h = fn(z: i64) -> i64 ! {} { step(ask, z) };
                  h(y) + perform ask(0)
              };
              g(1)",
@@ -634,7 +650,7 @@ fn a_lambda_performs_through_a_captured_capability() {
             "",
             "let b = Box.new(5);
              let owned = Box.new(7);
-             let f = fn() -> i64 ! {alloc, panic} { perform ask(Box.take(owned)) };
+             let f = fn() -> i64 ! {alloc} { perform ask(Box.take(owned)) };
              f() + Box.take(b)",
         ),
         112,
@@ -646,48 +662,48 @@ fn a_lambda_performs_through_a_captured_capability() {
 fn a_lambda_capturing_a_capability_is_scoped() {
     let scoped = "is scoped";
     rejects(
-        &in_place("", "let f = fn() -> i64 ! {panic} { perform ask(1) }; f")
+        &in_place("", "let f = fn() -> i64 ! {} { perform ask(1) }; f")
             .replace(
-                "fn main() -> i64 ! {alloc, panic} {",
-                "fn main() -> i64 ! {alloc, panic} { let g = ",
+                "fn main() -> i64 ! {alloc} {",
+                "fn main() -> i64 ! {alloc} { let g = ",
             )
             .replace("; f } }", "; f }; g() }"),
         scoped,
     );
     rejects(
         &in_place(
-            "fn call(f: once fn() -> i64 ! {panic}) -> i64 ! {panic} { f() }",
-            "let f = fn() -> i64 ! {panic} { perform ask(1) }; call(f)",
+            "fn call(f: once fn() -> i64 ! {}) -> i64 ! {} { f() }",
+            "let f = fn() -> i64 ! {} { perform ask(1) }; call(f)",
         ),
         scoped,
     );
     rejects(
         &in_place(
             "",
-            "let v: Vec<once fn() -> i64 ! {panic}> = Vec.new();
-             let w = Vec.push(v, fn() -> i64 ! {panic} { perform ask(1) }); 0",
+            "let v: Vec<once fn() -> i64 ! {}> = Vec.new();
+             let w = Vec.push(v, fn() -> i64 ! {} { perform ask(1) }); 0",
         ),
         "must be called immediately or bound directly to a local",
     );
     rejects(
         "effect Ask: i64 -> i64;
-         fn leak(op: cap Ask ! {panic}) -> once fn() -> i64 ! {panic} ! {alloc, panic} {
-             fn() -> i64 ! {panic} { perform op(1) }
+         fn leak(op: cap Ask ! {}) -> once fn() -> i64 ! {} ! {alloc} {
+             fn() -> i64 ! {} { perform op(1) }
          }
          fn main() -> i64 ! {} { 0 }",
         "a 'cap' parameter may be bound to a handler with code after 'resume'",
     );
     // Still second-class inside the lambda.
     rejects(
-        &in_place("", "let f = fn() -> i64 ! {panic} { let c = ask; 0 }; f()"),
+        &in_place("", "let f = fn() -> i64 ! {} { let c = ask; 0 }; f()"),
         "second-class capability",
     );
     // Not live across a non-tail perform of another handler.
     rejects(
         &in_place(
             "",
-            "handle G: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} { let r = k(x); r + 1 } {
-                 let f = fn() -> i64 ! {panic} { perform ask(1) };
+            "handle G: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { let r = k(x); r + 1 } {
+                 let f = fn() -> i64 ! {} { perform ask(1) };
                  let a = perform G(1);
                  f() + a
              }",
@@ -697,9 +713,9 @@ fn a_lambda_capturing_a_capability_is_scoped() {
     // Only capabilities whose handler runs in place can be captured.
     rejects(
         "effect Ask: i64 -> i64;
-         fn main() -> i64 ! {alloc, panic} {
-             handle Ask: i64 -> i64 as ask with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} { let r = k(x); r + 1 } {
-                 let f = fn() -> i64 ! {panic} { perform ask(1) }; f()
+         fn main() -> i64 ! {alloc} {
+             handle Ask: i64 -> i64 as ask with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { let r = k(x); r + 1 } {
+                 let f = fn() -> i64 ! {} { perform ask(1) }; f()
              }
          }",
         "whose handler runs in place",
@@ -714,18 +730,17 @@ fn review_regressions_for_capability_resumption() {
     const NON_TAIL: &str = "handle Ask: i64 -> i64 as ask with fn(
         x: i64,
         k: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {panic} { let r = k(x * 10); r ^ 1 }";
-    const STEP: &str =
-        "fn step(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} { perform op(x) + 1 }";
+    ) -> i64 ! {} { let r = k(x * 10); r ^ 1 }";
+    const STEP: &str = "fn step(op: cap Ask ! {}, x: i64) -> i64 ! {} { perform op(x) + 1 }";
     // A lambda cannot capture a `cap` parameter: it may be non-tail.
     rejects(
         &format!(
             "effect Ask: i64 -> i64;
-             fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{alloc, panic}} {{
-                 let f = fn(y: i64) -> i64 ! {{panic}} {{ perform op(y) }};
+             fn step(op: cap Ask ! {{}}, x: i64) -> i64 ! {{alloc}} {{
+                 let f = fn(y: i64) -> i64 ! {{}} {{ perform op(y) }};
                  f(x) + 1
              }}
-             fn main() -> i64 ! {{alloc, panic}} {{ {NON_TAIL} {{ step(ask, 1) }} }}"
+             fn main() -> i64 ! {{alloc}} {{ {NON_TAIL} {{ step(ask, 1) }} }}"
         ),
         "a 'cap' parameter may be bound to a handler with code after 'resume'",
     );
@@ -733,17 +748,17 @@ fn review_regressions_for_capability_resumption() {
     rejects(
         &format!(
             "effect Ask: i64 -> i64;
-             fn two(a: cap Ask ! {{panic}}, b: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform b(x) + 1 }}
-             fn main() -> i64 ! {{panic}} {{ {NON_TAIL} {{ two(ask, ask, 1) }} }}"
+             fn two(a: cap Ask ! {{}}, b: cap Ask ! {{}}, x: i64) -> i64 ! {{}} {{ perform b(x) + 1 }}
+             fn main() -> i64 ! {{}} {{ {NON_TAIL} {{ two(ask, ask, 1) }} }}"
         ),
         "cannot be passed to two parameters of one call",
     );
     rejects(
         &format!(
             "effect Ask: i64 -> i64;
-             fn two(a: cap Ask ! {{panic}}, b: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform b(x) + 1 }}
-             fn fwd(op: cap Ask ! {{panic}}) -> i64 ! {{panic}} {{ two(op, op, 1) }}
-             fn main() -> i64 ! {{panic}} {{ {NON_TAIL} {{ fwd(ask) }} }}"
+             fn two(a: cap Ask ! {{}}, b: cap Ask ! {{}}, x: i64) -> i64 ! {{}} {{ perform b(x) + 1 }}
+             fn fwd(op: cap Ask ! {{}}) -> i64 ! {{}} {{ two(op, op, 1) }}
+             fn main() -> i64 ! {{}} {{ {NON_TAIL} {{ fwd(ask) }} }}"
         ),
         "cannot be passed to two parameters of one call",
     );
@@ -757,7 +772,7 @@ fn review_regressions_for_capability_resumption() {
             &format!(
                 "effect Ask: i64 -> i64;
                  {STEP}
-                 fn main() -> i64 ! {{alloc, panic}} {{ {NON_TAIL} {{ {body} }} }}"
+                 fn main() -> i64 ! {{alloc}} {{ {NON_TAIL} {{ {body} }} }}"
             ),
             110,
             "",
@@ -768,12 +783,12 @@ fn review_regressions_for_capability_resumption() {
     rejects(
         "effect Ask: i64 -> i64;
          effect Log: i64 -> i64;
-         fn step(op: cap Ask ! {Log, panic}, x: i64) -> i64 ! {Log, panic} { perform op(x) }
-         fn main() -> i64 ! {alloc, panic} {
-             handle Ask: i64 -> i64 as outer with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} { let r = k(x); r ^ 1 } {
-                 let f = fn() -> i64 ! {alloc, panic} {
+         fn step(op: cap Ask ! {Log}, x: i64) -> i64 ! {Log} { perform op(x) }
+         fn main() -> i64 ! {alloc} {
+             handle Ask: i64 -> i64 as outer with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { let r = k(x); r ^ 1 } {
+                 let f = fn() -> i64 ! {alloc} {
                      handle Log: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { k(x) } {
-                         handle Ask: i64 -> i64 as c with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {Log, panic} { k(perform Log(x)) } {
+                         handle Ask: i64 -> i64 as c with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {Log} { k(perform Log(x)) } {
                              step(c, 1)
                          }
                      }
@@ -790,19 +805,19 @@ fn review_regressions_for_capability_resumption() {
 /// operation stays in its dynamic frame; a callee given its capability
 /// performs through a trampoline that reaches exactly that frame. The frame
 /// serves one perform (by name, by capability in the body, or in any callee);
-/// a second one panics, so the callee's parameter is `cap Op ! {panic}`.
+/// a second one panics, so the callee's parameter is `cap Op ! {}`.
 fn capturing(body: &str, handler: &str) -> String {
     format!(
         "effect Ask: i64 -> i64;
-         fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform op(x) + 1 }}
-         fn twice(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ let a = perform op(x); let b = perform op(a); b }}
-         fn forward(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{alloc, panic}} {{
+         fn step(op: cap Ask ! {{}}, x: i64) -> i64 ! {{}} {{ perform op(x) + 1 }}
+         fn twice(op: cap Ask ! {{}}, x: i64) -> i64 ! {{}} {{ let a = perform op(x); let b = perform op(a); b }}
+         fn forward(op: cap Ask ! {{}}, x: i64) -> i64 ! {{alloc}} {{
              let mine = Box.new(5);
              let r = step(op, x);
              r + Box.take(mine)
          }}
-         fn skip(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ if x > 100 {{ perform op(x) }} else {{ x }} }}
-         fn main() -> i64 ! {{io, alloc, panic}} {{
+         fn skip(op: cap Ask ! {{}}, x: i64) -> i64 ! {{}} {{ if x > 100 {{ perform op(x) }} else {{ x }} }}
+         fn main() -> i64 ! {{io, alloc}} {{
              let base = Box.new(41);
              let r = handle Ask: i64 -> i64 as ask with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{
                  {handler}
@@ -863,17 +878,11 @@ fn a_capturing_capability_serves_one_perform() {
 #[test]
 fn capturing_capabilities_stay_checked() {
     let handler = "k(x ^ Box.take(base))";
-    // Without `panic` in the parameter's row.
-    rejects(
-        &capturing("step(ask, 2)", handler)
-            .replace("fn step(op: cap Ask ! {panic}", "fn step(op: cap Ask ! {}"),
-        "cap Op ! {panic}",
-    );
     // A perform through it inside a nested handle of the callee.
     rejects(
         &capturing("nested(ask, 2)", handler).replace(
             "fn main()",
-            "fn nested(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} {
+            "fn nested(op: cap Ask ! {}, x: i64) -> i64 ! {} {
                  handle Ask: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { r(y) } { perform op(x) }
              }
              fn main()",
@@ -888,13 +897,13 @@ fn capturing_capabilities_stay_checked() {
 fn effectful(body: &str) -> String {
     format!(
         "effect Ask: i64 -> i64;
-         fn step(op: cap Ask ! {{io, panic}}, x: i64) -> i64 ! {{io, panic}} {{ perform op(x) + 1 }}
-         fn skip(op: cap Ask ! {{io, panic}}, x: i64) -> i64 ! {{io, panic}} {{ if x > 100 {{ perform op(x) }} else {{ x }} }}
-         fn by_name(x: i64) -> i64 ! {{Ask, panic}} {{ perform Ask(x) }}
-         fn main() -> i64 ! {{io, alloc, panic}} {{
+         fn step(op: cap Ask ! {{io}}, x: i64) -> i64 ! {{io}} {{ perform op(x) + 1 }}
+         fn skip(op: cap Ask ! {{io}}, x: i64) -> i64 ! {{io}} {{ if x > 100 {{ perform op(x) }} else {{ x }} }}
+         fn by_name(x: i64) -> i64 ! {{Ask}} {{ perform Ask(x) }}
+         fn main() -> i64 ! {{io, alloc}} {{
              handle Ask: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{ r(y ^ 100) }} {{
                  let base = Box.new(41);
-                 let r = handle Ask: i64 -> i64 as ask with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{io, panic}} {{
+                 let r = handle Ask: i64 -> i64 as ask with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{io}} {{
                      print_i64(x);
                      let r = k(x ^ Box.take(base));
                      print_i64(r);
@@ -921,10 +930,8 @@ fn effectful_capturing_capabilities_cross_calls() {
     );
     // The parameter's row must hold the handler's effects and `panic`.
     rejects(
-        &effectful("step(ask, 2)").replace(
-            "fn step(op: cap Ask ! {io, panic}",
-            "fn step(op: cap Ask ! {panic}",
-        ),
+        &effectful("step(ask, 2)")
+            .replace("fn step(op: cap Ask ! {io}", "fn step(op: cap Ask ! {}"),
         "handler's own effects",
     );
     // A second perform through the consumed frame panics.

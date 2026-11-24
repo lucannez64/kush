@@ -3,16 +3,16 @@
 // until both children and their descendants reach their last use.
 //   cargo run -p kush -- run examples/mutable-splits.kush
 
-fn bump<'a>(left: &'a mut [i64], right: &'a mut [i64]) -> Unit ! {panic} {
+fn bump<'a>(left: &'a mut [i64], right: &'a mut [i64]) -> Unit ! {} {
     Slice.set(left, 0, Slice.get(left, 0) + 1);
     Slice.set(right, 0, Slice.get(right, 0) + 10);
 }
 
-fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {} {
     &mut view[1..]
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let mut values: [i64; 5] = [1, 2, 3, 4, 5];
     let parent = &mut values[..];
     let (left, right) = Slice.split_at_mut(parent, 2);

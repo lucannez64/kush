@@ -29,7 +29,7 @@ fn program(gpu: &str) -> String {
 
 const SAXPY: &str = "
 #[gpu]
-fn saxpy(id: u32, a: f32, x: &GpuBuf<f32>, y: &mut GpuBuf<f32>) -> Unit ! {panic} {
+fn saxpy(id: u32, a: f32, x: &GpuBuf<f32>, y: &mut GpuBuf<f32>) -> Unit ! {} {
     GpuBuf.set(y, id, a * GpuBuf.get(x, id) + GpuBuf.get(y, id));
 }
 ";
@@ -47,7 +47,7 @@ struct Point { x: f32, y: f32 }
 enum Mode { Add, Scale }
 
 #[gpu]
-fn combine(mode: Mode, p: Point) -> f32 ! {panic} {
+fn combine(mode: Mode, p: Point) -> f32 ! {} {
     match mode {
         Mode.Add => p.x + p.y,
         Mode.Scale => p.x * p.y,
@@ -55,7 +55,7 @@ fn combine(mode: Mode, p: Point) -> f32 ! {panic} {
 }
 
 #[gpu]
-fn kernel(id: u32, n: i32, input: &GpuBuf<f32>, out: &mut GpuBuf<f32>) -> Unit ! {panic} {
+fn kernel(id: u32, n: i32, input: &GpuBuf<f32>, out: &mut GpuBuf<f32>) -> Unit ! {} {
     let mut acc: f32 = 0.0;
     let mut i: i32 = 0;
     while i < n {
@@ -74,7 +74,7 @@ fn wrapping_integer_builtins_are_accepted() {
     accepts(&program(
         "
 #[gpu]
-fn hash(id: u32, out: &mut GpuBuf<u32>) -> Unit ! {panic} {
+fn hash(id: u32, out: &mut GpuBuf<u32>) -> Unit ! {} {
     let x: u32 = Int.wrapping_mul(id, 2654435761);
     GpuBuf.set(out, id, x);
 }
@@ -101,11 +101,11 @@ fn programs_with_gpu_functions_still_run_on_the_cpu() {
 #[test]
 fn buffer_element_types_are_32_bit() {
     rejects(
-        &program("#[gpu] fn f(id: u32, b: &GpuBuf<i64>) -> Unit ! {panic} { }"),
+        &program("#[gpu] fn f(id: u32, b: &GpuBuf<i64>) -> Unit ! {} { }"),
         "a GPU buffer holds i32, u32 or f32 elements, found i64",
     );
     rejects(
-        &program("#[gpu] fn f(id: u32, b: &GpuBuf<Bool>) -> Unit ! {panic} { }"),
+        &program("#[gpu] fn f(id: u32, b: &GpuBuf<Bool>) -> Unit ! {} { }"),
         "a GPU buffer holds i32, u32 or f32 elements",
     );
 }
@@ -113,11 +113,11 @@ fn buffer_element_types_are_32_bit() {
 #[test]
 fn sixty_four_bit_values_are_rejected() {
     rejects(
-        &program("#[gpu] fn f(x: i64) -> i64 ! {panic} { x }"),
+        &program("#[gpu] fn f(x: i64) -> i64 ! {} { x }"),
         "#[gpu] function 'f' cannot use a value of type i64",
     );
     rejects(
-        &program("#[gpu] fn f(x: f64) -> f32 ! {panic} { 1.0 }"),
+        &program("#[gpu] fn f(x: f64) -> f32 ! {} { 1.0 }"),
         "cannot use a value of type f64",
     );
 }
@@ -125,31 +125,31 @@ fn sixty_four_bit_values_are_rejected() {
 #[test]
 fn owning_and_payload_values_are_rejected() {
     rejects(
-        &program("#[gpu] fn f(b: Box<i32>) -> i32 ! {panic} { 0 }"),
+        &program("#[gpu] fn f(b: Box<i32>) -> i32 ! {} { 0 }"),
         "cannot use a value of type Box<i32>",
     );
     rejects(
         &program(
             "enum Shape { Dot, Circle(f32) }
-             #[gpu] fn f(s: Shape) -> f32 ! {panic} { 0.0 }",
+             #[gpu] fn f(s: Shape) -> f32 ! {} { 0.0 }",
         ),
         "cannot use a value of type Shape",
     );
     rejects(
-        &program("#[gpu] fn f(v: &[i32]) -> i32 ! {panic} { 0 }"),
+        &program("#[gpu] fn f(v: &[i32]) -> i32 ! {} { 0 }"),
         "cannot use a value of type &[i32]",
     );
 }
 
 #[test]
-fn effects_other_than_panic_are_rejected() {
+fn effects_are_rejected() {
     rejects(
-        &program("#[gpu] fn f(x: i32) -> i32 ! {io, panic} { x }"),
-        "may only declare the panic effect",
+        &program("#[gpu] fn f(x: i32) -> i32 ! {io} { x }"),
+        "must have the empty effect row",
     );
     rejects(
         &program("#[gpu] fn f(x: i32) -> i32 ! {alloc} { x }"),
-        "may only declare the panic effect",
+        "must have the empty effect row",
     );
 }
 
@@ -174,18 +174,18 @@ fn gpu_code_calls_only_gpu_functions_without_recursion() {
     rejects(
         &program(
             "fn cpu(x: i32) -> i32 ! {} { x }
-             #[gpu] fn f(x: i32) -> i32 ! {panic} { cpu(x) }",
+             #[gpu] fn f(x: i32) -> i32 ! {} { cpu(x) }",
         ),
         "can only call other #[gpu] functions, not 'cpu'",
     );
     rejects(
-        &program("#[gpu] fn f(x: i32) -> i32 ! {panic} { if x > 0 { f(x - 1) } else { 0 } }"),
+        &program("#[gpu] fn f(x: i32) -> i32 ! {} { if x > 0 { f(x - 1) } else { 0 } }"),
         "is recursive through 'f'",
     );
     rejects(
         &program(
-            "#[gpu] fn f(x: i32) -> i32 ! {panic} { if x > 0 { g(x - 1) } else { 0 } }
-             #[gpu] fn g(x: i32) -> i32 ! {panic} { f(x) }",
+            "#[gpu] fn f(x: i32) -> i32 ! {} { if x > 0 { g(x - 1) } else { 0 } }
+             #[gpu] fn g(x: i32) -> i32 ! {} { f(x) }",
         ),
         "GPU code has no recursion",
     );
@@ -195,12 +195,12 @@ fn gpu_code_calls_only_gpu_functions_without_recursion() {
 fn buffers_cannot_be_rebound_or_used_on_the_cpu() {
     rejects(
         &program(
-            "#[gpu] fn f(id: u32, y: &mut GpuBuf<f32>) -> Unit ! {panic} { let z = y; GpuBuf.set(z, id, 1.0); }",
+            "#[gpu] fn f(id: u32, y: &mut GpuBuf<f32>) -> Unit ! {} { let z = y; GpuBuf.set(z, id, 1.0); }",
         ),
         "cannot use a value of type &mut GpuBuf<f32>",
     );
     rejects(
-        "fn cpu(b: &GpuBuf<f32>) -> u32 ! {panic} { GpuBuf.len(b) }
+        "fn cpu(b: &GpuBuf<f32>) -> u32 ! {} { GpuBuf.len(b) }
          fn main() -> i64 ! {} { 0 }",
         "GpuBuf.len, GpuBuf.get and GpuBuf.set run only inside #[gpu] functions",
     );
@@ -210,13 +210,13 @@ fn buffers_cannot_be_rebound_or_used_on_the_cpu() {
 fn closures_and_text_are_rejected() {
     rejects(
         &program(
-            "#[gpu] fn f(x: i32) -> i32 ! {panic} { let g = fn(y: i32) -> i32 ! {panic} { y + 1 }; g(x) }",
+            "#[gpu] fn f(x: i32) -> i32 ! {} { let g = fn(y: i32) -> i32 ! {} { y + 1 }; g(x) }",
         ),
         "#[gpu] function 'f'",
     );
     rejects(
-        &program("#[gpu] fn f(x: i32) -> Unit ! {alloc, panic} { let s = \"hi\"; }"),
-        "may only declare the panic effect",
+        &program("#[gpu] fn f(x: i32) -> Unit ! {alloc} { let s = \"hi\"; }"),
+        "must have the empty effect row",
     );
 }
 
@@ -224,7 +224,7 @@ fn closures_and_text_are_rejected() {
 fn panics_and_unwrapping_buffer_reads_are_allowed() {
     accepts(&program(
         "#[gpu]
-         fn f(id: u32, x: &GpuBuf<i32>, y: &mut GpuBuf<i32>) -> Unit ! {panic} {
+         fn f(id: u32, x: &GpuBuf<i32>, y: &mut GpuBuf<i32>) -> Unit ! {} {
              let v = GpuBuf.get(x, id);
              if v < 0 { panic(); }
              GpuBuf.set(y, id, v / 2);
@@ -251,19 +251,17 @@ fn nan_tests_and_function_values_are_rejected() {
 fn buffers_are_used_only_through_gpubuf_operations() {
     rejects(
         &program(
-            "#[gpu] fn g(b: &GpuBuf<f32>) -> u32 ! {panic} { GpuBuf.len(b) }
-             #[gpu] fn f(id: u32, b: &GpuBuf<f32>) -> u32 ! {panic} { g(b) }",
+            "#[gpu] fn g(b: &GpuBuf<f32>) -> u32 ! {} { GpuBuf.len(b) }
+             #[gpu] fn f(id: u32, b: &GpuBuf<f32>) -> u32 ! {} { g(b) }",
         ),
         "can only use a buffer as the first argument of GpuBuf.len, GpuBuf.get or GpuBuf.set",
     );
     rejects(
-        &program(
-            "#[gpu] fn f(id: u32, b: &GpuBuf<f32>) -> Unit ! {panic} { GpuBuf.set(b, id, 1.0); }",
-        ),
+        &program("#[gpu] fn f(id: u32, b: &GpuBuf<f32>) -> Unit ! {} { GpuBuf.set(b, id, 1.0); }"),
         "GpuBuf.set requires a read-write buffer '&mut GpuBuf<T>'",
     );
     rejects(
-        &program("#[gpu] fn f(id: u32, b: &GpuBuf<f32>) -> f32 ! {panic} { GpuBuf.get(b, 1.5) }"),
+        &program("#[gpu] fn f(id: u32, b: &GpuBuf<f32>) -> f32 ! {} { GpuBuf.get(b, 1.5) }"),
         "",
     );
 }
@@ -272,7 +270,7 @@ fn buffers_are_used_only_through_gpubuf_operations() {
 fn buffer_indices_are_u32_or_i32() {
     rejects(
         &program(
-            "#[gpu] fn f(id: u32, b: &GpuBuf<f32>) -> f32 ! {panic} { let i: Bool = true; GpuBuf.get(b, i) }",
+            "#[gpu] fn f(id: u32, b: &GpuBuf<f32>) -> f32 ! {} { let i: Bool = true; GpuBuf.get(b, i) }",
         ),
         "a GPU buffer index is u32 or i32, found Bool",
     );
@@ -295,7 +293,7 @@ fn cpu_code_cannot_call_or_take_gpu_functions() {
 #[test]
 fn text_and_io_are_rejected() {
     rejects(
-        &program("#[gpu] fn f(x: i32) -> Unit ! {io, panic} { print_int(x); }"),
-        "may only declare the panic effect",
+        &program("#[gpu] fn f(x: i32) -> Unit ! {io} { print_int(x); }"),
+        "must have the empty effect row",
     );
 }

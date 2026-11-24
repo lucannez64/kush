@@ -1,6 +1,5 @@
 //! SHIFT-ELIDE: `<<` and `>>` whose amount the facts keep in `0..bits` need
-//! no runtime check, so they need no `panic` effect. The proof is a checked
-//! certificate; the shift becomes a plain machine shift in both backends,
+//! no runtime check. The proof is a checked certificate; the shift becomes a plain machine shift in both backends,
 //! with the language's semantics unchanged (a left shift drops high bits, a
 //! right shift of a signed value is arithmetic).
 use kush::executable::check;
@@ -24,18 +23,18 @@ fn agrees(source: &str, expected: i64) {
     }
 }
 
-fn rejects(source: &str, fragment: &str) {
-    match check(source) {
-        Ok(_) => panic!("accepted:\n{source}"),
-        Err(error) => assert!(
-            error.message.contains(fragment),
-            "expected {fragment:?}, got {error:?}\n{source}"
-        ),
-    }
+/// A shift whose amount the facts do not bound keeps its runtime check: the
+/// checker records no certificate for it.
+fn keeps_the_check(source: &str) {
+    let program = check(source).unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+    assert!(
+        program.certificates().is_empty(),
+        "an unproved shift was elided:\n{source}"
+    );
 }
 
 #[test]
-fn constant_and_proved_amounts_need_no_panic_effect() {
+fn constant_and_proved_amounts_elide_the_check() {
     agrees(
         "fn rotr(x: u32, n: u64, erased q: { 1 <= n && n <= 31 }) -> u32 ! {} {
              (x >> n) | (x << (32 - n))
@@ -44,7 +43,7 @@ fn constant_and_proved_amounts_need_no_panic_effect() {
          fn top_bit(x: i8) -> i8 ! {} { x >> 7 }
          fn drop_high(x: u8) -> u8 ! {} { x << 1 }
          fn bit(i: i64) -> i64 ! {} { if i >= 0 && i < 63 { 1 << i } else { 0 } }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              let r: u32 = rotr(1, 1, _);                 // 0x80000000
              let a: i64 = if r == 2147483648 { 1 } else { 0 };
              let s: u32 = spread(171);                   // 0xabababab
@@ -59,15 +58,16 @@ fn constant_and_proved_amounts_need_no_panic_effect() {
 
 #[test]
 fn unproved_amounts_still_need_the_check() {
-    rejects("fn f(x: u32, n: u32) -> u32 ! {} { x << n }", "panic");
-    rejects("fn f(x: u32) -> u32 ! {} { x >> 32 }", "panic");
-    rejects(
+    for source in [
+        "fn f(x: u32, n: u32) -> u32 ! {} { x << n }",
+        "fn f(x: u32) -> u32 ! {} { x >> 32 }",
         "fn f(x: i64, n: i64) -> i64 ! {} { if n < 64 { x << n } else { 0 } }",
-        "panic",
-    );
+    ] {
+        keeps_the_check(&format!("{source}\nfn main() -> i64 ! {{}} {{ 0 }}"));
+    }
     // An out-of-range amount still panics at run time in both backends.
-    let source = "fn f(x: u32, n: u32) -> u32 ! {panic} { x << n }
-                  fn main() -> i64 ! {panic} { let v: u32 = f(1, 40); Int.convert(v) }";
+    let source = "fn f(x: u32, n: u32) -> u32 ! {} { x << n }
+                  fn main() -> i64 ! {} { let v: u32 = f(1, 40); Int.convert(v) }";
     let program = check(source).unwrap();
     assert!(program.evaluate_with_stats(&mut Vec::new()).is_err());
 }
@@ -75,7 +75,7 @@ fn unproved_amounts_still_need_the_check() {
 #[test]
 fn loop_shifts_are_proved_from_the_loop_condition() {
     agrees(
-        "fn mask(n: i64) -> i64 ! {panic} {
+        "fn mask(n: i64) -> i64 ! {} {
              let mut m = 0;
              let mut i = 0;
              while i < n && i < 63 invariant { 0 <= i } {
@@ -84,7 +84,7 @@ fn loop_shifts_are_proved_from_the_loop_condition() {
              }
              m
          }
-         fn main() -> i64 ! {panic} { mask(6) }",
+         fn main() -> i64 ! {} { mask(6) }",
         63,
     );
 }

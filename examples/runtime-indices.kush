@@ -53,7 +53,7 @@ fn keep_tag(n: i64, erased p: Tag<n>) -> i64 ! {} { 11 }
 // binder: the kernel still sees the same `n`.
 fn forward(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { keep(n, p) }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let five: i64 = 5;
     let b: Bool = true;
 

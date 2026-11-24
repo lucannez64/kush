@@ -126,7 +126,7 @@ use std.result.Result;
 use std.text;
 use std.path;
 
-fn show(value: &Bytes) -> Unit ! {io, panic} {
+fn show(value: &Bytes) -> Unit ! {io} {
     let mut i = 0;
     while i < Bytes.len(value) {
         print_i64(Bytes.get(value, i));
@@ -135,7 +135,7 @@ fn show(value: &Bytes) -> Unit ! {io, panic} {
     print_i64(-1);
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let root = match ENV.arg(1, Bytes.with_capacity(4096)) {
         Ok(value) => value,
         Err(code) => return code,
@@ -200,7 +200,7 @@ use std.result.Result;
 use std.text;
 use std.path;
 
-fn show(value: &Bytes) -> Unit ! {io, panic} {
+fn show(value: &Bytes) -> Unit ! {io} {
     let mut i = 0;
     while i < Bytes.len(value) {
         print_i64(Bytes.get(value, i));
@@ -209,7 +209,7 @@ fn show(value: &Bytes) -> Unit ! {io, panic} {
     print_i64(-1);
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let root = match ENV.arg(1, Bytes.with_capacity(4096)) {
         Ok(value) => value,
         Err(code) => return code,
@@ -321,7 +321,7 @@ fn write_exclusive_refuses_planted_paths_and_creates_0600_files() {
 const ENVIRONMENT: &str = r#"
 use std.result.Result;
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let argument_count = match ENV.arg_count() {
         Ok(value) => value,
         Err(code) => return code,
@@ -387,7 +387,7 @@ fn arguments_and_environment_are_explicit_and_bounded() {
 const HOSTILE_NAMES: &str = r#"
 use std.result.Result;
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let bad = Bytes.from("a\0b");
     let empty = Bytes.with_capacity(0);
     print_i64(match FS.read(&bad, Bytes.with_capacity(8)) {
@@ -430,7 +430,7 @@ fn embedded_nul_bytes_are_rejected_before_host_calls() {
 const TIME_AND_ERRORS: &str = r#"
 use std.result.Result;
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     print_i64(match TIME.unix_seconds() { Ok(_) => 1, Err(_) => 0 });
     let first = match TIME.monotonic_ns() { Ok(value) => value, Err(code) => return code };
     print_i64(match TIME.sleep_ms(5) { Ok(_) => 0, Err(code) => code });
@@ -457,7 +457,7 @@ fn clocks_sleep_and_error_messages_are_observable() {
 const SUBPROCESS: &str = r#"
 use std.result.Result;
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let echo = Bytes.from("/bin/echo");
     let arguments = Bytes.from("hello\0world");
     let mut first_output = Bytes.with_capacity(64);
@@ -500,7 +500,7 @@ fn subprocess_runs_capture_bounded_output_and_report_failures() {
 const SUBPROCESS_ERRORS: &str = r#"
 use std.result.Result;
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let sleep = Bytes.from("/bin/sleep");
     let one = Bytes.from("1");
     let mut first_output = Bytes.with_capacity(8);
@@ -535,7 +535,7 @@ use std.result.Result;
 use std.http;
 use std.text;
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let host = Bytes.from("127.0.0.1");
     let port_bytes = match ENV.arg(1, Bytes.with_capacity(16)) {
         Ok(value) => value,
@@ -609,7 +609,7 @@ const NETWORK_TIMEOUT: &str = r#"
 use std.result.Result;
 use std.text;
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let port_bytes = match ENV.arg(1, Bytes.with_capacity(16)) {
         Ok(value) => value,
         Err(code) => return code,
@@ -665,7 +665,7 @@ fn tcp_timeout_is_explicit_in_both_backends() {
 #[test]
 fn http_response_boundaries_preserve_zero_one_and_multiple_headers() {
     let source = r#"use std.result.Result; use std.text; use std.http;
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let port_text = match ENV.arg(1, Bytes.with_capacity(16)) { Ok(v) => v, Err(e) => return e };
             let port = match text.parse_i64(&port_text) { Result.Ok(n) => n, Result.Err(e) => return e };
             let host = Bytes.from("127.0.0.1"); let path = Bytes.from("/");
@@ -723,11 +723,11 @@ const FS_PREDICATES_BOOL: &str = r#"
 use std.result.Result;
 use std.path;
 
-fn flag(r: Result<Bool, i64>) -> i64 ! {panic} {
+fn flag(r: Result<Bool, i64>) -> i64 ! {} {
     match r { Ok(b) => if b { 1 } else { 0 }, Err(code) => -code }
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let root = match ENV.arg(1, Bytes.with_capacity(4096)) {
         Ok(value) => value,
         Err(code) => return code,
@@ -785,7 +785,7 @@ fn filesystem_predicates_are_not_integers() {
     for call in ["FS.exists(&p)", "FS.is_file(&p)", "FS.is_dir(&p)"] {
         let source = format!(
             "use std.result.Result;
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn main() -> i64 ! {{io, alloc}} {{
                 let p = Bytes.from(\"x\");
                 let n: i64 = match {call} {{ Ok(v) => v, Err(code) => code }};
                 drop(p);
@@ -858,9 +858,9 @@ const STD_FS_EDGES: &str = r#"
 use std.result.Result;
 use std.path;
 
-fn flag(r: Result<Bool, i64>) -> i64 ! {panic} { match r { Result.Ok(b) => if b { 1 } else { 0 }, Result.Err(e) => -e } }
+fn flag(r: Result<Bool, i64>) -> i64 ! {} { match r { Result.Ok(b) => if b { 1 } else { 0 }, Result.Err(e) => -e } }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let root = match ENV.arg(1, Bytes.with_capacity(4096)) {
         Ok(value) => value,
         Err(code) => return code,
@@ -958,7 +958,7 @@ fn std_time_and_os_match_the_builtins() {
 const STD_ENV_EDGES: &str = r#"
 use std.result.Result;
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     print_i64(match ENV.arg(-1, Bytes.with_capacity(8)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
     print_i64(match ENV.arg(1, Bytes.with_capacity(2)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
     print_i64(match ENV.var(&Bytes.from("A\0B"), Bytes.with_capacity(8)) { Ok(b) => { drop(b); -1 }, Err(e) => e });

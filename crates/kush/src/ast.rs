@@ -621,7 +621,7 @@ pub struct Arm {
 /// An explicitly typed lambda expression:
 ///
 /// ```text
-/// fn(x: i64, y: i64) -> i64 ! {panic} { x + y }
+/// fn(x: i64, y: i64) -> i64 ! {} { x + y }
 /// ```
 ///
 /// Parameter, result and effect annotations may be omitted

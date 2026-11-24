@@ -651,7 +651,7 @@ impl Parser {
     }
     /// One method item. Methods use ordinary function syntax with an explicit
     /// first receiver parameter named `self`, as in
-    /// `fn distance(self: Point, other: Point) -> i64 ! { panic } { ... }`.
+    /// `fn distance(self: Point, other: Point) -> i64 ! {} { ... }`.
     fn method(&mut self) -> Result<Method> {
         let start = self.current().span;
         let public = self.eat(&Kind::Pub);

@@ -58,7 +58,7 @@ const KIND_PAD_REMOVED: i64 = 8;
 /// SDL keycodes for keys without a character set bit 30.
 const SCANCODE_KEY: i64 = 0x40000000;
 
-pub fn key(code: i64) -> Key ! {panic} {
+pub fn key(code: i64) -> Key ! {} {
     match code {
         13 => Key.Enter,
         27 => Key.Escape,
@@ -100,7 +100,7 @@ pub fn axis(code: i64) -> Axis ! {} {
 }
 
 /// Decode one packed event; packed 0 is no event, and so is an unknown kind.
-pub fn decode(packed: i64) -> Option<Event> ! {panic} {
+pub fn decode(packed: i64) -> Option<Event> ! {} {
     let kind = packed & 0xFF;
     let device = (packed >> 8) & 0xFF;
     let code = (packed >> 16) & 0xFFFFFFFF;

@@ -15,7 +15,7 @@ from pathlib import Path
 def kush_unit(u):
     a, b, c = 3 + u % 7, 11 + u % 13, 5 + u % 5
     return f"""
-fn sum_{u}(values: &[i64]) -> i64 ! {{panic}} {{
+fn sum_{u}(values: &[i64]) -> i64 ! {{}} {{
     let mut acc = {u};
     let mut i = 0;
     while i < Slice.len(values) {{
@@ -25,7 +25,7 @@ fn sum_{u}(values: &[i64]) -> i64 ! {{panic}} {{
     acc
 }}
 
-fn scale_{u}<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> Unit ! {{panic}} {{
+fn scale_{u}<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> Unit ! {{}} {{
     let mut i = 0;
     while i < Slice.len(source) {{
         Slice.set(target, i, Slice.get(source, i) * factor - {b});
@@ -33,7 +33,7 @@ fn scale_{u}<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> U
     }}
 }}
 
-fn fill_{u}(n: i64) -> Vec<i64> ! {{alloc, panic}} {{
+fn fill_{u}(n: i64) -> Vec<i64> ! {{alloc}} {{
     let mut values: Vec<i64> = Vec.with_capacity(n);
     let mut i = 0;
     while i < n {{
@@ -43,7 +43,7 @@ fn fill_{u}(n: i64) -> Vec<i64> ! {{alloc, panic}} {{
     values
 }}
 
-fn pick_{u}(x: i64, y: i64) -> i64 ! {{panic}} {{
+fn pick_{u}(x: i64, y: i64) -> i64 ! {{}} {{
     if x < y {{
         if x & 1 == 0 {{ x * {a} + y }} else {{ y - x * {c} }}
     }} else {{
@@ -51,11 +51,11 @@ fn pick_{u}(x: i64, y: i64) -> i64 ! {{panic}} {{
     }}
 }}
 
-fn climb_{u}(n: i64, acc: i64) -> i64 ! {{panic}} {{
+fn climb_{u}(n: i64, acc: i64) -> i64 ! {{}} {{
     if n == 0 {{ acc }} else {{ climb_{u}(n - 1, acc + pick_{u}(n, acc & 63)) }}
 }}
 
-fn find_{u}(values: &[i64], wanted: i64) -> i64 ! {{panic}} {{
+fn find_{u}(values: &[i64], wanted: i64) -> i64 ! {{}} {{
     let mut i = 0;
     let mut at = 0 - 1;
     while i < Slice.len(values) {{
@@ -65,7 +65,7 @@ fn find_{u}(values: &[i64], wanted: i64) -> i64 ! {{panic}} {{
     at
 }}
 
-fn unit_{u}() -> i64 ! {{alloc, panic}} {{
+fn unit_{u}() -> i64 ! {{alloc}} {{
     let source = fill_{u}({64 + u % 32});
     let mut target = fill_{u}({64 + u % 32});
     scale_{u}(&source[..], &mut target[..], {c});
@@ -206,7 +206,7 @@ def kush_program(units):
     calls = "\n".join(f"    result = (result ^ unit_{u}()) + {u & 1};" for u in range(units))
     return f"""module build_scale;
 {body}
-fn main() -> i64 ! {{io, alloc, panic}} {{
+fn main() -> i64 ! {{io, alloc}} {{
     let mut result = 0;
 {calls}
     print_i64(result);

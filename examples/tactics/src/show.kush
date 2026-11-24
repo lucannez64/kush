@@ -21,7 +21,7 @@ struct Names {
     hypotheses: i64,
 }
 
-fn put(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+fn put(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
     let mut out = out;
     let mut i = 0;
     while i < text.len() {
@@ -32,7 +32,7 @@ fn put(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
 }
 
 /// The name code of variable `index`, or `UNKNOWN`.
-fn code_of(names: &Names, index: i64) -> i64 ! {panic} {
+fn code_of(names: &Names, index: i64) -> i64 ! {} {
     let n = names.depth;
     if index >= n {
         return UNKNOWN;
@@ -42,11 +42,11 @@ fn code_of(names: &Names, index: i64) -> i64 ! {panic} {
 
 const UNKNOWN: i64 = -1000000;
 
-fn name(out: Bytes, names: &Names, index: i64) -> Bytes ! {alloc, panic} {
+fn name(out: Bytes, names: &Names, index: i64) -> Bytes ! {alloc} {
     write_name(out, code_of(names, index))
 }
 
-fn write_name(out: Bytes, code: i64) -> Bytes ! {alloc, panic} {
+fn write_name(out: Bytes, code: i64) -> Bytes ! {alloc} {
     if code == UNKNOWN {
         return put(out, &Bytes.from("?"));
     }
@@ -57,7 +57,7 @@ fn write_name(out: Bytes, code: i64) -> Bytes ! {alloc, panic} {
     }
 }
 
-fn bind(st: &State, names: &mut Names, prop: Bool) -> Unit ! {alloc, panic} {
+fn bind(st: &State, names: &mut Names, prop: Bool) -> Unit ! {alloc} {
     if prop {
         let letter = if names.letters < st.atoms.len() { st.atoms[names.letters] } else { 97 + names.letters };
         names.letters = names.letters + 1;
@@ -69,7 +69,7 @@ fn bind(st: &State, names: &mut Names, prop: Bool) -> Unit ! {alloc, panic} {
     }
 }
 
-fn push(names: &mut Names, code: i64) -> Unit ! {alloc, panic} {
+fn push(names: &mut Names, code: i64) -> Unit ! {alloc} {
     let depth = names.depth;
     if depth < names.stack.len() {
         names.stack[depth] = code;
@@ -79,12 +79,12 @@ fn push(names: &mut Names, code: i64) -> Unit ! {alloc, panic} {
     names.depth = depth + 1;
 }
 
-fn unbind(names: &mut Names) -> Unit ! {panic} {
+fn unbind(names: &mut Names) -> Unit ! {} {
     names.depth = names.depth - 1;
 }
 
 /// Precedence: 0 implication, 1 or, 2 and, 3 atoms and negations.
-fn proposition(st: &State, out: Bytes, names: &mut Names, t: i64, level: i64) -> Bytes ! {alloc, panic} {
+fn proposition(st: &State, out: Bytes, names: &mut Names, t: i64, level: i64) -> Bytes ! {alloc} {
     let s = &st.kernel.store;
     let tag = term.tag(s, t);
     if tag == term.VAR {
@@ -150,17 +150,17 @@ fn proposition(st: &State, out: Bytes, names: &mut Names, t: i64, level: i64) ->
 }
 
 /// Print a goal.
-pub fn goal(st: &State, t: i64) -> Bytes ! {alloc, panic} {
+pub fn goal(st: &State, t: i64) -> Bytes ! {alloc} {
     let mut names = Names { stack: Vec.new::<i64>(), depth: 0, letters: 0, hypotheses: 0 };
     proposition(st, Bytes.with_capacity(128), &mut names, t, 0)
 }
 
-fn is_prop(s: &Store, t: i64) -> Bool ! {panic} {
+fn is_prop(s: &Store, t: i64) -> Bool ! {} {
     term.tag(s, t) == term.PROP
 }
 
 /// Proof terms. `atomic` asks for parentheses around anything but a name.
-fn proof(st: &State, out: Bytes, names: &mut Names, t: i64, atomic: Bool) -> Bytes ! {alloc, panic} {
+fn proof(st: &State, out: Bytes, names: &mut Names, t: i64, atomic: Bool) -> Bytes ! {alloc} {
     let s = &st.kernel.store;
     let tag = term.tag(s, t);
     if tag == term.VAR {
@@ -239,7 +239,7 @@ fn proof(st: &State, out: Bytes, names: &mut Names, t: i64, atomic: Bool) -> Byt
 }
 
 /// Print a proof term.
-pub fn proof_term(st: &State, t: i64) -> Bytes ! {alloc, panic} {
+pub fn proof_term(st: &State, t: i64) -> Bytes ! {alloc} {
     let mut names = Names { stack: Vec.new::<i64>(), depth: 0, letters: 0, hypotheses: 0 };
     proof(st, Bytes.with_capacity(256), &mut names, t, false)
 }

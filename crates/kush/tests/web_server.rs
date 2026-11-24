@@ -72,7 +72,7 @@ use std.web.Config;
 use std.web.Request;
 use std.web.Responder;
 
-fn app(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+fn app(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
     if req.path_is(&Bytes.from("/hello")) {
         res.text(200, &Bytes.from("hi"))
     } else if req.path_is(&Bytes.from("/echo")) {
@@ -95,8 +95,8 @@ fn app(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
         res.status(200 + total)
     } else if req.path_is(&Bytes.from("/scoped")) {
         // Panics while a child task waits: the child is cancelled and joined.
-        let code = Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
-            let child = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+        let code = Task.scope(fn() -> i64 ! {io, alloc, suspend} {
+            let child = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
                 let held = Bytes.from("held by the child");
                 match time.wait_ms(60000) { Result.Ok(_) => Bytes.len(&held), Result.Err(code) => code }
             });
@@ -147,24 +147,24 @@ fn app(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
     }
 }
 
-fn weigh(owned: Bytes, extra: i64, list: &Vec<i64>) -> i64 ! {panic} {
+fn weigh(owned: Bytes, extra: i64, list: &Vec<i64>) -> i64 ! {} {
     Bytes.len(&owned) + extra + Vec.len(list)
 }
 
-fn show(exit: TaskExit<i64>) -> Unit ! {io, panic} {
+fn show(exit: TaskExit<i64>) -> Unit ! {io} {
     match exit {
         TaskExit.Completed(value) => print_i64(value),
         TaskExit.Cancelled => print_i64(-1),
     }
 }
 
-fn out(bytes: &Bytes) -> Unit ! {io, alloc, panic} {
+fn out(bytes: &Bytes) -> Unit ! {io, alloc} {
     let _ = io.write(io.stdout(), bytes);
     let _ = io.write(io.stdout(), &Bytes.from("|\n"));
 }
 
 /// Read until the server closes the connection.
-fn read_all(conn: &net.Conn) -> Bytes ! {io, alloc, panic, suspend} {
+fn read_all(conn: &net.Conn) -> Bytes ! {io, alloc, suspend} {
     let mut buffer = Bytes.with_capacity(4096);
     loop {
         let before = Bytes.len(&buffer);
@@ -177,7 +177,7 @@ fn read_all(conn: &net.Conn) -> Bytes ! {io, alloc, panic, suspend} {
 }
 
 /// Read until at least `count` bytes came.
-fn read_some(conn: &net.Conn, count: i64) -> Bytes ! {io, alloc, panic, suspend} {
+fn read_some(conn: &net.Conn, count: i64) -> Bytes ! {io, alloc, suspend} {
     let mut buffer = Bytes.with_capacity(4096);
     while Bytes.len(&buffer) < count {
         let before = Bytes.len(&buffer);
@@ -190,7 +190,7 @@ fn read_some(conn: &net.Conn, count: i64) -> Bytes ! {io, alloc, panic, suspend}
     buffer
 }
 
-fn open(port: i64) -> net.Conn ! {io, alloc, panic, suspend} {
+fn open(port: i64) -> net.Conn ! {io, alloc, suspend} {
     match net.connect(&Bytes.from("127.0.0.1"), port, 5000) {
         Result.Ok(conn) => conn,
         Result.Err(code) => { print_i64(-code); panic() },
@@ -198,7 +198,7 @@ fn open(port: i64) -> net.Conn ! {io, alloc, panic, suspend} {
 }
 
 /// Send `request`, close the sending side, print everything that comes back.
-fn exchange(port: i64, request: &Bytes) -> Unit ! {io, alloc, panic, suspend} {
+fn exchange(port: i64, request: &Bytes) -> Unit ! {io, alloc, suspend} {
     let conn = open(port);
     let _ = net.write(&conn, request, 5000);
     let _ = net.shutdown(&conn, 1);
@@ -207,7 +207,7 @@ fn exchange(port: i64, request: &Bytes) -> Unit ! {io, alloc, panic, suspend} {
     let _ = net.close(conn);
 }
 
-fn listener() -> net.Listener ! {io, alloc, panic} {
+fn listener() -> net.Listener ! {io, alloc} {
     match net.listen(&Bytes.from("127.0.0.1"), 0, 64, false) {
         Result.Ok(listener) => listener,
         Result.Err(code) => { print_i64(-code); panic() },
@@ -220,7 +220,7 @@ fn port_of(listener: &net.Listener) -> i64 ! {io} {
 "#;
 
 const REQUESTS: &str = r#"
-fn clients(port: i64) -> i64 ! {io, alloc, panic, suspend} {
+fn clients(port: i64) -> i64 ! {io, alloc, suspend} {
     exchange(port, &Bytes.from("GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"));
     // Pipelined: both answers on one connection, in order.
     exchange(port, &Bytes.from("GET /hello HTTP/1.1\r\nHost: x\r\n\r\nPOST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello"));
@@ -253,7 +253,7 @@ fn clients(port: i64) -> i64 ! {io, alloc, panic, suspend} {
     0
 }
 
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let server_socket = listener();
     let port = port_of(&server_socket);
     let mut config = web.config();
@@ -261,11 +261,11 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
     config.limits.body = 50;
     config.idle_ms = 50;
     config.request_ms = 100;
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             match web.serve(server_socket, app, config) { Result.Ok(_) => 0, Result.Err(code) => code }
         });
-        let client = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} { clients(port) });
+        let client = Task.spawn(fn() -> i64 ! {io, alloc, suspend} { clients(port) });
         show(Task.join(client));
         Task.cancel(&server);
         show(Task.join(server));
@@ -295,16 +295,16 @@ HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n|\
 }
 
 const GRACEFUL: &str = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let server_socket = listener();
     let port = port_of(&server_socket);
     let start = time.monotonic_ns();
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             match web.serve(server_socket, app, web.config()) { Result.Ok(_) => 0, Result.Err(code) => code }
         });
         // One request in flight, one idle kept-alive connection.
-        let busy = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+        let busy = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             let conn = open(port);
             let _ = net.write(&conn, &Bytes.from("GET /slow HTTP/1.1\r\nHost: x\r\n\r\n"), 5000);
             let reply = read_all(&conn);
@@ -312,7 +312,7 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
             // The whole answer, "slow" included.
             if Bytes.len(&reply) > 0 && Bytes.get(&reply, Bytes.len(&reply) - 1) == 119 { Bytes.len(&reply) } else { -Bytes.len(&reply) }
         });
-        let idle = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+        let idle = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             let conn = open(port);
             let _ = net.write(&conn, &Bytes.from("GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"), 5000);
             let reply = read_all(&conn);
@@ -347,7 +347,7 @@ fn cancelling_the_server_finishes_responses_and_closes_idle_connections() {
 #[test]
 fn a_native_server_serves_concurrent_rust_clients() {
     let main = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let server_socket = listener();
     print_i64(port_of(&server_socket));
     match web.serve(server_socket, app, web.config()) { Result.Ok(_) => 0, Result.Err(code) => code }
@@ -401,14 +401,14 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
 }
 
 const PANICS: &str = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let server_socket = listener();
     let port = port_of(&server_socket);
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             match web.serve(server_socket, app, web.config()) { Result.Ok(_) => 0, Result.Err(code) => code }
         });
-        let client = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+        let client = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             // The pipelined /hello is not answered: the connection closes.
             exchange(port, &Bytes.from("GET /boom HTTP/1.1\r\nHost: x\r\n\r\nGET /hello HTTP/1.1\r\nHost: x\r\n\r\n"));
             exchange(port, &Bytes.from("GET /late HTTP/1.1\r\nHost: x\r\n\r\n"));
@@ -468,7 +468,7 @@ HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\
 #[test]
 fn unwinding_closes_linear_resources() {
     let main = r#"
-fn status_of(port: i64, request: &Bytes) -> i64 ! {io, alloc, panic, suspend} {
+fn status_of(port: i64, request: &Bytes) -> i64 ! {io, alloc, suspend} {
     let conn = open(port);
     let _ = net.write(&conn, request, 5000);
     let _ = net.shutdown(&conn, 1);
@@ -479,14 +479,14 @@ fn status_of(port: i64, request: &Bytes) -> i64 ! {io, alloc, panic, suspend} {
     (Bytes.get(&reply, 9) - 48) * 100 + (Bytes.get(&reply, 10) - 48) * 10 + Bytes.get(&reply, 11) - 48
 }
 
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let server_socket = listener();
     let port = port_of(&server_socket);
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             match web.serve(server_socket, app, web.config()) { Result.Ok(_) => 0, Result.Err(code) => code }
         });
-        let client = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+        let client = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             let fds = Bytes.from("GET /fds HTTP/1.1\r\nHost: x\r\n\r\n");
             let before = status_of(port, &fds);
             let mut i = 0;
@@ -585,14 +585,14 @@ impl Read for Untouched {
 #[test]
 fn the_evaluator_does_not_wait_for_unread_standard_input() {
     let main = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let server_socket = listener();
     let port = port_of(&server_socket);
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             match web.serve(server_socket, app, web.config()) { Result.Ok(_) => 0, Result.Err(code) => code }
         });
-        let client = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+        let client = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             exchange(port, &Bytes.from("GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"));
             0
         });
@@ -616,28 +616,28 @@ fn main() -> i64 ! {io, alloc, panic, suspend} {
 /// with its own reactor and SO_REUSEPORT listener. Cancelling the calling
 /// task stops every thread, and every listener is closed.
 const THREADED: &str = r#"
-fn shared_listener() -> net.Listener ! {io, alloc, panic} {
+fn shared_listener() -> net.Listener ! {io, alloc} {
     match net.listen(&Bytes.from("127.0.0.1"), 0, 64, true) {
         Result.Ok(listener) => listener,
         Result.Err(code) => { print_i64(-code); panic() },
     }
 }
 
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     match web.serve_threads(shared_listener(), &Bytes.from("127.0.0.1"), 0, app, web.config()) {
         Result.Ok(_) => print_i64(0),
         Result.Err(code) => print_i64(code),
     }
     let server_socket = shared_listener();
     let port = port_of(&server_socket);
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let server = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let server = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             match web.serve_threads(server_socket, &Bytes.from("127.0.0.1"), 3, app, web.config()) {
                 Result.Ok(_) => 0,
                 Result.Err(code) => code,
             }
         });
-        let client = Task.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
+        let client = Task.spawn(fn() -> i64 ! {io, alloc, suspend} {
             let mut i = 0;
             while i < 6 {
                 exchange(port, &Bytes.from("POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"));
@@ -673,7 +673,7 @@ fn serve_threads_serves_on_every_thread_and_stops_them_all() {
 #[test]
 fn a_native_threaded_server_serves_concurrent_rust_clients() {
     let main = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let server_socket = match net.listen(&Bytes.from("127.0.0.1"), 0, 64, true) {
         Result.Ok(listener) => listener,
         Result.Err(code) => { return code; },

@@ -16,11 +16,11 @@ fn scalar_count(text: &str) -> i64 ! {} {
     Str.scalar_len(text)
 }
 
-fn initial(text: &str) -> &str ! {panic} {
+fn initial(text: &str) -> &str ! {} {
     if Str.scalar_len(text) == 0 { text } else { text[0..1] }
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let text = "héllo";
     let view: &str = text.as_str();   // no allocation
     print_i64(view.len());            // 6 UTF-8 bytes
@@ -136,7 +136,7 @@ its last use.
 ```kush
 fn shout(text: &mut str) -> Unit ! {} { Str.make_ascii_uppercase(text); }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let mut s = String.from("héllo wörld");
     let v = s.as_mut_str();            // or String.as_mut_str(&mut s)
     shout(&mut v[..]);                 // reborrow: "HéLLO WöRLD"

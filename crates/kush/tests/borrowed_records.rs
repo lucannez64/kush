@@ -13,7 +13,7 @@ fn owning_record_place_reads_never_create_duplicate_owners() {
         struct Outer { meta: P }
         fn pass(p: P) -> P ! {} { let observed = p.start; p }
         fn read(p: P) -> i64 ! {} { p.start }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let p = pass(P { token: Box.new(7), start: 4 });
             let mark = p.start;
             let P { token, .. } = p;
@@ -38,7 +38,7 @@ fn mixed_record_shared_projection_and_record_return_cleanup_agree() {
         r#"struct Mixed<'a> { view: &'a [i64], token: Box<i64>, start: i64 }
         fn view<'a>(m: Mixed<'a>) -> &'a [i64] ! {} { m.view }
         fn pass<'a>(m: Mixed<'a>) -> Mixed<'a> ! {} { let s = m.start; m }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let values: [i64; 2] = [4, 5];
             let v = view(Mixed { view: &values[..], token: Box.new(1), start: 0 });
             let head = Slice.get(v, 1);
@@ -68,7 +68,7 @@ fn exclusive_slice_returns_accept_mutable_record_field_parameters() {
         fn mixed<'a>(m: Mixed<'a>) -> &'a mut [i64] ! {} {
             let Mixed { view, .. } = m; view
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             let v = nested(Outer { window: Window { view: &mut a[..], start: 0 } });
             Slice.set(v, 0, 9);
@@ -95,7 +95,7 @@ fn exclusive_slice_returns_accept_mutable_record_field_parameters() {
 fn record_rest_pattern_must_be_final_and_preserves_ignored_field_cleanup() {
     agrees(
         r#"struct P { token: Box<i64>, value: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let p = P { token: Box.new(1), value: 4 };
             let P { value: n, .., } = p;
             let P { .. } = P { token: Box.new(2), value: 5 };
@@ -132,7 +132,7 @@ fn mixed_metadata_exclusions_apply_through_nested_records_and_owned_wrappers() {
             "{declarations}
             struct Mixed<'a> {{ view: &'a [i64], meta: Meta }}
             fn answer() -> i64 ! {{}} {{ 1 }}
-            fn main() -> Unit ! {{io, alloc, panic}} {{
+            fn main() -> Unit ! {{io, alloc}} {{
                 let a: [i64; 1] = [1];
                 let mixed = Mixed {{ view: &a[..], meta: {value} }};
                 drop(mixed);
@@ -151,7 +151,7 @@ fn nested_record_literals_infer_actual_lifetimes_including_alias_fields() {
         fn make<'a, 'b>(first: &'a [i64], second: &'b [i64]) -> Outer<'b, i64> ! {} {
             Outer::<'b, i64> { inner: Inner { view: second }, note: 1 }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [4, 5];
             let outer = Outer { inner: Inner { view: &values[..] }, note: 3 };
             let returned = make(&values[..], &values[..]);
@@ -191,7 +191,7 @@ fn destructured_field_loans_release_at_last_use_and_keep_live_aliases() {
     ] {
         let source = format!(
             "struct Window<'a> {{ view: &'a [i64], start: i64 }}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 {owner}
                 let window = Window {{ view: &values[..], start: 5 }};
                 let Window {{ view, start }} = window;
@@ -204,7 +204,7 @@ fn destructured_field_loans_release_at_last_use_and_keep_live_aliases() {
     }
     agrees(
         r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let window = Window { view: &values[..], start: 5 };
             let Window { view, start } = window;
@@ -218,7 +218,7 @@ fn destructured_field_loans_release_at_last_use_and_keep_live_aliases() {
     assert!(
         check(
             r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let window = Window { view: &values[..], start: 5 };
             let Window { view, start } = window;
@@ -231,10 +231,10 @@ fn destructured_field_loans_release_at_last_use_and_keep_live_aliases() {
     // Destructuring in a later argument must retain the first argument's loan.
     rejects(
         r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn consume<'a>(window: Window<'a>, n: i64) -> i64 ! {panic} {
+        fn consume<'a>(window: Window<'a>, n: i64) -> i64 ! {} {
             Slice.get(window.view, 0) + n
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let window = Window { view: &values[..], start: 5 };
             consume(window, {
@@ -255,23 +255,23 @@ fn record_loans_taken_in_a_condition_end_with_the_condition() {
     agrees(
         r#"
         struct N { limbs: Vec<i64>, count: i64 }
-        fn size(n: &N) -> i64 ! {panic} { Vec.len(&n.limbs) + n.count }
-        fn bump(n: &mut N) -> i64 ! {panic} {
+        fn size(n: &N) -> i64 ! {} { Vec.len(&n.limbs) + n.count }
+        fn bump(n: &mut N) -> i64 ! {} {
             n.count = n.count + 1;
             n.count
         }
-        fn first() -> i64 ! {alloc, panic} {
+        fn first() -> i64 ! {alloc} {
             let r = N { limbs: Vec.new(), count: 0 };
             if size(&r) == 0 { drop(r); return 1; }
             0
         }
-        fn second() -> i64 ! {alloc, panic} {
+        fn second() -> i64 ! {alloc} {
             let mut r = N { limbs: Vec.new(), count: 0 };
             while bump(&mut r) < 3 {}
             if bump(&mut r) > 3 { let moved = r; return size(&moved); }
             0
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             print_i64(first());
             print_i64(second());
             0
@@ -285,7 +285,7 @@ fn record_loans_taken_in_a_condition_end_with_the_condition() {
         r#"
         struct N { limbs: Vec<i64> }
         fn both(n: &N, m: N) -> i64 ! {} { 0 }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let r = N { limbs: Vec.new() };
             if both(&r, r) == 0 { return 1; }
             0
@@ -346,7 +346,7 @@ fn inferred_local_record_destructuring_and_owner_kinds() {
             view: &'a [T],
             start: i64
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let values: [i64; 3] = [4, 5, 6];
             let window = Window { view: &values[..], start: 1 };
             let Window { view, start } = window;
@@ -367,10 +367,10 @@ fn inferred_local_record_destructuring_and_owner_kinds() {
             view: &'a [T],
             start: i64
         }
-        fn length<'a>(window: Window<'a, i64>) -> i64 ! {panic} {
+        fn length<'a>(window: Window<'a, i64>) -> i64 ! {} {
             Slice.len(window.view) + window.start
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [1, 2];
             length(Window { view: &values[..], start: 2 })
         }"#,
@@ -389,7 +389,7 @@ fn multiple_lifetimes_keep_fields_distinct_and_swap_or_wrong_field_fails() {
         }
         fn first<'a, 'b>(two: Two<'a, 'b>) -> &'a [i64] ! {} { two.first }
         fn second<'a, 'b>(two: Two<'a, 'b>) -> &'b [i64] ! {} { two.second }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [10, 11];
             let b: [i64; 2] = [20, 21];
             let two = Two { first: &a[..], second: &b[..], tag: 4 };
@@ -427,7 +427,7 @@ fn multiple_lifetimes_keep_fields_distinct_and_swap_or_wrong_field_fails() {
             second: &'b [i64]
         }
         fn first<'a, 'b>(two: Two<'a, 'b>) -> &'a [i64] ! {} { two.first }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [10, 11];
             let b: [i64; 2] = [20, 21];
             let two = Two { first: &a[..], second: &b[..] };
@@ -463,7 +463,7 @@ fn nested_generic_and_alias_records_preserve_field_provenance() {
         fn read_holder<'a>(holder: Holder<Inner<'a, i64>>) -> &'a [i64] ! {} {
             holder.item.view
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [8, 9];
             let nested = outer(&values[..]);
             let holder = Holder { item: Inner { view: &values[..] }, tag: 1 };
@@ -487,7 +487,7 @@ fn nested_generic_and_alias_records_preserve_field_provenance() {
 fn local_construction_and_nested_records_must_not_escape() {
     agrees(
         r#"struct Inner<'a> { view: &'a [i64] }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 3] = [1, 2, 3];
             let inner = Inner { view: &values[..] };
             let copied = inner;
@@ -521,7 +521,7 @@ fn local_construction_and_nested_records_must_not_escape() {
 fn owner_replacement_and_argument_order_are_checked_through_records() {
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let window = Window { view: &values[..] };
             values = [3, 4];
@@ -531,10 +531,10 @@ fn owner_replacement_and_argument_order_are_checked_through_records() {
     );
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn read<'a>(window: Window<'a>, n: i64) -> i64 ! {panic} {
+        fn read<'a>(window: Window<'a>, n: i64) -> i64 ! {} {
             Slice.get(window.view, 0) + n
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             read(Window { view: &values[..] }, { values = [3, 4]; 0 })
         }"#,
@@ -542,7 +542,7 @@ fn owner_replacement_and_argument_order_are_checked_through_records() {
     );
     rejects(
         r#"struct Late<'a> { start: i64, view: &'a [i64] }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let late = Late { view: &values[..], start: { values = [3, 4]; 0 } };
             Slice.get(late.view, 0)
@@ -551,7 +551,7 @@ fn owner_replacement_and_argument_order_are_checked_through_records() {
     );
     agrees(
         r#"struct Late<'a> { start: i64, view: &'a [i64] }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let late = Late { start: { values = [3, 4]; 5 }, view: &values[..] };
             late.start + Slice.get(late.view, 0)
@@ -568,7 +568,7 @@ fn record_loans_follow_branches_loops_and_last_use() {
         fn choose<'a>(flag: Bool, a: &'a [i64], b: &'a [i64]) -> Window<'a> ! {} {
             if flag { Window { view: a } } else { Window { view: b } }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [1, 2];
             let b: [i64; 2] = [3, 4];
             let window = choose(true, &a[..], &b[..]);
@@ -585,7 +585,7 @@ fn record_loans_follow_branches_loops_and_last_use() {
     );
     agrees(
         r#"struct Window<'a> { view: &'a [i64], start: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let window = Window { view: &values[..], start: 0 };
             let first = Slice.get(window.view, 0);
@@ -617,7 +617,7 @@ fn borrowed_record_rejects_unsafe_storage_generic_and_callable_escapes() {
     // than rejected outright.
     check(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn store<'a>(view: &'a [i64]) -> Unit ! {alloc, panic} {
+        fn store<'a>(view: &'a [i64]) -> Unit ! {alloc} {
             let vector: Vec<Window<'a>> = Vec.new();
             let _ = vector;
         }
@@ -626,7 +626,7 @@ fn borrowed_record_rejects_unsafe_storage_generic_and_callable_escapes() {
     .unwrap();
     check(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn store<'a>(view: &'a [i64]) -> Unit ! {alloc, panic} {
+        fn store<'a>(view: &'a [i64]) -> Unit ! {alloc} {
             let slot: Box<Window<'a>> = Box.new(Window { view: view });
             drop(slot);
         }
@@ -645,7 +645,7 @@ fn borrowed_record_rejects_unsafe_storage_generic_and_callable_escapes() {
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
         fn identity<T>(value: T) -> T ! {} { value }
-        fn run<'a>(view: &'a [i64]) -> i64 ! {panic} {
+        fn run<'a>(view: &'a [i64]) -> i64 ! {} {
             let window = Window { view: view };
             Slice.get(identity(window).view, 0)
         }
@@ -654,10 +654,10 @@ fn borrowed_record_rejects_unsafe_storage_generic_and_callable_escapes() {
     );
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn run<'a>(view: &'a [i64]) -> Unit ! {alloc, panic} {
+        fn run<'a>(view: &'a [i64]) -> Unit ! {alloc} {
             let window = Window { view: view };
-            let read = fn() -> i64 ! {panic} { Slice.get(window.view, 0) };
-            let command: once fn() -> i64 ! {panic} = read;
+            let read = fn() -> i64 ! {} { Slice.get(window.view, 0) };
+            let command: once fn() -> i64 ! {} = read;
             let _ = command;
         }
         fn main() -> Unit ! {} {}"#,
@@ -665,11 +665,11 @@ fn borrowed_record_rejects_unsafe_storage_generic_and_callable_escapes() {
     );
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn run<'a>(view: &'a [i64]) -> Unit ! {alloc, panic, suspend} {
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+        fn run<'a>(view: &'a [i64]) -> Unit ! {alloc, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let local: [i64; 1] = [5];
                 let window = Window { view: &local[..] };
-                Task.spawn(fn() -> Unit ! {panic, suspend} {
+                Task.spawn(fn() -> Unit ! {suspend} {
                     Slice.get(window.view, 0); Task.yield();
                 });
             });
@@ -679,8 +679,8 @@ fn borrowed_record_rejects_unsafe_storage_generic_and_callable_escapes() {
     );
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn run<'a>(view: &'a [i64]) -> Unit ! {alloc, panic, suspend} {
-            Task.scope(fn() -> Window<'a> ! {panic} {
+        fn run<'a>(view: &'a [i64]) -> Unit ! {alloc, suspend} {
+            Task.scope(fn() -> Window<'a> ! {} {
                 let local: [i64; 1] = [5];
                 Window { view: &local[..] }
             });
@@ -720,7 +720,7 @@ fn generic_record_alias_and_helper_results_keep_provenance() {
         }
         fn identity<'a>(window: Window<'a, i64>) -> Window<'a, i64> ! {} { window }
         fn first<'a>(window: Window<'a, i64>) -> &'a [i64] ! {} { window.view }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 3] = [2, 4, 6];
             let window = make(&values[..]);
             let copied = identity(identity(window));
@@ -749,7 +749,7 @@ fn split_siblings_in_one_record_keep_disjoint_labels() {
             first: &'a [i64],
             second: &'b [i64]
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 4] = [1, 2, 3, 4];
             let (left, right) = Slice.split_at_mut(&mut values[..], 2);
             let pair = Pair { first: &left[..], second: &right[..] };
@@ -760,7 +760,7 @@ fn split_siblings_in_one_record_keep_disjoint_labels() {
     );
     rejects(
         r#"struct Pair<'a, 'b> { first: &'a [i64], second: &'b [i64] }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 4] = [1, 2, 3, 4];
             let (left, right) = Slice.split_at_mut(&mut values[..], 2);
             let pair = Pair { first: &left[..], second: &right[..] };
@@ -778,7 +778,7 @@ fn result_lifetime_selects_only_matching_parameter_records() {
         fn second<'a, 'b>(first: Window<'a>, second: Window<'b>) -> &'b [i64] ! {} {
             second.view
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [1, 2];
             let b: [i64; 2] = [8, 9];
             let view = second(Window { view: &a[..] }, Window { view: &b[..] });
@@ -811,7 +811,7 @@ fn borrowed_record_metadata_may_be_arrays_enums_and_nested_records() {
             view: &'a [i64],
             info: Info
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 3] = [1, 2, 3];
             let window = Window {
                 view: &values[..],
@@ -835,10 +835,10 @@ fn borrowed_record_metadata_may_be_arrays_enums_and_nested_records() {
 fn dropping_an_owner_in_a_later_record_argument_is_rejected() {
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn read<'a>(window: Window<'a>, n: i64) -> i64 ! {panic} {
+        fn read<'a>(window: Window<'a>, n: i64) -> i64 ! {} {
             Slice.get(window.view, 0) + n
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             read(Window { view: &values[..] }, { drop(values); 0 })
@@ -847,7 +847,7 @@ fn dropping_an_owner_in_a_later_record_argument_is_rejected() {
     );
     rejects(
         r#"struct Late<'a> { start: i64, view: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let late = Late { view: &values[..], start: { drop(values); 0 } };
@@ -862,13 +862,13 @@ fn early_fallible_exit_does_not_require_borrowed_record_cleanup() {
     agrees(
         r#"use std.result.Result;
         struct Window<'a> { view: &'a [i64] }
-        fn run<'a>(view: &'a [i64]) -> Result<i64, i64> ! {alloc, panic} {
+        fn run<'a>(view: &'a [i64]) -> Result<i64, i64> ! {alloc} {
             let window = Window { view: view };
             let extra: Result<i64, i64> = Ok(1);
             let value = extra?;
             Ok(Slice.get(window.view, 0) + value)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let values: [i64; 2] = [40, 41];
             match run(&values[..]) {
                 Ok(value) => value,
@@ -885,8 +885,8 @@ fn borrowed_record_survives_same_task_suspension() {
     agrees_balanced(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let values: [i64; 2] = [12, 13];
                 let window = Window { view: &values[..] };
                 let child: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {
@@ -949,7 +949,7 @@ fn shared_slice_record_is_constructed_passed_and_projected() {
         fn first<'a>(window: Window<'a, i64>) -> &'a [i64] ! {} {
             window.view
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 3] = [7, 8, 9];
             let window = window(&values[..]);
             Slice.get(first(window), 0) + window.start
@@ -969,12 +969,12 @@ fn mutable_record_fields_are_affine_and_restore_the_owner_after_last_use() {
         fn window<'a>(view: &'a mut [i64]) -> Window<'a, i64> ! {} {
             Window { view: view, start: 3 }
         }
-        fn bump<'a>(window: Window<'a, i64>) -> i64 ! {panic} {
+        fn bump<'a>(window: Window<'a, i64>) -> i64 ! {} {
             let Window { view, start } = window;
             Slice.set(view, 0, Slice.get(view, 0) + 40);
             Slice.get(view, 0) + start
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 3] = [1, 2, 3];
             let window = window(&mut values[..]);
             let result = bump(window);
@@ -986,7 +986,7 @@ fn mutable_record_fields_are_affine_and_restore_the_owner_after_last_use() {
     );
     rejects(
         r#"struct Window<'a> { view: &'a mut [i64], start: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let window = Window { view: &mut values[..], start: 0 };
             let view = window.view;
@@ -997,7 +997,7 @@ fn mutable_record_fields_are_affine_and_restore_the_owner_after_last_use() {
     );
     rejects(
         r#"struct Window<'a> { view: &'a mut [i64], start: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let window = Window { view: &mut values[..], start: 0 };
             let copy = window;
@@ -1011,12 +1011,12 @@ fn mutable_record_fields_are_affine_and_restore_the_owner_after_last_use() {
 fn mutable_record_helper_returns_keep_the_exclusive_lifetime_and_owner_suspended() {
     agrees(
         r#"struct Window<'a> { view: &'a mut [i64], start: i64 }
-        fn tail<'a>(window: Window<'a>) -> Window<'a> ! {panic} {
+        fn tail<'a>(window: Window<'a>) -> Window<'a> ! {} {
             let Window { view, start } = window;
             let child = &mut view[1..];
             Window { view: child, start: start + 1 }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let window = tail(Window { view: &mut values[..], start: 0 });
             let Window { view, start } = window;
@@ -1051,7 +1051,7 @@ fn mutable_record_destructuring_transfers_the_capability_transitively() {
     agrees(
         r#"struct Inner<'a> { view: &'a mut [i64] }
         struct Outer<'a> { inner: Inner<'a>, note: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let outer = Outer { inner: Inner { view: &mut values[..] }, note: 4 };
             let moved = outer;
@@ -1066,7 +1066,7 @@ fn mutable_record_destructuring_transfers_the_capability_transitively() {
     rejects(
         r#"struct Inner<'a> { view: &'a mut [i64] }
         struct Outer<'a> { inner: Inner<'a>, note: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let outer = Outer { inner: Inner { view: &mut values[..] }, note: 4 };
             let moved = outer;
@@ -1084,7 +1084,7 @@ fn mutable_split_siblings_in_one_record_remain_disjoint_and_restore_the_owner() 
             left: &'a mut [i64],
             right: &'b mut [i64]
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 4] = [1, 2, 3, 4];
             let (left_parent, right_parent) = Slice.split_at_mut(&mut values[..], 2);
             let pair = Pair { left: &mut left_parent[..], right: &mut right_parent[..] };
@@ -1099,7 +1099,7 @@ fn mutable_split_siblings_in_one_record_remain_disjoint_and_restore_the_owner() 
     );
     rejects(
         r#"struct Pair<'a, 'b> { left: &'a mut [i64], right: &'b mut [i64] }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 4] = [1, 2, 3, 4];
             let (left_parent, right_parent) = Slice.split_at_mut(&mut values[..], 2);
             let pair = Pair { left: &mut left_parent[..], right: &mut right_parent[..] };
@@ -1120,10 +1120,10 @@ fn mixed_borrowed_owning_records_move_and_free_owned_parts_exactly_once() {
             token: Box<i64>,
             start: i64
         }
-        fn make<'a>(view: &'a [i64]) -> BufferView<'a> ! {alloc, panic} {
+        fn make<'a>(view: &'a [i64]) -> BufferView<'a> ! {alloc} {
             BufferView { token: Box.new(5), start: 2, view: view }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let values: [i64; 2] = [8, 9];
             let record = make(&values[..]);
             let BufferView { view, token, start } = record;
@@ -1140,12 +1140,12 @@ fn mixed_borrowed_owning_records_move_and_free_owned_parts_exactly_once() {
             items: Vec<i64>,
             count: i64
         }
-        fn make<'a>(view: &'a mut [i64]) -> Mixed<'a> ! {alloc, panic} {
+        fn make<'a>(view: &'a mut [i64]) -> Mixed<'a> ! {alloc} {
             let token = Bytes.from("A");
             let items: Vec<i64> = [3];
             Mixed { view: view, token: token, items: items, count: 1 }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut values: [i64; 2] = [1, 2];
             let record = make(&mut values[..]);
             let Mixed { view, token, items, count } = record;
@@ -1162,7 +1162,7 @@ fn mixed_borrowed_owning_records_move_and_free_owned_parts_exactly_once() {
     );
     let stats = agrees(
         r#"struct BufferView<'a> { view: &'a [i64], token: Box<i64> }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let values: [i64; 1] = [1];
             {
                 let record = BufferView { view: &values[..], token: Box.new(1) };
@@ -1184,13 +1184,13 @@ fn mixed_record_cleanup_balances_across_early_exits_loops_and_noalloc_helpers() 
         r#"use std.result.Result;
         struct Mixed<'a> { view: &'a [i64], token: Box<i64> }
         fn fail() -> Result<i64, i64> ! {} { Err(9) }
-        fn run<'a>(view: &'a [i64]) -> Result<i64, i64> ! {alloc, panic} {
+        fn run<'a>(view: &'a [i64]) -> Result<i64, i64> ! {alloc} {
             let record = Mixed { view: view, token: Box.new(3) };
             let Mixed { view, token } = record;
             let value = fail()?;
             Ok(Slice.get(view, 0) + Box.take(token) + value)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let values: [i64; 1] = [40];
             match run(&values[..]) {
                 Ok(value) => value,
@@ -1202,11 +1202,11 @@ fn mixed_record_cleanup_balances_across_early_exits_loops_and_noalloc_helpers() 
     );
     agrees(
         r#"struct Mixed<'a> { view: &'a [i64], token: Box<i64> }
-        fn payload<'a>(record: Mixed<'a>) -> i64 ! {panic} {
+        fn payload<'a>(record: Mixed<'a>) -> i64 ! {} {
             let Mixed { view, token } = record;
             Slice.get(view, 0) + Box.take(token)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let values: [i64; 1] = [40];
             payload(Mixed { view: &values[..], token: Box.new(2) })
         }"#,
@@ -1215,7 +1215,7 @@ fn mixed_record_cleanup_balances_across_early_exits_loops_and_noalloc_helpers() 
     );
     agrees(
         r#"struct Mixed<'a> { view: &'a [i64], token: Box<i64> }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let values: [i64; 1] = [4];
             let mut index = 0;
             let mut sum = 0;
@@ -1235,10 +1235,10 @@ fn mixed_record_cleanup_balances_across_early_exits_loops_and_noalloc_helpers() 
     );
     agrees(
         r#"struct BufferView<'a> { view: &'a [i64], token: Box<i64>, start: i64 }
-        fn partial<'a>(view: &'a [i64]) -> i64 ! {alloc, panic} {
+        fn partial<'a>(view: &'a [i64]) -> i64 ! {alloc} {
             let record = BufferView { token: Box.new(4), start: 0, view: { return 9; } };
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let values: [i64; 1] = [1];
             partial(&values[..])
         }"#,
@@ -1252,8 +1252,8 @@ fn mixed_record_survives_same_task_suspension_with_balanced_ownership() {
     agrees_balanced(
         r#"use std.task.TaskExit;
         struct Mixed<'a> { view: &'a [i64], token: Box<i64> }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let values: [i64; 2] = [12, 13];
                 let record = Mixed { token: Box.new(5), view: &values[..] };
                 let child: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {
@@ -1279,7 +1279,7 @@ fn mixed_owning_records_reject_containers_self_reference_and_linear_fields() {
     // token is still dropped exactly once with the box.
     check(
         r#"struct Mixed<'a> { view: &'a [i64], token: Box<i64> }
-        fn store<'a>(view: &'a [i64]) -> Unit ! {alloc, panic} {
+        fn store<'a>(view: &'a [i64]) -> Unit ! {alloc} {
             let slot: Box<Mixed<'a>> = Box.new(Mixed { view: view, token: Box.new(1) });
             drop(slot);
         }
@@ -1288,7 +1288,7 @@ fn mixed_owning_records_reject_containers_self_reference_and_linear_fields() {
     .unwrap();
     rejects(
         r#"struct Owner<'a> { owner: Vec<i64>, view: &'a [i64] }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let values: Vec<i64> = [1, 2];
             let record = Owner { owner: values, view: &values[..] };
             drop(record);
@@ -1297,7 +1297,7 @@ fn mixed_owning_records_reject_containers_self_reference_and_linear_fields() {
     );
     rejects(
         r#"struct Owner<'a> { owner: Vec<i64>, view: &'a [i64] }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let values: Vec<i64> = [1, 2];
             let record = Owner { view: &values[..], owner: values };
             drop(record);
@@ -1333,11 +1333,11 @@ fn mixed_record_example_matches_documented_output() {
 fn mutable_record_arguments_keep_owners_borrowed_through_later_arguments() {
     rejects(
         r#"struct Window<'a> { view: &'a mut [i64], start: i64 }
-        fn read<'a>(window: Window<'a>, n: i64) -> i64 ! {panic} {
+        fn read<'a>(window: Window<'a>, n: i64) -> i64 ! {} {
             let Window { view, start } = window;
             Slice.get(view, 0) + start + n
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             read(Window { view: &mut values[..], start: 0 }, { values = [3, 4]; 0 })
         }"#,
@@ -1345,7 +1345,7 @@ fn mutable_record_arguments_keep_owners_borrowed_through_later_arguments() {
     );
     rejects(
         r#"struct Late<'a> { start: i64, view: &'a mut [i64] }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [1, 2];
             let late = Late { view: &mut values[..], start: { values = [3, 4]; 0 } };
             let Late { view, start } = late;
@@ -1359,7 +1359,7 @@ fn mutable_record_arguments_keep_owners_borrowed_through_later_arguments() {
 fn mutable_record_field_reborrows_restore_the_parent_and_owner() {
     agrees(
         r#"struct Window<'a> { view: &'a mut [i64], start: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 3] = [1, 2, 3];
             let window = Window { view: &mut values[..], start: 0 };
             let Window { view, start } = window;
@@ -1376,7 +1376,7 @@ fn mutable_record_field_reborrows_restore_the_parent_and_owner() {
         type Alias<'a> = Inner<'a>;
         struct Outer<'a> { inner: Alias<'a>, note: i64 }
         fn pass<'a>(outer: Outer<'a>) -> Outer<'a> ! {} { outer }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut values: [i64; 2] = [4, 5];
             let outer = pass(Outer { inner: Inner { view: &mut values[..] }, note: 2 });
             let Outer { inner, note } = outer;

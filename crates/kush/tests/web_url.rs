@@ -60,7 +60,7 @@ use std.text;
 use std.test;
 use std.web;
 use std.http1.Method;
-fn run() -> Result<Unit, url.Error> ! {io, alloc, panic} {
+fn run() -> Result<Unit, url.Error> ! {io, alloc} {
     let req = web.request_for(Method.Get, &Bytes.from("/a%2Fb?x=%3F%26"), Bytes.from(""));
     let segments = url.path_segments(&req.path(), 64)?;
     test.is_true(segments.segment_count() == 2);
@@ -96,7 +96,7 @@ fn run() -> Result<Unit, url.Error> ! {io, alloc, panic} {
     test.is_true(form.field_count() == 0);
     Ok(())
 }
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     match run() { Result.Ok(_) => print_i64(1), Result.Err(_) => panic() }
 }
 "#
@@ -114,7 +114,7 @@ use std.url.Error;
 use std.result.Result;
 use std.test;
 use std.io;
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
 "#,
     );
     for (input, error) in [

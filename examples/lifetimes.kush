@@ -3,15 +3,15 @@
 // last-use release, and exclusive mutable slice views. Run with:
 //   cargo run -p kush -- run examples/lifetimes.kush
 
-fn tail(view: &[i64]) -> &[i64] ! {panic} {
+fn tail(view: &[i64]) -> &[i64] ! {} {
     view[1..]
 }
 
-fn pick<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &'a [i64] ! {panic} {
+fn pick<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &'a [i64] ! {} {
     if flag { left } else { right }
 }
 
-fn sum(view: &[i64]) -> i64 ! {panic} {
+fn sum(view: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut index = 0;
     while index < Slice.len(view) {
@@ -21,11 +21,11 @@ fn sum(view: &[i64]) -> i64 ! {panic} {
     acc
 }
 
-fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {} {
     &mut view[1..]
 }
 
-fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {panic} {
+fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {} {
     let mut index = 0;
     while index < Slice.len(view) {
         Slice.set(view, index, value);
@@ -33,7 +33,7 @@ fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {panic} {
     }
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let mut values: Vec<i64> = Vec.new();
     values = Vec.push(values, 10);
     values = Vec.push(values, 20);

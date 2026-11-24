@@ -1,9 +1,9 @@
 enum Code { X(i64), Y(i64), None }
-fn make(i: i64) -> Code ! {panic} {
+fn make(i: i64) -> Code ! {} {
     let r = i % 3;
     if r == 0 { Code.None } else { if r == 1 { Code.X(i) } else { Code.Y(i) } }
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let n = 4000000;
     let mut v: Vec<Code> = Vec.with_capacity(n);
     let mut i = 0;

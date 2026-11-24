@@ -49,11 +49,11 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 #[test]
 fn a_bare_result_grade_is_inferred_from_the_expected_arrow() {
     agrees(
-        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G] ! {alloc, panic} { Box.new(n) }
-        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G] ! {alloc} { Box.new(n) }
+        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc}) -> i64 ! {alloc} {
             Box.take(f(42))
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         42,
         "",
     );
@@ -62,11 +62,11 @@ fn a_bare_result_grade_is_inferred_from_the_expected_arrow() {
 #[test]
 fn explicit_specialization_remains_available_for_function_values() {
     agrees(
-        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G] ! {alloc, panic} { Box.new(n) }
-        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G] ! {alloc} { Box.new(n) }
+        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc}) -> i64 ! {alloc} {
             Box.take(f(42))
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make::<1>) }"#,
+        fn main() -> i64 ! {alloc} { apply(make::<1>) }"#,
         42,
         "",
     );
@@ -78,11 +78,11 @@ fn grade_arguments_forward_through_nested_result_aliases() {
         r#"type Handle<G: Grade, T> = Box<T> @[G];
         type Forward<G: Grade, T> = Handle<G, T>;
         type Nested<G: Grade, T> = Forward<G, T>;
-        fn make<G: Grade, T>(n: T) -> Nested<G, T> ! {alloc, panic} { Box.new(n) }
-        fn apply(f: fn(i64) -> Handle<1, i64> ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        fn make<G: Grade, T>(n: T) -> Nested<G, T> ! {alloc} { Box.new(n) }
+        fn apply(f: fn(i64) -> Handle<1, i64> ! {alloc}) -> i64 ! {alloc} {
             Box.take(f(42))
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         42,
         "",
     );
@@ -91,11 +91,11 @@ fn grade_arguments_forward_through_nested_result_aliases() {
 #[test]
 fn an_ungraded_expected_arrow_cannot_bind_a_result_grade() {
     rejects(
-        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G] ! {alloc, panic} { Box.new(n) }
-        fn apply(f: fn(i64) -> Box<i64> ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G] ! {alloc} { Box.new(n) }
+        fn apply(f: fn(i64) -> Box<i64> ! {alloc}) -> i64 ! {alloc} {
             Box.take(f(42))
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         "cannot infer usage grade parameter",
     );
 }
@@ -103,8 +103,8 @@ fn an_ungraded_expected_arrow_cannot_bind_a_result_grade() {
 #[test]
 fn a_missing_expected_arrow_cannot_bind_a_result_grade() {
     rejects(
-        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G] ! {alloc, panic} { Box.new(n) }
-        fn main() -> i64 ! {alloc, panic} { let f = make; Box.take(f(42)) }"#,
+        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G] ! {alloc} { Box.new(n) }
+        fn main() -> i64 ! {alloc} { let f = make; Box.take(f(42)) }"#,
         "needs an expected 'fn(...)' type",
     );
 }
@@ -115,23 +115,23 @@ fn a_grade_reaching_a_parameter_is_solved_and_checked_for_conflicts() {
     // arrow parameters are ungraded, so the result contract determines G = 1
     // and the specialization simply has a stricter @[1] parameter.
     agrees(
-        r#"fn make<G: Grade>(n: i64, b: Box<i64> @[G]) -> Box<i64> @[G] ! {alloc, panic} {
+        r#"fn make<G: Grade>(n: i64, b: Box<i64> @[G]) -> Box<i64> @[G] ! {alloc} {
             Box.take(b); Box.new(n)
         }
-        fn apply(f: fn(i64, Box<i64>) -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        fn apply(f: fn(i64, Box<i64>) -> Box<i64> @[1] ! {alloc}) -> i64 ! {alloc} {
             Box.take(f(42, Box.new(0)))
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         42,
         "",
     );
     // Two positions demand different values for the same binder.
     rejects(
-        r#"fn make<G: Grade>(b: i64 @[G]) -> Box<i64> @[G] ! {alloc, panic} { Box.new(b) }
-        fn apply(f: fn(i64 @[2]) -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn make<G: Grade>(b: i64 @[G]) -> Box<i64> @[G] ! {alloc} { Box.new(b) }
+        fn apply(f: fn(i64 @[2]) -> Box<i64> @[1] ! {alloc}) -> i64 ! {alloc} {
             Box.take(f(42))
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         "conflicting inferred grades",
     );
 }
@@ -139,11 +139,11 @@ fn a_grade_reaching_a_parameter_is_solved_and_checked_for_conflicts() {
 #[test]
 fn a_grade_used_inside_the_underlying_result_blocks_inference() {
     rejects(
-        r#"fn make<G: Grade>(n: i64) -> Box<i64 @[G]> @[1] ! {alloc, panic} { Box.new(n) }
-        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn make<G: Grade>(n: i64) -> Box<i64 @[G]> @[1] ! {alloc} { Box.new(n) }
+        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc}) -> i64 ! {alloc} {
             Box.take(f(42))
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         "cannot infer usage grade parameter",
     );
 }
@@ -152,11 +152,11 @@ fn a_grade_used_inside_the_underlying_result_blocks_inference() {
 fn composite_result_grades_use_the_single_occurrence_solver() {
     // `G + 1 = 1` has the unique natural solution G = 0.
     agrees(
-        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G + 1] ! {alloc, panic} { Box.new(n) }
-        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G + 1] ! {alloc} { Box.new(n) }
+        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc}) -> i64 ! {alloc} {
             Box.take(f(42))
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         42,
         "",
     );
@@ -165,11 +165,11 @@ fn composite_result_grades_use_the_single_occurrence_solver() {
     for grade in ["G * 2", "G + G"] {
         rejects(
             &format!(
-                r#"fn make<G: Grade>(n: i64) -> Box<i64> @[{grade}] ! {{alloc, panic}} {{ Box.new(n) }}
-                fn apply(f: fn(i64) -> Box<i64> @[1] ! {{alloc, panic}}) -> i64 ! {{alloc, panic}} {{
+                r#"fn make<G: Grade>(n: i64) -> Box<i64> @[{grade}] ! {{alloc}} {{ Box.new(n) }}
+                fn apply(f: fn(i64) -> Box<i64> @[1] ! {{alloc}}) -> i64 ! {{alloc}} {{
                     Box.take(f(42))
                 }}
-                fn main() -> i64 ! {{alloc, panic}} {{ apply(make) }}"#
+                fn main() -> i64 ! {{alloc}} {{ apply(make) }}"#
             ),
             "cannot infer usage grade parameter",
         );
@@ -179,11 +179,11 @@ fn composite_result_grades_use_the_single_occurrence_solver() {
 #[test]
 fn extra_grade_parameters_are_not_silently_dropped() {
     rejects(
-        r#"fn make<A: Grade, B: Grade>(n: i64) -> Box<i64> @[A] ! {alloc, panic} { Box.new(n) }
-        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+        r#"fn make<A: Grade, B: Grade>(n: i64) -> Box<i64> @[A] ! {alloc} { Box.new(n) }
+        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc}) -> i64 ! {alloc} {
             Box.take(f(42))
         }
-        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        fn main() -> i64 ! {alloc} { apply(make) }"#,
         "cannot infer usage grade parameter",
     );
 }
@@ -194,8 +194,8 @@ fn unsupported_result_grades_through_aliases_are_still_rejected() {
         rejects(
             &format!(
                 r#"type Handle<G: Grade, T> = Box<T> @[G];
-                fn make() -> Handle<{grade}, i64> ! {{alloc, panic}} {{ Box.new(1) }}
-                fn main() -> i64 ! {{alloc, panic}} {{ Box.take(make()) }}"#
+                fn make() -> Handle<{grade}, i64> ! {{alloc}} {{ Box.new(1) }}
+                fn main() -> i64 ! {{alloc}} {{ Box.take(make()) }}"#
             ),
             "result",
         );
@@ -207,8 +207,8 @@ fn copyable_results_through_aliases_carry_a_must_use_contract() {
     agrees(
         r#"type Handle<G: Grade, T> = T @[G];
         fn make() -> Handle<1, i64> ! {} { 42 }
-        fn observe(x: i64 @[1]) -> i64 ! {panic} { x + 1 }
-        fn main() -> i64 ! {panic} { observe(make()) }"#,
+        fn observe(x: i64 @[1]) -> i64 ! {} { x + 1 }
+        fn main() -> i64 ! {} { observe(make()) }"#,
         43,
         "",
     );
@@ -236,14 +236,14 @@ fn accepts(source: &str) {
 fn grade_arguments_in_parameter_and_stored_alias_positions_are_rejected() {
     rejects(
         r#"type Handle<G: Grade, T> = Box<T> @[G];
-        fn consume(b: Handle<1, i64>) -> i64 ! {alloc, panic} { Box.take(b) }
-        fn main() -> i64 ! {alloc, panic} { consume(Box.new(1)) }"#,
+        fn consume(b: Handle<1, i64>) -> i64 ! {alloc} { Box.take(b) }
+        fn main() -> i64 ! {alloc} { consume(Box.new(1)) }"#,
         "grade parameters are not part of runtime type aliases",
     );
     rejects(
         r#"type Handle<G: Grade, T> = Box<T> @[G];
         struct Holder { b: Handle<1, i64> }
-        fn main() -> i64 ! {alloc, panic} { 0 }"#,
+        fn main() -> i64 ! {alloc} { 0 }"#,
         "grade parameters are not part of runtime type aliases",
     );
 }

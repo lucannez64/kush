@@ -8,7 +8,7 @@
 //!
 //! Layout rules, in short:
 //! - `{ ... }` is a multi-line block when the source spread it over several
-//!   lines; otherwise it stays on one line as `{ a, b }` or `{ return x; }`. An effect row after `!` is always `{io, panic}`.
+//!   lines; otherwise it stays on one line as `{ a, b }` or `{ return x; }`. An effect row after `!` is always `{io, alloc}`.
 //! - In a multi-line block every statement (`;`), comma-separated item (struct
 //!   fields, enum variants, match arms) and completed nested block ends a line.
 //! - `( ... )` and `[ ... ]` stay on one line unless the source broke the line
@@ -24,7 +24,7 @@ enum Group {
     Block,
     /// Single-line `{ }`.
     Inline,
-    /// Effect row `! {io, panic}`.
+    /// Effect row `! {io}`.
     Row,
     /// Multi-line `(` / `[` with one item per line.
     ListMulti,

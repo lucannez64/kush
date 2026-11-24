@@ -1,8 +1,7 @@
 # 7. Effects
 
 Planned changes (decided): private functions will infer their rows
-(FND-ROWS-INFER) and `panic` will stop being an effect (FND-ROWS-PANIC).
-Handlers will move to one capability model
+(FND-ROWS-INFER). Handlers will move to one capability model
 and tasks to a library on handlers (FND-HANDLERS-ONE,
 FND-TASKS-ON-HANDLERS).
 
@@ -14,8 +13,9 @@ A function's row `! { ... }` lists what it may do. Built-in effects:
 | --- | --- |
 | `io` | input/output, foreign calls |
 | `alloc` | acquiring heap memory (boxes, vectors, strings, closure environments, `dyn` payloads) |
-| `panic` | anything that can abort: checked arithmetic, bounds checks, `panic()`, a missing dynamic handler |
 | `suspend` | yielding to the task scheduler |
+
+Panicking is not an effect: any function may panic ([below](#panics)).
 
 Declared operations (below) are also row entries. Each operation in a body
 must be allowed by the row, and a call requires the callee's **declared** row
@@ -23,8 +23,8 @@ must be allowed by the row, and a call requires the callee's **declared** row
 where more are allowed.
 
 ```kush reject
-fn noisy() -> Unit ! {io, panic} { print_i64(1); }
-fn quiet() -> Unit ! {panic} { noisy(); }
+fn noisy() -> Unit ! {io} { print_i64(1); }
+fn quiet() -> Unit ! {} { noisy(); }
 fn main() -> i64 ! {} { 0 }
 // error: requires effects {io}
 ```
@@ -37,7 +37,7 @@ removed:
 
 ```kush reject
 #[noalloc]
-fn sum(values: &[i64]) -> i64 ! {panic} { values.len() }
+fn sum(values: &[i64]) -> i64 ! {} { values.len() }
 fn main() -> i64 ! {} { 0 }
 // error: #[noalloc] was removed: the effect row is the contract
 ```
@@ -48,17 +48,17 @@ A row variable `e: Effects` lets a higher-order function take the effects of
 its argument. It is inferred from the argument or given explicitly.
 
 ```kush eval
-fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-fn loud(x: i64) -> i64 ! {io, panic} { print_i64(x); x }
+fn inc(x: i64) -> i64 ! {} { x + 1 }
+fn loud(x: i64) -> i64 ! {io} { print_i64(x); x }
 
-fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
     f(x)
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(apply(inc, 1));
     print_i64(apply(loud, 7));
-    print_i64(apply::<io | panic>(loud, 8));
+    print_i64(apply::<io>(loud, 8));
 }
 ```
 
@@ -76,10 +76,22 @@ subtract: `! {e - io}`.
 
 ## Panics
 
-`panic()` aborts the program with a message, as do failed checks. By default
-there is no unwinding and destructors do not run. A program that uses
-`Task.catch` (see [chapter 8](08-concurrency.md)) unwinds panics to that
-boundary instead, running cleanup.
+Any function may panic: `panic()`, checked arithmetic, bounds checks, a
+missing dynamic handler. A panic aborts the program with a message; by
+default there is no unwinding and destructors do not run. A program that
+uses `Task.catch` (see [chapter 8](08-concurrency.md)) unwinds panics to that
+boundary instead, running cleanup. A panic inside an unwind cleanup
+(`#[linear(unwind = f)]`) ends that cleanup and unwinding goes on; a panic
+inside an allocator release callback or an arena strategy aborts the
+process.
+
+`panic` is not an effect name:
+
+```kush reject
+fn f(x: i64) -> i64 ! {panic} { x + 1 }
+fn main() -> i64 ! {} { f(41) }
+// error: 'panic' is not an effect: any function may panic
+```
 
 ## Effect handlers
 
@@ -89,11 +101,11 @@ an ordinary function value taking the payload and a resumption token; the
 token continues the body from the perform point.
 
 ```kush eval
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let result = handle Ask: i64 -> i64 with fn(
         x: i64,
         resume: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {panic} {
+    ) -> i64 ! {} {
         let r = resume(x + 1);
         r * 2
     } {
@@ -118,22 +130,22 @@ state machine.
 `effect Op: P -> R;` declares an operation that called functions may
 perform. It becomes a row entry; a `handle Op` discharges it. The handler
 active at run time is found on a per-task handler stack; with none active,
-the program aborts (so a dynamic perform also needs `panic`). A handler's own
+the perform panics. A handler's own
 effects are declared on the operation: `effect Log: i64 -> Unit ! {io};`.
 
 ```kush eval
-effect Next: Unit -> i64 ! {panic};
+effect Next: Unit -> i64 ! {};
 
-fn sum_three() -> i64 ! {Next, panic} {
+fn sum_three() -> i64 ! {Next} {
     perform Next(()) + perform Next(()) + perform Next(())
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let mut counter = 0;
     let total = handle Next: Unit -> i64 with fn(
         u: Unit,
         resume: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {panic} {
+    ) -> i64 ! {} {
         counter = counter + 10;
         resume(counter)
     } {
@@ -160,14 +172,14 @@ fn main() -> Unit ! {io, alloc, panic} {
 effect Fail: i64 -> Never;
 effect Ask: i64 -> i64;
 
-fn parse(x: i64) -> i64 ! {Fail, panic} {
+fn parse(x: i64) -> i64 ! {Fail} {
     if x < 0 { perform Fail(x) }
     x * 2
 }
 
-fn step(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} { perform op(x) + 1 }
+fn step(op: cap Ask ! {}, x: i64) -> i64 ! {} { perform op(x) + 1 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let bad = handle Fail: i64 -> Never with fn(code: i64) -> i64 ! {} { code } {
         parse(-5) + 1000
     };
@@ -177,7 +189,7 @@ fn main() -> Unit ! {io, panic} {
     let asked = handle Ask: i64 -> i64 as ask with fn(
         x: i64,
         resume: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {panic} { resume(x + 100) } {
+    ) -> i64 ! {} { resume(x + 100) } {
         step(ask, 1)
     };
     print_i64(bad);

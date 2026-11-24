@@ -59,7 +59,7 @@ fn contextual_union_inference_accumulates_literal_constraints() {
     // Each shape enumerates every matching union alternative, checks the
     // literal under each candidate, and requires exactly one survivor.
     let source = r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: [i64; 2] | [Bool; 2] = [20, 22];
             let b: Vec<i64> | Vec<Bool> = [1, 2];
             let c: (i64, i64) | (Bool, Bool) = (3, 4);
@@ -77,7 +77,7 @@ fn contextual_union_inference_accumulates_literal_constraints() {
     assert_eq!(value(source), 42);
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 2] | [Bool; 2] = [1, true];
             0
         }"#,
@@ -85,7 +85,7 @@ fn contextual_union_inference_accumulates_literal_constraints() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let v: Vec<i64> | Vec<Bool> = Vec.new();
             0
         }"#,
@@ -93,7 +93,7 @@ fn contextual_union_inference_accumulates_literal_constraints() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let t: (i64, i64) | (Bool, Bool) = (1, true);
             0
         }"#,
@@ -104,16 +104,16 @@ fn contextual_union_inference_accumulates_literal_constraints() {
 #[test]
 fn union_patterns_infer_the_residual_type_variable() {
     let source = r#"
-        fn pick<T>(x: T | i64) -> i64 ! {panic} {
+        fn pick<T>(x: T | i64) -> i64 ! {} {
             match x {
                 i64 @ n => n,
                 _ => 0,
             }
         }
-        fn three(c: i64) -> i64 | Bool | Unit ! {panic} {
+        fn three(c: i64) -> i64 | Bool | Unit ! {} {
             if c == 0 { 1 } else { if c == 1 { true } else { () } }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             pick(three(0)) + pick(true)
         }"#;
     assert_eq!(value(source), 1);
@@ -121,14 +121,14 @@ fn union_patterns_infer_the_residual_type_variable() {
     agrees(source, 1);
     rejects(
         r#"
-        fn pick<T>(x: T | i64) -> i64 ! {panic} { match x { i64 @ n => n, _ => 0 } }
-        fn main() -> i64 ! {panic} { pick(1) }"#,
+        fn pick<T>(x: T | i64) -> i64 ! {} { match x { i64 @ n => n, _ => 0 } }
+        fn main() -> i64 ! {} { pick(1) }"#,
         "residual binding is not unique",
     );
     rejects(
         r#"
-        fn pick<T, U>(x: T | U | i64) -> i64 ! {panic} { 0 }
-        fn main() -> i64 ! {panic} { pick(true) }"#,
+        fn pick<T, U>(x: T | U | i64) -> i64 ! {} { 0 }
+        fn main() -> i64 ! {} { pick(true) }"#,
         "cannot infer type parameter",
     );
 }
@@ -139,26 +139,26 @@ fn union_patterns_partition_multiple_variables_principally() {
     // Both T=Bool,U=Unit and T=Unit,U=Bool fit, and the body can tell them
     // apart, so inference reports the ambiguity instead of choosing one.
     let three = r#"
-        fn three(c: i64) -> Bool | Unit | i64 ! {panic} {
+        fn three(c: i64) -> Bool | Unit | i64 ! {} {
             if c == 0 { true } else { if c == 1 { () } else { 41 } }
         }"#;
     rejects(
         &format!(
             "{three}
-            fn pick<T, U>(x: T | U | i64) -> i64 ! {{panic}} {{
+            fn pick<T, U>(x: T | U | i64) -> i64 ! {{}} {{
                 match x {{ i64 @ n => n, T @ _ => 1, U @ _ => 2 }}
             }}
-            fn main() -> i64 ! {{panic}} {{ pick(three(0)) }}"
+            fn main() -> i64 ! {{}} {{ pick(three(0)) }}"
         ),
         "type inference for 'pick' is ambiguous: the union alternatives can be split as [T = Bool, U = Unit] or [T = Unit, U = Bool]",
     );
     // An explicit specialization is the escape hatch.
     let source = format!(
         "{three}
-        fn pick<T, U>(x: T | U | i64) -> i64 ! {{panic}} {{
+        fn pick<T, U>(x: T | U | i64) -> i64 ! {{}} {{
             match x {{ i64 @ n => n, T @ _ => 1, U @ _ => 42 }}
         }}
-        fn main() -> i64 ! {{panic}} {{ pick::<Unit, Bool>(three(0)) }}"
+        fn main() -> i64 ! {{}} {{ pick::<Unit, Bool>(three(0)) }}"
     );
     assert_eq!(value(&source), 42);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -167,11 +167,11 @@ fn union_patterns_partition_multiple_variables_principally() {
     // T=Bool, U=Unit, but the second parameter requires T=Unit. The bounded
     // replay reruns the whole constraint group and selects T=Unit, U=Bool.
     let replayed = r#"
-        fn pick<T, U>(x: T | U | i64, first: T) -> i64 ! {panic} { 0 }
-        fn two(c: i64) -> Bool | Unit ! {panic} {
+        fn pick<T, U>(x: T | U | i64, first: T) -> i64 ! {} { 0 }
+        fn two(c: i64) -> Bool | Unit ! {} {
             if c == 0 { true } else { () }
         }
-        fn main() -> i64 ! {panic} { pick(two(0), ()) }"#;
+        fn main() -> i64 ! {} { pick(two(0), ()) }"#;
     assert_eq!(value(replayed), 0);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(replayed, 0);
@@ -179,18 +179,18 @@ fn union_patterns_partition_multiple_variables_principally() {
     // bind T to Bool or Unit, never to i64.
     rejects(
         r#"
-        fn pick<T, U>(x: T | U | i64, first: T) -> i64 ! {panic} { 0 }
-        fn two(c: i64) -> Bool | Unit ! {panic} {
+        fn pick<T, U>(x: T | U | i64, first: T) -> i64 ! {} { 0 }
+        fn two(c: i64) -> Bool | Unit ! {} {
             if c == 0 { true } else { () }
         }
-        fn main() -> i64 ! {panic} { pick(two(0), 1) }"#,
+        fn main() -> i64 ! {} { pick(two(0), 1) }"#,
         "no partition",
     );
     // A single residual alternative cannot bind two unbound variables.
     rejects(
         r#"
-        fn pick<T, U>(x: T | U | i64) -> i64 ! {panic} { 0 }
-        fn main() -> i64 ! {panic} { pick(true) }"#,
+        fn pick<T, U>(x: T | U | i64) -> i64 ! {} { 0 }
+        fn main() -> i64 ! {} { pick(true) }"#,
         "no partition binds every variable",
     );
 }
@@ -201,17 +201,17 @@ fn call_site_constraints_decide_a_deferred_partition() {
     // expected result type and a callable argument each leave one solution.
     let source = r#"
         enum Option<T> { None, Some(T) }
-        fn three(c: i64) -> Bool | Unit | i64 ! {panic} {
+        fn three(c: i64) -> Bool | Unit | i64 ! {} {
             if c == 0 { true } else { if c == 1 { () } else { 41 } }
         }
-        fn tag<T, U>(x: T | U | i64) -> Option<T> ! {panic} {
+        fn tag<T, U>(x: T | U | i64) -> Option<T> ! {} {
             match x { T @ t => Option.Some(t), _ => Option.None }
         }
-        fn wrap<T, U>(x: T | U | i64, f: fn(T) -> i64 ! {}) -> i64 ! {panic} {
+        fn wrap<T, U>(x: T | U | i64, f: fn(T) -> i64 ! {}) -> i64 ! {} {
             match x { T @ t => f(t), _ => 7 }
         }
         fn score(b: Bool) -> i64 ! {} { if b { 40 } else { 1 } }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let r: Option<Unit> = tag(three(1));
             let k = match r { Option.Some(_) => 2, Option.None => 0 };
             k + wrap(three(0), score)
@@ -223,13 +223,13 @@ fn call_site_constraints_decide_a_deferred_partition() {
     rejects(
         r#"
         enum Option<T> { None, Some(T) }
-        fn three(c: i64) -> Bool | Unit | i64 ! {panic} {
+        fn three(c: i64) -> Bool | Unit | i64 ! {} {
             if c == 0 { true } else { if c == 1 { () } else { 41 } }
         }
-        fn tag<T, U>(x: T | U | i64) -> Option<T> ! {panic} {
+        fn tag<T, U>(x: T | U | i64) -> Option<T> ! {} {
             match x { T @ t => Option.Some(t), _ => Option.None }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let r = tag(three(1));
             match r { Option.Some(_) => 2, Option.None => 0 }
         }"#,
@@ -240,15 +240,15 @@ fn call_site_constraints_decide_a_deferred_partition() {
 #[test]
 fn principal_inference_review_regressions() {
     let three = r#"
-        fn three(c: i64) -> Bool | Unit | i64 ! {panic} {
+        fn three(c: i64) -> Bool | Unit | i64 ! {} {
             if c == 0 { true } else { if c == 1 { () } else { 41 } }
         }"#;
     // A wider-closed expected result row does not fix `..r` during the
     // exhaustive search either (this used to panic).
     let rows = format!(
         "{three}
-        fn keep<T, U, r>(x: T | U | i64, t: T, v: struct {{ x: i64, ..r }}) -> struct {{ x: i64, ..r }} ! {{panic}} {{ v }}
-        fn main() -> i64 ! {{panic}} {{
+        fn keep<T, U, r>(x: T | U | i64, t: T, v: struct {{ x: i64, ..r }}) -> struct {{ x: i64, ..r }} ! {{}} {{ v }}
+        fn main() -> i64 ! {{}} {{
             let w = struct {{ x: 5, y: true }};
             let n: struct {{ x: i64 }} = keep(three(0), true, w);
             let m: struct {{ x: i64 }} = keep(three(0), (), w);
@@ -261,10 +261,10 @@ fn principal_inference_review_regressions() {
     let nested = format!(
         "{three}
         struct Pair<A, B> {{ a: A, b: B }}
-        fn f<T, U>(x: Pair<T | U | i64, T> | i64) -> i64 ! {{panic}} {{
+        fn f<T, U>(x: Pair<T | U | i64, T> | i64) -> i64 ! {{}} {{
             match x {{ i64 @ n => n, Pair<T | U | i64, T> @ p => match p.a {{ T @ _ => 1, U @ _ => 2, i64 @ _ => 3 }} }}
         }}
-        fn main() -> i64 ! {{panic}} {{
+        fn main() -> i64 ! {{}} {{
             let p: Pair<Bool | Unit | i64, Unit> = Pair {{ a: three(0), b: () }};
             let x: Pair<Bool | Unit | i64, Unit> | i64 = p;
             f(x)
@@ -280,12 +280,12 @@ fn principal_inference_review_regressions() {
                 "{three}
                 enum Option<T> {{ None, Some(T) }}
                 struct Pair<A, B> {{ a: A, b: B }}
-                fn f<{generics}>(x: Option<Pair<T | U | i64, T>> | Option<V>) -> i64 ! {{panic}} {{ 0 }}
-                fn mk(c: Bool) -> Option<Pair<Bool | Unit | i64, Bool>> | Option<Pair<Bool | Unit | i64, Unit>> ! {{panic}} {{
+                fn f<{generics}>(x: Option<Pair<T | U | i64, T>> | Option<V>) -> i64 ! {{}} {{ 0 }}
+                fn mk(c: Bool) -> Option<Pair<Bool | Unit | i64, Bool>> | Option<Pair<Bool | Unit | i64, Unit>> ! {{}} {{
                     if c {{ let p: Pair<Bool | Unit | i64, Bool> = Pair {{ a: three(0), b: true }}; let o: Option<Pair<Bool | Unit | i64, Bool>> = Option.Some(p); o }}
                     else {{ let p: Pair<Bool | Unit | i64, Unit> = Pair {{ a: three(0), b: () }}; let o: Option<Pair<Bool | Unit | i64, Unit>> = Option.Some(p); o }}
                 }}
-                fn main() -> i64 ! {{panic}} {{ f(mk(true)) }}"
+                fn main() -> i64 ! {{}} {{ f(mk(true)) }}"
             ),
             "is ambiguous",
         );
@@ -295,8 +295,8 @@ fn principal_inference_review_regressions() {
     let invariant = r#"
         enum Option<T> { None, Some(T) }
         struct S { a: i64 }
-        fn pick<T, U>(x: T | U | i64, t: Option<T>) -> i64 ! {panic} { match x { i64 @ n => n, _ => 5 } }
-        fn main() -> i64 ! {panic} {
+        fn pick<T, U>(x: T | U | i64, t: Option<T>) -> i64 ! {} { match x { i64 @ n => n, _ => 5 } }
+        fn main() -> i64 ! {} {
             let x: Bool | Unit | S | i64 = true;
             let t: Option<Bool> = Option.Some(true);
             pick(x, t)
@@ -308,28 +308,28 @@ fn principal_inference_review_regressions() {
         "U, T, e: Effects, f: Effects",
     ] {
         let effects = format!(
-            "fn a(x: i64) -> i64 ! {{panic}} {{ x }}
+            "fn a(x: i64) -> i64 ! {{}} {{ x }}
             fn b(x: Bool) -> i64 ! {{alloc}} {{ 2 }}
-            fn mk(c: Bool) -> (fn(i64) -> i64 ! {{panic}}) | (fn(Bool) -> i64 ! {{alloc}}) ! {{}} {{
+            fn mk(c: Bool) -> (fn(i64) -> i64 ! {{}}) | (fn(Bool) -> i64 ! {{alloc}}) ! {{}} {{
                 if c {{ a }} else {{ b }}
             }}
-            fn h<{generics}>(x: (fn(T) -> i64 ! {{e}}) | (fn(U) -> i64 ! {{f}}), t: T) -> i64 ! {{e, panic}} {{
+            fn h<{generics}>(x: (fn(T) -> i64 ! {{e}}) | (fn(U) -> i64 ! {{f}}), t: T) -> i64 ! {{e}} {{
                 match x {{ (fn(T) -> i64 ! {{e}}) @ g => 10, (fn(U) -> i64 ! {{f}}) @ g => 20 }}
             }}
-            fn main() -> i64 ! {{panic, alloc}} {{ h(mk(true), true) }}"
+            fn main() -> i64 ! {{alloc}} {{ h(mk(true), true) }}"
         );
         assert_eq!(value(&effects), 20, "{generics}");
     }
     // Assignments that differ only in effect rows are still two solutions.
     rejects(
         r#"
-        fn a() -> i64 ! {panic} { 1 }
+        fn a() -> i64 ! {} { 1 }
         fn b() -> i64 ! {alloc} { 2 }
-        fn mk(c: Bool) -> (fn() -> i64 ! {panic}) | (fn() -> i64 ! {alloc}) ! {} {
+        fn mk(c: Bool) -> (fn() -> i64 ! {}) | (fn() -> i64 ! {alloc}) ! {} {
             if c { a } else { b }
         }
-        fn h<e: Effects, f: Effects>(x: (fn() -> i64 ! {e}) | (fn() -> i64 ! {f})) -> i64 ! {e, panic} { 5 }
-        fn main() -> i64 ! {panic} { h(mk(true)) }"#,
+        fn h<e: Effects, f: Effects>(x: (fn() -> i64 ! {e}) | (fn() -> i64 ! {f})) -> i64 ! {e} { 5 }
+        fn main() -> i64 ! {} { h(mk(true)) }"#,
         "is ambiguous",
     );
     // A member with the right constructor that is no instance of the
@@ -338,12 +338,12 @@ fn principal_inference_review_regressions() {
     let bare = r#"
         enum Option<T> { None, Some(T) }
         struct Pair<A, B> { a: A, b: B }
-        fn f<T, A>(x: T | Pair<A, Bool>, a: A) -> i64 ! {panic} {
+        fn f<T, A>(x: T | Pair<A, Bool>, a: A) -> i64 ! {} {
             match x { Pair<A, Bool> @ _ => 1, _ => 2 }
         }
-        fn g<T>(x: T | Option<T>) -> i64 ! {panic} { match x { Option<T> @ _ => 10, _ => 20 } }
-        fn h<T>(x: Box<T> | T) -> i64 ! {panic} { match x { Box<T> @ _ => 100, _ => 200 } }
-        fn main() -> i64 ! {alloc, panic} {
+        fn g<T>(x: T | Option<T>) -> i64 ! {} { match x { Option<T> @ _ => 10, _ => 20 } }
+        fn h<T>(x: Box<T> | T) -> i64 ! {} { match x { Box<T> @ _ => 100, _ => 200 } }
+        fn main() -> i64 ! {alloc} {
             let q: Pair<Bool, i64> = Pair { a: true, b: 7 };
             let x: Pair<Bool, i64> | i64 = q;
             let o: Option<i64> = Option.Some(3);
@@ -355,8 +355,8 @@ fn principal_inference_review_regressions() {
     agrees(bare, 112);
     rejects(
         r#"
-        fn f<T>(x: (T, T) | i64) -> i64 ! {panic} { 0 }
-        fn main() -> i64 ! {panic} { let p: (i64, Bool) | i64 = (1, true); f(p) }"#,
+        fn f<T>(x: (T, T) | i64) -> i64 ! {} { 0 }
+        fn main() -> i64 ! {} { let p: (i64, Bool) | i64 = (1, true); f(p) }"#,
         "(i64, Bool) fits no alternative",
     );
 }
@@ -364,7 +364,7 @@ fn principal_inference_review_regressions() {
 #[test]
 fn structural_literals_accumulate_contextual_union_candidates() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let v: struct { x: i64 } | struct { x: Bool } = struct { x: 40 };
             match v {
                 struct { x: i64 } @ struct { x: n } => n + 2,
@@ -377,7 +377,7 @@ fn structural_literals_accumulate_contextual_union_candidates() {
     // The contextual hint is not just cosmetic: the same literal text would
     // default to i64 without the expected Bool alternative.
     let hinted = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let v: struct { x: Bool } = struct { x: true };
             match v { struct { x } => if x { 42 } else { 0 } }
         }"#;
@@ -388,11 +388,11 @@ fn structural_literals_accumulate_contextual_union_candidates() {
 fn generic_inference_across_union_alternatives_reports_conflicts() {
     rejects(
         r#"
-        fn sized<T>(v: Vec<T>) -> i64 ! {panic} { Vec.len(&v) }
-        fn make(c: Bool) -> Vec<i64> | Vec<Bool> ! {alloc, panic} {
+        fn sized<T>(v: Vec<T>) -> i64 ! {} { Vec.len(&v) }
+        fn make(c: Bool) -> Vec<i64> | Vec<Bool> ! {alloc} {
             if c { [1, 2] } else { [true, false] }
         }
-        fn main() -> i64 ! {alloc, panic} { sized(make(true)) }"#,
+        fn main() -> i64 ! {alloc} { sized(make(true)) }"#,
         "union alternatives disagree on type parameter 'T'",
     );
 }
@@ -403,20 +403,20 @@ fn indexed_union_patterns_assign_members_per_constructor() {
     // solved separately instead of being merged into one Option<...>.
     let source = r#"
         enum Option<T> { None, Some(T) }
-        fn get<T>(x: Option<T> | i64, d: T) -> T ! {panic} {
+        fn get<T>(x: Option<T> | i64, d: T) -> T ! {} {
             match x {
                 i64 @ _ => d,
                 Option<T> @ o => match o { Option.Some(v) => v, Option.None => d },
             }
         }
-        fn sz<T, U>(x: Vec<T> | Vec<U> | i64, t: T) -> i64 ! {panic} {
+        fn sz<T, U>(x: Vec<T> | Vec<U> | i64, t: T) -> i64 ! {} {
             match x { i64 @ n => n, Vec<T> @ v => Vec.len(&v), Vec<U> @ v => 100 + Vec.len(&v) }
         }
-        fn make(c: i64) -> Vec<i64> | Vec<Bool> | i64 ! {alloc, panic} {
+        fn make(c: i64) -> Vec<i64> | Vec<Bool> | i64 ! {alloc} {
             if c == 0 { let v: Vec<i64> = [1, 2]; v }
             else { if c == 1 { let v: Vec<Bool> = [true]; v } else { 7 } }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: Option<i64> | i64 = 4;
             let b: Option<i64> | i64 = Option.Some(40);
             get(a, 2) + get(b, 0) + sz(make(0), 0) + sz(make(1), 0) + sz(make(2), 0) - 110
@@ -431,23 +431,23 @@ fn indexed_union_patterns_cover_every_constructor_shape() {
     let source = r#"
         enum Option<T> { None, Some(T) }
         struct Pair<A, B> { a: A, b: B }
-        fn one<T, U>(x: T | Option<U>, u: U) -> i64 ! {panic} {
+        fn one<T, U>(x: T | Option<U>, u: U) -> i64 ! {} {
             match x { Option<U> @ _ => 1, T @ _ => 2 }
         }
-        fn arr<T, U, N: Nat, M: Nat>(x: [T; N] | [U; M], t: T) -> i64 ! {panic} {
+        fn arr<T, U, N: Nat, M: Nat>(x: [T; N] | [U; M], t: T) -> i64 ! {} {
             match x { [T; N] @ _ => 2, [U; M] @ _ => 30 }
         }
-        fn tup<T>(x: (T, i64) | Bool) -> i64 ! {panic} {
+        fn tup<T>(x: (T, i64) | Bool) -> i64 ! {} {
             match x { Bool @ _ => 0, (T, i64) @ (_, k) => k }
         }
-        fn single<T>(x: Option<T> | i64) -> i64 ! {panic} { match x { i64 @ n => n, _ => 3 } }
-        fn nest<T>(x: Option<Vec<T>> | i64) -> i64 ! {panic} {
+        fn single<T>(x: Option<T> | i64) -> i64 ! {} { match x { i64 @ n => n, _ => 3 } }
+        fn nest<T>(x: Option<Vec<T>> | i64) -> i64 ! {} {
             match x { i64 @ n => n, Option<Vec<T>> @ _ => 4 }
         }
-        fn rec<A, B>(x: Pair<A, i64> | Pair<B, Bool>) -> i64 ! {panic} {
+        fn rec<A, B>(x: Pair<A, i64> | Pair<B, Bool>) -> i64 ! {} {
             match x { Pair<A, i64> @ p => p.b, Pair<B, Bool> @ _ => 5 }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let x: Bool | Option<i64> = Option.Some(3);
             let y: [i64; 2] | [Bool; 3] = [true, false, true];
             let z: (Bool, i64) | Bool = (true, 6);
@@ -472,14 +472,14 @@ fn indexed_union_assignments_are_unique_or_ambiguous() {
     // parameter needs T=Bool, so the bounded replay swaps the assignment.
     let replayed = r#"
         enum Option<T> { None, Some(T) }
-        fn pick<T, U>(x: Option<T> | Option<U>, t: T) -> i64 ! {panic} {
+        fn pick<T, U>(x: Option<T> | Option<U>, t: T) -> i64 ! {} {
             match x { Option<T> @ _ => 10, Option<U> @ _ => 20 }
         }
-        fn make(c: Bool) -> Option<i64> | Option<Bool> ! {panic} {
+        fn make(c: Bool) -> Option<i64> | Option<Bool> ! {} {
             if c { let o: Option<i64> = Option.Some(1); o }
             else { let o: Option<Bool> = Option.Some(true); o }
         }
-        fn main() -> i64 ! {panic} { pick(make(true), true) + pick(make(false), 5) + 2 }"#;
+        fn main() -> i64 ! {} { pick(make(true), true) + pick(make(false), 5) + 2 }"#;
     assert_eq!(value(replayed), 42);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(replayed, 42);
@@ -488,10 +488,10 @@ fn indexed_union_assignments_are_unique_or_ambiguous() {
     let ordered = |pattern: &str, decider: &str, call: &str| {
         format!(
             "enum Option<T> {{ None, Some(T) }}
-            fn pick<T, U>(x: {pattern}{decider}) -> i64 ! {{panic}} {{
+            fn pick<T, U>(x: {pattern}{decider}) -> i64 ! {{}} {{
                 match x {{ Option<T> @ _ => 1, Option<U> @ _ => 2 }}
             }}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let o: Option<Bool> = Option.Some(true);
                 let x: Option<i64> | Option<Bool> = o;
                 {call}
@@ -511,20 +511,20 @@ fn indexed_union_patterns_never_merge_invariant_arguments() {
     // would need the unsound Vec<i64 | Bool>.
     rejects(
         r#"
-        fn sz<T>(x: Vec<T> | i64) -> i64 ! {panic} { 0 }
-        fn make(c: i64) -> Vec<i64> | Vec<Bool> | i64 ! {alloc, panic} {
+        fn sz<T>(x: Vec<T> | i64) -> i64 ! {} { 0 }
+        fn make(c: i64) -> Vec<i64> | Vec<Bool> | i64 ! {alloc} {
             if c == 0 { let v: Vec<i64> = [1, 2]; v }
             else { if c == 1 { let v: Vec<Bool> = [true]; v } else { 7 } }
         }
-        fn main() -> i64 ! {alloc, panic} { sz(make(0)) }"#,
+        fn main() -> i64 ! {alloc} { sz(make(0)) }"#,
         "never merged into one Option<...>",
     );
     rejects(
         r#"
         enum Option<T> { None, Some(T) }
         struct Pair<A, B> { a: A, b: B }
-        fn rec<A>(x: Pair<A, i64> | Pair<A, Bool>) -> i64 ! {panic} { 0 }
-        fn main() -> i64 ! {panic} {
+        fn rec<A>(x: Pair<A, i64> | Pair<A, Bool>) -> i64 ! {} { 0 }
+        fn main() -> i64 ! {} {
             let q: Pair<Bool, i64> = Pair { a: true, b: 7 };
             let p: Pair<Bool, i64> | Pair<i64, Bool> = q;
             rec(p)
@@ -536,19 +536,19 @@ fn indexed_union_patterns_never_merge_invariant_arguments() {
     rejects(
         r#"
         enum Option<T> { None, Some(T) }
-        fn pick<T, U>(x: T | Option<U>) -> i64 ! {panic} { 0 }
-        fn main() -> i64 ! {panic} { let o: Option<i64> = Option.None; pick(o) }"#,
+        fn pick<T, U>(x: T | Option<U>) -> i64 ! {} { 0 }
+        fn main() -> i64 ! {} { let o: Option<i64> = Option.None; pick(o) }"#,
         "bare type parameter 'T' gets no alternative",
     );
     // Symmetric constructor alternatives with nothing else to decide them.
     rejects(
         r#"
-        fn sz<T, U>(x: Vec<T> | Vec<U> | i64) -> i64 ! {panic} { 0 }
-        fn make(c: i64) -> Vec<i64> | Vec<Bool> | i64 ! {alloc, panic} {
+        fn sz<T, U>(x: Vec<T> | Vec<U> | i64) -> i64 ! {} { 0 }
+        fn make(c: i64) -> Vec<i64> | Vec<Bool> | i64 ! {alloc} {
             if c == 0 { let v: Vec<i64> = [1, 2]; v }
             else { if c == 1 { let v: Vec<Bool> = [true]; v } else { 7 } }
         }
-        fn main() -> i64 ! {alloc, panic} { sz(make(0)) }"#,
+        fn main() -> i64 ! {alloc} { sz(make(0)) }"#,
         "type inference for 'sz' is ambiguous",
     );
 }
@@ -563,21 +563,21 @@ fn row_constraints_accumulate_across_every_higher_order_argument() {
     // `g`. The solver takes their union rather than letting the first argument
     // choose the row. The caller must declare the resulting union.
     let source = r#"
-        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-        fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn inc(x: i64) -> i64 ! {} { x + 1 }
+        fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
         fn two<e: Effects>(f: fn(i64) -> i64 ! {e}, g: fn(i64) -> i64 ! {e}, x: i64)
-            -> i64 ! {panic, e} { g(f(x)) }
-        fn main() -> i64 ! {io, panic} { two(inc, io_inc, 1) }"#;
+            -> i64 ! {e} { g(f(x)) }
+        fn main() -> i64 ! {io} { two(inc, io_inc, 1) }"#;
     assert_eq!(value(source), 3);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 3);
     rejects(
         r#"
-        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-        fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn inc(x: i64) -> i64 ! {} { x + 1 }
+        fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
         fn two<e: Effects>(f: fn(i64) -> i64 ! {e}, g: fn(i64) -> i64 ! {e}, x: i64)
-            -> i64 ! {panic, e} { g(f(x)) }
-        fn main() -> i64 ! {panic} { two(inc, io_inc, 1) }"#,
+            -> i64 ! {e} { g(f(x)) }
+        fn main() -> i64 ! {} { two(inc, io_inc, 1) }"#,
         "requires effects {io}",
     );
 }
@@ -585,13 +585,13 @@ fn row_constraints_accumulate_across_every_higher_order_argument() {
 #[test]
 fn separate_row_variables_get_their_own_evidence() {
     let source = r#"
-        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-        fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn inc(x: i64) -> i64 ! {} { x + 1 }
+        fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
         fn both<e1: Effects, e2: Effects>(
             f: fn(i64) -> i64 ! {e1},
             g: fn(i64) -> i64 ! {e2},
-        ) -> i64 ! {panic, e1, e2} { g(f(1)) }
-        fn main() -> i64 ! {io, panic} { both(inc, io_inc) }"#;
+        ) -> i64 ! {e1, e2} { g(f(1)) }
+        fn main() -> i64 ! {io} { both(inc, io_inc) }"#;
     assert_eq!(value(source), 3);
 }
 
@@ -601,46 +601,46 @@ fn row_constraints_support_required_effects_and_combined_bounds() {
     // pure. The inferred specialization is therefore `{io}` and the caller
     // must declare it; `panic` still comes from the callable actuals.
     let inferred = r#"
-        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn inc(x: i64) -> i64 ! {} { x + 1 }
         fn apply<e: Effects + io>(f: fn(i64) -> i64 ! {e}, x: i64)
-            -> i64 ! {panic, e} { f(x) }
-        fn main() -> i64 ! {io, panic} { apply(inc, 41) }"#;
+            -> i64 ! {e} { f(x) }
+        fn main() -> i64 ! {io} { apply(inc, 41) }"#;
     assert_eq!(value(inferred), 42);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(inferred, 42);
     let explicit = r#"
-        fn inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn inc(x: i64) -> i64 ! {io} { x + 1 }
         fn apply<e: Effects + (io | alloc) - suspend>(f: fn(i64) -> i64 ! {e}, x: i64)
-            -> i64 ! {panic, e} { f(x) }
-        fn main() -> i64 ! {io, alloc, panic} { apply::<io | alloc | panic>(inc, 41) }"#;
+            -> i64 ! {e} { f(x) }
+        fn main() -> i64 ! {io, alloc} { apply::<io | alloc>(inc, 41) }"#;
     assert_eq!(value(explicit), 42);
     rejects(
         r#"
-        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn inc(x: i64) -> i64 ! {} { x + 1 }
         fn apply<e: Effects + io>(f: fn(i64) -> i64 ! {e}, x: i64)
-            -> i64 ! {panic, e} { f(x) }
-        fn main() -> i64 ! {panic} { apply(inc, 1) }"#,
+            -> i64 ! {e} { f(x) }
+        fn main() -> i64 ! {} { apply(inc, 1) }"#,
         "requires effects {io}",
     );
     rejects(
         r#"
-        fn inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn inc(x: i64) -> i64 ! {io} { x + 1 }
         fn apply<e: Effects + alloc>(f: fn(i64) -> i64 ! {e}, x: i64)
-            -> i64 ! {panic, e} { f(x) }
-        fn main() -> i64 ! {io, alloc, panic} { apply::<io | panic>(inc, 1) }"#,
+            -> i64 ! {e} { f(x) }
+        fn main() -> i64 ! {io, alloc} { apply::<io>(inc, 1) }"#,
         "required by '<e: Effects + alloc>'",
     );
     rejects(
         r#"
-        fn apply<e: Effects + io - io>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn apply<e: Effects + io - io>(f: fn(i64) -> i64 ! {e}) -> i64 ! {e} { f(1) }
+        fn main() -> i64 ! {} { 0 }"#,
         "both includes and excludes",
     );
     rejects(
         r#"
         #[noalloc]
-        fn apply<e: Effects + alloc>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn apply<e: Effects + alloc>(f: fn(i64) -> i64 ! {e}) -> i64 ! {e} { f(1) }
+        fn main() -> i64 ! {} { 0 }"#,
         "#[noalloc] was removed",
     );
 }
@@ -649,18 +649,18 @@ fn row_constraints_support_required_effects_and_combined_bounds() {
 fn row_constraint_solver_rejects_ambiguity_and_exclusions() {
     rejects(
         r#"
-        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn inc(x: i64) -> i64 ! {io} { x + 1 }
         fn split<e1: Effects, e2: Effects>(f: fn(i64) -> i64 ! {e1, e2}, x: i64)
-            -> i64 ! {panic, e1, e2} { f(x) }
-        fn main() -> i64 ! {panic} { split(inc, 1) }"#,
+            -> i64 ! {e1, e2} { f(x) }
+        fn main() -> i64 ! {io} { split(inc, 1) }"#,
         "incomparable minimal",
     );
     rejects(
         r#"
-        fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
         fn only<e: Effects - io>(f: fn(i64) -> i64 ! {e}, x: i64)
-            -> i64 ! {panic, e} { f(x) }
-        fn main() -> i64 ! {io, panic} { only(io_inc, 1) }"#,
+            -> i64 ! {e} { f(x) }
+        fn main() -> i64 ! {io} { only(io_inc, 1) }"#,
         "is excluded by",
     );
 }
@@ -674,11 +674,11 @@ fn handler_resumes_nonlinearly_and_returns_the_continuation_result() {
     // `resume(x + 1)` runs the rest of the handled body (`a + 1`) and returns
     // its result 22 to the handler, which then computes 44.
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} {
+            ) -> i64 ! {} {
                 let r = resume(x + 1);
                 r * 2
             } {
@@ -694,16 +694,16 @@ fn handler_resumes_nonlinearly_and_returns_the_continuation_result() {
 #[test]
 fn handlers_shadow_lexically_and_pure_handlers_serve_many_performs() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x + 1) } {
+            ) -> i64 ! {} { resume(x + 1) } {
                 let outer = perform Op(1);
                 let inner = handle Op: i64 -> i64 with fn(
                     x: i64,
                     resume: linear once fn(i64) -> i64 ! {},
-                ) -> i64 ! {panic} { resume(x + 10) } {
+                ) -> i64 ! {} { resume(x + 10) } {
                     perform Op(2)
                 };
                 outer + inner
@@ -716,11 +716,11 @@ fn handlers_shadow_lexically_and_pure_handlers_serve_many_performs() {
 fn resumption_is_linear_and_cannot_be_duplicated_or_ignored() {
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} {
+            ) -> i64 ! {} {
                 let a = resume(x);
                 let b = resume(x + 1);
                 a + b
@@ -730,11 +730,11 @@ fn resumption_is_linear_and_cannot_be_duplicated_or_ignored() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { 0 } { perform Op(20) }
+            ) -> i64 ! {} { 0 } { perform Op(20) }
         }"#,
         "consumed",
     );
@@ -742,11 +742,11 @@ fn resumption_is_linear_and_cannot_be_duplicated_or_ignored() {
     // copy the continuation.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {alloc, panic} {
+            ) -> i64 ! {alloc} {
                 let v: Vec<linear once fn(i64) -> i64 ! {}> = Vec.new();
                 let v = Vec.push(v, resume);
                 Vec.len(&v)
@@ -759,11 +759,11 @@ fn resumption_is_linear_and_cannot_be_duplicated_or_ignored() {
 #[test]
 fn owning_handler_payload_and_result_cleanup_once() {
     let source = r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             Box.take(handle Op: Box<i64> -> Box<i64> with fn(
                 x: Box<i64>,
                 resume: linear once fn(Box<i64>) -> Box<i64> ! {},
-            ) -> Box<i64> ! {alloc, panic} {
+            ) -> Box<i64> ! {alloc} {
                 resume(x)
             } {
                 let b = perform Op(Box.new(42));
@@ -785,12 +785,12 @@ fn linear_values_survive_a_perform_without_duplication() {
     let source = r#"
         #[linear]
         struct Token { id: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let token = Token { id: 5 };
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x) } {
+            ) -> i64 ! {} { resume(x) } {
                 let a = perform Op(1);
                 let Token { id } = token;
                 a + id
@@ -804,11 +804,11 @@ fn linear_values_survive_a_perform_without_duplication() {
 #[test]
 fn handler_effects_are_part_of_the_handle_contract() {
     let source = r#"
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {io, panic} {
+            ) -> i64 ! {io} {
                 print_i64(x);
                 resume(x + 1)
             } {
@@ -820,11 +820,11 @@ fn handler_effects_are_part_of_the_handle_contract() {
     check(source).unwrap();
     rejects(
         r#"
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {io, panic} {
+            ) -> i64 ! {io} {
                 print_i64(x);
                 resume(x + 1)
             } {
@@ -841,9 +841,9 @@ fn handler_effects_are_part_of_the_handle_contract() {
 fn declared_effects_reach_handlers_through_called_functions() {
     let source = r#"
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
-        fn call() -> i64 ! {Op, panic} { deep() + 1 }
-        fn main() -> i64 ! {panic} {
+        fn deep() -> i64 ! {Op} { perform Op(20) }
+        fn call() -> i64 ! {Op} { deep() + 1 }
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
@@ -858,9 +858,9 @@ fn declared_effects_reach_handlers_through_called_functions() {
     // called functions.
     let many = r#"
         effect Op: i64 -> i64;
-        fn a() -> i64 ! {Op, panic} { perform Op(20) }
-        fn b() -> i64 ! {Op, panic} { perform Op(1) }
-        fn main() -> i64 ! {panic} {
+        fn a() -> i64 ! {Op} { perform Op(20) }
+        fn b() -> i64 ! {Op} { perform Op(1) }
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
@@ -875,8 +875,8 @@ fn declared_effects_reach_handlers_through_called_functions() {
     // function-entry depth restoration must make the next perform handlerless.
     let loop_restore = r#"
         effect Op: i64 -> i64;
-        fn next() -> i64 ! {Op, panic} { perform Op(1) }
-        fn main() -> i64 ! {panic} {
+        fn next() -> i64 ! {Op} { perform Op(1) }
+        fn main() -> i64 ! {} {
             let mut i = 0;
             let mut sum = 0;
             while i < 2 {
@@ -899,8 +899,8 @@ fn declared_effects_reach_handlers_through_called_functions() {
     agrees(loop_restore, 3);
     let restored = r#"
         effect Op: i64 -> i64;
-        fn next() -> i64 ! {Op, panic} { perform Op(1) }
-        fn scoped() -> i64 ! {panic} {
+        fn next() -> i64 ! {Op} { perform Op(1) }
+        fn scoped() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
@@ -908,7 +908,7 @@ fn declared_effects_reach_handlers_through_called_functions() {
                 return next();
             }
         }
-        fn main() -> i64 ! {Op, panic} {
+        fn main() -> i64 ! {Op} {
             let x = scoped();
             perform Op(2) + x
         }"#;
@@ -922,40 +922,41 @@ fn declared_effects_reach_handlers_through_called_functions() {
         r#"
         effect Op: i64 -> i64;
         effect Op: Bool -> Bool;
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "duplicate or reserved declaration",
     );
     rejects(
         r#"
         effect Op: i64 -> i64;
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {io, panic} { print_i64(x); resume(x) } {
+            ) -> i64 ! {io} { print_i64(x); resume(x) } {
                 perform Op(1)
             }
         }"#,
         "dynamically visible handler must be pure",
     );
-    rejects(
-        r#"
+    // A capturing handler whose only failure is a panic is pure.
+    let capturing = r#"
         effect Op: i64 -> i64;
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let n = 1;
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x + n) } {
+            ) -> i64 ! {} { resume(x + n) } {
                 perform Op(1)
             }
-        }"#,
-        "dynamically visible handler must be pure",
-    );
+        }"#;
+    assert_eq!(value(capturing), 2);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(capturing, 2);
     rejects(
         r#"
         effect Op: i64 -> i64;
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: Bool -> i64 with fn(
                 x: Bool,
                 resume: linear once fn(i64) -> i64 ! {},
@@ -974,8 +975,8 @@ fn capturing_dynamic_handlers_own_their_environment() {
     // frame frees the original when it pops.
     let source = r#"
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn deep() -> i64 ! {Op} { perform Op(20) }
+        fn main() -> i64 ! {alloc} {
             let n = 1;
             handle Op: i64 -> i64 with fn(
                 x: i64,
@@ -995,7 +996,7 @@ fn capturing_dynamic_handlers_own_their_environment() {
     // frame pops.
     let unused = r#"
         effect Op: i64 -> i64;
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let n = 1;
             let r = handle Op: i64 -> i64 with fn(
                 x: i64,
@@ -1016,7 +1017,7 @@ fn capturing_dynamic_handlers_own_their_environment() {
     // must drop the unconsumed owning handler exactly once.
     let early = r#"
         effect Op: i64 -> i64;
-        fn scoped() -> i64 ! {alloc, panic} {
+        fn scoped() -> i64 ! {alloc} {
             let n = 5;
             handle Op: i64 -> i64 with fn(
                 x: i64,
@@ -1025,7 +1026,7 @@ fn capturing_dynamic_handlers_own_their_environment() {
                 return n;
             }
         }
-        fn main() -> i64 ! {alloc, panic} { scoped() }"#;
+        fn main() -> i64 ! {alloc} { scoped() }"#;
     let (result, stats) = evaluate(early);
     assert_eq!(result, 5);
     assert_eq!(stats.allocations, 1);
@@ -1041,9 +1042,9 @@ fn a_once_dynamic_handler_is_consumed_by_its_first_perform() {
     // aborts rather than reusing freed state.
     let source = r#"
         effect Op: i64 -> i64;
-        fn a() -> i64 ! {Op, panic} { perform Op(1) }
-        fn b() -> i64 ! {Op, panic} { perform Op(2) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn a() -> i64 ! {Op} { perform Op(1) }
+        fn b() -> i64 ! {Op} { perform Op(2) }
+        fn main() -> i64 ! {alloc} {
             let n = Box.new(10);
             handle Op: i64 -> i64 with fn(
                 x: i64,
@@ -1067,14 +1068,14 @@ fn tasks_inherit_copyable_dynamic_frames_with_isolated_extents() {
     let inherited = r#"
         use std.task.TaskExit;
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(10) }
-        fn main() -> i64 ! {suspend, alloc, panic} {
+        fn deep() -> i64 ! {Op} { perform Op(10) }
+        fn main() -> i64 ! {suspend, alloc} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
             ) -> i64 ! {} { resume(x) } {
-                Task.scope(fn() -> i64 ! {suspend, alloc, Op, panic} {
-                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {Op, panic} { deep() });
+                Task.scope(fn() -> i64 ! {suspend, alloc, Op} {
+                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {Op} { deep() });
                     match Task.join(t) {
                         TaskExit.Completed(v) => v,
                         TaskExit.Cancelled => 0,
@@ -1091,15 +1092,15 @@ fn tasks_inherit_copyable_dynamic_frames_with_isolated_extents() {
     let isolated = r#"
         use std.task.TaskExit;
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(10) }
-        fn main() -> i64 ! {suspend, alloc, panic} {
+        fn deep() -> i64 ! {Op} { perform Op(10) }
+        fn main() -> i64 ! {suspend, alloc} {
             let n = 1;
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
             ) -> i64 ! {} { resume(n) } {
-                Task.scope(fn() -> i64 ! {suspend, alloc, Op, panic} {
-                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {Op, panic} { deep() });
+                Task.scope(fn() -> i64 ! {suspend, alloc, Op} {
+                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {Op} { deep() });
                     match Task.join(t) {
                         TaskExit.Completed(v) => v,
                         TaskExit.Cancelled => 0,
@@ -1122,9 +1123,9 @@ fn declared_effect_names_are_checked_row_entries() {
     // body while still requiring the handler's own effects.
     let source = r#"
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
-        fn call() -> i64 ! {Op, panic} { deep() + 1 }
-        fn main() -> i64 ! {panic} {
+        fn deep() -> i64 ! {Op} { perform Op(20) }
+        fn call() -> i64 ! {Op} { deep() + 1 }
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
@@ -1139,8 +1140,8 @@ fn declared_effect_names_are_checked_row_entries() {
     rejects(
         r#"
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {panic} { perform Op(20) }
-        fn main() -> i64 ! {panic} { deep() }"#,
+        fn deep() -> i64 ! {} { perform Op(20) }
+        fn main() -> i64 ! {} { deep() }"#,
         "requires effects {Op}",
     );
     // The handle removes the operation from the enclosing requirement but not
@@ -1148,12 +1149,12 @@ fn declared_effect_names_are_checked_row_entries() {
     rejects(
         r#"
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
-        fn main() -> i64 ! {panic} {
+        fn deep() -> i64 ! {Op} { perform Op(20) }
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {io, panic} { print_i64(x); resume(x) } {
+            ) -> i64 ! {io} { print_i64(x); resume(x) } {
                 deep()
             }
         }"#,
@@ -1163,15 +1164,15 @@ fn declared_effect_names_are_checked_row_entries() {
     rejects(
         r#"
         effect Op: i64 -> i64;
-        fn main() -> i64 ! {Missing, panic} { 0 }"#,
+        fn main() -> i64 ! {Missing} { 0 }"#,
         "unknown name",
     );
     // Declared effects participate in ordinary row inference and exclusions.
     let inferred = r#"
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
-        fn apply<e: Effects>(f: fn() -> i64 ! {e}) -> i64 ! {panic, e} { f() }
-        fn main() -> i64 ! {panic} {
+        fn deep() -> i64 ! {Op} { perform Op(20) }
+        fn apply<e: Effects>(f: fn() -> i64 ! {e}) -> i64 ! {e} { f() }
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
@@ -1185,9 +1186,9 @@ fn declared_effect_names_are_checked_row_entries() {
     rejects(
         r#"
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
-        fn only<e: Effects - Op>(f: fn() -> i64 ! {e}) -> i64 ! {panic, e} { f() }
-        fn main() -> i64 ! {panic} { only(deep) }"#,
+        fn deep() -> i64 ! {Op} { perform Op(20) }
+        fn only<e: Effects - Op>(f: fn() -> i64 ! {e}) -> i64 ! {e} { f() }
+        fn main() -> i64 ! {} { only(deep) }"#,
         "excluded",
     );
     // A declared operation's dynamic perform supplies the one-shot token, so a
@@ -1195,8 +1196,8 @@ fn declared_effect_names_are_checked_row_entries() {
     rejects(
         r#"
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
-        fn main() -> i64 ! {panic} {
+        fn deep() -> i64 ! {Op} { perform Op(20) }
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: fn(i64) -> i64 ! {},
@@ -1211,29 +1212,29 @@ fn declared_effect_names_are_checked_row_entries() {
 #[test]
 fn performs_require_a_lexical_handler_and_a_exact_resume_contract() {
     rejects(
-        "fn main() -> i64 ! {panic} { perform Op(1) }",
+        "fn main() -> i64 ! {} { perform Op(1) }",
         "no lexically enclosing handler",
     );
     rejects(
         r#"
-        fn call() -> i64 ! {panic} { perform Op(1) }
-        fn main() -> i64 ! {panic} {
+        fn call() -> i64 ! {} { perform Op(1) }
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x) } { call() }
+            ) -> i64 ! {} { resume(x) } { call() }
         }"#,
         "no lexically enclosing handler",
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x) } {
-                let f: once fn() -> i64 ! {alloc, panic} =
-                    fn() -> i64 ! {alloc, panic} { perform Op(1) };
+            ) -> i64 ! {} { resume(x) } {
+                let f: once fn() -> i64 ! {alloc} =
+                    fn() -> i64 ! {alloc} { perform Op(1) };
                 f()
             }
         }"#,
@@ -1241,11 +1242,11 @@ fn performs_require_a_lexical_handler_and_a_exact_resume_contract() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: fn(Bool) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(true) } { perform Op(1) }
+            ) -> i64 ! {} { resume(true) } { perform Op(1) }
         }"#,
         "second parameter must be exactly",
     );
@@ -1258,11 +1259,11 @@ fn performs_require_a_lexical_handler_and_a_exact_resume_contract() {
 #[test]
 fn a_tail_perform_keeps_the_allocation_free_identity_resumption() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x + 1) } {
+            ) -> i64 ! {} { resume(x + 1) } {
                 perform Op(20)
             }
         }"#;
@@ -1280,34 +1281,30 @@ fn non_tail_resumption_rejects_unsupported_continuation_shapes() {
     let handler = r#"handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { let r = resume(x); r * 2 }"#;
+            ) -> i64 ! {} { let r = resume(x); r * 2 }"#;
     // A perform nested in an operand and several performs are resumable.
     let nested =
-        format!("fn main() -> i64 ! {{panic}} {{ {handler} {{ let a = perform Op(20) + 1; a }} }}");
+        format!("fn main() -> i64 ! {{}} {{ {handler} {{ let a = perform Op(20) + 1; a }} }}");
     assert_eq!(value(&nested), 42);
     let several = format!(
-        "fn main() -> i64 ! {{alloc, panic}} {{ {handler} {{ let a = perform Op(1); let b = perform Op(2); a + b }} }}"
+        "fn main() -> i64 ! {{alloc}} {{ {handler} {{ let a = perform Op(1); let b = perform Op(2); a + b }} }}"
     );
     // resume(1) -> resume(2) -> 3, doubled by the inner then the outer
     // handler activation.
     assert_eq!(value(&several), 12);
     // The body result is the operation result under real resumption.
     rejects(
-        &format!(
-            "fn main() -> i64 ! {{panic}} {{ {handler} {{ let a = perform Op(20); a > 0 }} }}"
-        ),
+        &format!("fn main() -> i64 ! {{}} {{ {handler} {{ let a = perform Op(20); a > 0 }} }}"),
         "type mismatch",
     );
     // Control transfers cannot cross the resumption boundary.
     rejects(
-        &format!(
-            "fn main() -> i64 ! {{panic}} {{ {handler} {{ let a = perform Op(20); return a; }} }}"
-        ),
+        &format!("fn main() -> i64 ! {{}} {{ {handler} {{ let a = perform Op(20); return a; }} }}"),
         "cannot 'return' out of the handled body",
     );
     rejects(
         &format!(
-            "fn main() -> i64 ! {{panic}} {{ let mut i = 0; while i < 2 {{ i = i + 1; {handler} {{ let a = perform Op(20); if a > 0 {{ break; }} a }}; }} i }}"
+            "fn main() -> i64 ! {{}} {{ let mut i = 0; while i < 2 {{ i = i + 1; {handler} {{ let a = perform Op(20); if a > 0 {{ break; }} a }}; }} i }}"
         ),
         "cannot 'break' or 'continue' to a loop outside the handled body",
     );
@@ -1316,11 +1313,11 @@ fn non_tail_resumption_rejects_unsupported_continuation_shapes() {
     assert_eq!(
         value(
             r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x) } {
+            ) -> i64 ! {} { resume(x) } {
                 let a = perform Op(20);
                 return a + 1;
             }
@@ -1334,11 +1331,11 @@ fn non_tail_resumption_rejects_unsupported_continuation_shapes() {
         r#"
         #[linear]
         struct Token { id: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: Token -> Token with fn(
                 x: Token,
                 resume: linear once fn(Token) -> Token ! {},
-            ) -> Token ! {panic} { let r = resume(x); r } {
+            ) -> Token ! {} { let r = resume(x); r } {
                 let a = perform Op(Token { id: 1 });
                 a
             }
@@ -1353,7 +1350,7 @@ fn multishot_resumption_reuses_a_capture_free_continuation() {
     // The continuation owns no environment, so each call re-runs the suffix
     // from the perform point with the supplied value.
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: fn(i64) -> i64 ! {},
@@ -1371,7 +1368,7 @@ fn multishot_resumption_reuses_a_capture_free_continuation() {
     // A tail perform with a copyable token is the allocation-free identity
     // resumption, callable repeatedly.
     let tail = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: fn(i64) -> i64 ! {},
@@ -1389,7 +1386,7 @@ fn multishot_resumption_reuses_a_capture_free_continuation() {
     // than silently sharing an environment.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let n = 1;
             handle Op: i64 -> i64 with fn(
                 x: i64,
@@ -1409,7 +1406,7 @@ fn multishot_resumption_reuses_a_capture_free_continuation() {
         r#"
         #[linear]
         struct Token { id: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: Token -> Token with fn(
                 x: Token,
                 resume: fn(Token) -> Token ! {},
@@ -1428,7 +1425,7 @@ fn non_tail_continuation_effects_are_visible_at_the_handle() {
     // prints. The enclosing row must still require io.
     rejects(
         r#"
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
@@ -1441,7 +1438,7 @@ fn non_tail_continuation_effects_are_visible_at_the_handle() {
         "requires effects {io}",
     );
     let source = r#"
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
@@ -1459,12 +1456,12 @@ fn non_tail_resumption_preserves_handler_and_continuation_order() {
     // The handler runs before and after `resume`; the continuation observes the
     // resumed value, and the handler sees the continuation result.
     let source = r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let n = 1;
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} {
+            ) -> i64 ! {} {
                 let r = resume(x + 1);
                 r * 2 + n
             } {
@@ -1486,7 +1483,7 @@ fn non_tail_resumption_preserves_handler_and_continuation_order() {
 fn mutable_scalar_locals_index_erased_proofs_at_their_current_version() {
     let source = r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 5;
             let a = keep(n, refl::<i64>(n));
             n = 7;
@@ -1503,7 +1500,7 @@ fn total_logical_evidence_is_independent_and_versioned() {
     let source = r#"
         total fn same_i64(n: i64) -> Eq<i64, n, n> ! {} { refl::<i64>(n) }
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 5;
             let a = keep(n, same_i64(n));
             n = 7;
@@ -1517,7 +1514,7 @@ fn total_logical_evidence_is_independent_and_versioned() {
 fn branch_and_loop_joins_preserve_only_agreed_literal_indices() {
     let same_branches = r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 0;
             if true { n = 6; } else { n = 6; }
             let a = keep(n, refl::<i64>(6));
@@ -1533,7 +1530,7 @@ fn branch_and_loop_joins_preserve_only_agreed_literal_indices() {
     rejects(
         r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 0;
             if true { n = 0; } else { n = 1; }
             keep(n, refl::<i64>(0))
@@ -1545,7 +1542,7 @@ fn branch_and_loop_joins_preserve_only_agreed_literal_indices() {
     rejects(
         r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 6;
             while false { n = 7; }
             keep(n, refl::<i64>(6))
@@ -1555,7 +1552,7 @@ fn branch_and_loop_joins_preserve_only_agreed_literal_indices() {
     // A loop that never assigns keeps the joined literal index alive.
     let loop_preserves = r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 0;
             if true { n = 6; } else { n = 6; }
             while false { let _copy = n; }
@@ -1569,7 +1566,7 @@ fn proof_valued_locals_are_erased_aliases_with_checked_terms() {
     let source = r#"
         total fn same_i64(n: i64) -> Eq<i64, n, n> ! {} { refl::<i64>(n) }
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 5;
             let p = same_i64(n);
             let q = p;
@@ -1581,7 +1578,7 @@ fn proof_valued_locals_are_erased_aliases_with_checked_terms() {
     // A proof-valued local has no runtime representation.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = refl::<i64>(1);
             p
         }"#,
@@ -1593,7 +1590,7 @@ fn proof_valued_locals_are_erased_aliases_with_checked_terms() {
         prop ZeroI<n: i64> { Zero: ZeroI<0> }
         total fn zero_proof() -> ZeroI<0> ! {} { ZeroI.Zero::<0> }
         fn keep_zero(n: i64, erased p: ZeroI<n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 1;
             let p = zero_proof();
             keep_zero(n, p)
@@ -1607,7 +1604,7 @@ fn an_old_value_proof_cannot_be_reused_after_a_write() {
     rejects(
         r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 5;
             let a = keep(n, refl::<i64>(n));
             n = 6;
@@ -1621,7 +1618,7 @@ fn an_old_value_proof_cannot_be_reused_after_a_write() {
 fn scalar_aliases_keep_the_copied_kernel_index_and_freeze_before_mutation() {
     let source = r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n: i64 = 5;
             let m = n;
             keep(n, refl::<i64>(m)) + keep(m, refl::<i64>(n))
@@ -1629,7 +1626,7 @@ fn scalar_aliases_keep_the_copied_kernel_index_and_freeze_before_mutation() {
     assert_eq!(value(source), 10);
     let frozen = r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n: i64 = 5;
             let m = n;
             n = 6;
@@ -1641,7 +1638,7 @@ fn scalar_aliases_keep_the_copied_kernel_index_and_freeze_before_mutation() {
     rejects(
         r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n: i64 = 5;
             let m = n;
             n = 6;
@@ -1653,7 +1650,7 @@ fn scalar_aliases_keep_the_copied_kernel_index_and_freeze_before_mutation() {
     // fresh unconstrained indices.
     let chained = r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n: i64 = 4;
             let a = n;
             let b = a;
@@ -1666,12 +1663,12 @@ fn scalar_aliases_keep_the_copied_kernel_index_and_freeze_before_mutation() {
 fn proof_parameters_survive_unrelated_versioned_binders() {
     let source = r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn outer(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {panic} {
+        fn outer(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} {
             let mut x = 3;
             x = 4;
             keep(n, p) + x
         }
-        fn main() -> i64 ! {panic} { outer(5, refl::<i64>(5)) }"#;
+        fn main() -> i64 ! {} { outer(5, refl::<i64>(5)) }"#;
     assert_eq!(value(source), 9);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 9);
@@ -1684,9 +1681,9 @@ fn mutable_scalar_capture_is_a_live_view_with_a_checked_loan() {
     // that call is rejected; after the call the binding is free again.
     let source = r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut n = 5;
-            let f = fn() -> i64 ! {alloc, panic} { keep(n, refl::<i64>(n)) };
+            let f = fn() -> i64 ! {alloc} { keep(n, refl::<i64>(n)) };
             let value = f();
             n = 6;
             value + n
@@ -1695,9 +1692,9 @@ fn mutable_scalar_capture_is_a_live_view_with_a_checked_loan() {
     rejects(
         r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut n = 5;
-            let f = fn() -> i64 ! {alloc, panic} { keep(n, refl::<i64>(n)) };
+            let f = fn() -> i64 ! {alloc} { keep(n, refl::<i64>(n)) };
             n = 6;
             f() + n
         }"#,
@@ -1712,7 +1709,7 @@ fn mutable_scalar_capture_is_a_live_view_with_a_checked_loan() {
 #[test]
 fn runtime_sized_inline_arrays_push_grow_and_read() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = DynArray.new::<i64, 4>();
             let mut i = 0;
             while i < 3 {
@@ -1729,7 +1726,7 @@ fn runtime_sized_inline_arrays_push_grow_and_read() {
 #[test]
 fn runtime_sized_arrays_drop_only_the_initialized_owning_prefix() {
     let source = r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 3> = DynArray.new::<Box<i64>, 3>();
             let a = DynArray.push(a, Box.new(1));
             let a = DynArray.push(a, Box.new(2));
@@ -1746,7 +1743,7 @@ fn runtime_sized_arrays_drop_only_the_initialized_owning_prefix() {
 #[test]
 fn runtime_sized_arrays_check_capacity_and_bounds_at_runtime() {
     let overflow = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 1> = DynArray.new::<i64, 1>();
             let a = DynArray.push(a, 1);
             let a = DynArray.push(a, 2);
@@ -1756,7 +1753,7 @@ fn runtime_sized_arrays_check_capacity_and_bounds_at_runtime() {
     let error = program.evaluate(&mut Vec::new()).unwrap_err();
     assert!(error.message.contains("capacity exceeded"), "{error:?}");
     let bounds = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 2> = DynArray.new::<i64, 2>();
             let a = DynArray.push(a, 1);
             DynArray.get(&a, 1)
@@ -1769,7 +1766,7 @@ fn runtime_sized_arrays_check_capacity_and_bounds_at_runtime() {
 #[test]
 fn runtime_sized_arrays_set_and_pop_copyable_slots() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = DynArray.new::<i64, 4>();
             let a = DynArray.push(a, 1);
             let a = DynArray.push(a, 2);
@@ -1783,7 +1780,7 @@ fn runtime_sized_arrays_set_and_pop_copyable_slots() {
     agrees(source, 46);
     // Popping back to empty is checked, not a sentinel value.
     let drained = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 2> = DynArray.new::<i64, 2>();
             let a = DynArray.push(a, 7);
             let (a, x) = DynArray.pop(a);
@@ -1794,7 +1791,7 @@ fn runtime_sized_arrays_set_and_pop_copyable_slots() {
     assert!(program.evaluate(&mut Vec::new()).is_err());
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 2> = DynArray.new();
             let a = DynArray.push(a, Box.new(1));
             let (a, _) = DynArray.pop(a);
@@ -1804,7 +1801,7 @@ fn runtime_sized_arrays_set_and_pop_copyable_slots() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 2> = DynArray.new();
             let a = DynArray.push(a, Box.new(1));
             let a = DynArray.set(a, 0, Box.new(2));
@@ -1813,7 +1810,7 @@ fn runtime_sized_arrays_set_and_pop_copyable_slots() {
         "owning, linear, and view elements",
     );
     let out_of_bounds = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 2> = DynArray.new::<i64, 2>();
             let a = DynArray.push(a, 1);
             let a = DynArray.set(a, 1, 2);
@@ -1827,16 +1824,16 @@ fn runtime_sized_arrays_set_and_pop_copyable_slots() {
 #[test]
 fn runtime_sized_array_layout_contracts_are_checked() {
     rejects(
-        "fn main() -> i64 ! {alloc, panic} { let a: DynArray<i64, 32> = DynArray.new(); 0 }",
+        "fn main() -> i64 ! {alloc} { let a: DynArray<i64, 32> = DynArray.new(); 0 }",
         "capacity must be 1..31",
     );
     rejects(
-        "fn main() -> i64 ! {panic} { let a: DynArray<i64, 0> = DynArray.new(); 0 }",
+        "fn main() -> i64 ! {} { let a: DynArray<i64, 0> = DynArray.new(); 0 }",
         "capacity must be 1..31",
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 2] = [1, 2];
             let a: DynArray<&mut [i64], 1> = DynArray.new();
             0
@@ -1856,8 +1853,8 @@ fn structural_width_coercion_reorders_and_drops_affine_fields() {
     // dropped exactly once by the checked conversion.
     let source = r#"
         struct Wide { b: i64, a: i64, extra: Box<i64> }
-        fn sum(v: struct { a: i64, b: i64 }) -> i64 ! {panic} { v.a + v.b }
-        fn main() -> i64 ! {alloc, panic} {
+        fn sum(v: struct { a: i64, b: i64 }) -> i64 ! {} { v.a + v.b }
+        fn main() -> i64 ! {alloc} {
             let w = Wide { b: 20, a: 22, extra: Box.new(1) };
             sum(w)
         }"#;
@@ -1871,8 +1868,8 @@ fn structural_alias_and_parameter_share_the_canonical_row() {
     let source = r#"
         struct Point { x: i64, y: i64, tag: Bool }
         type Pair = struct { y: i64, x: i64 };
-        fn read(p: Pair) -> i64 ! {panic} { p.x - p.y }
-        fn main() -> i64 ! {panic} {
+        fn read(p: Pair) -> i64 ! {} { p.x - p.y }
+        fn main() -> i64 ! {} {
             read(Point { x: 42, y: 0, tag: true })
         }"#;
     assert_eq!(value(source), 42);
@@ -1883,15 +1880,15 @@ fn structural_missing_field_and_changed_borrowed_leaf_are_rejected() {
     rejects(
         r#"
         struct Point { x: i64 }
-        fn read(p: struct { x: i64, y: i64 }) -> i64 ! {panic} { p.x + p.y }
-        fn main() -> i64 ! {panic} { read(Point { x: 1 }) }"#,
+        fn read(p: struct { x: i64, y: i64 }) -> i64 ! {} { p.x + p.y }
+        fn main() -> i64 ! {} { read(Point { x: 1 }) }"#,
         "no field 'y'",
     );
     rejects(
         r#"
         struct Window<'a> { view: &'a mut [i64], n: i64 }
         fn keep<'a>(w: struct { view: &'a [i64], n: i64 }) -> i64 ! {} { w.n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [1, 2];
             keep(Window { view: &mut a[..], n: 1 })
         }"#,
@@ -1906,8 +1903,8 @@ fn structural_width_cannot_erase_a_linear_field() {
         #[linear]
         struct Token { id: i64 }
         struct Wide { a: i64, token: Token }
-        fn read(v: struct { a: i64 }) -> i64 ! {panic} { v.a }
-        fn main() -> i64 ! {panic} {
+        fn read(v: struct { a: i64 }) -> i64 ! {} { v.a }
+        fn main() -> i64 ! {} {
             let token = Token { id: 1 };
             read(Wide { a: 1, token: token })
         }"#,
@@ -1920,13 +1917,13 @@ fn structural_nested_width_and_field_union_injection_coerce() {
     let source = r#"
         struct Inner { x: i64, extra: Box<i64> }
         struct Outer { inner: Inner, tag: i64 }
-        fn read(v: struct { inner: struct { x: i64 }, tag: i64 | Bool }) -> i64 ! {panic} {
+        fn read(v: struct { inner: struct { x: i64 }, tag: i64 | Bool }) -> i64 ! {} {
             match v.tag {
                 i64 @ n => v.inner.x + n,
                 Bool @ _ => 0,
             }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             read(Outer { inner: Inner { x: 40, extra: Box.new(1) }, tag: 2 })
         }"#;
     let (result, stats) = evaluate(source);
@@ -1938,14 +1935,14 @@ fn structural_nested_width_and_field_union_injection_coerce() {
     let nested_union = r#"
         struct Inner { v: i64 | Bool }
         struct Outer { inner: Inner }
-        fn read(v: struct { inner: struct { v: i64 | Bool | Unit } }) -> i64 ! {panic} {
+        fn read(v: struct { inner: struct { v: i64 | Bool | Unit } }) -> i64 ! {} {
             match v.inner.v {
                 i64 @ n => n,
                 Bool @ _ => 0,
                 Unit @ _ => 0,
             }
         }
-        fn main() -> i64 ! {panic} { read(Outer { inner: Inner { v: 40 } }) + 2 }"#;
+        fn main() -> i64 ! {} { read(Outer { inner: Inner { v: 40 } }) + 2 }"#;
     assert_eq!(value(nested_union), 42);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(nested_union, 42);
@@ -1954,7 +1951,7 @@ fn structural_nested_width_and_field_union_injection_coerce() {
 #[test]
 fn structural_record_literals_and_generic_patterns_share_the_canonical_row() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let r = struct { b: 2, a: 40 };
             let n = match r {
                 struct { a, b } => a + b,
@@ -1970,7 +1967,7 @@ fn structural_record_literals_and_generic_patterns_share_the_canonical_row() {
     // A literal is a real source row: width coercion drops extra fields and a
     // retained atom may still be injected into a union field.
     let coercing = r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let wide = struct { extra: Box.new(1), a: 41, tag: true };
             let narrow: struct { a: i64 | Bool } = wide;
             match narrow.a {
@@ -1989,7 +1986,7 @@ fn structural_record_literals_and_generic_patterns_share_the_canonical_row() {
     let narrowed = r#"
         struct A { left: i64, right: i64 }
         struct B { flag: Bool }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let value: A | B = A { left: 20, right: 22 };
             match value {
                 struct { left, right } => left + right,
@@ -1999,7 +1996,7 @@ fn structural_record_literals_and_generic_patterns_share_the_canonical_row() {
     assert_eq!(value(narrowed), 42);
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let r = struct { a: 1 };
             match r { struct { missing } => missing }
         }"#,
@@ -2014,15 +2011,15 @@ fn structural_callable_field_adapts_arrow_representation() {
     // structural conversion must generate a checked adapter instead of copying
     // the code pointer.
     let source = r#"
-        fn widen(value: i64 | Bool) -> i64 ! {panic} {
+        fn widen(value: i64 | Bool) -> i64 ! {} {
             match value { i64 @ n => n, Bool @ _ => 0 }
         }
-        struct Holder { f: fn(i64 | Bool) -> i64 ! {panic}, tag: Bool }
-        fn call(v: struct { f: once fn(i64) -> i64 ! {panic} }) -> i64 ! {panic} {
+        struct Holder { f: fn(i64 | Bool) -> i64 ! {}, tag: Bool }
+        fn call(v: struct { f: once fn(i64) -> i64 ! {} }) -> i64 ! {} {
             let struct { f } = v;
             f(21) * 2
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             call(Holder { f: widen, tag: true })
         }"#;
     let (result, stats) = evaluate(source);
@@ -2035,12 +2032,12 @@ fn structural_callable_field_adapts_arrow_representation() {
     // capture the dynamic code pointer in a pure arrow, so it stays rejected.
     rejects(
         r#"
-        fn both(value: i64 | Bool) -> i64 ! {panic} {
+        fn both(value: i64 | Bool) -> i64 ! {} {
             match value { i64 @ n => n, Bool @ _ => 0 }
         }
-        struct Holder { f: fn(i64 | Bool) -> i64 ! {panic} }
-        fn read(v: struct { f: fn(i64) -> i64 ! {panic} }) -> i64 ! {panic} { v.f(42) }
-        fn main() -> i64 ! {panic} { read(Holder { f: both }) }"#,
+        struct Holder { f: fn(i64 | Bool) -> i64 ! {} }
+        fn read(v: struct { f: fn(i64) -> i64 ! {} }) -> i64 ! {} { v.f(42) }
+        fn main() -> i64 ! {} { read(Holder { f: both }) }"#,
         "pure function has no environment",
     );
 }
@@ -2052,12 +2049,12 @@ fn structural_callable_field_preserves_borrow_and_linear_obligations() {
     // ordinary structural borrow-provenance tests cover reordered view fields;
     // this hostile case keeps the callable path from weakening that rule.
     rejects(
-        r#"struct Window<'a> { start: i64, view: &'a [i64], f: fn(i64) -> i64 ! {panic} }
-        fn noop(n: i64) -> i64 ! {panic} { n }
-        fn main() -> i64 ! {alloc, panic} {
+        r#"struct Window<'a> { start: i64, view: &'a [i64], f: fn(i64) -> i64 ! {} }
+        fn noop(n: i64) -> i64 ! {} { n }
+        fn main() -> i64 ! {alloc} {
             let mut data: Vec<i64> = [40];
             let w = Window { start: 0, view: &data[..], f: noop };
-            let narrow: struct { f: once fn(i64) -> i64 ! {panic}, view: &[i64] } = w;
+            let narrow: struct { f: once fn(i64) -> i64 ! {}, view: &[i64] } = w;
             match narrow { struct { view, .. } => { data = [9]; Slice.get(view, 0) } }
         }"#,
         "mixed borrowed record",
@@ -2066,17 +2063,17 @@ fn structural_callable_field_preserves_borrow_and_linear_obligations() {
     // once. Calling the converted field consumes it and releases the
     // environment exactly once.
     let source = r#"
-        fn widen(value: i64 | Bool) -> i64 ! {panic} {
+        fn widen(value: i64 | Bool) -> i64 ! {} {
             match value { i64 @ n => n, Bool @ _ => 0 }
         }
-        struct Holder { f: linear once fn(i64 | Bool) -> i64 ! {panic}, tag: Bool }
-        fn call(v: struct { f: linear once fn(i64) -> i64 ! {panic} }) -> i64 ! {alloc, panic} {
+        struct Holder { f: linear once fn(i64 | Bool) -> i64 ! {}, tag: Bool }
+        fn call(v: struct { f: linear once fn(i64) -> i64 ! {} }) -> i64 ! {alloc} {
             let struct { f } = v;
             f(42)
         }
-        fn main() -> i64 ! {alloc, panic} {
-            let make: linear once fn(i64 | Bool) -> i64 ! {panic} =
-                fn(value: i64 | Bool) -> i64 ! {panic} { widen(value) };
+        fn main() -> i64 ! {alloc} {
+            let make: linear once fn(i64 | Bool) -> i64 ! {} =
+                fn(value: i64 | Bool) -> i64 ! {} { widen(value) };
             call(Holder { f: make, tag: true })
         }"#;
     let (result, stats) = evaluate(source);
@@ -2087,13 +2084,13 @@ fn structural_callable_field_preserves_borrow_and_linear_obligations() {
     // A linear callable retained by the conversion still imposes its
     // obligation: the converted record cannot simply be discarded.
     rejects(
-        r#"fn noop(n: i64) -> i64 ! {panic} { n }
-        struct Holder { f: linear once fn(i64) -> i64 ! {panic} }
-        fn main() -> i64 ! {alloc, panic} {
-            let f: linear once fn(i64) -> i64 ! {panic} =
-                fn(n: i64) -> i64 ! {panic} { noop(n) };
+        r#"fn noop(n: i64) -> i64 ! {} { n }
+        struct Holder { f: linear once fn(i64) -> i64 ! {} }
+        fn main() -> i64 ! {alloc} {
+            let f: linear once fn(i64) -> i64 ! {} =
+                fn(n: i64) -> i64 ! {} { noop(n) };
             let h = Holder { f: f };
-            let narrow: struct { f: linear once fn(i64) -> i64 ! {panic} } = h;
+            let narrow: struct { f: linear once fn(i64) -> i64 ! {} } = h;
             drop(narrow);
             0
         }"#,
@@ -2106,7 +2103,7 @@ fn structural_borrowed_field_transfer_keeps_cleanup_balanced() {
     let source = r#"
         struct View<'a> { view: &'a mut [i64], n: i64, extra: Box<i64> }
         fn keep<'a>(v: struct { n: i64, view: &'a mut [i64] }) -> i64 ! {} { v.n }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a: [i64; 2] = [1, 2];
             keep(View { view: &mut a[..], n: 42, extra: Box.new(1) })
         }"#;
@@ -2123,8 +2120,8 @@ fn open_row_parameters_accept_records_with_the_named_fields() {
     // unification that preserves the extra fields.
     let source = r#"
         struct Wide { flag: Bool, x: i64, extra: Box<i64> }
-        fn read(v: struct { x: i64, .. }) -> i64 ! {panic} { v.x }
-        fn main() -> i64 ! {alloc, panic} {
+        fn read(v: struct { x: i64, .. }) -> i64 ! {} { v.x }
+        fn main() -> i64 ! {alloc} {
             read(Wide { flag: true, x: 42, extra: Box.new(1) })
         }"#;
     let (result, stats) = evaluate(source);
@@ -2136,8 +2133,8 @@ fn open_row_parameters_accept_records_with_the_named_fields() {
     // An empty open row accepts any record whose fields can be erased.
     let empty = r#"
         struct Wide { x: i64, extra: Box<i64> }
-        fn ignore(v: struct { .. }) -> i64 ! {panic} { 42 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn ignore(v: struct { .. }) -> i64 ! {} { 42 }
+        fn main() -> i64 ! {alloc} {
             ignore(Wide { x: 1, extra: Box.new(2) })
         }"#;
     let (result, stats) = evaluate(empty);
@@ -2150,8 +2147,8 @@ fn open_row_parameters_accept_records_with_the_named_fields() {
     rejects(
         r#"
         struct Point { y: i64 }
-        fn read(v: struct { x: i64, .. }) -> i64 ! {panic} { v.x }
-        fn main() -> i64 ! {panic} { read(Point { y: 1 }) }"#,
+        fn read(v: struct { x: i64, .. }) -> i64 ! {} { v.x }
+        fn main() -> i64 ! {} { read(Point { y: 1 }) }"#,
         "no field 'x'",
     );
     // Erasing an extra linear field is not allowed: the target cannot consume
@@ -2161,8 +2158,8 @@ fn open_row_parameters_accept_records_with_the_named_fields() {
         #[linear]
         struct Token { id: i64 }
         struct Wide { x: i64, token: Token }
-        fn read(v: struct { x: i64, .. }) -> i64 ! {panic} { v.x }
-        fn main() -> i64 ! {panic} {
+        fn read(v: struct { x: i64, .. }) -> i64 ! {} { v.x }
+        fn main() -> i64 ! {} {
             let token = Token { id: 1 };
             read(Wide { x: 1, token: token })
         }"#,
@@ -2173,9 +2170,9 @@ fn open_row_parameters_accept_records_with_the_named_fields() {
     rejects(
         r#"
         impl struct { x: i64, .. } {
-            fn read_x(self: Self) -> i64 ! {panic} { self.x }
+            fn read_x(self: Self) -> i64 ! {} { self.x }
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "open row",
     );
 }
@@ -2187,10 +2184,10 @@ fn structural_records_are_impl_receivers() {
     // uses that row's type identity.
     let source = r#"
         impl struct { x: i64, y: i64 } {
-            fn sum(self: Self) -> i64 ! {panic} { self.x + self.y }
+            fn sum(self: Self) -> i64 ! {} { self.x + self.y }
         }
         struct Point { x: i64, y: i64, tag: Bool }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p: struct { x: i64, y: i64 } = Point { x: 20, y: 22, tag: true };
             p.sum()
         }"#;
@@ -2200,20 +2197,20 @@ fn structural_records_are_impl_receivers() {
     // An inherent impl may take a borrowed receiver of the structural row.
     let borrowed = r#"
         impl struct { x: i64 } {
-            fn twice(self: &Self) -> i64 ! {panic} { self.x * 2 }
+            fn twice(self: &Self) -> i64 ! {} { self.x * 2 }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let r: struct { x: i64 } = struct { x: 21 };
             r.twice()
         }"#;
     assert_eq!(value(borrowed), 42);
     // A generic structural header binds its parameter from the canonical row.
     let generic = r#"
-        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        trait Tag { fn tag(self: Self) -> i64 ! {}; }
         impl<T> Tag for struct { value: T } {
-            fn tag(self: Self) -> i64 ! {panic} { 42 }
+            fn tag(self: Self) -> i64 ! {} { 42 }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let r: struct { value: Bool } = struct { value: true };
             r.tag()
         }"#;
@@ -2222,20 +2219,20 @@ fn structural_records_are_impl_receivers() {
     // overlap exactly and remain a duplicate-implementation error.
     rejects(
         r#"
-        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
-        impl Tag for struct { value: i64 } { fn tag(self: Self) -> i64 ! {panic} { 1 } }
-        impl Tag for struct { value: i64 } { fn tag(self: Self) -> i64 ! {panic} { 2 } }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        trait Tag { fn tag(self: Self) -> i64 ! {}; }
+        impl Tag for struct { value: i64 } { fn tag(self: Self) -> i64 ! {} { 1 } }
+        impl Tag for struct { value: i64 } { fn tag(self: Self) -> i64 ! {} { 2 } }
+        fn main() -> i64 ! {} { 0 }"#,
         "duplicate implementation",
     );
     // Structural and nominal impls of the same trait stay disjoint: a
     // structural header never matches a nominal record implicitly.
     let disjoint = r#"
-        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        trait Tag { fn tag(self: Self) -> i64 ! {}; }
         struct Point { x: i64 }
-        impl Tag for Point { fn tag(self: Self) -> i64 ! {panic} { 40 } }
-        impl Tag for struct { x: i64 } { fn tag(self: Self) -> i64 ! {panic} { 42 } }
-        fn main() -> i64 ! {panic} {
+        impl Tag for Point { fn tag(self: Self) -> i64 ! {} { 40 } }
+        impl Tag for struct { x: i64 } { fn tag(self: Self) -> i64 ! {} { 42 } }
+        fn main() -> i64 ! {} {
             let p = Point { x: 1 };
             let s: struct { x: i64 } = struct { x: 2 };
             let a = p.tag();
@@ -2254,14 +2251,14 @@ fn dynamically_resolved_perform_requires_panic() {
         effect Op: i64 -> i64;
         fn pure() -> i64 ! {} { perform Op(20) }
         fn main() -> i64 ! {} { pure() }"#,
-        "requires effects {panic, Op}",
+        "requires effects {Op}",
     );
 }
 
 #[test]
 fn runtime_sized_array_literals_set_the_runtime_length() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [10, 20, 30];
             let empty: DynArray<i64, 2> = [];
             DynArray.len(&a) + DynArray.get(&a, 2) + DynArray.len(&empty)
@@ -2281,7 +2278,7 @@ fn runtime_sized_array_literals_set_the_runtime_length() {
     agrees(literal, 2);
     // Owning elements in a literal are dropped as a prefix.
     let owning = r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 3> = [Box.new(1), Box.new(2)];
             DynArray.len(&a)
         }"#;
@@ -2301,7 +2298,7 @@ fn runtime_sized_array_literals_set_the_runtime_length() {
     );
     // Multi-word elements keep their layout through a literal and a view.
     let widened = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<[i64; 2], 3> = [[1, 2], [3, 4]];
             let view: &[[i64; 2]] = &a[..];
             let row = Slice.get(view, 1);
@@ -2315,8 +2312,8 @@ fn runtime_sized_array_literals_set_the_runtime_length() {
 #[test]
 fn runtime_sized_array_slice_views_cover_the_live_prefix() {
     let source = r#"
-        fn head(s: &[i64]) -> i64 ! {panic} { Slice.get(s, 0) }
-        fn main() -> i64 ! {io, panic} {
+        fn head(s: &[i64]) -> i64 ! {} { Slice.get(s, 0) }
+        fn main() -> i64 ! {io} {
             let a: DynArray<i64, 4> = [10, 20, 30];
             let all: &[i64] = &a[..];
             let middle = &a[1..3];
@@ -2331,7 +2328,7 @@ fn runtime_sized_array_slice_views_cover_the_live_prefix() {
     agrees(source, 75);
     // The range is checked against the runtime length, not the capacity.
     let out_of_bounds = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1, 2, 3];
             let bad: &[i64] = &a[0..4];
             Slice.len(bad)
@@ -2345,7 +2342,7 @@ fn runtime_sized_array_slice_views_cover_the_live_prefix() {
     // A view is invalidated by push, pop, assignment, or moving the owner.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [1, 2];
             let view: &[i64] = &a[..];
             a = DynArray.push(a, 3);
@@ -2355,7 +2352,7 @@ fn runtime_sized_array_slice_views_cover_the_live_prefix() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1, 2];
             let view: &[i64] = &a[..];
             drop(a);
@@ -2364,7 +2361,7 @@ fn runtime_sized_array_slice_views_cover_the_live_prefix() {
         "move",
     );
     let runtime_bounds = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1, 2];
             let bad: &[i64] = &a[0..3];
             Slice.len(bad)
@@ -2381,7 +2378,7 @@ fn runtime_sized_array_slice_views_cover_the_live_prefix() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 2> = [Box.new(1)];
             let view: &[Box<i64>] = &a[..];
             Slice.len(view)
@@ -2390,7 +2387,7 @@ fn runtime_sized_array_slice_views_cover_the_live_prefix() {
     );
     // Releasing the view at the end of its block permits a later push.
     let released = r#"
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut a: DynArray<i64, 4> = [1, 2];
             { let view: &[i64] = &a[..]; print_i64(Slice.len(view)); }
             a = DynArray.push(a, 3);
@@ -2404,7 +2401,7 @@ fn runtime_sized_array_slice_views_cover_the_live_prefix() {
 #[test]
 fn runtime_sized_array_mutable_views_write_the_live_prefix() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [10, 20, 30];
             {
                 let view: &mut [i64] = &mut a[1..3];
@@ -2419,7 +2416,7 @@ fn runtime_sized_array_mutable_views_write_the_live_prefix() {
     // Writes through the view are visible to the owner and survive a later
     // push after the view is released.
     let released = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [1];
             {
                 let view: &mut [i64] = &mut a[..];
@@ -2434,7 +2431,7 @@ fn runtime_sized_array_mutable_views_write_the_live_prefix() {
     // A mutable view requires a mutable owner and an exclusive range.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1, 2];
             let view: &mut [i64] = &mut a[..];
             Slice.len(view)
@@ -2444,7 +2441,7 @@ fn runtime_sized_array_mutable_views_write_the_live_prefix() {
     // Two exclusive views of the same live prefix alias, so they are rejected.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [1, 2];
             let first: &mut [i64] = &mut a[..];
             let second: &mut [i64] = &mut a[..];
@@ -2455,7 +2452,7 @@ fn runtime_sized_array_mutable_views_write_the_live_prefix() {
     // A shared view and an exclusive view cannot coexist.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [1, 2];
             let shared: &[i64] = &a[..];
             let exclusive: &mut [i64] = &mut a[..];
@@ -2473,7 +2470,7 @@ fn runtime_sized_array_mutable_views_write_the_live_prefix() {
     ] {
         let source = format!(
             r#"
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let mut a: DynArray<i64, 4> = [1, 2];
                 let view: &mut [i64] = &mut a[..];
                 {body}
@@ -2484,7 +2481,7 @@ fn runtime_sized_array_mutable_views_write_the_live_prefix() {
     // The descriptor length is the live prefix, so an out-of-prefix write
     // panics instead of touching an uninitialized capacity slot.
     let out_of_bounds = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [1, 2];
             let view: &mut [i64] = &mut a[..];
             Slice.set(view, 2, 3);
@@ -2499,7 +2496,7 @@ fn runtime_sized_array_mutable_views_write_the_live_prefix() {
 fn runtime_sized_array_field_views_alias_the_record_storage() {
     let source = r#"
         struct Holder { tag: i64, xs: DynArray<i64, 4> }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut holder = Holder { tag: 5, xs: [10, 20, 30] };
             {
                 let shared: &[i64] = &holder.xs[..];
@@ -2514,7 +2511,7 @@ fn runtime_sized_array_field_views_alias_the_record_storage() {
     let write = r#"
         struct Inner { xs: DynArray<i64, 4> }
         struct Holder { tag: i64, inner: Inner }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut holder = Holder { tag: 1, inner: Inner { xs: [4, 5, 6] } };
             {
                 let view: &mut [i64] = &mut holder.inner.xs[1..];
@@ -2532,7 +2529,7 @@ fn runtime_sized_array_field_views_alias_the_record_storage() {
     rejects(
         r#"
         struct Holder { xs: DynArray<i64, 4> }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut holder = Holder { xs: [1] };
             let view: &[i64] = &holder.xs[..];
             holder = Holder { xs: [2] };
@@ -2543,7 +2540,7 @@ fn runtime_sized_array_field_views_alias_the_record_storage() {
     rejects(
         r#"
         struct Holder { xs: DynArray<i64, 4> }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let holder = Holder { xs: [1] };
             let view: &mut [i64] = &mut holder.xs[..];
             Slice.len(view)
@@ -2554,7 +2551,7 @@ fn runtime_sized_array_field_views_alias_the_record_storage() {
     rejects(
         r#"
         struct Holder { xs: DynArray<i64, 4>, boxed: Box<i64> }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let holder = Holder { xs: [1], boxed: Box.new(2) };
             let view: &[i64] = &holder.xs[..];
             let moved = holder;
@@ -2568,8 +2565,8 @@ fn runtime_sized_array_field_views_alias_the_record_storage() {
     rejects(
         r#"
         struct Holder { xs: DynArray<i64, 4> }
-        fn make() -> Holder ! {panic} { Holder { xs: [1] } }
-        fn main() -> i64 ! {panic} {
+        fn make() -> Holder ! {} { Holder { xs: [1] } }
+        fn main() -> i64 ! {} {
             let view = { &make().xs[..] };
             Slice.len(view)
         }"#,
@@ -2588,7 +2585,7 @@ fn runtime_sized_array_field_views_alias_the_record_storage() {
 #[test]
 fn runtime_sized_array_equality_compares_the_live_prefix() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let same: DynArray<i64, 4> = [1, 2, 3];
             let copy: DynArray<i64, 4> = [1, 2, 3];
             let shorter: DynArray<i64, 4> = [1, 2];
@@ -2604,7 +2601,7 @@ fn runtime_sized_array_equality_compares_the_live_prefix() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 2);
     let floats = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<f64, 3> = [1.5, 2.5];
             let b: DynArray<f64, 3> = [1.5, 2.5];
             let c: DynArray<f64, 3> = [1.5, 2.75];
@@ -2616,7 +2613,7 @@ fn runtime_sized_array_equality_compares_the_live_prefix() {
     // Owning and non-scalar elements are not comparable by value.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 2> = [Box.new(1)];
             let b: DynArray<Box<i64>, 2> = [Box.new(1)];
             if a == b { 1 } else { 0 }
@@ -2625,7 +2622,7 @@ fn runtime_sized_array_equality_compares_the_live_prefix() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<[i64; 2], 2> = [[1, 2]];
             let b: DynArray<[i64; 2], 2> = [[1, 2]];
             if a == b { 1 } else { 0 }
@@ -2637,7 +2634,7 @@ fn runtime_sized_array_equality_compares_the_live_prefix() {
 #[test]
 fn runtime_sized_array_patterns_match_length_and_tail() {
     let source = r#"
-        fn classify(a: DynArray<i64, 4>) -> i64 ! {panic} {
+        fn classify(a: DynArray<i64, 4>) -> i64 ! {} {
             match a {
                 [] => 0,
                 [x] => x,
@@ -2646,7 +2643,7 @@ fn runtime_sized_array_patterns_match_length_and_tail() {
                 _ => 99
             }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let empty: DynArray<i64, 4> = [];
             let one: DynArray<i64, 4> = [5];
             let two: DynArray<i64, 4> = [1, 2];
@@ -2659,7 +2656,7 @@ fn runtime_sized_array_patterns_match_length_and_tail() {
     // A named rest binds a copy of the tail with the same capacity, so its
     // prefix is readable and its length is the remaining live count.
     let tail = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1, 2, 3];
             match a {
                 [first, ..rest] => first + DynArray.len(&rest) * 10 + DynArray.get(&rest, 1),
@@ -2671,7 +2668,7 @@ fn runtime_sized_array_patterns_match_length_and_tail() {
     agrees(tail, 24);
     // Literals and an unnamed rest participate in element patterns.
     let literal = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [7, 8, 9];
             match a {
                 [7, y, ..] => y,
@@ -2683,7 +2680,7 @@ fn runtime_sized_array_patterns_match_length_and_tail() {
     agrees(literal, 8);
     // A guard can fall through to a later arm, including the catch-all.
     let guarded = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1, 2];
             match a {
                 [x, ..] if x == 9 => 100,
@@ -2697,7 +2694,7 @@ fn runtime_sized_array_patterns_match_length_and_tail() {
     // The runtime length is not statically exhaustive.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1];
             match a {
                 [] => 0,
@@ -2709,7 +2706,7 @@ fn runtime_sized_array_patterns_match_length_and_tail() {
     // An earlier catch-all makes a later length pattern unreachable.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1];
             match a {
                 _ => 0,
@@ -2720,7 +2717,7 @@ fn runtime_sized_array_patterns_match_length_and_tail() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 2> = [Box.new(1)];
             match a {
                 [x] => 0,
@@ -2731,7 +2728,7 @@ fn runtime_sized_array_patterns_match_length_and_tail() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 2> = [1, 2, 3];
             a
         }"#,
@@ -2745,7 +2742,7 @@ fn match_arms_join_scalar_proof_indices() {
         r#"
         fn pick() -> Bool ! {} { false }
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 0;
             n = 6;
             match pick() {
@@ -2758,7 +2755,7 @@ fn match_arms_join_scalar_proof_indices() {
     rejects(
         r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 0; n = 6;
             match false { true => { n = 7; }, false => { } }
             keep(n, refl::<i64>(7))
@@ -2769,7 +2766,7 @@ fn match_arms_join_scalar_proof_indices() {
         value(
             r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 0;
             match false { true => { n = 7; }, false => { n = 7; } }
             keep(n, refl::<i64>(7))
@@ -2783,8 +2780,8 @@ fn match_arms_join_scalar_proof_indices() {
 fn nested_block_mutation_does_not_alias_scalar_proof_indices() {
     rejects(
         r#"
-        fn same(a: i64, b: i64, erased p: Eq<i64, a, b>) -> i64 ! {panic} { a - b }
-        fn main() -> i64 ! {panic} {
+        fn same(a: i64, b: i64, erased p: Eq<i64, a, b>) -> i64 ! {} { a - b }
+        fn main() -> i64 ! {} {
             let mut n = 6;
             { n = n + 1; }
             let m = 5;
@@ -2795,9 +2792,9 @@ fn nested_block_mutation_does_not_alias_scalar_proof_indices() {
     assert_eq!(
         value(
             r#"
-        fn get() -> i64 ! {panic} { 7 }
+        fn get() -> i64 ! {} { 7 }
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 6;
             { n = get(); }
             keep(n, refl::<i64>(n))
@@ -2812,41 +2809,41 @@ fn non_tail_continuations_reject_try_but_allow_local_loops_and_mut_results() {
     rejects(
         r#"
         enum Result<T, E> { Ok(T), Err(E) }
-        fn work() -> Result<i64, i64> ! {panic} {
+        fn work() -> Result<i64, i64> ! {} {
             handle Op: i64 -> Result<i64, i64> with fn(
                 x: i64, resume: linear once fn(Result<i64, i64>) -> Result<i64, i64> ! {},
-            ) -> Result<i64, i64> ! {panic} { let r = resume(Err(7)); r } {
+            ) -> Result<i64, i64> ! {} { let r = resume(Err(7)); r } {
                 let a = perform Op(1);
                 let v = a?;
                 Ok(v + 1)
             }
         }
-        fn main() -> i64 ! {panic} { match work() { Ok(v) => v, Err(e) => e } }"#,
+        fn main() -> i64 ! {} { match work() { Ok(v) => v, Err(e) => e } }"#,
         "cannot use '?'",
     );
     // A tail-resumptive handler continues in place, so `?` after its perform
     // returns from the enclosing function as usual.
     let in_place = r#"
         enum Result<T, E> { Ok(T), Err(E) }
-        fn work() -> Result<i64, i64> ! {panic} {
+        fn work() -> Result<i64, i64> ! {} {
             handle Op: i64 -> Result<i64, i64> with fn(
                 x: i64, resume: linear once fn(Result<i64, i64>) -> Result<i64, i64> ! {},
-            ) -> Result<i64, i64> ! {panic} { resume(Err(7)) } {
+            ) -> Result<i64, i64> ! {} { resume(Err(7)) } {
                 let a = perform Op(1);
                 let v = a?;
                 Ok(v + 1)
             }
         }
-        fn main() -> i64 ! {panic} { match work() { Ok(v) => v, Err(e) => e } }"#;
+        fn main() -> i64 ! {} { match work() { Ok(v) => v, Err(e) => e } }"#;
     assert_eq!(value(in_place), 7);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(in_place, 7);
     assert_eq!(
         value(
             r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {})
-                -> i64 ! {panic} { resume(x) } {
+                -> i64 ! {} { resume(x) } {
                 let a = perform Op(1);
                 let mut i = 0; let mut s = 0;
                 while i < 3 {
@@ -2863,9 +2860,9 @@ fn non_tail_continuations_reject_try_but_allow_local_loops_and_mut_results() {
     assert_eq!(
         value(
             r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {})
-                -> i64 ! {panic} { resume(x) + 10 } {
+                -> i64 ! {} { resume(x) + 10 } {
                 let mut a = perform Op(1);
                 a = a + 1;
                 a
@@ -2882,7 +2879,7 @@ fn union_injection_converts_structural_members_and_drops_erased_fields() {
     agrees(
         r#"
         struct Wide { a: i64, b: i64, c: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let v: struct { c: i64 } | Bool = Wide { a: 11, b: 22, c: 33 };
             match v { struct { c } => c, Bool @ _ => 0 }
         }"#,
@@ -2891,10 +2888,10 @@ fn union_injection_converts_structural_members_and_drops_erased_fields() {
     agrees(
         r#"
         struct Wide { a: i64, b: Box<i64> }
-        fn pass(v: struct { a: i64, .. } | Bool) -> i64 ! {panic} {
+        fn pass(v: struct { a: i64, .. } | Bool) -> i64 ! {} {
             match v { struct { a } => a, Bool @ _ => 0 }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             pass(Wide { a: 42, b: Box.new(1) })
         }"#,
         42,
@@ -2902,7 +2899,7 @@ fn union_injection_converts_structural_members_and_drops_erased_fields() {
     agrees(
         r#"
         struct Wide { a: i64, b: i64, c: Box<i64> }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let u: struct { c: Box<i64> } | Bool = Wide { a: 7, b: 8, c: Box.new(5) };
             match u { struct { c } => Box.take(c), Bool @ _ => 0 }
         }"#,
@@ -2911,7 +2908,7 @@ fn union_injection_converts_structural_members_and_drops_erased_fields() {
     rejects(
         r#"
         struct Wide { a: i64, b: i64, c: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let u: Wide | Bool = Wide { a: 1, b: 2, c: 3 };
             let v: struct { c: i64 } | Bool = u;
             match v { struct { c } => c, Bool @ _ => 0 }
@@ -2920,7 +2917,7 @@ fn union_injection_converts_structural_members_and_drops_erased_fields() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let u: struct { inner: struct { a: i64, b: i64, c: i64 } | Bool } =
                 struct { inner: struct { a: 1, b: 2, c: 3 } };
             let v: struct { inner: struct { c: i64 } | Bool } = u;
@@ -2935,13 +2932,13 @@ fn union_injection_converts_structural_members_and_drops_erased_fields() {
 fn callable_field_adapters_inside_dynarray_push_build_natively() {
     agrees(
         r#"
-        fn widen(value: i64 | Bool) -> i64 ! {panic} {
+        fn widen(value: i64 | Bool) -> i64 ! {} {
             match value { i64 @ n => n, Bool @ _ => 0 }
         }
-        struct Holder { f: fn(i64 | Bool) -> i64 ! {panic}, tag: Bool }
-        fn main() -> i64 ! {alloc, panic} {
-            let a: DynArray<struct { f: once fn(i64) -> i64 ! {panic} }, 2> =
-                DynArray.new::<struct { f: once fn(i64) -> i64 ! {panic} }, 2>();
+        struct Holder { f: fn(i64 | Bool) -> i64 ! {}, tag: Bool }
+        fn main() -> i64 ! {alloc} {
+            let a: DynArray<struct { f: once fn(i64) -> i64 ! {} }, 2> =
+                DynArray.new::<struct { f: once fn(i64) -> i64 ! {} }, 2>();
             let a = DynArray.push(a, Holder { f: widen, tag: true });
             42
         }"#,
@@ -2959,11 +2956,11 @@ fn structural_borrowed_results_transfer_a_nominal_field() {
     agrees(
         r#"
         struct W<'a> { n: i64, view: &'a [i64] }
-        fn ret<'a>(v: W<'a>) -> struct { view: &'a [i64] } ! {panic} {
+        fn ret<'a>(v: W<'a>) -> struct { view: &'a [i64] } ! {} {
             let W { view, .. } = v;
             struct { view: view }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 2];
             let out = ret(W { n: 1, view: &values[..] });
             Slice.get(out.view, 0) + 2
@@ -2976,11 +2973,11 @@ fn structural_borrowed_results_transfer_a_nominal_field() {
 fn union_partition_follows_declaration_order_not_operand_order() {
     let source = |pattern: &str| {
         format!(
-            "fn pick<A, B>(x: {pattern}, a: A) -> i64 ! {{panic}} {{ 0 }}
-            fn two(c: i64) -> Bool | Unit | i64 ! {{panic}} {{
+            "fn pick<A, B>(x: {pattern}, a: A) -> i64 ! {{}} {{ 0 }}
+            fn two(c: i64) -> Bool | Unit | i64 ! {{}} {{
                 if c == 0 {{ true }} else {{ if c == 1 {{ () }} else {{ 41 }} }}
             }}
-            fn main() -> i64 ! {{panic}} {{ pick(two(0), true) }}"
+            fn main() -> i64 ! {{}} {{ pick(two(0), true) }}"
         )
     };
     assert_eq!(value(&source("A | B | i64")), 0);
@@ -2991,7 +2988,7 @@ fn union_partition_follows_declaration_order_not_operand_order() {
 fn dynarray_pop_waits_for_live_views() {
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [1, 2];
             let v: &[i64] = &a[..];
             let (a, x) = DynArray.pop(a);
@@ -3002,7 +2999,7 @@ fn dynarray_pop_waits_for_live_views() {
     assert_eq!(
         value(
             r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1, 2];
             let n = { let v: &[i64] = &a[..]; Slice.len(v) };
             let (a, x) = DynArray.pop(a);
@@ -3020,8 +3017,8 @@ fn row_variables_preserve_unmentioned_fields() {
     // returned value can read them. The retained box is dropped exactly once.
     let source = r#"
         struct Wide { flag: Bool, x: i64, extra: Box<i64> }
-        fn keep<r>(v: struct { x: i64, ..r }) -> struct { x: i64, ..r } ! {panic} { v }
-        fn main() -> i64 ! {alloc, panic} {
+        fn keep<r>(v: struct { x: i64, ..r }) -> struct { x: i64, ..r } ! {} { v }
+        fn main() -> i64 ! {alloc} {
             let w = Wide { flag: true, x: 40, extra: Box.new(1) };
             let r = keep(w);
             if r.flag { r.x + 2 } else { 0 }
@@ -3035,8 +3032,8 @@ fn row_variables_preserve_unmentioned_fields() {
     // Row unification recurses through nested structural fields.
     let nested = r#"
         fn keep<r>(v: struct { inner: struct { a: i64, ..r } })
-            -> struct { inner: struct { a: i64, ..r } } ! {panic} { v }
-        fn main() -> i64 ! {panic} {
+            -> struct { inner: struct { a: i64, ..r } } ! {} { v }
+        fn main() -> i64 ! {} {
             let out = keep(struct { inner: struct { a: 40, extra: true } });
             if out.inner.extra { out.inner.a + 2 } else { 0 }
         }"#;
@@ -3048,13 +3045,13 @@ fn row_variables_preserve_unmentioned_fields() {
     let linear = r#"
         #[linear]
         struct Token { id: i64 }
-        fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {panic} { v }
-        fn consume(v: struct { n: i64, token: Token }) -> i64 ! {panic} {
+        fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {} { v }
+        fn consume(v: struct { n: i64, token: Token }) -> i64 ! {} {
             let struct { n, token } = v;
             let Token { id } = token;
             n + id
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let out = keep(struct { n: 1, token: Token { id: 41 } });
             consume(out)
         }"#;
@@ -3064,12 +3061,12 @@ fn row_variables_preserve_unmentioned_fields() {
     // A borrowed residual field stays live for the call and is dropped with
     // the consumed row, so replacing the owner afterwards is legal.
     let borrowed = r#"
-        fn first<r>(v: struct { view: &[i64], ..r }) -> i64 ! {alloc, panic} {
+        fn first<r>(v: struct { view: &[i64], ..r }) -> i64 ! {alloc} {
             let out = Slice.get(v.view, 1);
             drop(v);
             out
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut data: Vec<i64> = [1, 41];
             let n = first(struct { view: &data[..], flag: true });
             data = [9, 9];
@@ -3088,8 +3085,8 @@ fn row_variables_reject_erased_linear_and_borrowed_escapes() {
         r#"
         #[linear]
         struct Token { id: i64 }
-        fn erase<r>(v: struct { n: i64, ..r }) -> struct { n: i64 } ! {panic} { v }
-        fn main() -> i64 ! {panic} {
+        fn erase<r>(v: struct { n: i64, ..r }) -> struct { n: i64 } ! {} { v }
+        fn main() -> i64 ! {} {
             let t = Token { id: 1 };
             let out = erase(struct { n: 1, token: t });
             out.n
@@ -3100,11 +3097,11 @@ fn row_variables_reject_erased_linear_and_borrowed_escapes() {
     // an exclusive borrow of the same owner while the row is live is rejected.
     rejects(
         r#"fn keep<r>(v: struct { view: &[i64], ..r }, values: &mut Vec<i64>)
-            -> i64 ! {alloc, panic} {
+            -> i64 ! {alloc} {
             Vec.clear(values);
             Slice.get(v.view, 0)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut data: Vec<i64> = [1, 2];
             keep(struct { view: &data[..], n: 1 }, &mut data)
         }"#,
@@ -3116,8 +3113,8 @@ fn row_variables_reject_erased_linear_and_borrowed_escapes() {
     // this remains an explicit rejection rather than an invented equality.
     rejects(
         r#"fn keep<r>(v: struct { view: &[i64], ..r })
-            -> struct { view: &[i64], ..r } ! {panic} { v }
-        fn main() -> i64 ! {alloc, panic} {
+            -> struct { view: &[i64], ..r } ! {} { v }
+        fn main() -> i64 ! {alloc} {
             let data: Vec<i64> = [1, 2];
             let out = keep(struct { view: &data[..], n: 1 });
             Slice.get(out.view, 0)
@@ -3128,8 +3125,8 @@ fn row_variables_reject_erased_linear_and_borrowed_escapes() {
     // parameter; otherwise the specialization is not determined.
     rejects(
         r#"fn pair<r>(a: struct { x: i64, ..r }, b: struct { x: i64, ..r })
-            -> i64 ! {panic} { 0 }
-        fn main() -> i64 ! {panic} {
+            -> i64 ! {} { 0 }
+        fn main() -> i64 ! {} {
             pair(struct { x: 1, left: true }, struct { x: 2, right: true })
         }"#,
         "residual row",
@@ -3142,7 +3139,7 @@ fn structural_cast_renames_fields_explicitly() {
     // are dropped with ordinary cleanup, including an owning `extra`.
     let source = r#"
         struct Wide { a: i64, extra: Box<i64>, flag: Bool }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let w = Wide { a: 40, extra: Box.new(1), flag: true };
             let r = w as struct { b: i64 from a, flag: Bool };
             if r.flag { r.b + 2 } else { 0 }
@@ -3155,7 +3152,7 @@ fn structural_cast_renames_fields_explicitly() {
     agrees(source, 42);
     rejects(
         r#"struct Wide { a: i64, b: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let w = Wide { a: 1, b: 2 };
             let r = w as struct { x: i64 from a, y: i64 from a };
             r.x
@@ -3164,7 +3161,7 @@ fn structural_cast_renames_fields_explicitly() {
     );
     rejects(
         r#"struct Wide { a: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let w = Wide { a: 1 };
             let r = w as struct { x: i64 from missing };
             r.x
@@ -3175,7 +3172,7 @@ fn structural_cast_renames_fields_explicitly() {
         r#"#[linear]
         struct Token { id: i64 }
         struct Wide { a: i64, token: Token }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let w = Wide { a: 1, token: Token { id: 2 } };
             let r = w as struct { b: i64 from a };
             r.b
@@ -3185,8 +3182,8 @@ fn structural_cast_renames_fields_explicitly() {
     // Renaming metadata is only meaningful in the explicit cast, never in a
     // general structural type.
     rejects(
-        r#"fn read(v: struct { b: i64 from a }) -> i64 ! {panic} { v.b }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        r#"fn read(v: struct { b: i64 from a }) -> i64 ! {} { v.b }
+        fn main() -> i64 ! {} { 0 }"#,
         "field renaming",
     );
 }
@@ -3194,7 +3191,7 @@ fn structural_cast_renames_fields_explicitly() {
 #[test]
 fn structural_equality_compares_every_canonical_field() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a = struct { x: 1, y: true, z: struct { q: 3, r: 4 } };
             let b = struct { z: struct { r: 4, q: 3 }, y: true, x: 1 };
             let c = struct { x: 1, y: true, z: struct { q: 3, r: 5 } };
@@ -3206,7 +3203,7 @@ fn structural_equality_compares_every_canonical_field() {
     // Owning, borrowed, floating-point, union, nominal, and callable leaves
     // are not comparable without an explicit field match.
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let a = struct { b: Box.new(1) };
             let b = struct { b: Box.new(1) };
             if a == b { 1 } else { 0 }
@@ -3214,7 +3211,7 @@ fn structural_equality_compares_every_canonical_field() {
         "structural equality requires",
     );
     rejects(
-        r#"fn main() -> i64 ! {panic} {
+        r#"fn main() -> i64 ! {} {
             let a = struct { x: 1.0 };
             let b = struct { x: 1.0 };
             if a == b { 1 } else { 0 }
@@ -3222,7 +3219,7 @@ fn structural_equality_compares_every_canonical_field() {
         "structural equality requires",
     );
     rejects(
-        r#"fn main() -> i64 ! {panic} {
+        r#"fn main() -> i64 ! {} {
             let a: struct { x: i64 | Bool } = struct { x: 1 };
             let b: struct { x: i64 | Bool } = struct { x: true };
             if a == b { 1 } else { 0 }
@@ -3236,14 +3233,14 @@ fn open_row_impl_headers_monomorphize_per_receiver() {
     // A trait impl header may leave a named row tail. Dispatch binds the
     // residual row and instantiates the checked method once per receiver row.
     let source = r#"
-        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        trait Tag { fn tag(self: Self) -> i64 ! {}; }
         impl<r> Tag for struct { x: i64, ..r } {
-            fn tag(self: Self) -> i64 ! {panic} { self.x }
+            fn tag(self: Self) -> i64 ! {} { self.x }
         }
         impl<r> struct { n: i64, ..r } {
-            fn double(self: Self) -> i64 ! {panic} { self.n * 2 }
+            fn double(self: Self) -> i64 ! {} { self.n * 2 }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let s = struct { x: 40, extra: true };
             let t = struct { n: 1, flag: false };
             s.tag() + t.double()
@@ -3254,34 +3251,34 @@ fn open_row_impl_headers_monomorphize_per_receiver() {
     // Open-row impls remain structural-only: a nominal record has its own
     // identity and must be coerced explicitly first.
     rejects(
-        r#"trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        r#"trait Tag { fn tag(self: Self) -> i64 ! {}; }
         impl<r> Tag for struct { x: i64, ..r } {
-            fn tag(self: Self) -> i64 ! {panic} { self.x }
+            fn tag(self: Self) -> i64 ! {} { self.x }
         }
         struct Point { x: i64 }
-        fn main() -> i64 ! {panic} { Point { x: 1 }.tag() }"#,
+        fn main() -> i64 ! {} { Point { x: 1 }.tag() }"#,
         "no method 'tag'",
     );
     // Two incomparable open-row headers for one trait can both match a wider
     // row; coherence rejects that ambiguity instead of choosing one.
     rejects(
-        r#"trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        r#"trait Tag { fn tag(self: Self) -> i64 ! {}; }
         impl<r> Tag for struct { x: i64, ..r } {
-            fn tag(self: Self) -> i64 ! {panic} { self.x }
+            fn tag(self: Self) -> i64 ! {} { self.x }
         }
         impl<r> Tag for struct { y: i64, ..r } {
-            fn tag(self: Self) -> i64 ! {panic} { self.y }
+            fn tag(self: Self) -> i64 ! {} { self.y }
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "incomparable",
     );
     // A bare `..` has no parameter to bind the residual row, so it stays an
     // explicit rejection rather than an unconstrained blanket impl.
     rejects(
         r#"impl struct { x: i64, .. } {
-            fn read_x(self: Self) -> i64 ! {panic} { self.x }
+            fn read_x(self: Self) -> i64 ! {} { self.x }
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "open row",
     );
 }
@@ -3291,13 +3288,13 @@ fn task_handler_barriers_do_not_expose_shadowed_outer_frames() {
     let source = r#"
         use std.task.TaskExit;
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(0) }
-        fn main() -> i64 ! {suspend, alloc, panic} {
+        fn deep() -> i64 ! {Op} { perform Op(0) }
+        fn main() -> i64 ! {suspend, alloc} {
             handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { resume(100) } {
                 let n = 7;
                 handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { resume(n) } {
-                    Task.scope(fn() -> i64 ! {suspend, alloc, Op, panic} {
-                        let t: Task<i64> = Task.spawn(fn() -> i64 ! {Op, panic} { deep() });
+                    Task.scope(fn() -> i64 ! {suspend, alloc, Op} {
+                        let t: Task<i64> = Task.spawn(fn() -> i64 ! {Op} { deep() });
                         match Task.join(t) { TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 }
                     })
                 }
@@ -3330,14 +3327,14 @@ fn tasks_inherit_copyable_handler_suffix_above_an_owned_barrier() {
     let source = r#"
         use std.task.TaskExit;
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {Op, panic} { perform Op(0) }
-        fn run_child() -> i64 ! {Op, suspend, alloc, panic} {
-            Task.scope(fn() -> i64 ! {suspend, alloc, Op, panic} {
-                let task: Task<i64> = Task.spawn(fn() -> i64 ! {Op, panic} {deep()});
+        fn deep() -> i64 ! {Op} { perform Op(0) }
+        fn run_child() -> i64 ! {Op, suspend, alloc} {
+            Task.scope(fn() -> i64 ! {suspend, alloc, Op} {
+                let task: Task<i64> = Task.spawn(fn() -> i64 ! {Op} {deep()});
                 match Task.join(task) {TaskExit.Completed(v) => v, TaskExit.Cancelled => 0}
             })
         }
-        fn main() -> i64 ! {suspend, alloc, panic} {
+        fn main() -> i64 ! {suspend, alloc} {
             handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {resume(100)} {
                 let n = 7;
                 handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {resume(n)} {
@@ -3356,7 +3353,7 @@ fn tasks_inherit_copyable_handler_suffix_above_an_owned_barrier() {
 fn structural_equality_operands_are_ownership_checked() {
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let v: Vec<i64> = [1, 2];
             let a = struct { x: 1 };
             let b = struct { x: 1 };
@@ -3370,7 +3367,7 @@ fn structural_equality_operands_are_ownership_checked() {
         #[linear]
         enum Token { Live }
         fn take(t: Token) -> i64 ! {} { match t { Token.Live => 1 } }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let t = Token.Live;
             let a = struct { x: 1 };
             let same = a == struct { x: take(t) };
@@ -3381,7 +3378,7 @@ fn structural_equality_operands_are_ownership_checked() {
     assert_eq!(
         value(
             r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a = struct { x: 1, y: 2 };
             let b = struct { y: 2, x: 1 };
             if a == b { if a != struct { x: 1, y: 3 } { 7 } else { 0 } } else { 0 }
@@ -3395,10 +3392,10 @@ fn structural_equality_operands_are_ownership_checked() {
 fn open_row_impls_specialize_by_field_set() {
     let impls = |second: &str| {
         format!(
-            "trait Tag {{ fn tag(self: Self) -> i64 ! {{panic}}; }}
-            impl<r> Tag for struct {{ x: i64, ..r }} {{ fn tag(self: Self) -> i64 ! {{panic}} {{ 1 }} }}
+            "trait Tag {{ fn tag(self: Self) -> i64 ! {{}}; }}
+            impl<r> Tag for struct {{ x: i64, ..r }} {{ fn tag(self: Self) -> i64 ! {{}} {{ 1 }} }}
             {second}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let a = struct {{ x: 1, y: 2 }};
                 let b = struct {{ x: 1, z: true }};
                 a.tag() * 10 + b.tag()
@@ -3406,21 +3403,17 @@ fn open_row_impls_specialize_by_field_set() {
         )
     };
     for second in [
-        "impl<r> Tag for struct { x: i64, y: i64, ..r } { fn tag(self: Self) -> i64 ! {panic} { 2 } }",
-        "impl Tag for struct { x: i64, y: i64 } { fn tag(self: Self) -> i64 ! {panic} { 2 } }",
+        "impl<r> Tag for struct { x: i64, y: i64, ..r } { fn tag(self: Self) -> i64 ! {} { 2 } }",
+        "impl Tag for struct { x: i64, y: i64 } { fn tag(self: Self) -> i64 ! {} { 2 } }",
     ] {
         assert_eq!(value(&impls(second)), 21);
     }
     rejects(
-        &impls(
-            "impl<s> Tag for struct { x: i64, ..s } { fn tag(self: Self) -> i64 ! {panic} { 2 } }",
-        ),
+        &impls("impl<s> Tag for struct { x: i64, ..s } { fn tag(self: Self) -> i64 ! {} { 2 } }"),
         "duplicate implementation",
     );
     rejects(
-        &impls(
-            "impl<r> Tag for struct { y: i64, ..r } { fn tag(self: Self) -> i64 ! {panic} { 2 } }",
-        ),
+        &impls("impl<r> Tag for struct { y: i64, ..r } { fn tag(self: Self) -> i64 ! {} { 2 } }"),
         "incomparable",
     );
 }
@@ -3430,8 +3423,8 @@ fn a_result_hint_cannot_fix_a_row_variable_before_the_arguments() {
     assert_eq!(
         value(
             r#"
-        fn keep<r>(v: struct { x: i64, ..r }) -> struct { x: i64, ..r } ! {panic} { v }
-        fn main() -> i64 ! {panic} {
+        fn keep<r>(v: struct { x: i64, ..r }) -> struct { x: i64, ..r } ! {} { v }
+        fn main() -> i64 ! {} {
             let w = struct { x: 40, junk: true };
             let narrow: struct { x: i64 } = keep(w);
             narrow.x + 2
@@ -3454,7 +3447,7 @@ fn runtime_length_arrays_fill_and_read_with_length_proofs() {
             let a: [i64; n <= 8] = Array.fill(n, 7);
             a[i]
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let k = 5;
             let j = 3;
             pick(k, j, _) * 6
@@ -3465,7 +3458,7 @@ fn runtime_length_arrays_fill_and_read_with_length_proofs() {
     // A loop guard `i < n` and the monotone counter prove every read; only the
     // checked `+` needs `panic`.
     let looped = r#"
-        fn sum_all(n: i64, erased ok: { 0 <= n && n <= 8 }) -> i64 ! {panic} {
+        fn sum_all(n: i64, erased ok: { 0 <= n && n <= 8 }) -> i64 ! {} {
             let a: [i64; n <= 8] = Array.fill(n, 2);
             let mut i = 0;
             let mut acc = 0;
@@ -3475,7 +3468,7 @@ fn runtime_length_arrays_fill_and_read_with_length_proofs() {
             }
             acc
         }
-        fn main() -> i64 ! {panic} { let k = 6; sum_all(k, _) }"#;
+        fn main() -> i64 ! {} { let k = 6; sum_all(k, _) }"#;
     assert_eq!(value(looped), 12);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(looped, 12);
@@ -3494,35 +3487,35 @@ fn runtime_length_arrays_fill_and_read_with_length_proofs() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(branch, 5);
     // Without a proof, the read is a checked operation and needs `panic`.
-    rejects(
+    kush::executable::check(
         r#"
         fn pick(n: i64, i: i64, erased ok: { 0 <= n && n <= 8 }) -> i64 ! {} {
             let a: [i64; n <= 8] = Array.fill(n, 7);
             a[i]
         }
         fn main() -> i64 ! {} { 0 }"#,
-        "operation requires effects {panic}",
-    );
+    )
+    .unwrap();
     // Without a proof, the fill is a checked operation and needs `panic`.
-    rejects(
+    kush::executable::check(
         r#"
         fn build(n: i64) -> i64 ! {} {
             let a: [i64; n <= 8] = Array.fill(n, 7);
             0
         }
         fn main() -> i64 ! {} { 0 }"#,
-        "operation requires effects {panic}",
-    );
+    )
+    .unwrap();
 }
 
 #[test]
 fn runtime_length_arrays_check_unproved_lengths_and_indices_at_runtime() {
     let too_long = r#"
-        fn build(n: i64) -> i64 ! {panic} {
+        fn build(n: i64) -> i64 ! {} {
             let a: [i64; n <= 4] = Array.fill(n, 1);
             DynArray.len(&a)
         }
-        fn main() -> i64 ! {panic} { let k = 9; build(k) }"#;
+        fn main() -> i64 ! {} { let k = 9; build(k) }"#;
     let program = check(too_long).unwrap();
     let error = program.evaluate(&mut Vec::new()).unwrap_err();
     assert!(
@@ -3530,28 +3523,28 @@ fn runtime_length_arrays_check_unproved_lengths_and_indices_at_runtime() {
         "{error:?}"
     );
     let negative = r#"
-        fn build(n: i64) -> i64 ! {panic} {
+        fn build(n: i64) -> i64 ! {} {
             let a: [i64; n <= 4] = Array.fill(n, 1);
             DynArray.len(&a)
         }
-        fn main() -> i64 ! {panic} { let k = 0 - 1; build(k) }"#;
+        fn main() -> i64 ! {} { let k = 0 - 1; build(k) }"#;
     let program = check(negative).unwrap();
     assert!(program.evaluate(&mut Vec::new()).is_err());
     let out_of_bounds = r#"
-        fn read(n: i64, i: i64) -> i64 ! {panic} {
+        fn read(n: i64, i: i64) -> i64 ! {} {
             let a: [i64; n <= 4] = Array.fill(n, 1);
             a[i]
         }
-        fn main() -> i64 ! {panic} { let k = 2; read(k, 2) }"#;
+        fn main() -> i64 ! {} { let k = 2; read(k, 2) }"#;
     let program = check(out_of_bounds).unwrap();
     let error = program.evaluate(&mut Vec::new()).unwrap_err();
     assert!(error.message.contains("index out of bounds"), "{error:?}");
     let fine = r#"
-        fn read(n: i64, i: i64) -> i64 ! {panic} {
+        fn read(n: i64, i: i64) -> i64 ! {} {
             let a: [i64; n <= 4] = Array.fill(n, 9);
             a[i] + DynArray.len(&a)
         }
-        fn main() -> i64 ! {panic} { let k = 4; read(k, 3) }"#;
+        fn main() -> i64 ! {} { let k = 4; read(k, 3) }"#;
     assert_eq!(value(fine), 13);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
@@ -3571,10 +3564,10 @@ fn runtime_length_arrays_check_unproved_lengths_and_indices_at_runtime() {
 #[test]
 fn runtime_length_arrays_substitute_the_callers_binder_at_calls() {
     let source = r#"
-        fn make(n: i64) -> [i64; n <= 4] ! {panic} { Array.fill(n, 7) }
-        fn first(n: i64, a: &[i64; n <= 4]) -> i64 ! {panic} { a[0] }
-        fn last(n: i64, a: [i64; n <= 4]) -> i64 ! {panic} { a[n - 1] }
-        fn main() -> i64 ! {panic} {
+        fn make(n: i64) -> [i64; n <= 4] ! {} { Array.fill(n, 7) }
+        fn first(n: i64, a: &[i64; n <= 4]) -> i64 ! {} { a[0] }
+        fn last(n: i64, a: [i64; n <= 4]) -> i64 ! {} { a[n - 1] }
+        fn main() -> i64 ! {} {
             let k = 3;
             let a = make(k);
             let b: [i64; k <= 4] = make(k);
@@ -3586,22 +3579,22 @@ fn runtime_length_arrays_substitute_the_callers_binder_at_calls() {
     // The argument for a length parameter must be a named immutable binding.
     rejects(
         r#"
-        fn make(n: i64) -> [i64; n <= 4] ! {panic} { Array.fill(n, 7) }
-        fn main() -> i64 ! {panic} { let a = make(3); 0 }"#,
+        fn make(n: i64) -> [i64; n <= 4] ! {} { Array.fill(n, 7) }
+        fn main() -> i64 ! {} { let a = make(3); 0 }"#,
         "sizes a runtime-length array in the signature of 'make'",
     );
     rejects(
         r#"
-        fn make(n: i64) -> [i64; n <= 4] ! {panic} { Array.fill(n, 7) }
-        fn main() -> i64 ! {panic} { let mut k = 3; let a = make(k); 0 }"#,
+        fn make(n: i64) -> [i64; n <= 4] ! {} { Array.fill(n, 7) }
+        fn main() -> i64 ! {} { let mut k = 3; let a = make(k); 0 }"#,
         "must be an immutable i64 parameter or local",
     );
     // A value for one binder is not a value for another, even when both
     // hold the same number.
     rejects(
         r#"
-        fn last(n: i64, a: [i64; n <= 4]) -> i64 ! {panic} { a[n - 1] }
-        fn main() -> i64 ! {panic} {
+        fn last(n: i64, a: [i64; n <= 4]) -> i64 ! {} { a[n - 1] }
+        fn main() -> i64 ! {} {
             let k = 3;
             let m = 3;
             let a: [i64; m <= 4] = Array.fill(m, 1);
@@ -3612,7 +3605,7 @@ fn runtime_length_arrays_substitute_the_callers_binder_at_calls() {
     // A recursive call must pass the same binder; an alias is a new binder.
     rejects(
         r#"
-        fn walk(n: i64, a: [i64; n <= 4]) -> i64 ! {panic} {
+        fn walk(n: i64, a: [i64; n <= 4]) -> i64 ! {} {
             let m = n;
             walk(m, a)
         }
@@ -3625,7 +3618,7 @@ fn runtime_length_arrays_substitute_the_callers_binder_at_calls() {
 fn runtime_length_array_types_keep_their_binder() {
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let m = 3;
             let a: [i64; n <= 4] = Array.fill(n, 1);
@@ -3636,7 +3629,7 @@ fn runtime_length_array_types_keep_their_binder() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let a: [i64; n <= 4] = Array.fill(n, 1);
             let b: DynArray<i64, 4> = a;
@@ -3646,7 +3639,7 @@ fn runtime_length_array_types_keep_their_binder() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let a: DynArray<i64, 4> = [1, 2, 3];
             let b: [i64; n <= 4] = a;
@@ -3656,7 +3649,7 @@ fn runtime_length_array_types_keep_their_binder() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let a: [i64; n <= 8] = Array.fill(n, 1);
             let b: [i64; n <= 4] = a;
@@ -3666,7 +3659,7 @@ fn runtime_length_array_types_keep_their_binder() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let m = 3;
             let a: [i64; n <= 4] = Array.fill(m, 1);
@@ -3684,7 +3677,7 @@ fn runtime_length_array_binders_and_positions_are_checked() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut n = 3;
             let a: [i64; n <= 4] = Array.fill(n, 1);
             0
@@ -3693,7 +3686,7 @@ fn runtime_length_array_binders_and_positions_are_checked() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = true;
             let a: [i64; n <= 4] = Array.fill(n, 1);
             0
@@ -3702,7 +3695,7 @@ fn runtime_length_array_binders_and_positions_are_checked() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let a: [i64; n <= 32] = Array.fill(n, 1);
             0
@@ -3711,7 +3704,7 @@ fn runtime_length_array_binders_and_positions_are_checked() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let a: [[i64; 4]; n <= 8] = Array.fill(n, [0, 0, 0, 0]);
             0
@@ -3738,24 +3731,24 @@ fn runtime_length_array_binders_and_positions_are_checked() {
 fn runtime_length_arrays_are_not_first_class_function_signatures() {
     rejects(
         r#"
-        fn make(n: i64) -> [i64; n <= 4] ! {panic} { Array.fill(n, 7) }
-        fn main() -> i64 ! {panic} { let f = make; 0 }"#,
+        fn make(n: i64) -> [i64; n <= 4] ! {} { Array.fill(n, 7) }
+        fn main() -> i64 ! {} { let f = make; 0 }"#,
         "cannot be a first-class value",
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let n = 2;
-            let f = fn(a: [i64; n <= 4]) -> i64 ! {panic} { a[0] };
+            let f = fn(a: [i64; n <= 4]) -> i64 ! {} { a[0] };
             0
         }"#,
         "lambdas cannot mention a runtime-length array",
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let n = 2;
-            let f = fn() -> [i64; n <= 4] ! {panic} { Array.fill(n, 1) };
+            let f = fn() -> [i64; n <= 4] ! {} { Array.fill(n, 1) };
             0
         }"#,
         "lambdas cannot mention a runtime-length array",
@@ -3777,7 +3770,7 @@ fn runtime_length_arrays_keep_their_length_fixed() {
         rejects(
             &format!(
                 r#"
-                fn main() -> i64 ! {{panic}} {{
+                fn main() -> i64 ! {{}} {{
                     let n = 3;
                     let a: [i64; n <= 4] = Array.fill(n, 1);
                     {operation}
@@ -3789,7 +3782,7 @@ fn runtime_length_arrays_keep_their_length_fixed() {
     }
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 0;
             let a: [i64; n <= 4] = DynArray.new();
             0
@@ -3798,7 +3791,7 @@ fn runtime_length_arrays_keep_their_length_fixed() {
     );
     // `set` keeps the length, so it is allowed and keeps the type.
     let set = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let a: [i64; n <= 4] = Array.fill(n, 1);
             let a: [i64; n <= 4] = DynArray.set(a, 1, 40);
@@ -3812,7 +3805,7 @@ fn runtime_length_arrays_keep_their_length_fixed() {
 #[test]
 fn runtime_length_literals_need_a_proved_length_and_drop_owners() {
     let source = r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let n = 2;
             let a: [Box<i64>; n <= 4] = [Box.new(20), Box.new(22)];
             DynArray.len(&a)
@@ -3823,7 +3816,7 @@ fn runtime_length_literals_need_a_proved_length_and_drop_owners() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 2);
     let branch = r#"
-        fn count(n: i64) -> i64 ! {alloc, panic} {
+        fn count(n: i64) -> i64 ! {alloc} {
             if n == 3 {
                 let a: [Box<i64>; n <= 4] = [Box.new(1), Box.new(2), Box.new(3)];
                 DynArray.len(&a)
@@ -3831,7 +3824,7 @@ fn runtime_length_literals_need_a_proved_length_and_drop_owners() {
                 0
             }
         }
-        fn main() -> i64 ! {alloc, panic} { let k = 3; count(k) + 10 * count(2) }"#;
+        fn main() -> i64 ! {alloc} { let k = 3; count(k) + 10 * count(2) }"#;
     let (result, stats) = evaluate(branch);
     assert_eq!(result, 3);
     assert_eq!(stats.allocations, 3);
@@ -3839,7 +3832,7 @@ fn runtime_length_literals_need_a_proved_length_and_drop_owners() {
     agrees(branch, 3);
     rejects(
         r#"
-        fn count(n: i64) -> i64 ! {panic} {
+        fn count(n: i64) -> i64 ! {} {
             let a: [i64; n <= 4] = [1, 2, 3];
             DynArray.len(&a)
         }
@@ -3848,7 +3841,7 @@ fn runtime_length_literals_need_a_proved_length_and_drop_owners() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 2;
             let a: [i64; n <= 4] = [1, 2, 3];
             0
@@ -3858,7 +3851,7 @@ fn runtime_length_literals_need_a_proved_length_and_drop_owners() {
     // Copying owners is rejected rather than duplicating them.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let n = 2;
             let b = Box.new(1);
             let a: [Box<i64>; n <= 4] = Array.fill(n, b);
@@ -3871,7 +3864,7 @@ fn runtime_length_literals_need_a_proved_length_and_drop_owners() {
 #[test]
 fn runtime_length_views_cover_exactly_n_elements() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let mut a: [i64; n <= 4] = Array.fill(n, 4);
             {
@@ -3894,7 +3887,7 @@ fn runtime_length_views_cover_exactly_n_elements() {
     // proved.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let a: [i64; n <= 4] = Array.fill(n, 4);
             let all = &a[..];
@@ -3905,7 +3898,7 @@ fn runtime_length_views_cover_exactly_n_elements() {
     // Replacing the owner while a view is live is still rejected.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let mut a: [i64; n <= 4] = Array.fill(n, 4);
             let all = &a[..];
@@ -3919,7 +3912,7 @@ fn runtime_length_views_cover_exactly_n_elements() {
 #[test]
 fn runtime_length_arrays_match_compare_and_bind_plain_tails() {
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let a: [i64; n <= 4] = Array.fill(n, 5);
             let b: [i64; n <= 4] = Array.fill(n, 5);
@@ -3943,7 +3936,7 @@ fn runtime_length_arrays_flow_through_generics_closures_and_owning_calls() {
     // annotations are not re-validated against the callee's scope.
     let generic = r#"
         fn keep<T>(x: T) -> T ! {} { let y: T = x; y }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 3;
             let a: [i64; n <= 4] = Array.fill(n, 6);
             let b: [i64; n <= 4] = keep(a);
@@ -3954,10 +3947,10 @@ fn runtime_length_arrays_flow_through_generics_closures_and_owning_calls() {
     agrees(generic, 9);
     // A closure that captures the array reads it with a checked index.
     let closure = r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let n = 2;
             let a: [i64; n <= 4] = Array.fill(n, 21);
-            let f = fn() -> i64 ! {panic} { a[0] + a[1] };
+            let f = fn() -> i64 ! {} { a[0] + a[1] };
             f()
         }"#;
     assert_eq!(value(closure), 42);
@@ -3966,10 +3959,10 @@ fn runtime_length_arrays_flow_through_generics_closures_and_owning_calls() {
     // Owning elements move into a callee and are dropped there exactly once.
     let owning = r#"
         fn consume(n: i64, a: [Box<i64>; n <= 4]) -> i64 ! {} { n }
-        fn give(n: i64) -> [Box<i64>; n <= 4] ! {alloc, panic} {
+        fn give(n: i64) -> [Box<i64>; n <= 4] ! {alloc} {
             if n == 2 { [Box.new(1), Box.new(2)] } else { panic() }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let k = 2;
             let a = give(k);
             consume(k, a)
@@ -3986,7 +3979,7 @@ fn monotone_loop_counters_keep_their_lower_bound_for_proofs() {
     // Regression: a counter that only increases keeps `0 <= i` from loop
     // entry, so `Slice.at` inside the loop is provable from the guard.
     let source = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let xs: [i64; 3] = [1, 2, 3];
             let view = &xs[..];
             let mut i = 0;
@@ -4003,7 +3996,7 @@ fn monotone_loop_counters_keep_their_lower_bound_for_proofs() {
     // A counter that may decrease keeps no lower bound.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let xs: [i64; 3] = [1, 2, 3];
             let view = &xs[..];
             let mut i = 2;
@@ -4021,7 +4014,7 @@ fn monotone_loop_counters_keep_their_lower_bound_for_proofs() {
 #[test]
 fn dynamic_array_patterns_match_a_suffix_after_the_rest() {
     let source = r#"
-        fn ends(a: DynArray<i64, 5>) -> i64 ! {panic} {
+        fn ends(a: DynArray<i64, 5>) -> i64 ! {} {
             match a {
                 [] => 1000,
                 [x] => x,
@@ -4029,14 +4022,14 @@ fn dynamic_array_patterns_match_a_suffix_after_the_rest() {
                 _ => 0,
             }
         }
-        fn middle(a: DynArray<i64, 5>) -> i64 ! {panic} {
+        fn middle(a: DynArray<i64, 5>) -> i64 ! {} {
             match a {
                 [..mid, 9] => 500 + DynArray.len(&mid),
                 [a, ..mid, y, z] => a + y + z + 100 * DynArray.len(&mid) + 1000 * DynArray.get(&mid, 0),
                 _ => 7,
             }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 5> = [1, 2, 3, 4];
             let b: DynArray<i64, 5> = [6];
             let c: DynArray<i64, 5> = [1, 2, 9];
@@ -4051,7 +4044,7 @@ fn dynamic_array_patterns_match_a_suffix_after_the_rest() {
     // A suffix needs enough live elements: a one-element array cannot match
     // `[first, .., last]`, and a guard falls through to the next arm.
     let short = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [4];
             let b: DynArray<i64, 4> = [4, 5, 6];
             let x = match a { [first, .., last] => first + last, _ => 1 };
@@ -4068,7 +4061,7 @@ fn dynamic_array_patterns_match_a_suffix_after_the_rest() {
     // A runtime-length array accepts a suffix too, and its middle is a plain
     // DynArray.
     let runtime = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 4;
             let a: [i64; n <= 4] = Array.fill(n, 3);
             match a {
@@ -4081,7 +4074,7 @@ fn dynamic_array_patterns_match_a_suffix_after_the_rest() {
     agrees(runtime, 8);
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1];
             match a { [.., x, ..] => x, _ => 0 }
         }"#,
@@ -4089,7 +4082,7 @@ fn dynamic_array_patterns_match_a_suffix_after_the_rest() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 2> = [1];
             match a { [x, .., y, z] => x, _ => 0 }
         }"#,
@@ -4097,7 +4090,7 @@ fn dynamic_array_patterns_match_a_suffix_after_the_rest() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 3] = [1, 2, 3];
             match a { [x, .., y] => x, _ => 0 }
         }"#,
@@ -4105,7 +4098,7 @@ fn dynamic_array_patterns_match_a_suffix_after_the_rest() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 2> = [Box.new(1)];
             match a { [.., x] => 0, _ => 1 }
         }"#,
@@ -4118,7 +4111,7 @@ fn dynamic_array_patterns_destructure_nested_elements() {
     let source = r#"
         enum Opt { Some(i64), None }
         struct Pair { left: i64, right: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<(i64, i64), 4> = [(1, 2), (3, 4)];
             let b: DynArray<[i64; 2], 3> = [[5, 6]];
             let c: DynArray<Opt, 3> = [Opt.Some(7), Opt.None];
@@ -4138,7 +4131,7 @@ fn dynamic_array_patterns_destructure_nested_elements() {
     // A nested literal or variant that does not match falls through.
     let fallthrough = r#"
         enum Opt { Some(i64), None }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let c: DynArray<Opt, 3> = [Opt.None, Opt.Some(3)];
             match c {
                 [Opt.Some(x), ..] => x,
@@ -4153,7 +4146,7 @@ fn dynamic_array_patterns_destructure_nested_elements() {
     // A nested owner is still not copied out of the array.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<(i64, Box<i64>), 2> = [(1, Box.new(2))];
             match a { [(x, b)] => x, _ => 0 }
         }"#,
@@ -4166,16 +4159,16 @@ fn dynamic_array_field_views_through_references_and_temporaries() {
     // Shared and exclusive views through record reference parameters.
     let references = r#"
         struct Holder { tag: i64, xs: DynArray<i64, 4> }
-        fn sum_view(h: &Holder) -> i64 ! {panic} {
+        fn sum_view(h: &Holder) -> i64 ! {} {
             let view: &[i64] = &h.xs[..];
             Slice.len(view) + Slice.get(view, 1) + h.tag
         }
-        fn bump(h: &mut Holder) -> Unit ! {panic} {
+        fn bump(h: &mut Holder) -> Unit ! {} {
             let view: &mut [i64] = &mut h.xs[1..];
             Slice.set(view, 0, 70);
         }
-        fn tail<'a>(h: &'a Holder) -> &'a [i64] ! {panic} { &h.xs[1..] }
-        fn main() -> i64 ! {panic} {
+        fn tail<'a>(h: &'a Holder) -> &'a [i64] ! {} { &h.xs[1..] }
+        fn main() -> i64 ! {} {
             let mut h = Holder { tag: 5, xs: [10, 20, 30] };
             let before = sum_view(&h);
             bump(&mut h);
@@ -4188,7 +4181,7 @@ fn dynamic_array_field_views_through_references_and_temporaries() {
     // A record reached through a Vec element reference.
     let element = r#"
         struct Holder { tag: i64, xs: DynArray<i64, 4> }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut hs: Vec<Holder> = [Holder { tag: 1, xs: [7, 8] }];
             {
                 let r = &mut hs[0];
@@ -4205,8 +4198,8 @@ fn dynamic_array_field_views_through_references_and_temporaries() {
     // A temporary record is hoisted; its owning fields drop exactly once.
     let temporary = r#"
         struct Holder { b: Box<i64>, xs: DynArray<i64, 4> }
-        fn make() -> Holder ! {alloc, panic} { Holder { b: Box.new(5), xs: [1, 2, 3] } }
-        fn main() -> i64 ! {alloc, panic} {
+        fn make() -> Holder ! {alloc} { Holder { b: Box.new(5), xs: [1, 2, 3] } }
+        fn main() -> i64 ! {alloc} {
             let n = {
                 let v: &[i64] = &make().xs[1..];
                 Slice.len(v) + Slice.get(v, 1)
@@ -4222,7 +4215,7 @@ fn dynamic_array_field_views_through_references_and_temporaries() {
     rejects(
         r#"
         struct Holder { tag: i64, xs: DynArray<i64, 4> }
-        fn bad(h: &Holder) -> i64 ! {panic} { let v: &mut [i64] = &mut h.xs[..]; 0 }
+        fn bad(h: &Holder) -> i64 ! {} { let v: &mut [i64] = &mut h.xs[..]; 0 }
         fn main() -> i64 ! {} { 0 }"#,
         "behind a shared '&Record' reference",
     );
@@ -4230,7 +4223,7 @@ fn dynamic_array_field_views_through_references_and_temporaries() {
     rejects(
         r#"
         struct Holder { tag: i64, xs: DynArray<i64, 4> }
-        fn bad(h: &mut Holder) -> i64 ! {panic} {
+        fn bad(h: &mut Holder) -> i64 ! {} {
             let v: &mut [i64] = &mut h.xs[..];
             h.xs = [9];
             Slice.len(v)
@@ -4241,7 +4234,7 @@ fn dynamic_array_field_views_through_references_and_temporaries() {
     rejects(
         r#"
         struct Holder { tag: i64, xs: DynArray<i64, 4> }
-        fn bad(h: &mut Holder) -> i64 ! {panic} {
+        fn bad(h: &mut Holder) -> i64 ! {} {
             let v: &mut [i64] = &mut h.xs[..];
             let w: &mut [i64] = &mut h.xs[..];
             Slice.len(v) + Slice.len(w)
@@ -4253,8 +4246,8 @@ fn dynamic_array_field_views_through_references_and_temporaries() {
     rejects(
         r#"
         struct Holder { tag: i64, xs: DynArray<i64, 4> }
-        fn tail<'a>(h: &'a Holder) -> &'a [i64] ! {panic} { &h.xs[1..] }
-        fn main() -> i64 ! {panic} {
+        fn tail<'a>(h: &'a Holder) -> &'a [i64] ! {} { &h.xs[1..] }
+        fn main() -> i64 ! {} {
             let mut h = Holder { tag: 1, xs: [4, 5, 6] };
             let v = tail(&h);
             h = Holder { tag: 2, xs: [1] };
@@ -4266,7 +4259,7 @@ fn dynamic_array_field_views_through_references_and_temporaries() {
     rejects(
         r#"
         struct Holder { tag: i64, xs: DynArray<i64, 4> }
-        fn leak<'a>(h: &'a Holder) -> &'a [i64] ! {panic} {
+        fn leak<'a>(h: &'a Holder) -> &'a [i64] ! {} {
             let local = Holder { tag: 1, xs: [1] };
             let r = &local;
             &r.xs[..]
@@ -4281,7 +4274,7 @@ fn borrowed_dynamic_array_patterns_bind_element_references() {
     // Owning elements are matched by reference: nothing moves, and the array
     // still drops each box exactly once.
     let owning = r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 4> = [Box.new(10), Box.new(20), Box.new(12)];
             let x = match &a {
                 [first, .., last] => Box.read(first) + Box.read(last),
@@ -4301,7 +4294,7 @@ fn borrowed_dynamic_array_patterns_bind_element_references() {
     // Copyable elements mix by-value sub-patterns with references, and a
     // named rest is a `&[T]` view of the middle.
     let copyable = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1, 2, 3, 4];
             match &a {
                 [9, ..] => 0,
@@ -4315,14 +4308,14 @@ fn borrowed_dynamic_array_patterns_bind_element_references() {
     // A reference parameter to a runtime-length array, with a suffix whose
     // position depends on the runtime length.
     let runtime = r#"
-        fn ends(n: i64, a: &[i64; n <= 4]) -> i64 ! {panic} {
+        fn ends(n: i64, a: &[i64; n <= 4]) -> i64 ! {} {
             match a {
                 [x, .., y] => *x + *y,
                 [x] => *x,
                 _ => 0,
             }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let k = 3;
             let one = 1;
             let a: [i64; k <= 4] = Array.fill(k, 21);
@@ -4335,7 +4328,7 @@ fn borrowed_dynamic_array_patterns_bind_element_references() {
     // A record element is read through its reference.
     let records = r#"
         struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<Point, 3> = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
             match &a { [.., p] => p.x * 10 + p.y, _ => 0 }
         }"#;
@@ -4349,7 +4342,7 @@ fn borrowed_dynamic_array_patterns_keep_the_array_loaned() {
     // An element reference escaping the match keeps the array loaned.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut a: DynArray<Box<i64>, 4> = [Box.new(1)];
             let r = match &a { [first, ..] => first, _ => panic() };
             a = [Box.new(2)];
@@ -4359,7 +4352,7 @@ fn borrowed_dynamic_array_patterns_keep_the_array_loaned() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 4> = [Box.new(1)];
             let r = match &a { [first, ..] => first, _ => panic() };
             let moved = a;
@@ -4370,7 +4363,7 @@ fn borrowed_dynamic_array_patterns_keep_the_array_loaned() {
     // An element reference cannot outlive the array's scope.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let r = {
                 let a: DynArray<Box<i64>, 4> = [Box.new(1)];
                 match &a { [first, ..] => first, _ => panic() }
@@ -4382,7 +4375,7 @@ fn borrowed_dynamic_array_patterns_keep_the_array_loaned() {
     // Owning elements cannot be destructured or copied through the borrow.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<(i64, Box<i64>), 4> = [(1, Box.new(2))];
             match &a { [(x, b)] => x, _ => 0 }
         }"#,
@@ -4390,7 +4383,7 @@ fn borrowed_dynamic_array_patterns_keep_the_array_loaned() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 4> = [Box.new(1)];
             match &a { [..rest] => 0, _ => 1 }
         }"#,
@@ -4398,7 +4391,7 @@ fn borrowed_dynamic_array_patterns_keep_the_array_loaned() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 4> = [Box.new(1)];
             match &a { x => 0 }
         }"#,
@@ -4407,7 +4400,7 @@ fn borrowed_dynamic_array_patterns_keep_the_array_loaned() {
     // The runtime length is still not exhaustive without a catch-all.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1];
             match &a { [x] => *x, [] => 0 }
         }"#,
@@ -4417,7 +4410,7 @@ fn borrowed_dynamic_array_patterns_keep_the_array_loaned() {
     rejects(
         r#"
         struct P { x: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = P { x: 1 };
             match &p { _ => 0 }
         }"#,
@@ -4436,13 +4429,13 @@ fn review_writes_through_a_reference_parameter_respect_live_derived_borrows() {
     rejects(
         r#"
         struct H { xs: DynArray<Box<i64>, 4>, k: i64 }
-        fn f(h: &mut H) -> i64 ! {alloc, panic} {
+        fn f(h: &mut H) -> i64 ! {alloc} {
             match &h.xs {
                 [x, ..] => { *h = H { xs: [], k: 0 }; let junk = Box.new(1234); Box.read(x) },
                 _ => 0,
             }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut h = H { xs: [Box.new(42), Box.new(43)], k: 0 };
             f(&mut h)
         }"#,
@@ -4453,7 +4446,7 @@ fn review_writes_through_a_reference_parameter_respect_live_derived_borrows() {
             &format!(
                 r#"
                 struct H {{ xs: DynArray<i64, 4>, k: i64 }}
-                fn f(h: &mut H) -> i64 ! {{panic}} {{
+                fn f(h: &mut H) -> i64 ! {{}} {{
                     let s = &h.xs[..];
                     {write}
                     Slice.get(s, 0)
@@ -4467,7 +4460,7 @@ fn review_writes_through_a_reference_parameter_respect_live_derived_borrows() {
     rejects(
         r#"
         struct H { xs: DynArray<i64, 4>, k: i64 }
-        fn f(h: &mut H) -> i64 ! {panic} {
+        fn f(h: &mut H) -> i64 ! {} {
             let p = &h.k;
             *h = H { xs: [], k: 7 };
             *p
@@ -4478,13 +4471,13 @@ fn review_writes_through_a_reference_parameter_respect_live_derived_borrows() {
     // After the derived borrow's last use the write is fine.
     let ok = r#"
         struct H { xs: DynArray<i64, 4>, k: i64 }
-        fn f(h: &mut H) -> i64 ! {panic} {
+        fn f(h: &mut H) -> i64 ! {} {
             let n = { let s = &h.xs[..]; Slice.get(s, 0) };
             h.xs = [n + 1];
             h.k = 2;
             DynArray.get(&h.xs, 0) + h.k
         }
-        fn main() -> i64 ! {panic} { let mut h = H { xs: [40], k: 0 }; f(&mut h) }"#;
+        fn main() -> i64 ! {} { let mut h = H { xs: [40], k: 0 }; f(&mut h) }"#;
     assert_eq!(value(ok), 43);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(ok, 43);
@@ -4498,8 +4491,8 @@ fn review_mutable_borrows_remove_a_local_from_the_fact_system() {
         rejects(
             &format!(
                 r#"
-                fn neg(p: &mut i64) -> Unit ! {{panic}} {{ *p = 0 - 1000; }}
-                fn main() -> i64 ! {{panic}} {{
+                fn neg(p: &mut i64) -> Unit ! {{}} {{ *p = 0 - 1000; }}
+                fn main() -> i64 ! {{}} {{
                     let a: [i64; 5] = [1, 1, 1, 1, 1];
                     let v = &a[..];
                     let mut i = 0;
@@ -4519,7 +4512,7 @@ fn review_mutable_borrows_remove_a_local_from_the_fact_system() {
     // Straight-line: a fact established before `&mut` does not survive it.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 5] = [1, 1, 1, 1, 1];
             let v = &a[..];
             let mut i = 2;
@@ -4534,7 +4527,7 @@ fn review_mutable_borrows_remove_a_local_from_the_fact_system() {
     // The same through the runtime-length view fact.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let n = 5;
             let a: [i64; n <= 8] = Array.fill(n, 1);
             let v = &a[..];
@@ -4557,7 +4550,7 @@ fn review_nested_borrowed_matches_release_their_scrutinee() {
     // Finding 3: a borrowed match as an arm's tail was falsely rejected.
     let source = r#"
         enum Opt<T> { Some(T), None }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<i64, 4> = [1, 2];
             let o: Opt<DynArray<i64, 4>> = Opt.Some(a);
             match o { Opt.Some(x) => match &x { [_, ..] => 5, _ => 0 }, Opt.None => 0 }
@@ -4570,7 +4563,7 @@ fn review_nested_borrowed_matches_release_their_scrutinee() {
     rejects(
         r#"
         enum Opt<T> { Some(T), None }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: DynArray<Box<i64>, 4> = [Box.new(1)];
             let o: Opt<DynArray<Box<i64>, 4>> = Opt.Some(a);
             let r = match o {
@@ -4589,8 +4582,8 @@ fn review_returned_element_references_keep_their_split_side() {
     // element reference into the other side.
     let source = r#"
         struct P { x: i64, y: i64 }
-        fn bump<'a>(s: &'a mut [P], i: i64) -> &'a mut i64 ! {panic} { &mut s[i].y }
-        fn main() -> i64 ! {panic} {
+        fn bump<'a>(s: &'a mut [P], i: i64) -> &'a mut i64 ! {} { &mut s[i].y }
+        fn main() -> i64 ! {} {
             let mut v: DynArray<P, 3> = [P { x: 1, y: 2 }, P { x: 3, y: 4 }, P { x: 5, y: 6 }];
             {
                 let view: &mut [P] = &mut v[..];
@@ -4610,8 +4603,8 @@ fn review_returned_element_references_keep_their_split_side() {
     rejects(
         r#"
         struct P { x: i64, y: i64 }
-        fn bump<'a>(s: &'a mut [P], i: i64) -> &'a mut i64 ! {panic} { &mut s[i].y }
-        fn main() -> i64 ! {panic} {
+        fn bump<'a>(s: &'a mut [P], i: i64) -> &'a mut i64 ! {} { &mut s[i].y }
+        fn main() -> i64 ! {} {
             let mut v: DynArray<P, 3> = [P { x: 1, y: 2 }, P { x: 3, y: 4 }];
             let view: &mut [P] = &mut v[..];
             let (l, r) = Slice.split_at_mut(view, 1);
@@ -4628,8 +4621,8 @@ fn review_diagnostics_and_small_limits() {
     // Two binders with one name are named apart in the mismatch.
     rejects(
         r#"
-        fn mk(n: i64) -> [i64; n <= 8] ! {panic} { Array.fill(n, 1) }
-        fn main() -> i64 ! {panic} {
+        fn mk(n: i64) -> [i64; n <= 8] ! {} { Array.fill(n, 1) }
+        fn main() -> i64 ! {} {
             let k = 2;
             let b = { let k = 7; mk(k) };
             let c: [i64; k <= 8] = b;
@@ -4650,7 +4643,7 @@ fn review_diagnostics_and_small_limits() {
     assert_eq!(value(literal), 2);
     // `[..rest]` alone is exhaustive, and a later `_` is still accepted.
     let rest = r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1, 2];
             let x = match a { [..rest] => DynArray.len(&rest) };
             let y = match a { [..] => 10, _ => 0 };
@@ -4661,8 +4654,8 @@ fn review_diagnostics_and_small_limits() {
     agrees(rest, 12);
     // Indexing through an exclusive reference to a runtime-length array.
     let exclusive = r#"
-        fn f(n: i64, a: &mut [i64; n <= 4]) -> i64 ! {panic} { a[1] + a[2] }
-        fn main() -> i64 ! {panic} {
+        fn f(n: i64, a: &mut [i64; n <= 4]) -> i64 ! {} { a[1] + a[2] }
+        fn main() -> i64 ! {} {
             let k = 3;
             let mut b: [i64; k <= 4] = Array.fill(k, 6);
             f(k, &mut b)

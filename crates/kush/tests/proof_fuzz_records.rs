@@ -24,17 +24,17 @@ pub struct Counter { count: i64, limit: i64 }
 
 pub fn new() -> Counter ! {} { Counter { count: 1, limit: 10 } }
 
-pub fn tick(c: &mut Counter, by: i64) -> i64 ! {panic} {
+pub fn tick(c: &mut Counter, by: i64) -> i64 ! {} {
     c.count = c.count + by;
     c.count
 }
 
 pub trait Measure {
-    fn size(self: &Self) -> i64 ! {panic};
+    fn size(self: &Self) -> i64 ! {};
 }
 
 impl Measure for Grid {
-    pub fn size(self: &Self) -> i64 ! {panic} { self.scale }
+    pub fn size(self: &Self) -> i64 ! {} { self.scale }
 }
 ";
 
@@ -46,12 +46,12 @@ use app.shapes.Measure;
 
 // `cells` has at least 16 elements, so index 15 is proved; `scale` is not
 // bounded, so the sum is attacked.
-pub fn corner(g: &Grid) -> i64 ! {panic} {
+pub fn corner(g: &Grid) -> i64 ! {} {
     let c: i64 = Int.convert(g.cells[15]);
     g.scale + c + 1
 }
 
-pub fn factor(m: Mode) -> i64 ! {panic} {
+pub fn factor(m: Mode) -> i64 ! {} {
     match m {
         Mode.Off => 0,
         Mode.On => 1,
@@ -59,9 +59,9 @@ pub fn factor(m: Mode) -> i64 ! {panic} {
     }
 }
 
-pub fn twice<T: Measure>(t: &T) -> i64 ! {panic} { t.size() * 2 }
+pub fn twice<T: Measure>(t: &T) -> i64 ! {} { t.size() * 2 }
 
-pub fn say(x: i64) -> i64 ! {io, panic} { x + 1 }
+pub fn say(x: i64) -> i64 ! {io} { x + 1 }
 ";
 
 // A generic function has checks only where it is instantiated: `main`
@@ -69,7 +69,7 @@ pub fn say(x: i64) -> i64 ! {io, panic} { x + 1 }
 const MAIN: &str = "module app;
 use app.lib;
 use app.shapes;
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let mut cells: Vec<u8> = Vec.new();
     let mut i = 0;
     while i < 16 { cells = cells.push(0); i = i + 1; }

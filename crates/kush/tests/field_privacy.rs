@@ -21,7 +21,7 @@ pub struct Permit { pub label: i64, revision: i64 }
 pub fn mint(revision: i64) -> Permit ! {} { Permit { label: 7, revision: revision } }
 pub fn revision(permit: &Permit) -> i64 ! {} { permit.revision }
 pub fn relabel(permit: Permit, label: i64) -> Permit ! {} { Permit { label: label, ..permit } }
-pub fn bump(permit: Permit) -> Permit ! {panic} {
+pub fn bump(permit: Permit) -> Permit ! {} {
     let Permit { label, revision } = permit;
     Permit { label: label, revision: revision + 1 }
 }
@@ -52,7 +52,7 @@ fn run(main: &str) -> Result<(i64, String), String> {
 fn public_fields_and_module_functions_are_usable() {
     let (value, _) = run(r#"use demo.permit;
         use demo.permit.Permit;
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = permit.bump(permit.mint(3));
             let label = p.label;
             let current = permit.revision(&p);
@@ -85,7 +85,7 @@ fn private_fields_are_rejected_outside_their_module() {
         let main = format!(
             "use demo.permit;
             use demo.permit.Permit;
-            fn main() -> i64 ! {{panic}} {{ {body} }}
+            fn main() -> i64 ! {{}} {{ {body} }}
             "
         );
         let error = run(&main).expect_err(what);
@@ -101,7 +101,7 @@ fn private_fields_are_rejected_outside_their_module() {
 #[test]
 fn struct_update_needs_visible_fields() {
     let (value, _) = run(r#"use demo.permit;
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = permit.relabel(permit.mint(3), 9);
             p.label * 10 + permit.revision(&p)
         }
@@ -110,7 +110,7 @@ fn struct_update_needs_visible_fields() {
     assert_eq!(value, 93);
     let error = run(r#"use demo.permit;
         use demo.permit.Permit;
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Permit { label: 1, ..permit.mint(3) };
             p.label
         }

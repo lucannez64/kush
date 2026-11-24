@@ -52,13 +52,13 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 }
 
 const MUTUAL: &str = r#"
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     if stop { a } else { right(a, b, true) }
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     if stop { b } else { left(a, b, true) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(left(&a[..], &b[..], false), 0)
@@ -76,7 +76,7 @@ fn recursive_swap_names_the_actual_result_lifetime() {
     // name 'b.
     rejects_naming_b(
         r#"fn f<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64)
-            -> struct { view: &'a [i64] } ! {panic} {
+            -> struct { view: &'a [i64] } ! {} {
             if n == 0 {
                 struct { view: a }
             } else {
@@ -89,11 +89,11 @@ fn recursive_swap_names_the_actual_result_lifetime() {
     // The mutual-recursion form carries the same instantiated label.
     rejects_naming_b(
         r#"fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64)
-            -> struct { view: &'a [i64] } ! {panic} {
+            -> struct { view: &'a [i64] } ! {} {
             if n == 0 { struct { view: a } } else { right(b, a, n - 1) }
         }
         fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64)
-            -> struct { view: &'a [i64] } ! {panic} {
+            -> struct { view: &'a [i64] } ! {} {
             if n == 0 { struct { view: a } } else { left(a, b, n - 1) }
         }
         fn main() -> Unit ! {} {}"#,
@@ -111,13 +111,13 @@ fn mutual_recursion_keeps_every_result_owner_and_evaluates_consistently() {
 #[test]
 fn declaration_order_does_not_change_mutual_summaries() {
     let reversed = r#"
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     if stop { b } else { left(a, b, true) }
 }
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     if stop { a } else { right(a, b, true) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(left(&a[..], &b[..], false), 0)
@@ -130,13 +130,13 @@ fn main() -> i64 ! {panic} {
 fn input_permutation_on_recursive_calls_keeps_all_sources() {
     agrees(
         r#"
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     if stop { a } else { right(b, a, true) }
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     if stop { b } else { left(b, a, true) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(left(&a[..], &b[..], false), 0)
@@ -152,10 +152,10 @@ fn self_recursion_with_a_base_origin_unions_every_visit() {
     // One visit flips the arguments; the base returns the second lifetime.
     agrees(
         r#"
-fn find<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn find<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     if n == 0 { a } else { find(b, a, n - 1) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(find(&a[..], &b[..], 1), 0)
@@ -170,16 +170,16 @@ fn main() -> i64 ! {panic} {
 fn helper_chains_compose_through_a_three_function_cycle() {
     agrees(
         r#"
-fn first<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn first<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     if n == 0 { a } else { second(a, b, n - 1) }
 }
-fn second<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn second<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     third(a, b, n)
 }
-fn third<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn third<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     if n == 0 { b } else { first(a, b, n - 1) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(first(&a[..], &b[..], 1), 0)
@@ -197,13 +197,13 @@ fn recursive_projection_through_a_structural_helper_field() {
     // the recursive edge only ever selects `a` as well.
     agrees(
         r#"
-fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {} {
     struct { view: v }
 }
-fn find<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn find<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     if n == 0 { wrap(a).view } else { find(a, b, n - 1) }
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [40, 2];
     let mut b: Vec<i64> = [3, 4];
     let out = find(&a[..], &b[..], 1);
@@ -220,13 +220,13 @@ fn main() -> i64 ! {alloc, panic} {
 fn recursive_structural_helper_summary_keeps_its_projected_origin() {
     agrees(
         r#"
-fn wrap<'a>(v: &'a [i64], n: i64) -> struct { view: &'a [i64] } ! {panic} {
+fn wrap<'a>(v: &'a [i64], n: i64) -> struct { view: &'a [i64] } ! {} {
     if n == 0 { struct { view: v } } else { wrap(v, n - 1) }
 }
-fn project<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
+fn project<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {} {
     wrap(a, 1).view
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [40, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(project(&a[..], &b[..]), 0) + 2
@@ -238,10 +238,10 @@ fn main() -> i64 ! {panic} {
 }
 
 const LET_BOUND_PROJECT: &str = r#"
-fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {} {
     struct { view: v }
 }
-fn project<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn project<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     if n == 0 {
         wrap(a).view
     } else {
@@ -262,7 +262,7 @@ fn let_bound_helper_results_follow_recursive_path_origins() {
         &format!(
             "{LET_BOUND_PROJECT}{}",
             r#"
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [40, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(project(&a[..], &b[..], 1), 0) + 2
@@ -282,7 +282,7 @@ fn let_bound_recursive_result_keeps_each_reachable_owner_loaned() {
     for owner in ["a", "b"] {
         let main = format!(
             r#"
-fn main() -> i64 ! {{panic}} {{
+fn main() -> i64 ! {{}} {{
     let mut a: [i64; 2] = [1, 2];
     let mut b: [i64; 2] = [3, 4];
     let out = project(&a[..], &b[..], 1);
@@ -302,7 +302,7 @@ fn main() -> i64 ! {{panic}} {{
         &format!(
             "{LET_BOUND_PROJECT}{}",
             r#"
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     let mut c: Vec<i64> = [8, 9];
@@ -321,10 +321,10 @@ fn main() -> i64 ! {alloc, panic} {
 fn a_local_backed_let_binding_on_the_recursive_path_stays_rejected() {
     rejects(
         r#"
-fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {} {
     struct { view: v }
 }
-fn project<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn project<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     if n == 0 {
         wrap(a).view
     } else {
@@ -356,14 +356,14 @@ fn project_variant(main: &str, replacement: &str) -> String {
 #[test]
 fn shadowed_and_reassigned_let_bindings_stay_sound() {
     const RESULT_B: &str = r#"
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(project(&a[..], &b[..], 1), 0)
 }
 "#;
     const MUTATE_B: &str = r#"
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let mut b: [i64; 2] = [3, 4];
     let out = project(&a[..], &b[..], 1);
@@ -372,7 +372,7 @@ fn main() -> i64 ! {panic} {
 }
 "#;
     const MUTATE_A: &str = r#"
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let mut a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     let out = project(&a[..], &b[..], 1);
@@ -400,13 +400,13 @@ fn main() -> i64 ! {panic} {
 fn recursive_projected_result_keeps_its_owner_loaned() {
     rejects(
         r#"
-fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {} {
     struct { view: v }
 }
-fn find<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn find<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     if n == 0 { wrap(a).view } else { find(a, b, n - 1) }
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let mut a: Vec<i64> = [40, 2];
     let b: Vec<i64> = [3, 4];
     let out = find(&a[..], &b[..], 1);
@@ -422,10 +422,10 @@ fn main() -> i64 ! {alloc, panic} {
 fn a_local_projection_on_a_recursive_path_stays_rejected() {
     rejects(
         r#"
-fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {} {
     struct { view: v }
 }
-fn bad<'a>(a: &'a [i64], n: i64) -> &[i64] ! {panic} {
+fn bad<'a>(a: &'a [i64], n: i64) -> &[i64] ! {} {
     let local: [i64; 2] = [1, 2];
     if n == 0 { wrap(&local[..]).view } else { bad(a, n - 1) }
 }
@@ -440,13 +440,13 @@ fn recursive_record_field_parameters_keep_field_paths() {
     agrees(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-fn first<'a, 'b>(p: Pair<'a, 'b>, q: Pair<'a, 'b>, n: i64) -> &[i64] ! {panic} {
+fn first<'a, 'b>(p: Pair<'a, 'b>, q: Pair<'a, 'b>, n: i64) -> &[i64] ! {} {
     if n == 0 { p.left } else { second(q, p, n - 1) }
 }
-fn second<'a, 'b>(p: Pair<'a, 'b>, q: Pair<'a, 'b>, n: i64) -> &[i64] ! {panic} {
+fn second<'a, 'b>(p: Pair<'a, 'b>, q: Pair<'a, 'b>, n: i64) -> &[i64] ! {} {
     if n == 0 { q.right } else { first(p, q, n - 1) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     let p = Pair { left: &a[..], right: &b[..] };
@@ -463,11 +463,11 @@ fn main() -> i64 ! {panic} {
 fn a_local_escape_on_a_recursive_path_stays_rejected() {
     rejects(
         r#"
-fn f<'a>(a: &'a [i64], n: i64) -> &[i64] ! {panic} {
+fn f<'a>(a: &'a [i64], n: i64) -> &[i64] ! {} {
     let local: [i64; 2] = [9, 9];
     if n == 0 { a } else { f(&local[..], n - 1) }
 }
-fn main() -> Unit ! {panic} { let a: [i64; 2] = [1, 2]; let _ = f(&a[..], 2); }
+fn main() -> Unit ! {} { let a: [i64; 2] = [1, 2]; let _ = f(&a[..], 2); }
 "#,
         "outlive the lexical scope",
     );
@@ -477,10 +477,10 @@ fn main() -> Unit ! {panic} { let a: [i64; 2] = [1, 2]; let _ = f(&a[..], 2); }
 fn a_no_seed_cycle_cannot_manufacture_an_origin_or_equality() {
     let error = check(
         r#"
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     right(a, b, stop)
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     left(a, b, stop)
 }
 fn main() -> Unit ! {} {}
@@ -513,17 +513,17 @@ fn main() -> Unit ! {} {}
 fn an_explicit_recursive_contract_is_parametric_forwarding_not_inferred_never() {
     check(
         r#"
-fn f<'a>(a: &'a [i64], n: i64) -> &'a [i64] ! {panic} { f(a, n) }
+fn f<'a>(a: &'a [i64], n: i64) -> &'a [i64] ! {} { f(a, n) }
 fn main() -> Unit ! {} {}
 "#,
     )
     .unwrap();
     agrees(
         r#"
-fn f<'a>(a: &'a [i64], n: i64) -> &'a [i64] ! {panic} {
+fn f<'a>(a: &'a [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { a } else { f(a, n - 1) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [7, 8];
     Slice.get(f(&a[..], 2), 0)
 }
@@ -540,13 +540,13 @@ fn a_recursive_precondition_is_exported_and_checked_at_callers() {
     // declaration order could have checked the caller header first.
     rejects(
         r#"
-fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {} {
     Slice.get(left(a, b, 1), 0)
 }
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { a } else { right(a, b, n - 1) }
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { b } else { left(a, b, n - 1) }
 }
 fn main() -> Unit ! {} {}
@@ -558,13 +558,13 @@ fn main() -> Unit ! {} {}
     // it, so this is not a dead-code exemption.
     check(
         r#"
-fn caller<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+fn caller<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64]) -> i64 ! {} {
     Slice.get(left(a, b, 1), 0)
 }
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { a } else { right(a, b, n - 1) }
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { b } else { left(a, b, n - 1) }
 }
 fn main() -> Unit ! {} {}
@@ -578,14 +578,14 @@ fn a_frozen_recursive_contract_cannot_be_silently_strengthened_by_an_arrow() {
     // The recursive SCC infers `b: a`; an unconstrained arrow cannot erase it.
     rejects(
         r#"
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { a } else { right(a, b, n - 1) }
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { b } else { left(a, b, n - 1) }
 }
-fn main() -> Unit ! {panic} {
-    let f: fn<'a, 'b>(&'a [i64], &'b [i64], i64) -> &'a [i64] ! {panic} = left;
+fn main() -> Unit ! {} {
+    let f: fn<'a, 'b>(&'a [i64], &'b [i64], i64) -> &'a [i64] ! {} = left;
     let _ = f;
 }
 "#,
@@ -594,14 +594,14 @@ fn main() -> Unit ! {panic} {
     // Spelling the requirement keeps the exact arrow contract valid.
     check(
         r#"
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { a } else { right(a, b, n - 1) }
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { b } else { left(a, b, n - 1) }
 }
-fn main() -> Unit ! {panic} {
-    let f: fn<'a, 'b: 'a>(&'a [i64], &'b [i64], i64) -> &'a [i64] ! {panic} = left;
+fn main() -> Unit ! {} {
+    let f: fn<'a, 'b: 'a>(&'a [i64], &'b [i64], i64) -> &'a [i64] ! {} = left;
     let _ = f;
 }
 "#,
@@ -617,10 +617,10 @@ fn an_explicit_boundary_can_seed_an_elided_recursive_cycle() {
     // this also checks that no `Never` result is inferred.
     check(
         r#"
-fn annotated<'a>(a: &'a [i64], n: i64) -> &'a [i64] ! {panic} {
+fn annotated<'a>(a: &'a [i64], n: i64) -> &'a [i64] ! {} {
     elided(a, a, n - 1)
 }
-fn elided<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn elided<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     annotated(a, n)
 }
 fn main() -> Unit ! {} {}
@@ -637,11 +637,11 @@ fn an_unsupported_recursive_boundary_asks_for_an_explicit_contract() {
     rejects(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {} {
     Pair { left: a, right: b }
 }
-fn f<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
-    let g: fn<'a, 'b>(&'a [i64], &'b [i64]) -> Pair<'a, 'b> ! {panic} = make;
+fn f<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
+    let g: fn<'a, 'b>(&'a [i64], &'b [i64]) -> Pair<'a, 'b> ! {} = make;
     if n == 0 { g(a, b).left } else { f(a, b, n - 1) }
 }
 fn main() -> Unit ! {} {}
@@ -654,13 +654,13 @@ fn main() -> Unit ! {} {}
 fn every_recursive_result_owner_stays_loaned_until_the_last_use() {
     rejects(
         r#"
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     if stop { a } else { right(a, b, true) }
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {} {
     if stop { b } else { left(a, b, true) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let mut a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     let view = left(&a[..], &b[..], false);
@@ -678,13 +678,13 @@ fn mutually_recursive_exclusive_views_keep_their_capabilities() {
     // write through the returned view remains checked.
     agrees(
         r#"
-fn left<'a, 'b>(a: &'a mut [i64], b: &'b mut [i64], n: i64) -> &mut [i64] ! {panic} {
+fn left<'a, 'b>(a: &'a mut [i64], b: &'b mut [i64], n: i64) -> &mut [i64] ! {} {
     if n == 0 { a } else { right(a, b, n - 1) }
 }
-fn right<'a, 'b>(a: &'a mut [i64], b: &'b mut [i64], n: i64) -> &mut [i64] ! {panic} {
+fn right<'a, 'b>(a: &'a mut [i64], b: &'b mut [i64], n: i64) -> &mut [i64] ! {} {
     if n == 0 { b } else { left(a, b, n - 1) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let mut a: [i64; 2] = [1, 2];
     let mut b: [i64; 2] = [3, 4];
     let view = left(&mut a[..], &mut b[..], 1);
@@ -699,7 +699,7 @@ fn main() -> i64 ! {panic} {
     // the recursive branch only forwards the shared parameter.
     rejects(
         r#"
-fn bad<'a>(a: &'a [i64], n: i64) -> &mut [i64] ! {panic} {
+fn bad<'a>(a: &'a [i64], n: i64) -> &mut [i64] ! {} {
     if n == 0 { a } else { bad(a, n - 1) }
 }
 fn main() -> Unit ! {} {}
@@ -715,9 +715,9 @@ fn erased_proof_parameters_do_not_shift_recursive_argument_mapping() {
     // 2 (`y`), not to `x` at source position 1.
     agrees(
         r#"
-fn second<'a, 'b>(erased p: { 0 == 0 }, x: &'a [i64], y: &'b [i64]) -> &'b [i64] ! {panic} { y }
-fn forward<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> &[i64] ! {panic} { second(_, x, y) }
-fn main() -> i64 ! {panic} {
+fn second<'a, 'b>(erased p: { 0 == 0 }, x: &'a [i64], y: &'b [i64]) -> &'b [i64] ! {} { y }
+fn forward<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> &[i64] ! {} { second(_, x, y) }
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(forward(&a[..], &b[..]), 0)
@@ -732,9 +732,9 @@ fn main() -> i64 ! {panic} {
 fn erased_proof_parameters_in_the_middle_keep_source_argument_mapping() {
     agrees(
         r#"
-fn second<'a, 'b>(x: &'a [i64], erased p: { 0 == 0 }, y: &'b [i64]) -> &'b [i64] ! {panic} { y }
-fn forward<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> &[i64] ! {panic} { second(x, _, y) }
-fn main() -> i64 ! {panic} {
+fn second<'a, 'b>(x: &'a [i64], erased p: { 0 == 0 }, y: &'b [i64]) -> &'b [i64] ! {} { y }
+fn forward<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> &[i64] ! {} { second(x, _, y) }
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(forward(&a[..], &b[..]), 0)
@@ -749,9 +749,9 @@ fn main() -> i64 ! {panic} {
 fn an_acyclic_indirect_result_requires_an_explicit_contract() {
     rejects(
         r#"
-fn helper<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} { a }
-fn indirect<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
-    let f: fn<'a, 'b>(&'a [i64], &'b [i64], i64) -> &'a [i64] ! {panic} = helper;
+fn helper<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} { a }
+fn indirect<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
+    let f: fn<'a, 'b>(&'a [i64], &'b [i64], i64) -> &'a [i64] ! {} = helper;
     f(a, b, n)
 }
 fn main() -> Unit ! {} {}
@@ -768,13 +768,13 @@ fn an_acyclic_borrowed_record_channel_cannot_become_empty_provenance() {
     check(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {} {
     Pair { left: a, right: b }
 }
-fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
+fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {} {
     make(a, b).left
 }
-fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
+fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {} {
     unsupported(a, b)
 }
 fn main() -> Unit ! {} {}
@@ -784,14 +784,14 @@ fn main() -> Unit ! {} {}
     rejects(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {} {
     Pair { left: a, right: b }
 }
-fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
-    let g: fn<'a, 'b>(&'a [i64], &'b [i64]) -> Pair<'a, 'b> ! {panic} = make;
+fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {} {
+    let g: fn<'a, 'b>(&'a [i64], &'b [i64]) -> Pair<'a, 'b> ! {} = make;
     g(a, b).left
 }
-fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
+fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {} {
     unsupported(a, b)
 }
 fn main() -> Unit ! {} {}
@@ -802,13 +802,13 @@ fn main() -> Unit ! {} {}
     check(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {} {
     Pair { left: a, right: b }
 }
-fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
+fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {} {
     make(a, b).left
 }
-fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
+fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {} {
     unsupported(a, b)
 }
 fn main() -> Unit ! {} {}
@@ -821,13 +821,13 @@ fn main() -> Unit ! {} {}
 fn an_unrelated_explicit_result_call_does_not_seed_a_no_origin_cycle() {
     rejects(
         r#"
-fn annotated<'a>(a: &'a [i64]) -> &'a [i64] ! {panic} { a }
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn annotated<'a>(a: &'a [i64]) -> &'a [i64] ! {} { a }
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     let local: [i64; 1] = [9];
     let _ = annotated(a);
     if n == 0 { &local[..] } else { right(a, b, n - 1) }
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
     left(a, b, n)
 }
 fn main() -> Unit ! {} {}
@@ -845,11 +845,11 @@ fn statically_resolved_recursive_method_calls_compose_origins() {
         r#"
 struct Provider { tag: i64 }
 impl Provider {
-    fn pick<'a, 'b>(self: Provider, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    fn pick<'a, 'b>(self: Provider, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
         if n == 0 { a } else { self.pick(b, a, n - 1) }
     }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let provider = Provider { tag: 0 };
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
@@ -876,11 +876,11 @@ impl Provider {
         erased proof: { 0 == 0 },
         b: &'b [i64],
         n: i64,
-    ) -> &'b [i64] ! {panic} {
+    ) -> &'b [i64] ! {} {
         if n == 0 { b } else { self.pick(a, _, b, n - 1) }
     }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let provider = Provider { tag: 0 };
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
@@ -898,14 +898,14 @@ fn a_static_trait_method_cycle_participates_and_keeps_its_contract() {
         r#"
 struct Provider { tag: i64 }
 trait Pick {
-    fn pick<'a, 'b>(self: Self, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic};
+    fn pick<'a, 'b>(self: Self, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {};
 }
 impl Pick for Provider {
-    fn pick<'a, 'b>(self: Self, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    fn pick<'a, 'b>(self: Self, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
         if n == 0 { b } else { self.pick(a, b, n - 1) }
     }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let provider = Provider { tag: 0 };
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
@@ -923,7 +923,7 @@ fn a_recursive_method_cycle_without_a_base_origin_is_rejected() {
         r#"
 struct Provider { tag: i64 }
 impl Provider {
-    fn chase<'a, 'b>(self: Provider, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    fn chase<'a, 'b>(self: Provider, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {} {
         self.chase(a, b, n)
     }
 }
@@ -941,13 +941,13 @@ fn borrowed_record_results_keep_a_per_field_summary() {
     agrees(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-fn build<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+fn build<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {} {
     Pair { left: a, right: b }
 }
-fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {} {
     if n == 0 { build(a, b) } else { relay(a, b, n - 1) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     let pair = relay(&a[..], &b[..], 2);
@@ -965,13 +965,13 @@ fn a_recursive_record_result_keeps_every_owner_loaned() {
     rejects(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-fn build<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+fn build<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {} {
     Pair { left: a, right: b }
 }
-fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {} {
     if n == 0 { build(a, b) } else { relay(a, b, n - 1) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let mut a: [i64; 2] = [1, 2];
     let mut b: [i64; 2] = [3, 4];
     let pair = relay(&a[..], &b[..], 1);
@@ -992,13 +992,13 @@ fn permuted_record_inputs_keep_all_owners_under_one_lifetime() {
     rejects(
         r#"
 struct One<'a> { value: &'a [i64] }
-fn left<'a>(a: &'a [i64], b: &'a [i64], n: i64) -> One<'a> ! {panic} {
+fn left<'a>(a: &'a [i64], b: &'a [i64], n: i64) -> One<'a> ! {} {
     if n == 0 { One { value: a } } else { right(b, a, n - 1) }
 }
-fn right<'a>(a: &'a [i64], b: &'a [i64], n: i64) -> One<'a> ! {panic} {
+fn right<'a>(a: &'a [i64], b: &'a [i64], n: i64) -> One<'a> ! {} {
     if n == 0 { One { value: a } } else { left(b, a, n - 1) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let mut a: [i64; 2] = [1, 2];
     let mut b: [i64; 2] = [3, 4];
     let one = left(&a[..], &b[..], 1);
@@ -1015,7 +1015,7 @@ fn a_local_record_field_on_a_recursive_path_stays_rejected() {
     rejects(
         r#"
 struct Holder<'a> { value: &'a [i64] }
-fn chase<'a>(a: &'a [i64], n: i64) -> Holder<'a> ! {panic} {
+fn chase<'a>(a: &'a [i64], n: i64) -> Holder<'a> ! {} {
     let local: [i64; 2] = [9, 9];
     if n == 0 { Holder { value: a } } else { chase(&local[..], n - 1) }
 }
@@ -1030,10 +1030,10 @@ fn a_no_seed_record_cycle_cannot_manufacture_field_origins() {
     rejects(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> Pair<'a, 'b> ! {panic} {
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> Pair<'a, 'b> ! {} {
     right(a, b, stop)
 }
-fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> Pair<'a, 'b> ! {panic} {
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> Pair<'a, 'b> ! {} {
     left(a, b, stop)
 }
 fn main() -> Unit ! {} {}
@@ -1051,13 +1051,13 @@ fn a_recursive_container_write_exports_a_caller_precondition() {
     agrees(
         r#"
 struct Point { x: i64, y: i64 }
-fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc} {
     if n > 0 { fill(values, p, n - 1) } else { Vec.push(values, p) }
 }
-fn caller<'a, 'b: 'a>(values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc, panic} {
+fn caller<'a, 'b: 'a>(values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc} {
     fill(values, p, 1)
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let p = Point { x: 7, y: 0 };
     let values: Vec<&Point> = [&p];
     let values = caller(values, &p);
@@ -1072,10 +1072,10 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"
 struct Point { x: i64, y: i64 }
-fn caller<'a, 'b>(values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc, panic} {
+fn caller<'a, 'b>(values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc} {
     fill(values, p, 1)
 }
-fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc} {
     if n > 0 { fill(values, p, n - 1) } else { Vec.push(values, p) }
 }
 fn main() -> Unit ! {} {}
@@ -1090,13 +1090,13 @@ fn an_explicit_callee_bound_propagates_as_a_recursive_precondition() {
     // `'b: 'a` contract becomes relay's independent requirement.
     check(
         r#"
-fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { a } else { b }
 }
-fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {panic} {
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {} {
     if n == 0 { 0 } else { let _ = left(a, b, n - 1); relay(a, b, n - 1) }
 }
-fn caller<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+fn caller<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64]) -> i64 ! {} {
     relay(a, b, 1)
 }
 fn main() -> Unit ! {} {}
@@ -1105,13 +1105,13 @@ fn main() -> Unit ! {} {}
     .unwrap();
     rejects(
         r#"
-fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { a } else { b }
 }
-fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {panic} {
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {} {
     if n == 0 { 0 } else { let _ = left(a, b, n - 1); relay(a, b, n - 1) }
 }
-fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {} {
     relay(a, b, 1)
 }
 fn main() -> Unit ! {} {}
@@ -1121,13 +1121,13 @@ fn main() -> Unit ! {} {}
     // The same program with declarations permuted gives the same requirement.
     rejects(
         r#"
-fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {} {
     relay(a, b, 1)
 }
-fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {panic} {
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {} {
     if n == 0 { 0 } else { let _ = left(a, b, n - 1); relay(a, b, n - 1) }
 }
-fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
     if n == 0 { a } else { b }
 }
 fn main() -> Unit ! {} {}
@@ -1141,11 +1141,11 @@ fn a_frozen_arrow_cannot_erase_a_recursive_container_requirement() {
     rejects(
         r#"
 struct Point { x: i64, y: i64 }
-fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc} {
     if n > 0 { fill(values, p, n - 1) } else { Vec.push(values, p) }
 }
-fn main() -> Unit ! {alloc, panic} {
-    let f: fn<'a, 'b>(Vec<&'a Point>, &'b Point, i64) -> Vec<&'a Point> ! {alloc, panic} = fill;
+fn main() -> Unit ! {alloc} {
+    let f: fn<'a, 'b>(Vec<&'a Point>, &'b Point, i64) -> Vec<&'a Point> ! {alloc} = fill;
     let _ = f;
 }
 "#,
@@ -1161,13 +1161,13 @@ fn unsupported_relays_converge_independent_of_branch_order() {
     // witness again on every pass, so the fixed point never converged.
     for source in [
         r#"struct H<'a> { view: &'a [i64] }
-fn f<'a>(a: &'a [i64], g: fn<'a>(&'a [i64]) -> H<'a> ! {panic}, n: i64) -> H<'a> ! {panic} {
+fn f<'a>(a: &'a [i64], g: fn<'a>(&'a [i64]) -> H<'a> ! {}, n: i64) -> H<'a> ! {} {
     if n == 0 { f(a, g, n - 1) } else { g(a) }
 }
 fn main() -> Unit ! {} {}
 "#,
         r#"struct H<'a> { view: &'a [i64] }
-fn f<'a>(a: &'a [i64], g: fn<'a>(&'a [i64]) -> H<'a> ! {panic}, n: i64) -> H<'a> ! {panic} {
+fn f<'a>(a: &'a [i64], g: fn<'a>(&'a [i64]) -> H<'a> ! {}, n: i64) -> H<'a> ! {} {
     if n != 0 { g(a) } else { f(a, g, n - 1) }
 }
 fn main() -> Unit ! {} {}
@@ -1188,21 +1188,21 @@ fn a_generic_receiver_does_not_select_an_unrelated_impl_method() {
         r#"struct A { tag: i64 }
 struct B { tag: i64 }
 impl A {
-    fn pick<'a, 'b>(self: A, a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    fn pick<'a, 'b>(self: A, a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {} {
         if n == 0 { a } else { self.pick(a, b, n - 1) }
     }
 }
 impl B {
-    fn pick<'a, 'b>(self: B, a: &'a [i64], b: &'b [i64], n: i64) -> &'b [i64] ! {panic} {
+    fn pick<'a, 'b>(self: B, a: &'a [i64], b: &'b [i64], n: i64) -> &'b [i64] ! {} {
         if n == 0 { b } else { self.pick(a, b, n - 1) }
     }
 }
 fn id<A>(x: A) -> A ! {} { x }
-fn use_it<'a, 'b>(b: B, a: &'a [i64], bb: &'b [i64], n: i64) -> &[i64] ! {panic} {
+fn use_it<'a, 'b>(b: B, a: &'a [i64], bb: &'b [i64], n: i64) -> &[i64] ! {} {
     let r = id(b);
     r.pick(a, bb, n)
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     Slice.get(use_it(B { tag: 0 }, &a[..], &b[..], 0), 0)
@@ -1216,8 +1216,8 @@ fn main() -> i64 ! {panic} {
 fn whole_record_identity_helpers_keep_per_field_owners() {
     agrees(
         r#"struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-fn id<'a, 'b>(p: Pair<'a, 'b>) -> Pair<'a, 'b> ! {panic} { p }
-fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
+fn id<'a, 'b>(p: Pair<'a, 'b>) -> Pair<'a, 'b> ! {} { p }
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {} {
     if n == 0 {
         Pair { left: a, right: b }
     } else {
@@ -1225,7 +1225,7 @@ fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
         id(p)
     }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     let pair = relay(&a[..], &b[..], 2);
@@ -1237,8 +1237,8 @@ fn main() -> i64 ! {panic} {
     );
     rejects(
         r#"struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
-fn id<'a, 'b>(p: Pair<'a, 'b>) -> Pair<'a, 'b> ! {panic} { p }
-fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
+fn id<'a, 'b>(p: Pair<'a, 'b>) -> Pair<'a, 'b> ! {} { p }
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {} {
     if n == 0 {
         Pair { left: a, right: b }
     } else {
@@ -1246,7 +1246,7 @@ fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
         id(p)
     }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let mut a: [i64; 2] = [1, 2];
     let b: [i64; 2] = [3, 4];
     let pair = relay(&a[..], &b[..], 2);
@@ -1264,14 +1264,14 @@ fn inherent_methods_publish_inferred_container_write_requirements() {
         r#"struct Point { x: i64, y: i64 }
 struct Provider { tag: i64 }
 impl Provider {
-    fn fill<'a, 'b>(self: Provider, values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+    fn fill<'a, 'b>(self: Provider, values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc} {
         if n > 0 { self.fill(values, p, n - 1) } else { Vec.push(values, p) }
     }
 }
-fn caller<'a, 'b: 'a>(provider: Provider, values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc, panic} {
+fn caller<'a, 'b: 'a>(provider: Provider, values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc} {
     provider.fill(values, p, 1)
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let p = Point { x: 7, y: 0 };
     let values: Vec<&Point> = [&p];
     let values = caller(Provider { tag: 0 }, values, &p);
@@ -1285,14 +1285,14 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Point { x: i64, y: i64 }
 struct Provider { tag: i64 }
 impl Provider {
-    fn fill<'a, 'b>(self: Provider, values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+    fn fill<'a, 'b>(self: Provider, values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc} {
         if n > 0 { self.fill(values, p, n - 1) } else { Vec.push(values, p) }
     }
 }
-fn caller<'a, 'b>(provider: Provider, values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc, panic} {
+fn caller<'a, 'b>(provider: Provider, values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc} {
     provider.fill(values, p, 1)
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let p = Point { x: 7, y: 0 };
     let values: Vec<&Point> = [&p];
     let values = caller(Provider { tag: 0 }, values, &p);

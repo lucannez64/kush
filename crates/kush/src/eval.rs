@@ -626,6 +626,26 @@ impl Executable {
     }
 }
 
+/// FND-ROWS-PANIC: a panic inside runtime bookkeeping callbacks (allocator
+/// release, arena strategy) aborts instead of unwinding, as in the native
+/// runtime. The message no longer starts with "panic", so no boundary
+/// (`Task.catch`, a task entry) stops it.
+fn no_unwind<T>(result: Result<T>, context: &str) -> Result<T> {
+    result.map_err(|error| {
+        if error.message.starts_with("panic") {
+            Diagnostic::new(
+                error.span,
+                format!(
+                    "fatal: {context} panicked, which aborts the process ({})",
+                    error.message
+                ),
+            )
+        } else {
+            error
+        }
+    })
+}
+
 fn io_error_code(error: &io::Error) -> i64 {
     // Injected readers/writers may have no platform errno; map those to Linux EIO.
     error
@@ -1888,14 +1908,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         block: Value,
         span: Span,
     ) -> Result<()> {
-        match allocator {
-            AllocatorBinding::Static { free, .. } => {
-                let _ = self.call(*free, vec![block])?;
-            }
+        let released = match allocator {
+            AllocatorBinding::Static { free, .. } => self.call(*free, vec![block]),
             AllocatorBinding::Context(state) => {
-                let _ = self.allocator_context_call(state, state.free, vec![block])?;
+                self.allocator_context_call(state, state.free, vec![block])
             }
-        }
+        };
+        let _ = no_unwind(released, "an allocator release callback")?;
         let _ = span;
         Ok(())
     }
@@ -2092,9 +2111,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         let Some(function) = strategy else {
             return Ok(need.max(4096));
         };
-        let chosen = self.call(
-            function,
-            vec![Value::Scalar(need as i64), Value::Scalar(current as i64)],
+        let chosen = no_unwind(
+            self.call(
+                function,
+                vec![Value::Scalar(need as i64), Value::Scalar(current as i64)],
+            ),
+            "an arena strategy",
         )?;
         let chosen = usize::try_from(chosen.scalar()).unwrap_or(0);
         Ok(chosen.max(need))

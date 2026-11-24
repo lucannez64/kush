@@ -58,8 +58,8 @@ fn a_copyable_result_is_observed_by_a_call_argument() {
     agrees(
         &format!(
             "{MAKE}
-            fn observe(x: i64 @[1]) -> i64 ! {{panic}} {{ x + 1 }}
-            fn main() -> i64 ! {{panic}} {{ observe(make()) }}"
+            fn observe(x: i64 @[1]) -> i64 ! {{}} {{ x + 1 }}
+            fn main() -> i64 ! {{}} {{ observe(make()) }}"
         ),
         43,
         "",
@@ -78,7 +78,7 @@ fn a_let_binding_transfers_the_obligation_and_is_used_exactly_once() {
         "not used consistently before the end of its lexical scope",
     );
     rejects(
-        &format!("{MAKE}\nfn main() -> i64 ! {{panic}} {{ let x = make(); x + x }}"),
+        &format!("{MAKE}\nfn main() -> i64 ! {{}} {{ let x = make(); x + x }}"),
         "requires exactly 1",
     );
 }
@@ -125,7 +125,7 @@ fn branches_loops_and_aliases_preserve_the_obligation() {
         &format!(
             "{MAKE}
             fn alias(x: i64 @[1]) -> i64 @[1] ! {{}} {{ x }}
-            fn main() -> i64 ! {{panic}}
+            fn main() -> i64 ! {{}}
             {{ alias(make()) + 0 }}"
         ),
         42,
@@ -140,11 +140,11 @@ fn question_mark_observes_the_graded_result_once() {
         fn make_ok(which: Bool) -> Result<i64, i64> @[1] ! {} {
             if which { Ok(1) } else { Err(0) }
         }
-        fn use_it(r: Result<i64, i64> @[1]) -> Result<i64, i64> ! {panic} {
+        fn use_it(r: Result<i64, i64> @[1]) -> Result<i64, i64> ! {} {
             let x = r?;
             Ok(x + 1)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             match use_it(make_ok(true)) {
                 Ok(v) => v,
                 Err(e) => e,
@@ -168,7 +168,7 @@ fn aggregates_observe_the_value_once() {
     // A must-use tuple result cannot be split across destructured bindings.
     rejects(
         r#"fn pair() -> (i64, i64) @[1] ! {} { (1, 2) }
-        fn main() -> i64 ! {panic} { let (a, b) = pair(); a + b }"#,
+        fn main() -> i64 ! {} { let (a, b) = pair(); a + b }"#,
         "must be bound to a simple name",
     );
 }
@@ -178,9 +178,9 @@ fn a_captured_copyable_result_makes_the_closure_linear_once() {
     agrees(
         &format!(
             "{MAKE}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let x = make();
-                let f: linear once fn() -> i64 ! {{panic}} = fn() -> i64 ! {{panic}} {{ x + 1 }};
+                let f: linear once fn() -> i64 ! {{}} = fn() -> i64 ! {{}} {{ x + 1 }};
                 f()
             }}"
         ),

@@ -25,14 +25,14 @@ struct Reader {
     count: i64,
 }
 
-fn space(src: &Bytes, r: &mut Reader) -> Unit ! {panic} {
+fn space(src: &Bytes, r: &mut Reader) -> Unit ! {} {
     while r.at < src.len() && (src[r.at] == 32 || src[r.at] == 9 || src[r.at] == 10) {
         r.at = r.at + 1;
     }
 }
 
 /// Whether the next bytes (after spaces) are `text`; consume them if so.
-fn token(src: &Bytes, r: &mut Reader, text: &Bytes) -> Bool ! {panic} {
+fn token(src: &Bytes, r: &mut Reader, text: &Bytes) -> Bool ! {} {
     space(src, r);
     if r.at + text.len() > src.len() {
         return false;
@@ -53,7 +53,7 @@ fn is_atom(byte: i64) -> Bool ! {} {
 }
 
 /// The atoms that occur, as bits; malformed input is found by `read`.
-fn scan(src: &Bytes) -> i64 ! {panic} {
+fn scan(src: &Bytes) -> i64 ! {} {
     let mut atoms = 0;
     let mut i = 0;
     while i < src.len() {
@@ -72,7 +72,7 @@ fn scan(src: &Bytes) -> i64 ! {panic} {
 }
 
 /// The variable of atom `k` under `depth` binders inside the goal's body.
-fn atom(st: &mut State, r: &Reader, k: i64, depth: i64) -> i64 ! {alloc, panic} {
+fn atom(st: &mut State, r: &Reader, k: i64, depth: i64) -> i64 ! {alloc} {
     let mut position = 0;
     let mut j = 0;
     while j < k {
@@ -84,7 +84,7 @@ fn atom(st: &mut State, r: &Reader, k: i64, depth: i64) -> i64 ! {alloc, panic} 
     term.var(&mut st.kernel.store, r.count - 1 - position + depth)
 }
 
-fn unary(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc, panic} {
+fn unary(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc} {
     if token(src, r, &Bytes.from("~")) {
         let inner = unary(st, src, r, depth)?;
         let bottom = st.false_type;
@@ -109,7 +109,7 @@ fn unary(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64,
     Result.Err(r.at)
 }
 
-fn both(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc, panic} {
+fn both(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc} {
     let mut left = unary(st, src, r, depth)?;
     while token(src, r, &Bytes.from("&")) {
         let right = unary(st, src, r, depth)?;
@@ -119,7 +119,7 @@ fn both(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, 
     Result.Ok(left)
 }
 
-fn either(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc, panic} {
+fn either(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc} {
     let mut left = both(st, src, r, depth)?;
     while token(src, r, &Bytes.from("|")) {
         let right = both(st, src, r, depth)?;
@@ -129,7 +129,7 @@ fn either(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64
     Result.Ok(left)
 }
 
-fn formula(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc, panic} {
+fn formula(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i64, i64> ! {alloc} {
     let left = either(st, src, r, depth)?;
     if token(src, r, &Bytes.from("->")) {
         // The right side is under the implication's (unused) binder.
@@ -140,7 +140,7 @@ fn formula(st: &mut State, src: &Bytes, r: &mut Reader, depth: i64) -> Result<i6
 }
 
 /// The closed goal of a formula, or the byte offset where reading failed.
-pub fn read(st: &mut State, src: &Bytes) -> Result<i64, i64> ! {alloc, panic} {
+pub fn read(st: &mut State, src: &Bytes) -> Result<i64, i64> ! {alloc} {
     let atoms = scan(src);
     let mut count = 0;
     let mut k = 0;

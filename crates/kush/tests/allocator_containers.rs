@@ -111,7 +111,7 @@ fn agrees_task(source: &str, expected: i64) {
 }
 
 const ALLOCATOR: &str = r#"
-fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+fn block_alloc(bytes: i64) -> Bytes ! {alloc} {
     Bytes.with_capacity(bytes)
 }
 fn block_free(block: Bytes) -> Unit ! {} {
@@ -123,7 +123,7 @@ fn block_free(block: Bytes) -> Unit ! {} {
 fn alloc_box_owns_its_allocator_and_reads_and_takes() {
     let source = format!(
         r#"{ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator = Allocator.new(block_alloc, block_free);
             let box = AllocBox.new(allocator, 40);
             AllocBox.read(&box) + AllocBox.take(box)
@@ -142,7 +142,7 @@ fn alloc_box_owns_its_allocator_and_reads_and_takes() {
 fn allocator_binding_may_be_dropped_while_boxes_are_live() {
     let source = format!(
         r#"{ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let box = {{
                 let allocator = Allocator.new(block_alloc, block_free);
                 AllocBox.new(allocator, 7)
@@ -159,11 +159,11 @@ fn allocator_binding_may_be_dropped_while_boxes_are_live() {
 fn alloc_box_try_new_preserves_the_payload_on_refusal() {
     let source = r#"
         enum Result<T, E> { Ok(T), Err(E) }
-        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc} {
             if bytes > 0 { Bytes.with_capacity(0) } else { Bytes.with_capacity(bytes) }
         }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let allocator = Allocator.new(refuse_alloc, block_free);
             match AllocBox.try_new(allocator, 7) {
                 Ok(box) => AllocBox.take(box),
@@ -183,7 +183,7 @@ fn alloc_box_try_new_preserves_the_payload_on_refusal() {
 fn alloc_vec_grows_and_releases_through_the_recorded_allocator() {
     let source = format!(
         r#"{ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator = Allocator.new(block_alloc, block_free);
             let vector: AllocVec<i64> = AllocVec.new(allocator);
             let vector = AllocVec.push(vector, 1);
@@ -205,7 +205,7 @@ fn alloc_vec_grows_and_releases_through_the_recorded_allocator() {
 fn alloc_vec_drops_owning_elements_and_its_block() {
     let source = format!(
         r#"{ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator = Allocator.new(block_alloc, block_free);
             let vector: AllocVec<Box<i64>> = AllocVec.with_capacity(allocator, 2);
             let vector = AllocVec.push(vector, Box.new(1));
@@ -226,10 +226,10 @@ fn alloc_vec_drops_owning_elements_and_its_block() {
 fn allocator_values_are_copyable_and_can_be_shared() {
     let source = format!(
         r#"{ALLOCATOR}
-        fn make(allocator: Allocator) -> AllocBox<i64> ! {{alloc, panic}} {{
+        fn make(allocator: Allocator) -> AllocBox<i64> ! {{alloc}} {{
             AllocBox.new(allocator, 5)
         }}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator = Allocator.new(block_alloc, block_free);
             let first = make(allocator);
             let second = make(allocator);
@@ -245,7 +245,7 @@ fn allocator_values_are_copyable_and_can_be_shared() {
 fn hostile_allocator_shapes_are_rejected() {
     rejects(
         r#"
-        fn bad_alloc(bytes: i64) -> i64 ! {alloc, panic} { bytes }
+        fn bad_alloc(bytes: i64) -> i64 ! {alloc} { bytes }
         fn main() -> Unit ! {} {
             let allocator = Allocator.new(bad_alloc, bad_alloc);
         }"#,
@@ -253,26 +253,26 @@ fn hostile_allocator_shapes_are_rejected() {
     );
     rejects(
         r#"
-        fn block_free(block: Bytes) -> Unit ! {alloc, panic} { drop(block) }
-        fn main() -> Unit ! {alloc, panic} {
+        fn block_free(block: Bytes) -> Unit ! {alloc} { drop(block) }
+        fn main() -> Unit ! {alloc} {
             let allocator = Allocator.new(block_free, block_free);
         }"#,
         "allocation function",
     );
     rejects(
         r#"
-        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
-        fn impure_free(block: Bytes) -> Unit ! {alloc, panic} { drop(block) }
-        fn main() -> Unit ! {alloc, panic} {
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
+        fn impure_free(block: Bytes) -> Unit ! {alloc} { drop(block) }
+        fn main() -> Unit ! {alloc} {
             let allocator = Allocator.new(block_alloc, impure_free);
         }"#,
         "release callbacks must have the empty effect row",
     );
     rejects(
         r#"
-        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let allocator = Allocator.new(block_alloc, block_free);
             let box = AllocBox.new(allocator, 1);
             let copy = box;
@@ -282,9 +282,9 @@ fn hostile_allocator_shapes_are_rejected() {
     );
     rejects(
         r#"
-        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let allocator = Allocator.new(block_alloc, block_free);
             let box = AllocBox.new(allocator, 1);
             AllocBox.take(AllocBox.take(box));
@@ -293,9 +293,9 @@ fn hostile_allocator_shapes_are_rejected() {
     );
     rejects(
         r#"
-        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let allocator = Allocator.new(block_alloc, block_free);
             let vector: AllocVec<Box<i64>> = AllocVec.new(allocator);
             let vector = AllocVec.push(vector, Box.new(1));
@@ -305,9 +305,9 @@ fn hostile_allocator_shapes_are_rejected() {
     );
     rejects(
         r#"
-        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let allocator = Allocator.new(block_alloc, block_free);
             let vector: AllocVec<i64> = AllocVec.new(allocator);
             let first = AllocVec.push(vector, 1);
@@ -321,9 +321,9 @@ fn hostile_allocator_shapes_are_rejected() {
 fn allocator_bytes_are_not_dyn_array_or_slice_elements() {
     rejects(
         r#"
-        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let allocator = Allocator.new(block_alloc, block_free);
             let box = AllocBox.new(allocator, [1, 2, 3]);
             let view: &[i64] = &box[..];
@@ -336,11 +336,11 @@ fn allocator_bytes_are_not_dyn_array_or_slice_elements() {
 fn alloc_box_try_new_preserves_an_owning_payload_on_refusal() {
     let source = r#"
         enum Result<T, E> { Ok(T), Err(E) }
-        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc} {
             if bytes > 0 { Bytes.with_capacity(0) } else { Bytes.with_capacity(bytes) }
         }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             match AllocBox.try_new(Allocator.new(refuse_alloc, block_free), Box.new(41)) {
                 Ok(box) => Box.take(AllocBox.take(box)),
                 Err(payload) => Box.take(payload)
@@ -360,7 +360,7 @@ fn alloc_box_try_new_preserves_an_owning_payload_on_refusal() {
 fn alloc_vec_growth_releases_the_previous_owning_block() {
     let source = format!(
         r#"{ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator = Allocator.new(block_alloc, block_free);
             let vector: AllocVec<Box<i64>> = AllocVec.new(allocator);
             let mut i = 0;
@@ -387,7 +387,7 @@ fn alloc_containers_reject_borrowed_and_linear_elements() {
     rejects(
         &format!(
             r#"{ALLOCATOR}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let allocator = Allocator.new(block_alloc, block_free);
                 let mut v: AllocVec<&str> = AllocVec.new(allocator);
                 {{
@@ -404,7 +404,7 @@ fn alloc_containers_reject_borrowed_and_linear_elements() {
         &format!(
             r#"{ALLOCATOR}
             struct Point {{ x: i64 }}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let allocator = Allocator.new(block_alloc, block_free);
                 let p = Point {{ x: 40 }};
                 let mut v: AllocVec<&Point> = AllocVec.new(allocator);
@@ -419,7 +419,7 @@ fn alloc_containers_reject_borrowed_and_linear_elements() {
             r#"{ALLOCATOR}
             #[linear]
             enum Ticket {{ Live }}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let allocator = Allocator.new(block_alloc, block_free);
                 let v: AllocVec<Ticket> = AllocVec.new(allocator);
                 0
@@ -430,13 +430,13 @@ fn alloc_containers_reject_borrowed_and_linear_elements() {
 }
 
 const GROWING_ALLOCATOR: &str = r#"
-fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+fn block_alloc(bytes: i64) -> Bytes ! {alloc} {
     Bytes.with_capacity(bytes)
 }
 fn block_free(block: Bytes) -> Unit ! {} {
     drop(block)
 }
-fn block_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+fn block_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc} {
     let mut out = Bytes.with_capacity(bytes);
     let mut i = 0;
     while i < old_bytes {
@@ -452,7 +452,7 @@ fn block_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic
 fn alloc_vec_growth_uses_a_realloc_hook_and_preserves_elements() {
     let source = format!(
         r#"{GROWING_ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator = Allocator.with_realloc(block_alloc, block_free, block_grow);
             let vector: AllocVec<i64> = AllocVec.new(allocator);
             let vector = AllocVec.push(vector, 1);
@@ -477,16 +477,16 @@ fn alloc_vec_try_push_reports_refusal_and_preserves_state() {
     let source = r#"
         enum Result<T, E> { Ok(T), Err(E) }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc} {
             if bytes > 32 { Bytes.with_capacity(0) } else { Bytes.with_capacity(bytes) }
         }
-        fn push_ok(v: AllocVec<i64>, x: i64) -> AllocVec<i64> ! {alloc, panic} {
+        fn push_ok(v: AllocVec<i64>, x: i64) -> AllocVec<i64> ! {alloc} {
             match AllocVec.try_push(v, x) {
                 Ok(vector) => vector,
                 Err(pair) => match pair { (vector, _) => vector }
             }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let allocator = Allocator.new(refuse_alloc, block_free);
             let v: AllocVec<i64> = AllocVec.new(allocator);
             let v = push_ok(v, 1);
@@ -515,10 +515,10 @@ fn alloc_vec_try_push_returns_the_owning_element_on_refusal() {
     let source = r#"
         enum Result<T, E> { Ok(T), Err(E) }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc} {
             if bytes > 8 { Bytes.with_capacity(0) } else { Bytes.with_capacity(bytes) }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let allocator = Allocator.new(refuse_alloc, block_free);
             let v: AllocVec<Box<i64>> = AllocVec.new(allocator);
             let v = match AllocVec.try_push(v, Box.new(1)) {
@@ -547,7 +547,7 @@ fn alloc_vec_try_push_returns_the_owning_element_on_refusal() {
 fn alloc_vec_pop_returns_the_last_copyable_element() {
     let source = format!(
         r#"{ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator = Allocator.new(block_alloc, block_free);
             let vector: AllocVec<i64> = AllocVec.with_capacity(allocator, 2);
             let vector = AllocVec.push(vector, 10);
@@ -564,7 +564,7 @@ fn alloc_vec_pop_returns_the_last_copyable_element() {
     agrees(&source, 30);
     let empty = format!(
         r#"{ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator = Allocator.new(block_alloc, block_free);
             let vector: AllocVec<i64> = AllocVec.new(allocator);
             let (vector, _) = AllocVec.pop(vector);
@@ -580,24 +580,24 @@ fn alloc_vec_pop_returns_the_last_copyable_element() {
 fn allocator_growth_hook_contracts_are_checked() {
     rejects(
         r#"
-        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn bad_grow(block: Bytes) -> Bytes ! {alloc, panic} { block }
-        fn main() -> Unit ! {alloc, panic} {
+        fn bad_grow(block: Bytes) -> Bytes ! {alloc} { block }
+        fn main() -> Unit ! {alloc} {
             let allocator = Allocator.with_realloc(block_alloc, block_free, bad_grow);
         }"#,
         "growth function",
     );
     rejects(
         r#"
-        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
         fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
-        fn impure_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic, io} {
+        fn impure_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, io} {
             let _ = block;
             let _ = old_bytes;
             Bytes.with_capacity(bytes)
         }
-        fn main() -> Unit ! {alloc, panic, io} {
+        fn main() -> Unit ! {alloc, io} {
             let allocator = Allocator.with_realloc(block_alloc, block_free, impure_grow);
         }"#,
         "growth callbacks may only declare",
@@ -606,12 +606,12 @@ fn allocator_growth_hook_contracts_are_checked() {
     // never a partially moved vector.
     let short = format!(
         r#"{ALLOCATOR}
-        fn short_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {{alloc, panic}} {{
+        fn short_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {{alloc}} {{
             let _ = old_bytes;
             drop(block);
             Bytes.with_capacity(0)
         }}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator = Allocator.with_realloc(block_alloc, block_free, short_grow);
             let vector: AllocVec<i64> = AllocVec.new(allocator);
             let vector = AllocVec.push(vector, 1);
@@ -630,10 +630,10 @@ fn allocator_growth_hook_contracts_are_checked() {
     let fallible = format!(
         r#"enum Result<T, E> {{ Ok(T), Err(E) }}
         {GROWING_ALLOCATOR}
-        fn refuse_alloc(bytes: i64) -> Bytes ! {{alloc, panic}} {{
+        fn refuse_alloc(bytes: i64) -> Bytes ! {{alloc}} {{
             if bytes > 8 {{ Bytes.with_capacity(0) }} else {{ Bytes.with_capacity(bytes) }}
         }}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator =
                 Allocator.with_realloc(refuse_alloc, block_free, block_grow);
             let vector: AllocVec<i64> = AllocVec.with_capacity(allocator, 1);
@@ -649,7 +649,7 @@ fn allocator_growth_hook_contracts_are_checked() {
     assert_eq!(stats.allocations, stats.deallocations);
     // The allocation callback may panic, so a fallible append still requires
     // the caller to declare `panic` as well as `alloc`.
-    rejects(
+    kush::executable::check(
         r#"
         enum Result<T, E> { Ok(T), Err(E) }
         fn push(v: AllocVec<i64>) -> i64 ! {alloc} {
@@ -659,13 +659,13 @@ fn allocator_growth_hook_contracts_are_checked() {
             }
         }
         fn main() -> Unit ! {} {}"#,
-        "requires effects {panic}",
-    );
+    )
+    .unwrap();
     // Pop copies its element, so owning elements must be consumed explicitly.
     rejects(
         &format!(
             r#"{ALLOCATOR}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let allocator = Allocator.new(block_alloc, block_free);
                 let vector: AllocVec<Box<i64>> = AllocVec.new(allocator);
                 let (vector, _) = AllocVec.pop(vector);
@@ -680,7 +680,7 @@ fn allocator_growth_hook_contracts_are_checked() {
 fn realloc_callback_expressions_keep_literals_and_initializer_cleanup() {
     let source = format!(
         r#"{GROWING_ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let allocator = Allocator.with_realloc(block_alloc, block_free, {{
                 drop(Bytes.from("growth hook initializer"));
                 block_grow
@@ -699,17 +699,17 @@ fn realloc_callback_expressions_keep_literals_and_initializer_cleanup() {
 #[test]
 fn realloc_hook_declared_first_is_not_confused_with_no_hook() {
     let source = r#"
-        fn grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+        fn grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc} {
             let mut fresh = Bytes.with_capacity(bytes);
             let mut i = 0;
             while i < old_bytes { fresh = Bytes.push(fresh, Bytes.get(&block, i)); i = i + 1; }
             drop(block); fresh
         }
-        fn allocate(bytes: i64) -> Bytes ! {alloc, panic} {
+        fn allocate(bytes: i64) -> Bytes ! {alloc} {
             Bytes.with_capacity(if bytes > 32 {0} else {bytes})
         }
         fn release(block: Bytes) -> Unit ! {} {drop(block)}
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let allocator = Allocator.with_realloc(allocate, release, grow);
             let mut values: AllocVec<i64> = AllocVec.new(allocator);
             let mut i = 0;
@@ -724,14 +724,14 @@ fn realloc_hook_declared_first_is_not_confused_with_no_hook() {
 #[test]
 fn realloc_callbacks_cannot_overwrite_typed_elements_or_owning_handles() {
     let source = r#"
-        fn allocate(bytes: i64) -> Bytes ! {alloc, panic} {
+        fn allocate(bytes: i64) -> Bytes ! {alloc} {
             let mut block = Bytes.with_capacity(bytes);
             let mut i = 0;
             while i < bytes {block = Bytes.push_reserved(block, 255); i = i + 1;}
             block
         }
         fn release(block: Bytes) -> Unit ! {} {drop(block)}
-        fn replace(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+        fn replace(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc} {
             if old_bytes > 0 && Bytes.get(&block, 0) != 0 {
                 drop(block); return Bytes.with_capacity(0);
             }
@@ -741,7 +741,7 @@ fn realloc_callbacks_cannot_overwrite_typed_elements_or_owning_handles() {
             while i < bytes {fresh = Bytes.push_reserved(fresh, 0); i = i + 1;}
             fresh
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let allocator = Allocator.with_realloc(allocate, release, replace);
             let mut values: AllocVec<i64> = AllocVec.new(allocator);
             let mut i = 0;
@@ -766,7 +766,7 @@ struct Counting {
     limit: i64,
 }
 impl AllocatorProtocol for Counting {
-    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} {
+    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc} {
         self.calls = self.calls + 1;
         self.live = self.live + 1;
         if self.limit > 0 && self.live > self.limit {
@@ -779,7 +779,7 @@ impl AllocatorProtocol for Counting {
         self.live = 0;
         drop(block)
     }
-    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc} {
         self.calls = self.calls + 1;
         let mut out = Bytes.with_capacity(bytes);
         let mut i = 0;
@@ -797,7 +797,7 @@ impl AllocatorProtocol for Counting {
 fn stateful_allocator_context_uses_its_own_instance_callbacks() {
     let source = format!(
         r#"{STATEFUL_ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let box = {{
                 let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
                 AllocBox.new(context, 41)
@@ -814,7 +814,7 @@ fn stateful_allocator_context_uses_its_own_instance_callbacks() {
 fn stateful_alloc_vec_grows_through_the_instance_growth_hook() {
     let source = format!(
         r#"{STATEFUL_ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let mut vector: AllocVec<i64> =
                 AllocVec.with_capacity(AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }}), 1);
             let mut i = 0;
@@ -834,7 +834,7 @@ fn stateful_alloc_vec_grows_through_the_instance_growth_hook() {
 fn shared_instance_context_outlives_its_binding_and_serves_several_containers() {
     let source = format!(
         r#"{STATEFUL_ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
             let first = AllocBox.new(AllocatorContext.share(&context), 1);
             let second = AllocBox.new(AllocatorContext.share(&context), 2);
@@ -852,7 +852,7 @@ fn stateful_allocator_refusal_returns_the_untouched_vector_and_element() {
     let source = format!(
         r#"enum Result<T, E> {{ Ok(T), Err(E) }}
         {STATEFUL_ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 1 }});
             let mut vector: AllocVec<i64> = AllocVec.with_capacity(context, 1);
             vector = AllocVec.push(vector, 1);
@@ -877,7 +877,7 @@ struct OwnedCounting {
     token: Box<i64>,
 }
 impl AllocatorProtocol for OwnedCounting {
-    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} {
+    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc} {
         self.calls = self.calls + 1;
         self.live = self.live + 1;
         if self.limit > 0 && self.live > self.limit {
@@ -890,7 +890,7 @@ impl AllocatorProtocol for OwnedCounting {
         self.live = 0;
         drop(block)
     }
-    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc} {
         let mut out = Bytes.with_capacity(bytes);
         let mut i = 0;
         while i < old_bytes {
@@ -908,7 +908,7 @@ fn stateful_allocator_refusal_preserves_the_owning_payload_and_destroys_state_on
     let source = format!(
         r#"enum Result<T, E> {{ Ok(T), Err(E) }}
         {OWNING_STATE_ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let context = AllocatorContext.new(OwnedCounting {{
                 calls: 0, live: 0, limit: 1, token: Box.new(7),
             }});
@@ -934,10 +934,10 @@ fn allocator_context_crosses_a_structured_task_boundary() {
     let source = format!(
         r#"use std.task.TaskExit;
         {STATEFUL_ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic, suspend}} {{
+        fn main() -> i64 ! {{alloc, suspend}} {{
             let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
-            Task.scope(fn() -> i64 ! {{alloc, panic, suspend}} {{
-                let task: Task<i64> = Task.spawn(fn() -> i64 ! {{alloc, panic, suspend}} {{
+            Task.scope(fn() -> i64 ! {{alloc, suspend}} {{
+                let task: Task<i64> = Task.spawn(fn() -> i64 ! {{alloc, suspend}} {{
                     let box = AllocBox.new(context, 41);
                     AllocBox.take(box)
                 }});
@@ -958,7 +958,7 @@ fn hostile_allocator_context_shapes_are_rejected() {
     // A context needs an owned record with no borrowed leaves.
     rejects(
         r#"
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let context = AllocatorContext.new(5);
         }"#,
         "owned record instance",
@@ -967,13 +967,13 @@ fn hostile_allocator_context_shapes_are_rejected() {
         r#"
         struct Borrowed<'a> { view: &'a [i64] }
         impl AllocatorProtocol for Borrowed<'_> {
-            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
             fn free(self: &mut Self, block: Bytes) -> Unit ! {} { drop(block) }
-            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc} {
                 let _ = old_bytes; drop(block); Bytes.with_capacity(bytes)
             }
         }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let view: [i64; 1] = [1];
             let context = AllocatorContext.new(Borrowed { view: &view[..] });
         }"#,
@@ -982,8 +982,8 @@ fn hostile_allocator_context_shapes_are_rejected() {
     // A closure capture is not silently converted into reusable callbacks.
     rejects(
         r#"
-        fn main() -> Unit ! {alloc, panic} {
-            let context = AllocatorContext.new(fn(bytes: i64) -> Bytes ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
+            let context = AllocatorContext.new(fn(bytes: i64) -> Bytes ! {alloc} {
                 Bytes.with_capacity(bytes)
             });
         }"#,
@@ -995,13 +995,13 @@ fn hostile_allocator_context_shapes_are_rejected() {
         r#"
         struct Bad { count: i64 }
         impl AllocatorProtocol for Bad {
-            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
-            fn free(self: &mut Self, block: Bytes) -> Unit ! {alloc, panic} { drop(block) }
-            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
+            fn free(self: &mut Self, block: Bytes) -> Unit ! {alloc} { drop(block) }
+            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc} {
                 let _ = old_bytes; drop(block); Bytes.with_capacity(bytes)
             }
         }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let context = AllocatorContext.new(Bad { count: 0 });
         }"#,
         "does not match the trait signature exactly",
@@ -1010,10 +1010,10 @@ fn hostile_allocator_context_shapes_are_rejected() {
         r#"
         struct Bad { count: i64 }
         impl AllocatorProtocol for Bad {
-            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc} { Bytes.with_capacity(bytes) }
             fn free(self: &mut Self, block: Bytes) -> Unit ! {} { drop(block) }
         }
-        fn main() -> Unit ! {alloc, panic} {
+        fn main() -> Unit ! {alloc} {
             let context = AllocatorContext.new(Bad { count: 0 });
         }"#,
         "missing implementation of trait method",
@@ -1023,7 +1023,7 @@ fn hostile_allocator_context_shapes_are_rejected() {
     rejects(
         &format!(
             r#"{STATEFUL_ALLOCATOR}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
                 let copy = context;
                 let again = context;
@@ -1041,7 +1041,7 @@ fn stateful_growth_hook_cannot_overwrite_typed_vector_elements_or_owners() {
             calls: i64,
         }
         impl AllocatorProtocol for Zeroing {
-            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} {
+            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc} {
                 self.calls = self.calls + 1;
                 let mut block = Bytes.with_capacity(bytes);
                 let mut i = 0;
@@ -1052,7 +1052,7 @@ fn stateful_growth_hook_cannot_overwrite_typed_vector_elements_or_owners() {
                 block
             }
             fn free(self: &mut Self, block: Bytes) -> Unit ! {} { drop(block) }
-            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc} {
                 self.calls = self.calls + 1;
                 if old_bytes > 0 && Bytes.get(&block, 0) != 0 {
                     drop(block);
@@ -1068,7 +1068,7 @@ fn stateful_growth_hook_cannot_overwrite_typed_vector_elements_or_owners() {
                 fresh
             }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let allocator = AllocatorContext.new(Zeroing { calls: 0 });
             let mut values: AllocVec<i64> = AllocVec.new(AllocatorContext.share(&allocator));
             let mut i = 0;
@@ -1097,11 +1097,11 @@ fn stateful_growth_hook_cannot_overwrite_typed_vector_elements_or_owners() {
 fn allocator_context_and_container_cross_a_function_boundary() {
     let source = format!(
         r#"{STATEFUL_ALLOCATOR}
-        fn build() -> AllocBox<i64> ! {{alloc, panic}} {{
+        fn build() -> AllocBox<i64> ! {{alloc}} {{
             let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
             AllocBox.new(context, 7)
         }}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             AllocBox.take(build())
         }}"#
     );
@@ -1114,13 +1114,13 @@ fn allocator_context_and_container_cross_a_function_boundary() {
 fn allocator_context_is_an_ordinary_function_parameter_and_result() {
     let source = format!(
         r#"{STATEFUL_ALLOCATOR}
-        fn make(context: AllocatorContext) -> AllocBox<i64> ! {{alloc, panic}} {{
+        fn make(context: AllocatorContext) -> AllocBox<i64> ! {{alloc}} {{
             AllocBox.new(context, 5)
         }}
         fn share_context(context: &AllocatorContext) -> AllocatorContext ! {{}} {{
             AllocatorContext.share(context)
         }}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
             let first = make(share_context(&context));
             let second = make(context);
@@ -1138,7 +1138,7 @@ fn allocator_contexts_and_containers_support_projected_shared_references() {
         r#"{STATEFUL_ALLOCATOR}
         struct Owner {{ context: AllocatorContext }}
         struct Buffers {{ boxed: AllocBox<i64>, vector: AllocVec<i64> }}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let owner = Owner {{ context: AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }}) }};
             let vector: AllocVec<i64> = AllocVec.with_capacity(AllocatorContext.share(&owner.context), 1);
             let buffers = Buffers {{
@@ -1158,7 +1158,7 @@ fn allocator_contexts_and_containers_support_projected_shared_references() {
 fn allocator_context_state_moves_are_checked_and_cleaned_up() {
     let source = format!(
         r#"{OWNING_STATE_ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let token = Box.new(7);
             let ctx = AllocatorContext.new(OwnedCounting {{ calls: 0, live: 0, limit: 0, token: token }});
             let b = AllocBox.new(ctx, 41);
@@ -1176,7 +1176,7 @@ fn allocator_context_state_moves_are_checked_and_cleaned_up() {
     rejects(
         &format!(
             r#"{STATEFUL_ALLOCATOR}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let ctx = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
             let first = AllocBox.new(ctx, 1);
             drop(first);
@@ -1194,12 +1194,12 @@ fn allocator_constructor_early_returns_release_contexts() {
         let source = format!(
             r#"enum Result<T,E> {{ Ok(T), Err(E) }}
             {OWNING_STATE_ALLOCATOR}
-            fn stash(ctx: AllocatorContext, flag: Bool) -> i64 ! {{alloc, panic}} {{
+            fn stash(ctx: AllocatorContext, flag: Bool) -> i64 ! {{alloc}} {{
                 let b = {constructor}(ctx, if flag {{ return 7; }} else {{ 9 }});
                 drop(b);
                 0
             }}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let ctx = AllocatorContext.new(OwnedCounting {{ calls: 0, live: 0, limit: 0, token: Box.new(1) }});
                 stash(ctx, true)
             }}"#
@@ -1210,11 +1210,11 @@ fn allocator_constructor_early_returns_release_contexts() {
     }
     let source = format!(
         r#"{STATEFUL_ALLOCATOR}
-        fn build(ctx: AllocatorContext, flag: Bool) -> i64 ! {{alloc, panic}} {{
+        fn build(ctx: AllocatorContext, flag: Bool) -> i64 ! {{alloc}} {{
             let v: AllocVec<i64> = AllocVec.with_capacity(ctx, if flag {{ return 7; }} else {{ 1 }});
             AllocVec.len(&v)
         }}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let ctx = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
             build(ctx, true)
         }}"#
@@ -1228,11 +1228,11 @@ fn allocator_constructor_early_returns_release_contexts() {
 fn temporary_context_survives_later_early_return() {
     let source = format!(
         r#"{OWNING_STATE_ALLOCATOR}
-        fn run(ctx: AllocatorContext, flag: Bool) -> i64 ! {{alloc, panic}} {{
+        fn run(ctx: AllocatorContext, flag: Bool) -> i64 ! {{alloc}} {{
             let b = AllocBox.new(AllocatorContext.share(&ctx), if flag {{ return 7; }} else {{ 9 }});
             AllocBox.take(b)
         }}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let ctx = AllocatorContext.new(OwnedCounting {{ calls: 0, live: 0, limit: 0, token: Box.new(1) }});
             run(ctx, true)
         }}"#
@@ -1248,13 +1248,13 @@ fn nested_context_state_moves_and_drops_once() {
         r#"{STATEFUL_ALLOCATOR}
         struct Outer {{ inner: AllocatorContext, calls: i64 }}
         impl AllocatorProtocol for Outer {{
-            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {{alloc, panic}} {{ Bytes.with_capacity(bytes) }}
+            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {{alloc}} {{ Bytes.with_capacity(bytes) }}
             fn free(self: &mut Self, block: Bytes) -> Unit ! {{}} {{ drop(block) }}
-            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {{alloc, panic}} {{
+            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {{alloc}} {{
                 drop(old_bytes); drop(block); Bytes.with_capacity(bytes)
             }}
         }}
-        fn main() -> i64 ! {{alloc, panic}} {{
+        fn main() -> i64 ! {{alloc}} {{
             let inner = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
             let outer = AllocatorContext.new(Outer {{ inner: inner, calls: 0 }});
             AllocBox.take(AllocBox.new(outer, 41))

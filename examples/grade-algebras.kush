@@ -15,11 +15,11 @@ algebra Usage {
     }
 }
 
-fn twice(x: i64 @[Usage.Twice]) -> i64 ! {panic} { x + x }
+fn twice(x: i64 @[Usage.Twice]) -> i64 ! {} { x + x }
 
 fn make() -> i64 @[Usage.Once] ! {} { 21 }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let x: i64 @[Usage.Twice] = 10;
     twice(x) + make()
 }

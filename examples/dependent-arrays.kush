@@ -16,20 +16,20 @@ struct Buffer<N: Nat> { data: [i64; N] }
 
 fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
 
-fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {panic} { xs[N - 1] }
+fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {} { xs[N - 1] }
 
-fn second(xs: [i64; add<1, 1>]) -> i64 ! {panic} { xs[add(0, 1)] }
+fn second(xs: [i64; add<1, 1>]) -> i64 ! {} { xs[add(0, 1)] }
 
-fn head<N: Nat>(b: Buffer<N>) -> i64 ! {panic} { b.data[0] }
+fn head<N: Nat>(b: Buffer<N>) -> i64 ! {} { b.data[0] }
 
-fn describe(v: Value) -> i64 ! {panic} {
+fn describe(v: Value) -> i64 ! {} {
     match v {
         i64 @n => n,
         Bool @b => if b { 1 } else { 0 },
     }
 }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let values: [i64; 4] = [0, 20, 20, 2];
     let same = identity(values);
     let inferred = identity([12, 1]);

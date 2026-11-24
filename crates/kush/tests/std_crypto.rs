@@ -15,7 +15,7 @@ use std.ct;
 use std.base64;
 use std.random;
 
-fn hex(b: &Bytes) -> Bytes ! {alloc, panic} {
+fn hex(b: &Bytes) -> Bytes ! {alloc} {
     let digits = Bytes.from("0123456789abcdef");
     let mut out = Bytes.with_capacity(Bytes.len(b) * 2);
     let mut i = 0;
@@ -29,13 +29,13 @@ fn hex(b: &Bytes) -> Bytes ! {alloc, panic} {
     out
 }
 
-fn line(text: Bytes) -> Unit ! {io, alloc, panic} {
+fn line(text: Bytes) -> Unit ! {io, alloc} {
     let t = Bytes.push(text, 10);
     match IO.write(IO.stdout(), &t) { Result.Ok(_) => {}, Result.Err(_) => {} };
     drop(t);
 }
 
-fn repeat(byte: i64, n: i64) -> Bytes ! {alloc, panic} {
+fn repeat(byte: i64, n: i64) -> Bytes ! {alloc} {
     let mut out = Bytes.with_capacity(n);
     let mut i = 0;
     while i < n {
@@ -45,7 +45,7 @@ fn repeat(byte: i64, n: i64) -> Bytes ! {alloc, panic} {
     out
 }
 
-fn show(decoded: Option<Bytes>) -> Unit ! {io, alloc, panic} {
+fn show(decoded: Option<Bytes>) -> Unit ! {io, alloc} {
     match decoded {
         Option.Some(b) => { line(hex(&b)); drop(b); },
         Option.None => line(Bytes.from("none")),
@@ -96,12 +96,12 @@ fn sha256_and_sha1_match_known_digests() {
     // the length in the same block, 56 and 64 need a second one.
     let output = agrees(
         r#"
-        fn both(data: Bytes) -> Unit ! {io, alloc, panic} {
+        fn both(data: Bytes) -> Unit ! {io, alloc} {
             line(hex(&sha256.digest(&data)));
             line(hex(&sha1.digest(&data)));
             drop(data);
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             both(Bytes.from(""));
             both(Bytes.from("abc"));
             both(Bytes.from("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"));
@@ -142,7 +142,7 @@ fn incremental_updates_match_one_call() {
     // way: partial block, exact fill, whole blocks straight from the input.
     let output = agrees(
         r#"
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut h = sha256.new();
             let mut g = sha1.new();
             let sizes: Vec<i64> = [1, 63, 64, 200, 672];
@@ -175,7 +175,7 @@ fn a_million_bytes_hash_natively() {
     let source = format!(
         "{PRELUDE}\n{}",
         r#"
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let data = repeat(97, 1000000);
             line(hex(&sha256.digest(&data)));
             line(hex(&sha1.digest(&data)));
@@ -195,7 +195,7 @@ fn a_million_bytes_hash_natively() {
 fn hmac_sha256_matches_rfc_4231_and_verifies_in_constant_time() {
     let output = agrees(
         r#"
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             // RFC 4231 test cases 1, 2 and 6 (a 131-byte key is hashed first),
             // and a key of exactly one block.
             line(hex(&hmac.sign(&repeat(11, 20), &Bytes.from("Hi There"))));
@@ -240,7 +240,7 @@ fn hmac_sha256_matches_rfc_4231_and_verifies_in_constant_time() {
 fn constant_time_equal_compares_bytes_and_lengths() {
     let output = agrees(
         r#"
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             print_i64(if ct.equal(&Bytes.from(""), &Bytes.from("")) { 1 } else { 0 });
             print_i64(if ct.equal(&Bytes.from("secret"), &Bytes.from("secret")) { 1 } else { 0 });
             print_i64(if ct.equal(&Bytes.from("secret"), &Bytes.from("secreT")) { 1 } else { 0 });
@@ -256,7 +256,7 @@ fn constant_time_equal_compares_bytes_and_lengths() {
 fn base64_round_trips_rfc_4648_vectors_in_both_alphabets() {
     let output = agrees(
         r#"
-        fn row(data: Bytes) -> Unit ! {io, alloc, panic} {
+        fn row(data: Bytes) -> Unit ! {io, alloc} {
             let standard = base64.encode(&data);
             let url = base64.encode_url(&data);
             line(Bytes.copy(&standard));
@@ -267,7 +267,7 @@ fn base64_round_trips_rfc_4648_vectors_in_both_alphabets() {
             drop(url);
             drop(data);
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             row(Bytes.from(""));
             row(Bytes.from("f"));
             row(Bytes.from("fo"));
@@ -303,15 +303,15 @@ fn base64_round_trips_rfc_4648_vectors_in_both_alphabets() {
 fn base64_decoding_is_strict_and_canonical() {
     let output = agrees(
         r#"
-        fn standard(text: Bytes) -> Unit ! {io, alloc, panic} {
+        fn standard(text: Bytes) -> Unit ! {io, alloc} {
             show(base64.decode(&text));
             drop(text);
         }
-        fn url(text: Bytes) -> Unit ! {io, alloc, panic} {
+        fn url(text: Bytes) -> Unit ! {io, alloc} {
             show(base64.decode_url(&text));
             drop(text);
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             standard(Bytes.from("Zg=="));      // 66
             standard(Bytes.from("Zg="));       // length not a multiple of 4
             standard(Bytes.from("Zh=="));      // nonzero unused bits
@@ -341,7 +341,7 @@ fn base64_decoding_is_strict_and_canonical() {
 fn websocket_accept_key_from_rfc_6455() {
     let output = agrees(
         r#"
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let key = Bytes.from("dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
             line(base64.encode(&sha1.digest(&key)));
             0
@@ -356,7 +356,7 @@ fn random_bytes_come_from_the_kernel() {
     // zero bytes is fine; a negative count is EINVAL.
     let output = agrees(
         r#"
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let a = match random.bytes(32) { Result.Ok(b) => b, Result.Err(_) => Bytes.from("") };
             let b = match random.bytes(32) { Result.Ok(b) => b, Result.Err(_) => Bytes.from("") };
             print_i64(Bytes.len(&a));
@@ -387,7 +387,7 @@ fn sha_instructions_and_portable_code_give_the_same_digests() {
     let source = format!(
         "{PRELUDE}\n{}",
         r#"
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let sizes: Vec<i64> = [0, 1, 55, 56, 63, 64, 65, 119, 128, 1000, 4096];
             let mut i = 0;
             while i < Vec.len(&sizes) {

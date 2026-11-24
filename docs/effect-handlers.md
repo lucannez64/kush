@@ -17,9 +17,9 @@ like `io`, `alloc`, `panic`, and `suspend`.
 ```rust
 effect Op: i64 -> i64;
 
-fn call() -> i64 ! {Op, panic} { perform Op(20) }
+fn call() -> i64 ! {Op} { perform Op(20) }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     handle Op: i64 -> i64 with fn(
         x: i64,
         resume: linear once fn(i64) -> i64 ! {},
@@ -33,9 +33,9 @@ fn main() -> i64 ! {panic} {
 ```rust
 effect Op: i64 -> i64;
 
-fn call() -> i64 ! {Op, panic} { perform Op(20) }
+fn call() -> i64 ! {Op} { perform Op(20) }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     handle Op: i64 -> i64 with fn(
         x: i64,
         resume: linear once fn(i64) -> i64 ! {},
@@ -51,11 +51,11 @@ fn main() -> i64 ! {panic} {
 ```
 
 ```rust
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     handle Op: i64 -> i64 with fn(
         x: i64,
         resume: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {panic} {
+    ) -> i64 ! {} {
         let r = resume(x + 1);
         r * 2
     } {
@@ -117,8 +117,8 @@ string tag. A declared operation may be handled lexically and in addition:
   every `return`, dropping any unconsumed owning frame it leaves behind;
 - nested handling and shadowing follow the same innermost-first rule as direct
   performs;
-- a dynamically resolved `perform` additionally requires `panic` in the
-  enclosing row: when no handler is active at run time the program aborts.
+- a dynamically resolved `perform` with no active handler at run time
+  panics (`panic` is not an effect, so no row records it).
 
 A dynamic frame accepts a handler of either callable mode. A copyable
 noncapturing `fn` frame serves any number of performs. A capturing `once fn`
@@ -140,10 +140,10 @@ cannot touch state the handler writes.
 A handler's own effects must be declared on the operation:
 
 ```text
-effect Present: Bytes -> Bool ! {io, alloc, panic};
+effect Present: Bytes -> Bool ! {io, alloc};
 ```
 
-Every `perform Present(..)` then requires `{io, alloc, panic}` (besides
+Every `perform Present(..)` then requires `{io, alloc}` (besides
 `Present` and `panic`) in its row, so a called function's row still shows
 everything its handler may do, and a handler may have only those effects.
 Only built-in effects can be declared; an operation without a list keeps
@@ -248,7 +248,7 @@ Rules for suspendable bodies, checked after ownership:
   activation that is waiting for `resume` to return); in a called function's
   resumable entry, `return` and `?` continue the caller as usual;
 - a capturing continuation allocates its environment, so the handle requires
-  `{alloc, panic}`;
+  `{alloc}`;
 - a linear operation result is rejected for non-tail resumption;
 - a perform nested in a match guard, or inside the body of a nested non-tail
   or declared-operation handler, is rejected;

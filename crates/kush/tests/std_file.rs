@@ -88,16 +88,16 @@ const PRELUDE: &str = "
 module file_test;
 use std.result.Result;
 use std.file;
-fn code(r: Result<i64, i64>) -> i64 ! {panic} { match r { Result.Ok(n) => n, Result.Err(e) => -e } }
-fn unit(r: Result<Unit, i64>) -> i64 ! {panic} { match r { Result.Ok(_) => 0, Result.Err(e) => -e } }
-fn show(n: i64) -> Unit ! {io, panic} { print_i64(n); }
+fn code(r: Result<i64, i64>) -> i64 ! {} { match r { Result.Ok(n) => n, Result.Err(e) => -e } }
+fn unit(r: Result<Unit, i64>) -> i64 ! {} { match r { Result.Ok(_) => 0, Result.Err(e) => -e } }
+fn show(n: i64) -> Unit ! {io} { print_i64(n); }
 ";
 
 #[test]
 fn positioned_io_sync_truncate_and_size() {
     let (output, dir) = agree(&format!(
         "{PRELUDE}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let path = Bytes.from(\"@DIR@/data\");
             let f = match file.open_write(&path) {{ Result.Ok(f) => f, Result.Err(e) => return e }};
             show(code(file.write_at(&f, 0, &Bytes.from(\"0123456789\"))));
@@ -140,10 +140,10 @@ fn positioned_io_sync_truncate_and_size() {
 fn open_modes_and_errors() {
     let (output, _) = agree(&format!(
         "{PRELUDE}
-        fn try_close(r: Result<file.File, i64>) -> i64 ! {{io, panic}} {{
+        fn try_close(r: Result<file.File, i64>) -> i64 ! {{io}} {{
             match r {{ Result.Ok(f) => unit(file.close(f)), Result.Err(e) => -e }}
         }}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let path = Bytes.from(\"@DIR@/new\");
             show(try_close(file.open_read(&path)));       // ENOENT
             show(try_close(file.open_existing(&path)));   // ENOENT
@@ -181,7 +181,7 @@ fn open_modes_and_errors() {
 fn read_at_appends_and_rejects_overflowing_offsets() {
     let (output, _) = agree(&format!(
         "{PRELUDE}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let path = Bytes.from(\"@DIR@/r\");
             let f = match file.open_write(&path) {{ Result.Ok(f) => f, Result.Err(e) => return e }};
             show(code(file.write_at(&f, 0, &Bytes.from(\"abcdef\"))));
@@ -235,7 +235,7 @@ fn a_file_must_be_closed_and_cannot_be_forged() {
         ("unit(FS.close(2))", "reserved for std"),
         ("let f = FS.close; 0", ""),
     ] {
-        let source = format!("{PRELUDE} fn main() -> i64 ! {{io, alloc, panic}} {{ {body} }}");
+        let source = format!("{PRELUDE} fn main() -> i64 ! {{io, alloc}} {{ {body} }}");
         let error = checked(&source).err().unwrap_or_else(|| panic!("accepted: {body}"));
         assert!(error.contains(message), "expected {message:?} in:\n{error}");
     }
@@ -246,7 +246,7 @@ fn a_file_must_be_closed_and_cannot_be_forged() {
 fn a_root_module_named_std_cannot_call_raw_handles() {
     let source = "module std.evil;
         use std.result.Result;
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             match FS.file_size(0) { Result.Ok(n) => n, Result.Err(e) => e }
         }";
     let Err(error) = checked(source) else {
@@ -266,15 +266,15 @@ fn a_record_holding_a_file_can_be_taken_apart() {
     let (output, _) = agree(&format!(
         "{PRELUDE}
         struct Store {{ log: file.File, name: Bytes, size: i64 }}
-        fn finish(s: Store) -> i64 ! {{io, panic}} {{
+        fn finish(s: Store) -> i64 ! {{io}} {{
             match s {{ Store {{ log, name, size }} => {{ drop(name); unit(file.close(log)) + size }} }}
         }}
-        fn finish_let(s: Store) -> i64 ! {{io, panic}} {{
+        fn finish_let(s: Store) -> i64 ! {{io}} {{
             let Store {{ log, name, size }} = s;
             drop(name);
             unit(file.close(log)) + size
         }}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let path = Bytes.from(\"@DIR@/f\");
             let a = match file.open_write(&path) {{ Result.Ok(f) => f, Result.Err(e) => return e }};
             show(finish(Store {{ log: a, name: Bytes.from(\"a\"), size: 1 }}));
@@ -299,8 +299,8 @@ fn a_record_holding_a_file_can_be_taken_apart() {
         let source = format!(
             "{PRELUDE}
              struct Store {{ log: file.File, name: Bytes, size: i64 }}
-             fn finish(s: Store) -> i64 ! {{io, panic}} {{ {body} }}
-             fn main() -> i64 ! {{io, alloc, panic}} {{ 0 }}"
+             fn finish(s: Store) -> i64 ! {{io}} {{ {body} }}
+             fn main() -> i64 ! {{io, alloc}} {{ 0 }}"
         );
         let error = checked(&source)
             .err()

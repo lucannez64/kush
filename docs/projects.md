@@ -200,12 +200,12 @@ use std.test;
 use hello.util;
 
 #[test]
-fn addition_works() -> Unit ! {panic} {
+fn addition_works() -> Unit ! {} {
     test.is_true(1 + 1 == 2);
 }
 
 #[test]
-fn helper_works() -> Unit ! {panic, io} {
+fn helper_works() -> Unit ! {io} {
     test.equal_i64(util.double(21), 42);
 }
 ```
@@ -214,7 +214,7 @@ Rules:
 
 - `#[test]` functions must have no parameters, no generics/lifetimes, and return
   `Unit`. They may use any of the four current effects; the generated test entry
-  declares `{io, alloc, panic, suspend}`.
+  declares `{io, alloc, suspend}`.
 - Imported modules can define helper functions, but only `#[test]` functions in
   the test target file are discovered.
 - A test target must not define `main`; `kush test` generates one for each test

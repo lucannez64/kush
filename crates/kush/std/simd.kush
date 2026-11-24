@@ -203,7 +203,7 @@ impl u8x16 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: u8x16) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: u8x16) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -225,7 +225,7 @@ impl u8x16 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: u8x16) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: u8x16) -> Bytes ! {alloc} {
         u8x16.push_le(out, v)
     }
 }
@@ -414,7 +414,7 @@ impl u16x8 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: u16x8) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: u16x8) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -436,7 +436,7 @@ impl u16x8 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: u16x8) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: u16x8) -> Bytes ! {alloc} {
         u16x8.push_le(out, u16x8.swap_bytes(v))
     }
 }
@@ -625,7 +625,7 @@ impl u32x4 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: u32x4) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: u32x4) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -647,7 +647,7 @@ impl u32x4 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: u32x4) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: u32x4) -> Bytes ! {alloc} {
         u32x4.push_le(out, u32x4.swap_bytes(v))
     }
 }
@@ -828,7 +828,7 @@ impl u64x2 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: u64x2) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: u64x2) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -850,7 +850,7 @@ impl u64x2 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: u64x2) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: u64x2) -> Bytes ! {alloc} {
         u64x2.push_le(out, u64x2.swap_bytes(v))
     }
 }
@@ -1039,7 +1039,7 @@ impl i8x16 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: i8x16) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: i8x16) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -1061,7 +1061,7 @@ impl i8x16 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: i8x16) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: i8x16) -> Bytes ! {alloc} {
         i8x16.push_le(out, v)
     }
 }
@@ -1251,7 +1251,7 @@ impl i16x8 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: i16x8) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: i16x8) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -1273,7 +1273,7 @@ impl i16x8 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: i16x8) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: i16x8) -> Bytes ! {alloc} {
         i16x8.push_le(out, i16x8.swap_bytes(v))
     }
 }
@@ -1463,7 +1463,7 @@ impl i32x4 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: i32x4) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: i32x4) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -1485,7 +1485,7 @@ impl i32x4 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: i32x4) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: i32x4) -> Bytes ! {alloc} {
         i32x4.push_le(out, i32x4.swap_bytes(v))
     }
 }
@@ -1666,7 +1666,7 @@ impl i64x2 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: i64x2) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: i64x2) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -1688,7 +1688,7 @@ impl i64x2 {
     }
 
     /// `out` with the 16 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: i64x2) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: i64x2) -> Bytes ! {alloc} {
         i64x2.push_le(out, i64x2.swap_bytes(v))
     }
 }
@@ -1925,7 +1925,7 @@ impl u8x32 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: u8x32) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: u8x32) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -1963,7 +1963,7 @@ impl u8x32 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: u8x32) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: u8x32) -> Bytes ! {alloc} {
         u8x32.push_le(out, v)
     }
 }
@@ -2205,7 +2205,7 @@ impl u16x16 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: u16x16) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: u16x16) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -2243,7 +2243,7 @@ impl u16x16 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: u16x16) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: u16x16) -> Bytes ! {alloc} {
         u16x16.push_le(out, u16x16.swap_bytes(v))
     }
 }
@@ -2485,7 +2485,7 @@ impl u32x8 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: u32x8) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: u32x8) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -2523,7 +2523,7 @@ impl u32x8 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: u32x8) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: u32x8) -> Bytes ! {alloc} {
         u32x8.push_le(out, u32x8.swap_bytes(v))
     }
 }
@@ -2755,7 +2755,7 @@ impl u64x4 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: u64x4) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: u64x4) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -2793,7 +2793,7 @@ impl u64x4 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: u64x4) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: u64x4) -> Bytes ! {alloc} {
         u64x4.push_le(out, u64x4.swap_bytes(v))
     }
 }
@@ -3031,7 +3031,7 @@ impl i8x32 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: i8x32) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: i8x32) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -3069,7 +3069,7 @@ impl i8x32 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: i8x32) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: i8x32) -> Bytes ! {alloc} {
         i8x32.push_le(out, v)
     }
 }
@@ -3312,7 +3312,7 @@ impl i16x16 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: i16x16) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: i16x16) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -3350,7 +3350,7 @@ impl i16x16 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: i16x16) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: i16x16) -> Bytes ! {alloc} {
         i16x16.push_le(out, i16x16.swap_bytes(v))
     }
 }
@@ -3593,7 +3593,7 @@ impl i32x8 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: i32x8) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: i32x8) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -3631,7 +3631,7 @@ impl i32x8 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: i32x8) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: i32x8) -> Bytes ! {alloc} {
         i32x8.push_le(out, i32x8.swap_bytes(v))
     }
 }
@@ -3863,7 +3863,7 @@ impl i64x4 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane little-endian.
-    pub fn push_le(out: Bytes, v: i64x4) -> Bytes ! {alloc, panic} {
+    pub fn push_le(out: Bytes, v: i64x4) -> Bytes ! {alloc} {
         let mut out = out;
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 0) & 255));
         out = Bytes.push(out, Int.truncate::<i64>((v.w0 >> 8) & 255));
@@ -3901,7 +3901,7 @@ impl i64x4 {
     }
 
     /// `out` with the 32 bytes of `v` appended, each lane big-endian.
-    pub fn push_be(out: Bytes, v: i64x4) -> Bytes ! {alloc, panic} {
+    pub fn push_be(out: Bytes, v: i64x4) -> Bytes ! {alloc} {
         i64x4.push_le(out, i64x4.swap_bytes(v))
     }
 }

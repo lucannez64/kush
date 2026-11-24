@@ -210,7 +210,7 @@ deeply, such as the [Kush kernel](kernel-in-kush.md), asks for more on its
 
 ```kush
 #[stack_size(1024)]          // MiB, 1 to 65536
-fn main() -> i64 ! {io, alloc, panic} { ... }
+fn main() -> i64 ! {io, alloc} { ... }
 ```
 
 The native runtime then runs the program on a thread with a stack that

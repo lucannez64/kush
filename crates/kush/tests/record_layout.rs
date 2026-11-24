@@ -27,12 +27,12 @@ fn nested_first_fields_and_reference_writes_are_not_tags() {
         r#"
 struct Inner { x: i64, y: i64 }
 struct Outer { inner: Inner, z: i64 }
-fn update(p: &mut Outer) -> i64 ! {panic} {
+fn update(p: &mut Outer) -> i64 ! {} {
     p.inner.x = 41;
     p.inner.y = 7;
     p.inner.x + p.inner.y + p.z
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let mut value = Outer { inner: Inner { x: 3, y: 4 }, z: 9 };
     update(&mut value)
 }
@@ -47,7 +47,7 @@ fn owning_first_fields_survive_patterns_sums_and_structural_conversion() {
         r#"
 struct Pair { first: Box<i64>, second: i64 }
 enum Choice { Empty, Full(Pair) }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let value: Choice = Choice.Full(Pair { first: Box.new(40), second: 2 });
     match value {
         Choice.Empty => 0,
@@ -67,8 +67,8 @@ fn record_vectors_narrow_and_widen_with_balanced_ownership() {
     agrees(
         r#"
 struct Pair { first: i64, second: i64 }
-fn unpack(p: Pair) -> i64 ! {panic} { p.first + p.second }
-fn main() -> i64 ! {alloc, panic} {
+fn unpack(p: Pair) -> i64 ! {} { p.first + p.second }
+fn main() -> i64 ! {alloc} {
     let values: Vec<Pair> = [Pair { first: 10, second: 11 }];
     let values = Vec.map_in_place(values, unpack);
     let values = Vec.push(values, 7);

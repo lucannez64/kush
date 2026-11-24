@@ -48,11 +48,11 @@ fn program() -> String {
          use std.x86;
          use std.option.Option;
          use std.simd.u32x4;
-         fn show(v: u32x4) -> Unit ! {{io, panic}} {{
+         fn show(v: u32x4) -> Unit ! {{io}} {{
              print_int(u32x4.lane(v, 0, _)); print_int(u32x4.lane(v, 1, _));
              print_int(u32x4.lane(v, 2, _)); print_int(u32x4.lane(v, 3, _));
          }}
-         fn main() -> i64 ! {{io, panic}} {{
+         fn main() -> i64 ! {{io}} {{
              let sha = match cpu.sha() {{
                  Option.Some(sha) => sha,
                  Option.None => {{ print_int(-1); return 0; }},

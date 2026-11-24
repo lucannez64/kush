@@ -79,12 +79,16 @@ fn warm_builds_reuse_runtime_and_corrupt_entries_rebuild() {
     assert_eq!(compiles(root), 4);
     success(build(root, "uncached").env("KUSH_NO_RUNTIME_CACHE", "1"));
     assert_eq!(compiles(root), 5);
-    fs::write(root.join("main.kush"), "fn f(x:i64)->i64 ! {} {x^1} fn main()->i64 ! {alloc,panic} {let v:Vec<i64> =[1];let v=Vec.map_in_place(Vec.map_in_place(v,f),f);Vec.get(&v,0)}").unwrap();
+    fs::write(root.join("main.kush"), "fn f(x:i64)->i64 ! {} {x^1} fn main()->i64 ! {alloc} {let v:Vec<i64> =[1];let v=Vec.map_in_place(Vec.map_in_place(v,f),f);Vec.get(&v,0)}").unwrap();
     success(build(root, "fused").arg("--stats"));
     let output = Command::new(root.join("fused")).output().unwrap();
     assert!(String::from_utf8_lossy(&output.stderr).contains("fusions=1"));
     assert_eq!(compiles(root), 6);
-    fs::write(root.join("main.kush"), "fn main()->Unit ! {alloc,panic,suspend} {Task.scope(fn()->Unit ! {alloc,panic,suspend} {})}").unwrap();
+    fs::write(
+        root.join("main.kush"),
+        "fn main()->Unit ! {alloc, suspend} {Task.scope(fn()->Unit ! {alloc, suspend} {})}",
+    )
+    .unwrap();
     success(&mut build(root, "tasks"));
     assert!(Command::new(root.join("tasks")).status().unwrap().success());
     assert_eq!(compiles(root), 7);

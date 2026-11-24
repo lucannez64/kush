@@ -42,7 +42,7 @@ pub struct Request {
 
 /// The request whose head `http1.parse_head` parsed at the start of
 /// `buffer`, with its decoded `body`.
-pub fn request(buffer: &Bytes, head: http1.Head, body: Bytes) -> Request ! {alloc, panic} {
+pub fn request(buffer: &Bytes, head: http1.Head, body: Bytes) -> Request ! {alloc} {
     match head {
         http1.Head { method, target, target_end, minor, fields, framing, keep_alive, size } => {
             let mut copy = Bytes.with_capacity(size);
@@ -67,7 +67,7 @@ pub fn request(buffer: &Bytes, head: http1.Head, body: Bytes) -> Request ! {allo
 
 /// A request built directly, without parsing: no header fields. For tests
 /// and in-process calls.
-pub fn request_for(method: Method, target: &Bytes, body: Bytes) -> Request ! {alloc, panic} {
+pub fn request_for(method: Method, target: &Bytes, body: Bytes) -> Request ! {alloc} {
     let n = Bytes.len(target);
     let mut head = Bytes.with_capacity(n);
     let mut i = 0;
@@ -97,7 +97,7 @@ fn lower(c: i64) -> i64 ! {} {
 }
 
 /// A copy of `b[start..end]`.
-fn slice(b: &Bytes, start: i64, end: i64) -> Bytes ! {alloc, panic} {
+fn slice(b: &Bytes, start: i64, end: i64) -> Bytes ! {alloc} {
     let length = if end > start { Int.wrapping_sub::<i64>(end, start) } else { 0 };
     let mut out = Bytes.with_capacity(length);
     let mut i = start;
@@ -112,7 +112,7 @@ fn slice(b: &Bytes, start: i64, end: i64) -> Bytes ! {alloc, panic} {
 
 impl Request {
     /// The request target as sent: path and query.
-    pub fn target(self: &Self) -> Bytes ! {alloc, panic} {
+    pub fn target(self: &Self) -> Bytes ! {alloc} {
         slice(&self.head, self.target_from, self.target_to)
     }
 
@@ -127,12 +127,12 @@ impl Request {
     }
 
     /// The path, without the query (still percent-encoded; WEB-URL decodes).
-    pub fn path(self: &Self) -> Bytes ! {alloc, panic} {
+    pub fn path(self: &Self) -> Bytes ! {alloc} {
         slice(&self.head, self.target_from, self.path_end())
     }
 
     /// The query after '?', empty when there is none.
-    pub fn query(self: &Self) -> Bytes ! {alloc, panic} {
+    pub fn query(self: &Self) -> Bytes ! {alloc} {
         let end = self.path_end();
         if end == self.target_to { return Bytes.with_capacity(0); }
         slice(&self.head, Int.wrapping_add::<i64>(end, 1), self.target_to)
@@ -160,7 +160,7 @@ impl Request {
 
     /// The value of the first header field named `name` (ASCII
     /// case-insensitive), or None.
-    pub fn header(self: &Self, name: &Bytes) -> Option<Bytes> ! {alloc, panic} {
+    pub fn header(self: &Self, name: &Bytes) -> Option<Bytes> ! {alloc} {
         let count = Vec.len(&self.fields);
         let n = Bytes.len(name);
         let mut index = 0;
@@ -227,7 +227,7 @@ pub struct Stream {
     timeout_ms: i64,
 }
 
-fn abandon(res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+fn abandon(res: Responder) -> Unit ! {io, alloc, suspend} {
     match res {
         Responder { fd, head_only, keep_alive, chunked, timeout_ms } => {
             let none = Bytes.with_capacity(0);
@@ -288,7 +288,7 @@ fn send(fd: i64, data: &Bytes, timeout_ms: i64) -> Bool ! {io, suspend} {
     true
 }
 
-fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
     let mut out = out;
     let n = Bytes.len(text);
     let mut i = 0;
@@ -321,7 +321,7 @@ fn bodiless(status: i64) -> Bool ! {} {
 /// empty, Content-Length (chunked when `length` is -1, neither when -2:
 /// the body ends with the connection), and Connection: close when the
 /// connection ends after it.
-fn head(status: i64, content_type: &Bytes, length: i64, keep_alive: Bool) -> Bytes ! {alloc, panic} {
+fn head(status: i64, content_type: &Bytes, length: i64, keep_alive: Bool) -> Bytes ! {alloc} {
     let mut out = http1.status_line(Bytes.with_capacity(128), status);
     if Bytes.len(content_type) > 0 {
         let name = Bytes.from("Content-Type: ");
@@ -352,25 +352,25 @@ fn head(status: i64, content_type: &Bytes, length: i64, keep_alive: Bool) -> Byt
 
 impl Responder {
     /// Answer with `body` as text/plain; charset=utf-8.
-    pub fn text(self: Self, status: i64, body: &Bytes) -> Unit ! {io, alloc, panic, suspend} {
+    pub fn text(self: Self, status: i64, body: &Bytes) -> Unit ! {io, alloc, suspend} {
         let kind = Bytes.from("text/plain; charset=utf-8");
         self.complete(status, &kind, body)
     }
 
     /// Answer with `body` as application/json.
-    pub fn json(self: Self, status: i64, body: &Bytes) -> Unit ! {io, alloc, panic, suspend} {
+    pub fn json(self: Self, status: i64, body: &Bytes) -> Unit ! {io, alloc, suspend} {
         let kind = Bytes.from("application/json");
         self.complete(status, &kind, body)
     }
 
     /// Answer with an empty body.
-    pub fn status(self: Self, status: i64) -> Unit ! {io, alloc, panic, suspend} {
+    pub fn status(self: Self, status: i64) -> Unit ! {io, alloc, suspend} {
         let none = Bytes.with_capacity(0);
         self.complete(status, &none, &none)
     }
 
     /// Answer with a `Response` value.
-    pub fn reply(self: Self, response: Response) -> Unit ! {io, alloc, panic, suspend} {
+    pub fn reply(self: Self, response: Response) -> Unit ! {io, alloc, suspend} {
         match response {
             Response { status, content_type, body } => self.complete(status, &content_type, &body),
         }
@@ -378,7 +378,7 @@ impl Responder {
 
     /// Start a chunked response; send the body with `Stream.send` and end
     /// it with `Stream.finish`. For HEAD only the head is sent.
-    pub fn stream(self: Self, status: i64, content_type: &Bytes) -> Stream ! {io, alloc, panic, suspend} {
+    pub fn stream(self: Self, status: i64, content_type: &Bytes) -> Stream ! {io, alloc, suspend} {
         match self {
             Responder { fd, head_only, keep_alive, chunked, timeout_ms } => {
                 let length = if chunked { -1 } else { -2 };
@@ -395,7 +395,7 @@ impl Responder {
         }
     }
 
-    fn complete(self: Self, status: i64, content_type: &Bytes, body: &Bytes) -> Unit ! {io, alloc, panic, suspend} {
+    fn complete(self: Self, status: i64, content_type: &Bytes, body: &Bytes) -> Unit ! {io, alloc, suspend} {
         match self {
             Responder { fd, head_only, keep_alive, chunked, timeout_ms } => {
                 let mut bytes = head(status, content_type, Bytes.len(body), keep_alive);
@@ -408,7 +408,7 @@ impl Responder {
 
 impl Stream {
     /// Send `data` as one chunk (empty data sends nothing).
-    pub fn send(self: Self, data: &Bytes) -> Stream ! {io, alloc, panic, suspend} {
+    pub fn send(self: Self, data: &Bytes) -> Stream ! {io, alloc, suspend} {
         match self {
             Stream { fd, head_only, raw, failed, timeout_ms } => {
                 let mut failed = failed;
@@ -426,7 +426,7 @@ impl Stream {
     }
 
     /// End the body.
-    pub fn finish(self: Self) -> Unit ! {io, alloc, panic, suspend} {
+    pub fn finish(self: Self) -> Unit ! {io, alloc, suspend} {
         match self {
             Stream { fd, head_only, raw, failed, timeout_ms } => {
                 if !failed && !head_only && !raw {
@@ -440,7 +440,7 @@ impl Stream {
 
 /// Answer `request` with what `handler` returns: the `fn(&Request) ->
 /// Response` form of a handler.
-pub fn answer(request: &Request, res: Responder, handler: fn(&Request) -> Response ! {io, alloc, panic, suspend}) -> Unit ! {io, alloc, panic, suspend} {
+pub fn answer(request: &Request, res: Responder, handler: fn(&Request) -> Response ! {io, alloc, suspend}) -> Unit ! {io, alloc, suspend} {
     res.reply(handler(request))
 }
 
@@ -448,7 +448,7 @@ pub fn answer(request: &Request, res: Responder, handler: fn(&Request) -> Respon
 /// raw response (status line, head and body), for tests. Everything runs in
 /// the calling task, so the response must fit in the loopback socket
 /// buffers (megabytes). WEB-TEST-CLIENT builds on this.
-pub fn capture(request: &Request, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}) -> Result<Bytes, i64> ! {io, alloc, panic, suspend} {
+pub fn capture(request: &Request, handler: fn(&Request, Responder) -> Unit ! {io, alloc, suspend}) -> Result<Bytes, i64> ! {io, alloc, suspend} {
     let host = Bytes.from("127.0.0.1");
     let listener = match net.listen(&host, 0, 1, false) {
         Result.Ok(listener) => listener,
@@ -541,7 +541,7 @@ fn min(a: i64, b: i64) -> i64 ! {} { if a < b { a } else { b } }
 /// `timeout_ms`. A shielded read is not interrupted by cancellation. The
 /// buffer comes back longer, or unchanged when the peer closed; on failure
 /// (ETIMEDOUT 110, ECANCELED 125, EFBIG 27 at `cap`, ...) it is freed.
-fn receive(fd: i64, buffer: Bytes, cap: i64, timeout_ms: i64, shield: Bool) -> Result<Bytes, i64> ! {io, alloc, panic, suspend} {
+fn receive(fd: i64, buffer: Bytes, cap: i64, timeout_ms: i64, shield: Bool) -> Result<Bytes, i64> ! {io, alloc, suspend} {
     let mut buffer = buffer;
     let length = Bytes.len(&buffer);
     if length >= Bytes.capacity(&buffer) {
@@ -571,7 +571,7 @@ fn receive(fd: i64, buffer: Bytes, cap: i64, timeout_ms: i64, shield: Bool) -> R
 /// Read until a whole request head is in `buffer`. Waiting for the first
 /// byte uses the idle deadline and can be cancelled; the rest of a started
 /// head is shielded and uses the request deadline.
-fn read_head(fd: i64, buffer: Bytes, config: &Config) -> Got ! {io, alloc, panic, suspend} {
+fn read_head(fd: i64, buffer: Bytes, config: &Config) -> Got ! {io, alloc, suspend} {
     let mut buffer = buffer;
     let cap = Int.saturating_add::<i64>(config.limits.head, 1);
     loop {
@@ -599,7 +599,7 @@ fn read_head(fd: i64, buffer: Bytes, config: &Config) -> Got ! {io, alloc, panic
 
 /// Read the body `head` declares (shielded, within the request deadline):
 /// the buffer, the decoded body, and the bytes the request used.
-fn read_body(fd: i64, buffer: Bytes, head: &http1.Head, config: &Config) -> Got ! {io, alloc, panic, suspend} {
+fn read_body(fd: i64, buffer: Bytes, head: &http1.Head, config: &Config) -> Got ! {io, alloc, suspend} {
     let mut buffer = buffer;
     let start = head.size;
     match head.framing {
@@ -655,7 +655,7 @@ fn read_body(fd: i64, buffer: Bytes, head: &http1.Head, config: &Config) -> Got 
 
 /// `buffer` without its first `from` bytes: what a pipelining client sent
 /// after the request just answered.
-fn rest(buffer: Bytes, from: i64) -> Bytes ! {alloc, panic} {
+fn rest(buffer: Bytes, from: i64) -> Bytes ! {alloc} {
     let mut out = Bytes.with_capacity(Bytes.capacity(&buffer));
     let n = Bytes.len(&buffer);
     let mut i = if from > 0 { from } else { 0 };
@@ -667,7 +667,7 @@ fn rest(buffer: Bytes, from: i64) -> Bytes ! {alloc, panic} {
 }
 
 /// Answer `status` with an empty body and Connection: close.
-fn refuse(fd: i64, status: i64, timeout_ms: i64) -> Unit ! {io, alloc, panic, suspend} {
+fn refuse(fd: i64, status: i64, timeout_ms: i64) -> Unit ! {io, alloc, suspend} {
     let none = Bytes.with_capacity(0);
     let bytes = head(status, &none, 0, false);
     let _ = send(fd, &bytes, timeout_ms);
@@ -675,7 +675,7 @@ fn refuse(fd: i64, status: i64, timeout_ms: i64) -> Unit ! {io, alloc, panic, su
 
 /// Serve the requests of one connection until it closes, it is not kept
 /// alive, or the server stops.
-fn connection(conn: net.Conn, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}, config: Config) -> Unit ! {io, alloc, panic, suspend} {
+fn connection(conn: net.Conn, handler: fn(&Request, Responder) -> Unit ! {io, alloc, suspend}, config: Config) -> Unit ! {io, alloc, suspend} {
     let fd = net.descriptor(&conn);
     let mut buffer = Bytes.with_capacity(4096);
     loop {
@@ -710,7 +710,7 @@ fn connection(conn: net.Conn, handler: fn(&Request, Responder) -> Unit ! {io, al
         // handler's frames were unwound, and an unanswered Responder answered
         // 500 on the way (its unwind cleanup). The connection then closes,
         // since a response may be cut off.
-        let ran = Task.catch(fn() -> Unit ! {io, alloc, panic, suspend} {
+        let ran = Task.catch(fn() -> Unit ! {io, alloc, suspend} {
             handler(&req, res)
         });
         buffer = rest(bytes, used);
@@ -742,12 +742,12 @@ fn transient(code: i64) -> Bool ! {} {
 /// own task: the client gets a 500 if nothing was sent yet, and the
 /// connection is closed; what the handler owned is leaked.
 /// Returns Ok(()) after such a stop, or the accept error that ended it.
-pub fn serve(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}, config: Config) -> Result<Unit, i64> ! {io, alloc, panic, suspend} {
-    let ended = Task.scope(fn() -> Result<Unit, i64> ! {io, alloc, panic, suspend} {
+pub fn serve(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! {io, alloc, suspend}, config: Config) -> Result<Unit, i64> ! {io, alloc, suspend} {
+    let ended = Task.scope(fn() -> Result<Unit, i64> ! {io, alloc, suspend} {
         loop {
             match net.accept(&listener, 0) {
                 Result.Ok(conn) => {
-                    Task.spawn(fn() -> Unit ! {io, alloc, panic, suspend} { connection(conn, handler, config) });
+                    Task.spawn(fn() -> Unit ! {io, alloc, suspend} { connection(conn, handler, config) });
                 },
                 Result.Err(code) => {
                     if code == sys.ECANCELED() || !transient(code) {
@@ -771,12 +771,12 @@ pub fn serve(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! 
 
 /// Stop every thread of `serve_threads`: they wait on the read end of a pipe
 /// that nobody reads, so after one byte it stays readable for all of them.
-fn raise_stop(signal: i64) -> Unit ! {io, alloc, panic} {
+fn raise_stop(signal: i64) -> Unit ! {io, alloc} {
     let _ = sys.write(signal, &Bytes.from("!"), 0, -1);
 }
 
 /// Keep the first error any thread met.
-fn first_error(errors: &[Atomic], code: i64) -> Unit ! {panic} {
+fn first_error(errors: &[Atomic], code: i64) -> Unit ! {} {
     let _ = Atomic.compare_exchange(errors, 0, 0, code);
 }
 
@@ -785,9 +785,9 @@ fn first_error(errors: &[Atomic], code: i64) -> Unit ! {panic} {
 /// ends, every thread stops. A panic outside the handlers (they have their
 /// own catch) stops the other threads too before it goes on, so no thread
 /// waits forever at the scope's end.
-fn serve_part(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}, config: Config, stop: i64, signal: i64, errors: &[Atomic]) -> Unit ! {io, alloc, panic, suspend} {
-    let ran = Task.catch(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let server = Task.spawn(fn() -> Unit ! {io, alloc, panic, suspend} {
+fn serve_part(listener: net.Listener, handler: fn(&Request, Responder) -> Unit ! {io, alloc, suspend}, config: Config, stop: i64, signal: i64, errors: &[Atomic]) -> Unit ! {io, alloc, suspend} {
+    let ran = Task.catch(fn() -> Unit ! {io, alloc, suspend} {
+        let server = Task.spawn(fn() -> Unit ! {io, alloc, suspend} {
             match serve(listener, handler, config) {
                 Result.Err(code) => first_error(errors, code),
                 Result.Ok(_) => {},
@@ -819,7 +819,7 @@ fn serve_part(listener: net.Listener, handler: fn(&Request, Responder) -> Unit !
 /// `handler` and `config` are as for `serve`. Cancelling the calling task
 /// stops every thread gracefully, as `serve` stops; so does an accept error
 /// on any thread, which is then returned. EINVAL unless 1 <= threads <= 1024.
-pub fn serve_threads(listener: net.Listener, host: &Bytes, threads: i64, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}, config: Config) -> Result<Unit, i64> ! {io, alloc, panic, suspend} {
+pub fn serve_threads(listener: net.Listener, host: &Bytes, threads: i64, handler: fn(&Request, Responder) -> Unit ! {io, alloc, suspend}, config: Config) -> Result<Unit, i64> ! {io, alloc, suspend} {
     if threads < 1 || threads > 1024 {
         let _ = net.close_listener(listener);
         return Result.Err(22);
@@ -843,12 +843,12 @@ pub fn serve_threads(listener: net.Listener, host: &Bytes, threads: i64, handler
     let mut cells: Vec<Atomic> = Vec.with_capacity(1);
     cells = Vec.push(cells, Atomic.new(0));
     let errors: &[Atomic] = &cells[..];
-    Thread.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+    Thread.scope(fn() -> Unit ! {io, alloc, suspend} {
         let mut i = 1;
         while i < threads {
             match net.listen(host, port, config.backlog, true) {
                 Result.Ok(extra) => {
-                    Thread.spawn(fn() -> Unit ! {io, alloc, panic, suspend} {
+                    Thread.spawn(fn() -> Unit ! {io, alloc, suspend} {
                         serve_part(extra, handler, config, stop, signal, errors)
                     });
                 },

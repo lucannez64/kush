@@ -1,7 +1,7 @@
 use std.option.Option;
 use std.result.Result;
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let text = "héllo";
     print_i64(text.len()); // UTF-8 bytes
     print_i64(text.scalar_len()); // Unicode scalar values

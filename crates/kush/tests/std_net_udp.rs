@@ -53,7 +53,7 @@ fn sender(function: &str, host: &str, port: u16) -> String {
 use std.net;
 use std.result.Result;
 
-fn main() -> i64 ! {{io, alloc, panic}} {{
+fn main() -> i64 ! {{io, alloc}} {{
     let mut packet = Bytes.with_capacity(102);
     let mut i = 0;
     while i < 6 {{ packet = Bytes.push(packet, 255); i = i + 1; }}
@@ -139,14 +139,14 @@ fn udp_send_reports_errors_on_both_backends() {
 use std.net;
 use std.result.Result;
 
-fn show(result: Result<i64, i64>) -> Unit ! {io, panic} {
+fn show(result: Result<i64, i64>) -> Unit ! {io} {
     match result {
         Result.Ok(count) => print_i64(count),
         Result.Err(code) => print_i64(-code),
     }
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     show(net.udp_send(&Bytes.from("127.0.0.1"), 0, &Bytes.from("x")));
     let mut big = Bytes.with_capacity(70000);
     let mut i = 0;
@@ -173,7 +173,7 @@ use std.io;
 use std.net;
 use std.result.Result;
 
-fn send6(host: &Bytes, port: i64) -> Unit ! {{io, alloc, panic}} {{
+fn send6(host: &Bytes, port: i64) -> Unit ! {{io, alloc}} {{
     match net.udp_send6(host, port, &Bytes.from("xyz"), Bytes.with_capacity(64)) {{
         Result.Ok(address) => {{
             let line = Bytes.push(address, 10);
@@ -183,7 +183,7 @@ fn send6(host: &Bytes, port: i64) -> Unit ! {{io, alloc, panic}} {{
     }}
 }}
 
-fn main() -> i64 ! {{io, alloc, panic}} {{
+fn main() -> i64 ! {{io, alloc}} {{
 {calls}    0
 }}
 "#
@@ -235,7 +235,7 @@ use std.io;
 use std.net;
 use std.result.Result;
 
-fn route(host: &Bytes, port: i64) -> Unit ! {{io, alloc, panic}} {{
+fn route(host: &Bytes, port: i64) -> Unit ! {{io, alloc}} {{
     match net.udp_route_source(host, port, Bytes.with_capacity(64)) {{
         Result.Ok(address) => {{
             let line = Bytes.push(address, 10);
@@ -245,7 +245,7 @@ fn route(host: &Bytes, port: i64) -> Unit ! {{io, alloc, panic}} {{
     }}
 }}
 
-fn main() -> i64 ! {{io, alloc, panic}} {{
+fn main() -> i64 ! {{io, alloc}} {{
 {calls}    route(&Bytes.from("127.0.0.1"), 0);
     0
 }}

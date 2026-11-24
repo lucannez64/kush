@@ -71,11 +71,11 @@ and [structured async](async.md).
 Lifetimes are declared before ordinary generics:
 
 ```rust
-fn tail<'a>(view: &'a [i64]) -> &'a [i64] ! {panic} {
+fn tail<'a>(view: &'a [i64]) -> &'a [i64] ! {} {
     view[1..]
 }
 
-fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {} {
     &mut view[1..]
 }
 
@@ -83,11 +83,11 @@ fn pick_mut<'a>(
     left: &'a mut [i64],
     right: &'a mut [i64],
     flag: Bool,
-) -> &'a mut [i64] ! {panic} {
+) -> &'a mut [i64] ! {} {
     if flag { left } else { right }
 }
 
-fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {panic} {
+fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {} {
     let mut index = 0;
     while index < Slice.len(view) {
         Slice.set(view, index, value);
@@ -106,13 +106,13 @@ and may not reuse a type/natural/grade/effect generic's name.
 A function lifetime binder may declare outlives bounds:
 
 ```rust
-fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} {
+fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {} {
     view
 }
 
 fn shorten_mut<'long: 'short, 'short>(
     view: &'long mut [i64],
-) -> &'short mut [i64] ! {panic} {
+) -> &'short mut [i64] ! {} {
     view
 }
 ```
@@ -184,14 +184,14 @@ cannot be returned as a caller lifetime.
 fn first<'long: 'short, 'short>(
     long: &'long [i64],
     short: &'short [i64],
-) -> &'short [i64] ! {panic} {
+) -> &'short [i64] ! {} {
     long // shorten the longer source to the declared result
 }
 
 fn forward<'long: 'short, 'short>(
     long: &'long [i64],
     short: &'short [i64],
-) -> &'short [i64] ! {panic} {
+) -> &'short [i64] ! {} {
     first(long, short) // the caller proves 'long: 'short from its own signature
 }
 ```
@@ -208,19 +208,19 @@ A borrowed slice result may also omit its lifetime when the input side names
 exactly one distinct borrow lifetime:
 
 ```rust
-fn tail(view: &[i64]) -> &[i64] ! {panic} {
+fn tail(view: &[i64]) -> &[i64] ! {} {
     view[1..]
 }
 
-fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {panic} {
+fn tail_mut(view: &mut [i64]) -> &mut [i64] ! {} {
     &mut view[1..]
 }
 
-fn reborrow(view: &mut [i64]) -> &[i64] ! {panic} {
+fn reborrow(view: &mut [i64]) -> &[i64] ! {} {
     &view[1..]
 }
 
-fn pick<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &[i64] ! {panic} {
+fn pick<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &[i64] ! {} {
     if flag { left } else { right }
 }
 ```
@@ -280,7 +280,7 @@ Deriving a child records the parent capability in the child's ancestry. That is
 what distinguishes a legitimate parent-child reborrow from a competing alias:
 
 ```rust
-fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} { &mut s[1..] }
+fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {} { &mut s[1..] }
 
 let mut values: [i64; 4] = [1, 2, 3, 4];
 let child = tail_mut(&mut values[..]);      // values is suspended
@@ -323,7 +323,7 @@ exclusive view of it, but reading through each shared view is allowed.
 Ordinary passing of a mutable view moves the capability:
 
 ```rust
-fn consume(view: &mut [i64]) -> Unit ! {panic} { Slice.len(view); }
+fn consume(view: &mut [i64]) -> Unit ! {} { Slice.len(view); }
 
 let parent: &mut [i64] = &mut values[..];
 consume(parent);            // parent is consumed
@@ -335,7 +335,7 @@ The caller keeps the parent, but it is suspended by the call and by any returned
 view that names the same input lifetime:
 
 ```rust
-fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {panic} { &mut s[1..] }
+fn tail_mut<'a>(s: &'a mut [i64]) -> &'a mut [i64] ! {} { &mut s[1..] }
 
 let parent: &mut [i64] = &mut values[..];
 let child = tail_mut(&mut parent[..]); // explicit reborrow; parent retained
@@ -359,10 +359,10 @@ borrow remains tied to the original owner storage; the environment stores only
 the four-word view descriptors and never owns the array, `Vec`, or `Bytes`.
 
 ```rust
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let mut values: [i64; 3] = [1, 2, 3];
     let view: &mut [i64] = &mut values[..];
-    let bump = fn(by: i64) -> Unit ! {panic} {
+    let bump = fn(by: i64) -> Unit ! {} {
         Slice.set(view, 0, Slice.get(view, 0) + by);
     };
     bump(41);
@@ -446,7 +446,7 @@ fn window<'a>(view: &'a mut [i64]) -> Window<'a, i64> ! {} {
     Window { view: view, start: 0 }
 }
 
-fn first<'a>(window: Window<'a, i64>) -> &'a mut [i64] ! {panic} {
+fn first<'a>(window: Window<'a, i64>) -> &'a mut [i64] ! {} {
     let Window { view, .. } = window;
     view
 }
@@ -514,7 +514,7 @@ metadata. Moving the receiver, writing through it, or creating a competing view
 inside those bounds remains rejected.
 
 ```rust
-fn bump(a: &mut [i64], b: &mut [i64]) -> Unit ! {panic} {
+fn bump(a: &mut [i64], b: &mut [i64]) -> Unit ! {} {
     Slice.set(a, 0, Slice.get(a, 0) + 1);
     Slice.set(b, 0, Slice.get(b, 0) + 10);
 }
@@ -537,11 +537,11 @@ relationships between unrelated ranges.
 Returning a reborrow of an input lifetime may name that input lifetime:
 
 ```rust
-fn narrowed<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+fn narrowed<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {} {
     tail_mut(view) // the result and argument both carry 'a
 }
 
-fn local_child<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+fn local_child<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {} {
     let child = &mut view[1..];
     child // allowed: every root is a parameter with lifetime 'a
 }
@@ -603,7 +603,7 @@ opposite sides of one checked `Slice.split_at_mut` pair.
 `&mut [T]` creates a move-only capability over copyable elements:
 
 ```rust
-fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {panic} {
+fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {} {
     let mut index = 0;
     while index < Slice.len(view) {
         Slice.set(view, index, value);
@@ -646,14 +646,14 @@ returns `Option<T>` and needs no `panic` effect.
 A function arrow type may bind its own lifetimes and borrow slice views:
 
 ```rust
-fn measure(values: &[i64], f: fn(&[i64]) -> i64 ! {panic}) -> i64 ! {panic} {
+fn measure(values: &[i64], f: fn(&[i64]) -> i64 ! {}) -> i64 ! {} {
     f(values)
 }
 
 fn apply<'x>(
-    f: fn<'a>(&'a [i64]) -> &'a [i64] ! {panic},
+    f: fn<'a>(&'a [i64]) -> &'a [i64] ! {},
     values: &'x [i64],
-) -> &'x [i64] ! {panic} {
+) -> &'x [i64] ! {} {
     f(values)
 }
 ```

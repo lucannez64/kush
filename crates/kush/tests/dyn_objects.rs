@@ -51,13 +51,13 @@ struct Label { text: String }
 struct W<T> { value: T }
 trait Conv {
     type Out;
-    fn conv(self: &Self) -> Self.Out ! {alloc, panic};
-    fn size(self: &Self) -> i64 ! {panic};
+    fn conv(self: &Self) -> Self.Out ! {alloc};
+    fn size(self: &Self) -> i64 ! {};
 }
 impl<T> Conv for W<T> {
     type Out = Label;
-    fn conv(self: &Self) -> Label ! {alloc, panic} { Label { text: "made" } }
-    fn size(self: &Self) -> i64 ! {panic} { 7 }
+    fn conv(self: &Self) -> Label ! {alloc} { Label { text: "made" } }
+    fn size(self: &Self) -> i64 ! {} { 7 }
 }
 "#;
 
@@ -67,12 +67,12 @@ fn an_explicit_binding_fixes_the_projection_before_any_member() {
     let stats = agrees(
         &format!(
             "{CONV}
-            fn use_it(object: &dyn Conv<Out = Label>) -> i64 ! {{alloc, panic}} {{
+            fn use_it(object: &dyn Conv<Out = Label>) -> i64 ! {{alloc}} {{
                 let Label {{ text }} = object.conv();
                 String.len(&text) + object.size()
             }}
-            fn unused(object: &dyn Conv<Out = Label>) -> i64 ! {{alloc, panic}} {{ object.size() }}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn unused(object: &dyn Conv<Out = Label>) -> i64 ! {{alloc}} {{ object.size() }}
+            fn main() -> i64 ! {{io, alloc}} {{
                 let object: dyn Conv = W {{ value: 1 }};
                 print_i64(use_it(&object));
                 let other: dyn Conv<Out = Label> = W {{ value: true }};
@@ -88,11 +88,11 @@ fn an_explicit_binding_fixes_the_projection_before_any_member() {
     rejects(
         &format!(
             "{CONV}
-            fn use_it(object: &dyn Conv) -> i64 ! {{alloc, panic}} {{
+            fn use_it(object: &dyn Conv) -> i64 ! {{alloc}} {{
                 let Label {{ text }} = object.conv();
                 String.len(&text)
             }}
-            fn main() -> i64 ! {{alloc, panic}} {{ 0 }}"
+            fn main() -> i64 ! {{alloc}} {{ 0 }}"
         ),
         "associated type 'Out'",
     );
@@ -104,8 +104,8 @@ fn a_binding_is_checked_against_members_impls_and_other_bindings() {
     rejects(
         &format!(
             "{CONV}
-            fn size(object: &dyn Conv<Out = i64>) -> i64 ! {{panic}} {{ object.size() }}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn size(object: &dyn Conv<Out = i64>) -> i64 ! {{}} {{ object.size() }}
+            fn main() -> i64 ! {{alloc}} {{
                 let object: dyn Conv = W {{ value: 1 }};
                 size(&object)
             }}"
@@ -116,9 +116,9 @@ fn a_binding_is_checked_against_members_impls_and_other_bindings() {
     rejects(
         &format!(
             "{CONV}
-            fn a(object: &dyn Conv<Out = i64>) -> i64 ! {{panic}} {{ object.size() }}
-            fn b(object: &dyn Conv<Out = Bool>) -> i64 ! {{panic}} {{ object.size() }}
-            fn main() -> i64 ! {{alloc, panic}} {{ 0 }}"
+            fn a(object: &dyn Conv<Out = i64>) -> i64 ! {{}} {{ object.size() }}
+            fn b(object: &dyn Conv<Out = Bool>) -> i64 ! {{}} {{ object.size() }}
+            fn main() -> i64 ! {{alloc}} {{ 0 }}"
         ),
         "already fixed as",
     );
@@ -127,15 +127,15 @@ fn a_binding_is_checked_against_members_impls_and_other_bindings() {
     let concrete = r#"
         struct A { x: i64 }
         struct B { y: i64 }
-        trait Conv { type Out; fn conv(self: &Self) -> Self.Out ! {panic}; }
-        impl Conv for A { type Out = i64; fn conv(self: &Self) -> i64 ! {panic} { self.x } }
-        impl Conv for B { type Out = i64; fn conv(self: &Self) -> i64 ! {panic} { self.y } }
+        trait Conv { type Out; fn conv(self: &Self) -> Self.Out ! {}; }
+        impl Conv for A { type Out = i64; fn conv(self: &Self) -> i64 ! {} { self.x } }
+        impl Conv for B { type Out = i64; fn conv(self: &Self) -> i64 ! {} { self.y } }
     "#;
     rejects(
         &format!(
             "{concrete}
-            fn f(object: &dyn Conv<Out = Bool>) -> Bool ! {{panic}} {{ object.conv() }}
-            fn main() -> i64 ! {{panic}} {{ 0 }}"
+            fn f(object: &dyn Conv<Out = Bool>) -> Bool ! {{}} {{ object.conv() }}
+            fn main() -> i64 ! {{}} {{ 0 }}"
         ),
         "fixed as",
     );
@@ -143,7 +143,7 @@ fn a_binding_is_checked_against_members_impls_and_other_bindings() {
         &format!(
             "{concrete}
             struct Holder {{ object: dyn Conv<Out = Bool> }}
-            fn main() -> i64 ! {{panic}} {{ 0 }}"
+            fn main() -> i64 ! {{}} {{ 0 }}"
         ),
         "fixes it as Bool",
     );
@@ -152,8 +152,8 @@ fn a_binding_is_checked_against_members_impls_and_other_bindings() {
     let stats = agrees(
         &format!(
             "{concrete}
-            fn f(object: &dyn Conv<Out = i64>) -> i64 ! {{panic}} {{ object.conv() }}
-            fn main() -> i64 ! {{io, panic}} {{
+            fn f(object: &dyn Conv<Out = i64>) -> i64 ! {{}} {{ object.conv() }}
+            fn main() -> i64 ! {{io}} {{
                 let object: dyn Conv<Out = i64> = A {{ x: 5 }};
                 print_i64(f(&object));
                 0
@@ -174,30 +174,30 @@ fn binding_syntax_is_validated() {
         rejects(
             &format!(
                 "{CONV}
-                fn f(object: &{binding}) -> i64 ! {{panic}} {{ object.size() }}
-                fn main() -> i64 ! {{panic}} {{ 0 }}"
+                fn f(object: &{binding}) -> i64 ! {{}} {{ object.size() }}
+                fn main() -> i64 ! {{}} {{ 0 }}"
             ),
             expected,
         );
     }
     let generic = r#"
         struct W<T> { value: T }
-        trait Into<X> { type Out; fn into(self: &Self, x: X) -> Self.Out ! {panic}; }
-        impl<T> Into<i64> for W<T> { type Out = i64; fn into(self: &Self, x: i64) -> i64 ! {panic} { x + 1 } }
+        trait Into<X> { type Out; fn into(self: &Self, x: X) -> Self.Out ! {}; }
+        impl<T> Into<i64> for W<T> { type Out = i64; fn into(self: &Self, x: i64) -> i64 ! {} { x + 1 } }
     "#;
     rejects(
         &format!(
             "{generic}
-            fn f(object: &dyn Into<Out = i64, i64>) -> i64 ! {{panic}} {{ 0 }}
-            fn main() -> i64 ! {{panic}} {{ 0 }}"
+            fn f(object: &dyn Into<Out = i64, i64>) -> i64 ! {{}} {{ 0 }}
+            fn main() -> i64 ! {{}} {{ 0 }}"
         ),
         "trait arguments must come before",
     );
     agrees(
         &format!(
             "{generic}
-            fn f(object: &dyn Into<i64, Out = i64>) -> i64 ! {{panic}} {{ object.into(4) }}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn f(object: &dyn Into<i64, Out = i64>) -> i64 ! {{}} {{ object.into(4) }}
+            fn main() -> i64 ! {{alloc}} {{
                 let object: dyn Into<i64> = W {{ value: 0 }};
                 f(&object)
             }}"
@@ -213,46 +213,46 @@ struct Text { name: String, count: i64 }
 struct Point { x: i64 }
 struct Only { v: i64 }
 trait Show {
-    fn show(self: &Self) -> i64 ! {panic};
-    fn tag(self: &Self) -> i64 ! {panic};
+    fn show(self: &Self) -> i64 ! {};
+    fn tag(self: &Self) -> i64 ! {};
 }
 trait Count {
-    fn amount(self: &Self) -> i64 ! {panic};
-    fn bump(self: &mut Self) -> Unit ! {panic};
-    fn tag(self: &Self) -> i64 ! {panic};
-    fn eat(self: Self) -> i64 ! {panic};
-    fn pair<U>(self: &Self, value: U) -> (i64, U) ! {panic};
+    fn amount(self: &Self) -> i64 ! {};
+    fn bump(self: &mut Self) -> Unit ! {};
+    fn tag(self: &Self) -> i64 ! {};
+    fn eat(self: Self) -> i64 ! {};
+    fn pair<U>(self: &Self, value: U) -> (i64, U) ! {};
 }
 impl Show for Text {
-    fn show(self: &Self) -> i64 ! {panic} { 100 + self.count }
-    fn tag(self: &Self) -> i64 ! {panic} { 1 }
+    fn show(self: &Self) -> i64 ! {} { 100 + self.count }
+    fn tag(self: &Self) -> i64 ! {} { 1 }
 }
 impl Count for Text {
-    fn amount(self: &Self) -> i64 ! {panic} { self.count }
-    fn bump(self: &mut Self) -> Unit ! {panic} { self.count = self.count + 1; }
-    fn tag(self: &Self) -> i64 ! {panic} { 2 }
-    fn eat(self: Self) -> i64 ! {panic} { self.count * 10 }
-    fn pair<U>(self: &Self, value: U) -> (i64, U) ! {panic} { (self.count, value) }
+    fn amount(self: &Self) -> i64 ! {} { self.count }
+    fn bump(self: &mut Self) -> Unit ! {} { self.count = self.count + 1; }
+    fn tag(self: &Self) -> i64 ! {} { 2 }
+    fn eat(self: Self) -> i64 ! {} { self.count * 10 }
+    fn pair<U>(self: &Self, value: U) -> (i64, U) ! {} { (self.count, value) }
 }
 impl Show for Point {
-    fn show(self: &Self) -> i64 ! {panic} { 200 + self.x }
-    fn tag(self: &Self) -> i64 ! {panic} { 3 }
+    fn show(self: &Self) -> i64 ! {} { 200 + self.x }
+    fn tag(self: &Self) -> i64 ! {} { 3 }
 }
 impl Count for Point {
-    fn amount(self: &Self) -> i64 ! {panic} { self.x }
-    fn bump(self: &mut Self) -> Unit ! {panic} { self.x = self.x + 5; }
-    fn tag(self: &Self) -> i64 ! {panic} { 4 }
-    fn eat(self: Self) -> i64 ! {panic} { self.x * 10 }
-    fn pair<U>(self: &Self, value: U) -> (i64, U) ! {panic} { (self.x, value) }
+    fn amount(self: &Self) -> i64 ! {} { self.x }
+    fn bump(self: &mut Self) -> Unit ! {} { self.x = self.x + 5; }
+    fn tag(self: &Self) -> i64 ! {} { 4 }
+    fn eat(self: Self) -> i64 ! {} { self.x * 10 }
+    fn pair<U>(self: &Self, value: U) -> (i64, U) ! {} { (self.x, value) }
 }
 impl Show for Only {
-    fn show(self: &Self) -> i64 ! {panic} { self.v }
-    fn tag(self: &Self) -> i64 ! {panic} { 5 }
+    fn show(self: &Self) -> i64 ! {} { self.v }
+    fn tag(self: &Self) -> i64 ! {} { 5 }
 }
 "#;
 
 fn multi(main: &str) -> String {
-    format!("{MULTI}\nfn main() -> i64 ! {{io, alloc, panic}} {{\n{main}\n}}\n")
+    format!("{MULTI}\nfn main() -> i64 ! {{io, alloc}} {{\n{main}\n}}\n")
 }
 
 #[test]
@@ -290,8 +290,8 @@ fn multi_trait_objects_upcast_to_any_subset_of_their_traits() {
             // Checked before any member exists: later members still reach the
             // upcast targets.
             fn as_count(object: dyn Show + Count) -> dyn Count ! {{}} {{ object }}
-            fn shown(object: dyn Show) -> i64 ! {{panic}} {{ object.show() }}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn shown(object: dyn Show) -> i64 ! {{}} {{ object.show() }}
+            fn main() -> i64 ! {{io, alloc}} {{
                 let a: dyn Show + Count = Text {{ name: \"q\", count: 3 }};
                 let mut count = as_count(a);
                 count.bump();
@@ -319,7 +319,7 @@ fn multi_trait_objects_work_in_fields_containers_temporaries_and_projections() {
             "{MULTI}
             struct Holder {{ object: dyn Show + Count, tag: i64 }}
             fn make() -> dyn Show + Count ! {{alloc}} {{ Point {{ x: 9 }} }}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn main() -> i64 ! {{io, alloc}} {{
                 let mut holder = Holder {{ object: Text {{ name: \"h\", count: 1 }}, tag: 0 }};
                 holder.object.bump();
                 print_i64(holder.object.amount() + holder.object.show());
@@ -378,15 +378,15 @@ fn multi_trait_objects_keep_linear_members_linear_and_bind_projections() {
     let source = r#"
         #[linear]
         struct Ticket { id: i64 }
-        trait Look { fn look(self: &Self) -> i64 ! {panic}; }
-        trait Done { fn done(self: Self) -> i64 ! {panic}; }
-        impl Look for Ticket { fn look(self: &Self) -> i64 ! {panic} { self.id } }
-        impl Done for Ticket { fn done(self: Self) -> i64 ! {panic} { let Ticket { id } = self; id } }
+        trait Look { fn look(self: &Self) -> i64 ! {}; }
+        trait Done { fn done(self: Self) -> i64 ! {}; }
+        impl Look for Ticket { fn look(self: &Self) -> i64 ! {} { self.id } }
+        impl Done for Ticket { fn done(self: Self) -> i64 ! {} { let Ticket { id } = self; id } }
     "#;
     agrees(
         &format!(
             "{source}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let t: dyn Look + Done = Ticket {{ id: 4 }};
                 let seen = t.look();
                 seen + t.done()
@@ -398,7 +398,7 @@ fn multi_trait_objects_keep_linear_members_linear_and_bind_projections() {
     rejects(
         &format!(
             "{source}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let t: dyn Look + Done = Ticket {{ id: 4 }};
                 t.look()
             }}"
@@ -408,13 +408,13 @@ fn multi_trait_objects_keep_linear_members_linear_and_bind_projections() {
     agrees(
         &format!(
             "{CONV}
-            trait Show {{ fn show(self: &Self) -> i64 ! {{panic}}; }}
-            impl<T> Show for W<T> {{ fn show(self: &Self) -> i64 ! {{panic}} {{ 1 }} }}
-            fn read(object: &(dyn Show + Conv<Out = Label>)) -> i64 ! {{alloc, panic}} {{
+            trait Show {{ fn show(self: &Self) -> i64 ! {{}}; }}
+            impl<T> Show for W<T> {{ fn show(self: &Self) -> i64 ! {{}} {{ 1 }} }}
+            fn read(object: &(dyn Show + Conv<Out = Label>)) -> i64 ! {{alloc}} {{
                 let Label {{ text }} = object.conv();
                 String.len(&text) + object.show()
             }}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let object: dyn Conv + Show = W {{ value: 0 }};
                 read(&object)
             }}"
@@ -429,12 +429,12 @@ fn generic_trait_components_are_qualified_with_their_arguments() {
     let stats = agrees(
         r#"
         struct W<T> { value: T }
-        trait Into<X> { fn into(self: &Self, x: X) -> i64 ! {panic}; }
-        impl<T> Into<i64> for W<T> { fn into(self: &Self, x: i64) -> i64 ! {panic} { x + 1 } }
+        trait Into<X> { fn into(self: &Self, x: X) -> i64 ! {}; }
+        impl<T> Into<i64> for W<T> { fn into(self: &Self, x: i64) -> i64 ! {} { x + 1 } }
         impl<T> Into<Bool> for W<T> {
-            fn into(self: &Self, x: Bool) -> i64 ! {panic} { if x { 10 } else { 20 } }
+            fn into(self: &Self, x: Bool) -> i64 ! {} { if x { 10 } else { 20 } }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let o: dyn Into<i64> + Into<Bool> = W { value: 0 };
             print_i64(o.Into::<i64>.into(4));
             print_i64(o.Into::<Bool>.into(true));
@@ -449,10 +449,10 @@ fn generic_trait_components_are_qualified_with_their_arguments() {
     rejects(
         r#"
         struct W<T> { value: T }
-        trait Into<X> { fn into(self: &Self, x: X) -> i64 ! {panic}; }
-        impl<T> Into<i64> for W<T> { fn into(self: &Self, x: i64) -> i64 ! {panic} { x + 1 } }
-        impl<T> Into<Bool> for W<T> { fn into(self: &Self, x: Bool) -> i64 ! {panic} { 1 } }
-        fn main() -> i64 ! {alloc, panic} {
+        trait Into<X> { fn into(self: &Self, x: X) -> i64 ! {}; }
+        impl<T> Into<i64> for W<T> { fn into(self: &Self, x: i64) -> i64 ! {} { x + 1 } }
+        impl<T> Into<Bool> for W<T> { fn into(self: &Self, x: Bool) -> i64 ! {} { 1 } }
+        fn main() -> i64 ! {alloc} {
             let o: dyn Into<i64> + Into<Bool> = W { value: 0 };
             o.into(4)
         }"#,

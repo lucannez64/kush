@@ -14,27 +14,27 @@ export "lib_decide" fn decide(authenticated: Bool, has_pin: Bool, revision: u64)
     let f = Facts { authenticated: authenticated, has_pin: has_pin, revision: revision };
     if !f.has_pin && bound(f) { 1 } else { 0 }
 }
-export "lib_narrow" fn narrow(a: i8, b: u8, c: i16, d: u32) -> i64 ! {panic} {
+export "lib_narrow" fn narrow(a: i8, b: u8, c: i16, d: u32) -> i64 ! {} {
     let a: i64 = Int.convert(a);
     let b: i64 = Int.convert(b);
     let c: i64 = Int.convert(c);
     let d: i64 = Int.convert(d);
     a * 1000000 + b * 10000 + c + d
 }
-export "lib_negate" fn negate(x: i8) -> i8 ! {panic} { 0 - x }
+export "lib_negate" fn negate(x: i8) -> i8 ! {} { 0 - x }
 export "lib_top" fn top(x: u64) -> u64 ! {} { x }
-export "lib_scale" fn scale(x: i32, factor: f64) -> f64 ! {panic} { Float.from_int(x) * factor }
-export "lib_half" fn half(x: f32) -> f32 ! {panic} { x / 2.0 }
+export "lib_scale" fn scale(x: i32, factor: f64) -> f64 ! {} { Float.from_int(x) * factor }
+export "lib_half" fn half(x: f32) -> f32 ! {} { x / 2.0 }
 export "lib_flag" fn flag(n: i64) -> Bool ! {} { n < 0 }
-export "lib_divide" fn divide(a: i64, b: i64) -> i64 ! {panic} { a / b }
+export "lib_divide" fn divide(a: i64, b: i64) -> i64 ! {} { a / b }
 export "lib_nothing" fn nothing(x: i64) -> Unit ! {} { }
 export "lib_keywords" fn yield(ref: i64, move: Bool) -> i64 ! {} { if move { ref } else { 0 } }
 "#;
 
 /// The same calls as the C and Rust drivers, printed by the evaluator.
 const MAIN: &str = r#"
-fn show_bool(b: Bool) -> Unit ! {io, panic} { print_i64(if b { 1 } else { 0 }); }
-fn main() -> i64 ! {io, panic} {
+fn show_bool(b: Bool) -> Unit ! {io} { print_i64(if b { 1 } else { 0 }); }
+fn main() -> i64 ! {io} {
     print_i64(decide(true, false, 3));
     print_i64(decide(true, true, 3));
     print_i64(decide(false, false, 3));
@@ -220,11 +220,11 @@ fn export_rejections() {
             "integers, floats",
         ),
         (
-            "export \"f\" fn f(a: i64) -> i64 ! {io, panic} { print_i64(a); a }",
+            "export \"f\" fn f(a: i64) -> i64 ! {io} { print_i64(a); a }",
             "effect row",
         ),
         (
-            "export \"f\" fn f(a: i64) -> i64 ! {alloc, panic} { let b = Box.new(a); Box.take(b) }",
+            "export \"f\" fn f(a: i64) -> i64 ! {alloc} { let b = Box.new(a); Box.take(b) }",
             "effect row",
         ),
         (
@@ -346,7 +346,7 @@ export "rec_plan" fn plan(facts: Facts) -> Decision ! {} {
     }
 }
 export "rec_small" fn small(facts: Facts) -> i64 ! {} { let n: i64 = Int.convert(facts.small); n }
-export "rec_sum" fn sum(data: &Bytes, scale: i64) -> i64 ! {panic} {
+export "rec_sum" fn sum(data: &Bytes, scale: i64) -> i64 ! {} {
     let mut i = 0;
     let mut acc = 0;
     while i < Bytes.len(data) { acc = acc + Bytes.get(data, i) * scale; i = i + 1; }
@@ -355,10 +355,10 @@ export "rec_sum" fn sum(data: &Bytes, scale: i64) -> i64 ! {panic} {
 "#;
 
 const RECORDS_MAIN: &str = r#"
-fn show(d: Decision) -> Unit ! {io, panic} {
+fn show(d: Decision) -> Unit ! {io} {
     print_i64(d.code); print_int(d.revision); print_i64(if d.admitted { 1 } else { 0 });
 }
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let f = Facts { authenticated: true, has_pin: false, small: -5, revisions: Revisions { pinned: 0, candidate: 3 }, weight: 1.5 };
     show(plan(f));
     show(plan(Facts { has_pin: true, revisions: Revisions { pinned: 4, candidate: 9 }, ..f }));

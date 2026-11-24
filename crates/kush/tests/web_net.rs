@@ -55,14 +55,14 @@ use std.net.Conn;
 use std.net.Listener;
 use std.result.Result;
 
-fn listener(host: &Bytes, port: i64, reuse: Bool) -> Listener ! {io, panic} {
+fn listener(host: &Bytes, port: i64, reuse: Bool) -> Listener ! {io} {
     match net.listen(host, port, 16, reuse) {
         Result.Ok(listener) => listener,
         Result.Err(code) => { print_i64(-code); panic() },
     }
 }
 
-fn conn(result: Result<Conn, i64>) -> Conn ! {io, panic} {
+fn conn(result: Result<Conn, i64>) -> Conn ! {io} {
     match result {
         Result.Ok(conn) => conn,
         Result.Err(code) => { print_i64(-code); panic() },
@@ -77,7 +77,7 @@ fn code(result: Result<Unit, i64>) -> i64 ! {} {
 }
 
 /// Read until the peer closes; the length, or minus the errno.
-fn read_all(conn: &Conn, capacity: i64) -> i64 ! {io, alloc, panic, suspend} {
+fn read_all(conn: &Conn, capacity: i64) -> i64 ! {io, alloc, suspend} {
     let mut buffer = Bytes.with_capacity(capacity);
     loop {
         let before = Bytes.len(&buffer);
@@ -93,7 +93,7 @@ fn read_all(conn: &Conn, capacity: i64) -> i64 ! {io, alloc, panic, suspend} {
 "#;
 
 const ROUND_TRIP: &str = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let host = Bytes.from("127.0.0.1");
     let server = listener(&host, 0, false);
     let port = match net.local_port(&server) { Result.Ok(port) => port, Result.Err(code) => -code };
@@ -165,7 +165,7 @@ fn a_server_and_client_round_trip_in_both_backends() {
 /// A native server answering a real client: it prints its port, then
 /// serves one connection.
 const ECHO: &str = r#"
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let host = Bytes.from("127.0.0.1");
     let server = listener(&host, 0, false);
     match net.local_port(&server) { Result.Ok(port) => print_i64(port), Result.Err(code) => print_i64(-code) }
@@ -219,7 +219,7 @@ fn a_native_server_echoes_a_rust_client() {
 fn reuse_port_lets_two_listeners_share_a_port() {
     let source = format!(
         "{PRELUDE}
-        fn main() -> i64 ! {{io, alloc, panic, suspend}} {{
+        fn main() -> i64 ! {{io, alloc, suspend}} {{
             let host = Bytes.from(\"127.0.0.1\");
             let first = listener(&host, 0, true);
             let port = match net.local_port(&first) {{ Result.Ok(port) => port, Result.Err(code) => -code }};
@@ -249,8 +249,7 @@ fn sockets_are_linear_and_cannot_be_forged() {
             "private",
         ),
     ] {
-        let source =
-            format!("{PRELUDE}\nfn main() -> i64 ! {{io, alloc, panic, suspend}} {{ {body} }}");
+        let source = format!("{PRELUDE}\nfn main() -> i64 ! {{io, alloc, suspend}} {{ {body} }}");
         match checked(&source) {
             Ok(_) => panic!("accepted: {body}"),
             Err(error) => assert!(error.contains(message), "{body}: {error}"),

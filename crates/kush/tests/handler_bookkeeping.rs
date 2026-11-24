@@ -46,13 +46,13 @@ fn handler_free_worker_preserves_ancestor_handler_across_loop_exits() {
     compare(
         r#"
     effect Op: i64 -> i64;
-    fn worker(n:i64)->i64 ! {Op,panic} {
+    fn worker(n:i64)->i64 ! {Op} {
         let mut i=0;let mut sum=0;
         while i<n {i=i+1;if i==2 {continue;}sum=sum+perform Op(i);if i==4 {break;}}
         loop {break sum;}
     }
-    fn next()->i64 ! {Op,panic} {perform Op(5)}
-    fn main()->i64 ! {panic} {
+    fn next()->i64 ! {Op} {perform Op(5)}
+    fn main()->i64 ! {} {
         handle Op:i64->i64 with fn(x:i64,resume:linear once fn(i64)->i64 ! {})->i64 ! {} {resume(x)} {
             worker(9)+next()
         }
@@ -65,10 +65,10 @@ fn installer_early_return_cannot_leak_a_handler_into_unguarded_caller() {
     compare(
         r#"
     effect Op:i64->i64;
-    fn install()->i64 ! {panic} {
+    fn install()->i64 ! {} {
         handle Op:i64->i64 with fn(x:i64,resume:linear once fn(i64)->i64 ! {})->i64 ! {} {resume(x)} {return 1;}
     }
-    fn main()->i64 ! {Op,panic} {let x=install();x+perform Op(2)}
+    fn main()->i64 ! {Op} {let x=install();x+perform Op(2)}
     "#,
         None,
     );

@@ -2549,7 +2549,11 @@ impl<'a> Types<'a> {
             format!("<{list}>")
         };
         let mut effects = Vec::new();
-        for (bit, name) in [(1u16, "panic"), (2, "io"), (4, "alloc"), (8, "suspend")] {
+        for (bit, name) in [
+            (crate::executable::IO, "io"),
+            (crate::executable::ALLOC, "alloc"),
+            (crate::executable::SUSPEND, "suspend"),
+        ] {
             if signature.effects & bit != 0 {
                 effects.push(name.to_owned());
             }
@@ -5741,11 +5745,13 @@ pub(crate) fn user_effect_names(resolution: &Resolution, bits: u16) -> Vec<Strin
     declared.sort_by_key(|(bit, _)| *bit);
     declared.into_iter().map(|(_, name)| name).collect()
 }
+/// FND-ROWS-PANIC: the diagnostic for `panic` written as an effect.
+pub(crate) const PANIC_NOT_AN_EFFECT: &str =
+    "'panic' is not an effect: any function may panic. Remove it from the effect row";
 /// Render every concrete effect set bit, built-ins first in the canonical
-/// `panic`, `io`, `alloc`, `suspend` order, then declared operations.
+/// `io`, `alloc`, `suspend` order, then declared operations.
 pub(crate) fn effect_name_list(resolution: &Resolution, bits: u16) -> Vec<String> {
     let mut names = [
-        (crate::executable::PANIC, "panic"),
         (crate::executable::IO, "io"),
         (crate::executable::ALLOC, "alloc"),
         (crate::executable::SUSPEND, "suspend"),
@@ -5863,7 +5869,9 @@ fn effect_row_expr_inner(
                 return Ok(EffectRowTerm::Variable(id));
             }
             let bit = match (binding.kind, binding.name.as_str(), arguments.is_empty()) {
-                (BindingKind::Builtin, "panic", true) => crate::executable::PANIC,
+                (BindingKind::Builtin, "panic", true) => {
+                    return Err(Diagnostic::new(effect.span, PANIC_NOT_AN_EFFECT));
+                }
                 (BindingKind::Builtin, "io", true) => crate::executable::IO,
                 (BindingKind::Builtin, "alloc", true) => crate::executable::ALLOC,
                 (BindingKind::Builtin, "suspend", true) => crate::executable::SUSPEND,
@@ -5951,12 +5959,14 @@ fn effect_exclusion_part(resolution: &Resolution, ty: &ast::Type, bits: &mut u16
             let Some(id) = resolution.reference(ty.span) else {
                 return Err(Diagnostic::new(
                     ty.span,
-                    "an effect exclusion must name one of the concrete effects 'io', 'alloc', 'suspend', or 'panic'",
+                    "an effect exclusion must name one of the concrete effects 'io', 'alloc', or 'suspend', or a declared 'effect' operation",
                 ));
             };
             let binding = &resolution.bindings[id];
             let bit = match (binding.kind, binding.name.as_str()) {
-                (BindingKind::Builtin, "panic") => crate::executable::PANIC,
+                (BindingKind::Builtin, "panic") => {
+                    return Err(Diagnostic::new(ty.span, PANIC_NOT_AN_EFFECT));
+                }
                 (BindingKind::Builtin, "io") => crate::executable::IO,
                 (BindingKind::Builtin, "alloc") => crate::executable::ALLOC,
                 (BindingKind::Builtin, "suspend") => crate::executable::SUSPEND,
@@ -5974,7 +5984,7 @@ fn effect_exclusion_part(resolution: &Resolution, ty: &ast::Type, bits: &mut u16
                     return Err(Diagnostic::new(
                         ty.span,
                         format!(
-                            "'{}' is not an effect; supported effects are 'io', 'alloc', 'suspend', 'panic', and declared 'effect' operations",
+                            "'{}' is not an effect; supported effects are 'io', 'alloc', 'suspend', and declared 'effect' operations",
                             binding.name
                         ),
                     ));

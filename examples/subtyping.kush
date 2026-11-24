@@ -19,14 +19,14 @@ fn scalar(flag: Bool) -> i64 | Bool ! {} {
     if flag { 21 } else { true }
 }
 
-fn scalar_value(value: i64 | Bool) -> i64 ! {panic} {
+fn scalar_value(value: i64 | Bool) -> i64 ! {} {
     match value {
         i64 @n => n,
         Bool @flag => if flag { 22 } else { 0 },
     }
 }
 
-fn shape_value(value: Point | Shape | i64) -> i64 ! {panic} {
+fn shape_value(value: Point | Shape | i64) -> i64 ! {} {
     match value {
         Point @p => p.x + p.y,
         Shape @s => match s {
@@ -37,12 +37,12 @@ fn shape_value(value: Point | Shape | i64) -> i64 ! {panic} {
     }
 }
 
-fn owning(flag: Bool) -> Box<i64> | Bytes ! {alloc, panic} {
+fn owning(flag: Bool) -> Box<i64> | Bytes ! {alloc} {
     if flag { Box.new(20) } else { Bytes.from("kush") }
 }
 
 // A subtype union is repacked into the wider union at this return.
-fn widen(flag: Bool) -> i64 | Bool | Bytes ! {alloc, panic} {
+fn widen(flag: Bool) -> i64 | Bool | Bytes ! {alloc} {
     if flag {
         let small: i64 | Bool = scalar(flag);
         small
@@ -51,7 +51,7 @@ fn widen(flag: Bool) -> i64 | Bool | Bytes ! {alloc, panic} {
     }
 }
 
-fn guarded(value: i64 | Bool) -> i64 ! {panic} {
+fn guarded(value: i64 | Bool) -> i64 ! {} {
     match value {
         i64 @n if n > 0 => n,
         i64 @_ => 0,
@@ -59,7 +59,7 @@ fn guarded(value: i64 | Bool) -> i64 ! {panic} {
     }
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     print_i64(scalar_value(scalar(true)));
 
     let boxed = owning(true);

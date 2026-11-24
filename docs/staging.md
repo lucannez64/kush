@@ -27,12 +27,12 @@ Putting latent effects, argument/result types and callable multiplicity in
 `F` avoids silently discarding the effects of an expression quotation.
 
 ```kush
-fn power(n: i64) -> Code<fn(i64) -> i64 ! {panic}> ! {alloc, panic} {
+fn power(n: i64) -> Code<fn(i64) -> i64 ! {}> ! {alloc} {
     if n == 0 {
-        quote fn(x: i64) -> i64 ! {panic} { 1 }
+        quote fn(x: i64) -> i64 ! {} { 1 }
     } else {
         let smaller = power(n - 1);
-        quote fn(x: i64) -> i64 ! {panic} {
+        quote fn(x: i64) -> i64 ! {} {
             x * splice(smaller)(x)
         }
     }
@@ -101,7 +101,7 @@ Proposed declaration spelling:
 
 ```kush
 #[staged]
-fn cube(x: i64) -> i64 ! {panic} = power(3);
+fn cube(x: i64) -> i64 ! {} = power(3);
 ```
 
 The right-hand side is a generation-time expression returning a `Code<F>`

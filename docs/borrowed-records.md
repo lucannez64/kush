@@ -36,7 +36,7 @@ fn window<'a>(view: &'a mut [i64]) -> Window<'a, i64> ! {} {
     Window { view: view, start: 0 }
 }
 
-fn first<'a>(window: Window<'a, i64>) -> &'a mut [i64] ! {panic} {
+fn first<'a>(window: Window<'a, i64>) -> &'a mut [i64] ! {} {
     let Window { view, .. } = window;
     view
 }
@@ -83,7 +83,7 @@ struct BufferView<'a> {
     start: i64,
 }
 
-fn make<'a>(view: &'a [i64]) -> BufferView<'a> ! {alloc, panic} {
+fn make<'a>(view: &'a [i64]) -> BufferView<'a> ! {alloc} {
     BufferView { view: view, token: Box.new(5), start: 2 }
 }
 ```
@@ -183,15 +183,15 @@ nominal records. It is not general `&T`/`&mut T` support.
 struct Point { x: i64, y: i64 }
 
 impl Point {
-    fn sum(self: &Self) -> i64 ! {panic} { self.x + self.y }
-    fn shift(&mut self, by: i64) -> Unit ! {panic} {
+    fn sum(self: &Self) -> i64 ! {} { self.x + self.y }
+    fn shift(&mut self, by: i64) -> Unit ! {} {
         self.x = self.x + by;
         self.y = self.y + by;
     }
 }
 
-fn peek(p: &Point) -> i64 ! {panic} { p.x }
-fn bump(p: &mut Point) -> Unit ! {panic} { p.x = p.x + 1; }
+fn peek(p: &Point) -> i64 ! {} { p.x }
+fn bump(p: &mut Point) -> Unit ! {} { p.x = p.x + 1; }
 ```
 
 Supported:

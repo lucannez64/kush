@@ -63,7 +63,7 @@ rare/exceptional path is handled separately?
 
 ```text
 handle Op as op with h { body }        -- binds a capability `op` in body
-fn step(op: cap Op, x: i64) -> i64 ! {panic} { perform op(x) + 1 }
+fn step(op: cap Op, x: i64) -> i64 ! {} { perform op(x) + 1 }
 step(op, 1)                             -- pass it explicitly
 ```
 
@@ -139,9 +139,9 @@ tail-resumptive** handlers (`crates/kush/tests/effect_capabilities.rs`):
 
 ```text
 effect Ask: i64 -> i64;
-fn step(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} { perform op(x) + 1 }
+fn step(op: cap Ask ! {}, x: i64) -> i64 ! {} { perform op(x) + 1 }
 handle Ask: i64 -> i64 as ask with fn(x: i64, resume: linear once fn(i64) -> i64 ! {})
-    -> i64 ! {panic} { resume(x + 100) } { step(ask, 1) }
+    -> i64 ! {} { resume(x + 100) } { step(ask, 1) }
 ```
 
 - `as` and `cap` are contextual: `as` only after a handled signature, `cap`
@@ -154,7 +154,7 @@ handle Ask: i64 -> i64 as ask with fn(x: i64, resume: linear once fn(i64) -> i64
   environment can be freed under a capability.
 - `perform op(x)` is an indirect call of that handler with the identity
   token: the existing in-place tail-resumptive path, with no dynamic lookup,
-  no `Op` row bit and no `panic` for a missing handler; the handler's row is
+  no `Op` row bit and no missing-handler panic; the handler's row is
   required. A capability names one activation: an inner dynamic handler for
   the same operation does not intercept it (tested).
 - **Second class.** A capability local may only be passed by name to a `cap`
@@ -271,7 +271,7 @@ their token). Tests: `capturing_capabilit*` in
 - Such a handler already lives in its dynamic frame (code, environment, a
   consumed flag; `kush_handler_push`), which is the handler cell of the
   design note below. Passing its capability to a call passes a synthesized
-  noncapturing **trampoline** `fn(P, token) -> R ! {panic}` that performs the
+  noncapturing **trampoline** `fn(P, token) -> R ! {}` that performs the
   operation through the dynamic stack (`capability_thunk`). The capability
   representation (a code pointer) and the callees' resumable entries are
   unchanged.
@@ -286,7 +286,7 @@ their token). Tests: `capturing_capabilit*` in
 - **One perform.** An owning `once` handler serves one perform across all
   callees: the frame's consumed flag makes a second one find no handler and
   panic, in both backends. So the callee's parameter must allow it:
-  `cap Op ! {panic}` (otherwise "pass it to a 'cap Op ! {panic}'
+  `cap Op ! {}` (otherwise "pass it to a 'cap Op ! {}'
   parameter"). A copyable capturing `fn` handler is never consumed.
 - **Handlers with effects (CAP-CAPTURING-LEXICAL).** A capturing handler
   with effects is capability-only: it is not dynamically visible, since a
@@ -295,7 +295,7 @@ their token). Tests: `capturing_capabilit*` in
   operation id (above `PRIVATE_OPERATION_BASE`) that no declared operation
   uses; only its trampoline looks that id up, so performs by name still
   reach outer handlers (tested). The trampoline's row is the handler's row
-  plus `panic`, so the parameter must be `cap Op ! {e, panic}`.
+  plus `panic`, so the parameter must be `cap Op ! {e}`.
 - Still rejected: multishot capturing handlers with owned captures (copyable
   ones work through `cap multi`, [multishot capabilities](multishot-capabilities.md)), and performing a `once`
   handler both in its own body and through a callee (the frame owns it).

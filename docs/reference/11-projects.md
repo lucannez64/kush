@@ -12,7 +12,7 @@ its module.
 use std.option.Option;
 use std.option;
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let some: Option<i64> = Option.Some(1);
     print_i64(option.unwrap_or(some, 0));
 }
@@ -62,7 +62,7 @@ own process, and a panic fails it. `std.test` has assertion helpers.
 use std.test;
 
 #[test]
-fn arithmetic() -> Unit ! {io, panic} {
+fn arithmetic() -> Unit ! {io} {
     test.equal_i64(6 * 7, 42);
     test.is_true(1 < 2);
 }

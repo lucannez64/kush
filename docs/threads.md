@@ -6,12 +6,12 @@ thread) 2026-11-16. Tests:
 `crates/kush/tests/threads.rs`.
 
 ```kush
-fn part(v: &[i64], from: i64, to: i64) -> i64 ! {panic} { .. }
+fn part(v: &[i64], from: i64, to: i64) -> i64 ! {} { .. }
 
-fn sum(v: &[i64]) -> i64 ! {alloc, panic} {
-    Thread.scope(fn() -> i64 ! {alloc, panic} {
-        let a = Thread.spawn(fn() -> i64 ! {panic} { part(v, 0, 500) });
-        let b = Thread.spawn(fn() -> i64 ! {panic} { part(v, 500, 1000) });
+fn sum(v: &[i64]) -> i64 ! {alloc} {
+    Thread.scope(fn() -> i64 ! {alloc} {
+        let a = Thread.spawn(fn() -> i64 ! {} { part(v, 0, 500) });
+        let b = Thread.spawn(fn() -> i64 ! {} { part(v, 500, 1000) });
         Thread.join(a) + Thread.join(b)
     })
 }
@@ -29,8 +29,8 @@ unchanged.
   `Thread.join(h)` waits for the thread and yields its `T` (threads are not
   cancelled). The scope's epilogue joins every thread not joined yet and
   drops its result; a linear result must be joined explicitly.
-- **Effects.** `Thread.scope` and `Thread.spawn` need `{alloc, panic}`. A
-  thread body may only have `{io, alloc, panic, suspend}` and must handle
+- **Effects.** `Thread.scope` and `Thread.spawn` need `{alloc}`. A
+  thread body may only have `{io, alloc, suspend}` and must handle
   any declared operation inside itself, since a thread starts with an empty
   handler stack. Its `suspend` stays inside the thread (see below), so the
   spawner does not need it. A panic in a thread unwinds it when the program
@@ -54,14 +54,14 @@ unchanged.
 ## Atomics (THREAD-ATOMICS)
 
 ```kush
-fn bump(c: &[Atomic]) -> Unit ! {panic} { Atomic.fetch_add(c, 0, 1); }
+fn bump(c: &[Atomic]) -> Unit ! {} { Atomic.fetch_add(c, 0, 1); }
 
 let mut cells: Vec<Atomic> = Vec.with_capacity(1);
 cells = Vec.push(cells, Atomic.new(0));
 let c: &[Atomic] = &cells[..];
-Thread.scope(fn() -> Unit ! {alloc, panic} {
-    Thread.spawn(fn() -> Unit ! {panic} { bump(c); });
-    Thread.spawn(fn() -> Unit ! {panic} { bump(c); });
+Thread.scope(fn() -> Unit ! {alloc} {
+    Thread.spawn(fn() -> Unit ! {} { bump(c); });
+    Thread.spawn(fn() -> Unit ! {} { bump(c); });
 });
 Atomic.load(c, 0) // 2
 ```
@@ -97,8 +97,8 @@ use std.option.Option;
 let mut chans: Vec<Channel<i64>> = Vec.with_capacity(1);
 chans = Vec.push(chans, Channel.new(16));
 let c: &[Channel<i64>] = &chans[..];
-let total = Thread.scope(fn() -> i64 ! {alloc, panic} {
-    let consumer = Thread.spawn(fn() -> i64 ! {panic} {
+let total = Thread.scope(fn() -> i64 ! {alloc} {
+    let consumer = Thread.spawn(fn() -> i64 ! {} {
         let mut acc = 0;
         loop {
             match Channel.recv(c, 0) {
@@ -137,11 +137,11 @@ variables; in the evaluator a blocked operation yields to the other threads.
 ## Tasks inside threads (THREAD-TASKS)
 
 ```kush
-let total = Thread.scope(fn() -> i64 ! {alloc, panic} {
-    let a = Thread.spawn(fn() -> i64 ! {io, alloc, panic, suspend} {
-        Task.scope(fn() -> i64 ! {io, alloc, panic, suspend} {
-            let x = Task.spawn(fn() -> i64 ! {alloc, panic, suspend} { work(1) });
-            let y = Task.spawn(fn() -> i64 ! {alloc, panic, suspend} { work(2) });
+let total = Thread.scope(fn() -> i64 ! {alloc} {
+    let a = Thread.spawn(fn() -> i64 ! {io, alloc, suspend} {
+        Task.scope(fn() -> i64 ! {io, alloc, suspend} {
+            let x = Task.spawn(fn() -> i64 ! {alloc, suspend} { work(1) });
+            let y = Task.spawn(fn() -> i64 ! {alloc, suspend} { work(2) });
             // value: TaskExit<i64> -> i64
             value(Task.join(x)) + value(Task.join(y))
         })

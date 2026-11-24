@@ -84,9 +84,9 @@ A direct call infers a grade parameter when an argument is an expression with a
 known exact grade and the corresponding parameter grade mentions the binder:
 
 ```kush
-fn twice<G: Grade>(x: i64 @[G]) -> i64 ! {panic} { x + x }
+fn twice<G: Grade>(x: i64 @[G]) -> i64 ! {} { x + x }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let x: i64 @[2] = 21;
     twice(x)                 // G inferred as 2
 }
@@ -106,17 +106,17 @@ A generic function used as a value is checked against the expected arrow. The
 arrow's concrete parameter and result grades are constraints:
 
 ```kush
-fn four<G: Grade>(x: i64 @[G * 2]) -> i64 ! {panic} { x + x + x + x }
-fn apply(f: fn(i64 @[4]) -> i64 ! {panic}) -> i64 ! {panic} { f(10) }
+fn four<G: Grade>(x: i64 @[G * 2]) -> i64 ! {} { x + x + x + x }
+fn apply(f: fn(i64 @[4]) -> i64 ! {}) -> i64 ! {} { f(10) }
 
-fn main() -> i64 ! {panic} { apply(four) }    // G = 2
+fn main() -> i64 ! {} { apply(four) }    // G = 2
 ```
 
 Several binders may be solved together. In
 
 ```kush
-fn combine<G: Grade, H: Grade>(x: i64 @[G + 1], y: i64 @[H + G]) -> i64 ! {panic} { ... }
-fn apply(f: fn(i64 @[3], i64 @[5]) -> i64 ! {panic}) -> i64 ! {panic} { ... }
+fn combine<G: Grade, H: Grade>(x: i64 @[G + 1], y: i64 @[H + G]) -> i64 ! {} { ... }
+fn apply(f: fn(i64 @[3], i64 @[5]) -> i64 ! {}) -> i64 ! {} { ... }
 ```
 
 `G + 1 = 3` determines `G = 2`, then `H + G = 5` determines `H = 3`, regardless

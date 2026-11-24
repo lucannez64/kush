@@ -1923,14 +1923,11 @@ fn build(
         }
         let missing = (crate::executable::ALLOC | crate::executable::PANIC) & !effects;
         if missing != 0 {
-            let names = [
-                (crate::executable::ALLOC, "alloc"),
-                (crate::executable::PANIC, "panic"),
-            ]
-            .into_iter()
-            .filter(|(bit, _)| missing & bit != 0)
-            .map(|(_, name)| name)
-            .collect::<Vec<_>>();
+            let names = [(crate::executable::ALLOC, "alloc")]
+                .into_iter()
+                .filter(|(bit, _)| missing & bit != 0)
+                .map(|(_, name)| name)
+                .collect::<Vec<_>>();
             return Err(Diagnostic::new(
                 spec.span,
                 format!(

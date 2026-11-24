@@ -75,7 +75,7 @@ fn read_program(capacity: i64) -> String {
             let bytes=IO.read_all(input,buffer)?;
             IO.write(output,&bytes)
         }}
-        fn main()->i64 ! {{io,alloc,panic}} {{
+        fn main()->i64 ! {{io, alloc}} {{
             match copy(IO.stdin(),IO.stdout(),Bytes.with_capacity({capacity})) {{Ok(_)=>0,Err(code)=>code}}
         }}"#
     )
@@ -113,7 +113,7 @@ fn capacity_errors_reclaim_input_and_consume_only_one_excess_probe_byte() {
 fn reading_appends_to_initialized_bytes_and_accepts_exact_capacity() {
     let source = format!(
         r#"{RESULT}
-        fn main()->i64 ! {{io,alloc,panic}} {{
+        fn main()->i64 ! {{io, alloc}} {{
             let input=IO.stdin();let output=IO.stdout();
             let b=Bytes.push_reserved(Bytes.with_capacity(3),65);
             match IO.read_all(input,b) {{
@@ -276,7 +276,7 @@ fn capabilities_types_effects_and_affine_transfers_are_checked() {
         "IO.write();",
     ] {
         let source = format!(
-            r#"{RESULT} fn main()->Unit ! {{io,alloc,panic}} {{let b=Bytes.with_capacity(1);{body}}}"#
+            r#"{RESULT} fn main()->Unit ! {{io, alloc}} {{let b=Bytes.with_capacity(1);{body}}}"#
         );
         assert!(check(&source).is_err(), "{body}");
     }
@@ -295,7 +295,7 @@ fn capabilities_types_effects_and_affine_transfers_are_checked() {
         "enum Result<T,E>{Ok(T),Err(E),Other}",
     ] {
         let source = format!(
-            "{prefix} fn main()->Unit ! {{io,alloc,panic}} {{IO.read_all(IO.stdin(),Bytes.with_capacity(1));}}"
+            "{prefix} fn main()->Unit ! {{io, alloc}} {{IO.read_all(IO.stdin(),Bytes.with_capacity(1));}}"
         );
         let error = check(&source).unwrap_err();
         assert!(error.message.contains("I/O requires"), "{error:?}");
@@ -306,7 +306,7 @@ fn capabilities_types_effects_and_affine_transfers_are_checked() {
 fn stream_values_can_be_passed_stored_and_matched_without_owning_descriptors() {
     let source = format!(
         r#"{RESULT} enum Streams{{Pair(Stdin,Stdout)}}
-        fn main()->i64 ! {{io,alloc,panic}} {{
+        fn main()->i64 ! {{io, alloc}} {{
             let streams=Streams.Pair(IO.stdin(),IO.stdout());
             match streams {{Streams.Pair(input,output)=>{{
                 let bytes=IO.read_all(input,Bytes.with_capacity(2));
@@ -409,7 +409,7 @@ fn chunk_reads_append_without_probing_and_full_buffers_consume_no_input() {
 fn clear_keeps_capacity_and_cannot_invalidate_live_views_or_erase_linear_obligations() {
     let source = r#"
         fn reset(b: Bytes) -> Bytes ! {} { Bytes.clear(b) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let b = reset(Bytes.from("abc"));
             let n = Bytes.capacity(&b) + Bytes.len(&b);
             let b = Bytes.push_reserved(b, 90);
@@ -417,8 +417,8 @@ fn clear_keeps_capacity_and_cannot_invalidate_live_views_or_erase_linear_obligat
         }"#;
     assert_eq!(evaluate(source, b"").0, 93);
     for source in [
-        "fn main()->i64 ! {alloc,panic} { let b=Bytes.from(\"abc\");let v=&b[..];let b=Bytes.clear(b);Slice.get(v,0) }",
-        "fn main()->Unit ! {alloc,panic} { let b: Bytes @[1]=Bytes.from(\"abc\");drop(Bytes.clear(b)); }",
+        "fn main()->i64 ! {alloc} { let b=Bytes.from(\"abc\");let v=&b[..];let b=Bytes.clear(b);Slice.get(v,0) }",
+        "fn main()->Unit ! {alloc} { let b: Bytes @[1]=Bytes.from(\"abc\");drop(Bytes.clear(b)); }",
     ] {
         assert!(check(source).is_err());
     }

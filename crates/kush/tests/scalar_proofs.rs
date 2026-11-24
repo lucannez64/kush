@@ -41,10 +41,10 @@ fn bool_terms_follow_branches_and_atoms() {
          fn split(b: Bool) -> i64 ! {} { if b { need_true(b, _) } else { need_false(b, _) } }
          fn same(a: Bool, b: Bool, erased p: { a == b }) -> i64 ! {} { 3 }
          fn equal(a: Bool, b: Bool) -> i64 ! {} { if a == b { same(a, b, _) } else { 0 } }
-         fn mixed(a: Bool, b: Bool) -> i64 ! {panic} { if a && !b { need_false(b, _) + need_true(a, _) } else { 0 } }
-         fn literal() -> i64 ! {panic} { need_true(true, _) + need_false(false, _) }
+         fn mixed(a: Bool, b: Bool) -> i64 ! {} { if a && !b { need_false(b, _) + need_true(a, _) } else { 0 } }
+         fn literal() -> i64 ! {} { need_true(true, _) + need_false(false, _) }
          fn forward(b: Bool, erased p: { b && b == true }) -> i64 ! {} { need_true(b, _) }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              split(true) + split(false) + equal(true, true) + mixed(true, false) + literal() + forward(true, _)
          }",
         1 + 2 + 3 + 3 + 3 + 1,
@@ -78,7 +78,7 @@ fn fixed_width_integers_carry_their_ranges() {
          fn newer(c: u64, p: u64, erased q: { c >= p + 1 }) -> i64 ! {} { 4 }
          fn compare(c: u64, p: u64) -> i64 ! {} { if c > p { newer(c, p, _) } else { 0 } }
          fn positive(x: u64, erased p: { x >= 1 }) -> i64 ! {} { 8 }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              let a: u8 = 200;
              let b: i8 = -5;
              let c: u64 = 18446744073709551615;
@@ -114,7 +114,7 @@ fn fixed_width_integers_carry_their_ranges() {
 #[test]
 fn masks_and_lossless_conversions_bound_indexes() {
     agrees(
-        "fn lookup(v: &Vec<u32>, c: u32, byte: u32) -> u32 ! {panic} {
+        "fn lookup(v: &Vec<u32>, c: u32, byte: u32) -> u32 ! {} {
              if Vec.len(v) != 256 { return 0; }
              let index: i64 = Int.convert((c ^ byte) & 255);
              Vec.at(v, index, _)
@@ -129,7 +129,7 @@ fn masks_and_lossless_conversions_bound_indexes() {
              at_most_255(w, _)
          }
          fn at_most_255(v: i64, erased p: { 0 <= v && v <= 255 }) -> i64 ! {} { v }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
              let mut t: Vec<u32> = Vec.with_capacity(256);
              let mut i: u32 = 0;
              while i < 256 { t = Vec.push(t, i * 2); i = i + 1; }
@@ -150,7 +150,7 @@ fn masks_and_lossless_conversions_bound_indexes() {
     ] {
         rejects(
             &format!(
-                "fn lookup(v: &Vec<u32>, c: u32) -> u32 ! {{panic}} {{
+                "fn lookup(v: &Vec<u32>, c: u32) -> u32 ! {{}} {{
                      if Vec.len(v) != 256 {{ return 0; }}
                      {body}
                  }}

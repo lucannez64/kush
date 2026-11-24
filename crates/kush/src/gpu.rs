@@ -44,7 +44,7 @@ pub(crate) fn check_declaration(
     }
     if fixed_effects & (IO | ALLOC | SUSPEND) != 0 || !effect_variables.is_empty() {
         return fail(
-            "may only declare the panic effect: GPU code has no I/O, allocation, or suspension",
+            "must have the empty effect row: GPU code has no I/O, allocation, or suspension",
         );
     }
     Ok(())

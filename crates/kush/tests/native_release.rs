@@ -50,7 +50,7 @@ fn graded_bitwise_maps_and_negative_values_agree_in_all_modes() {
         r#"
         fn mask(x:i64 @[2])->i64 ! {} { (x & 65535) ^ (x & 255) }
         fn tag(x:i64)->i64 ! {} { x ^ 23130 }
-        fn main()->Unit ! {io,alloc,panic} {
+        fn main()->Unit ! {io, alloc} {
             let values:Vec<i64> =[-9223372036854775808,-1,0,255,256,9223372036854775807];
             let out=Vec.map_in_place(Vec.map_in_place(values,mask),tag);
             let mut i=0; while i<Vec.len(&out) { print_i64(Vec.get(&out,i)); i=i+1; }
@@ -62,9 +62,9 @@ fn graded_bitwise_maps_and_negative_values_agree_in_all_modes() {
 fn unsupported_callbacks_preserve_effects_owning_cleanup_and_abi() {
     agrees(
         r#"
-        fn noisy(x:i64)->i64 ! {io,panic} { print_i64(x); x+1 }
+        fn noisy(x:i64)->i64 ! {io} { print_i64(x); x+1 }
         fn owning(x:Box<i64>)->i64 ! {} { Box.take(x) }
-        fn main()->Unit ! {io,alloc,panic} {
+        fn main()->Unit ! {io, alloc} {
             let values:Vec<i64> =[1,2];
             let mapped=Vec.map_in_place(values,{print_i64(99);noisy});
             print_i64(Vec.get(&mapped,1));
@@ -78,9 +78,9 @@ fn erased_proof_linear_and_borrowed_programs_keep_their_contracts() {
     agrees(
         r#"
         prop Approved<key:i64> { Yes:Approved<7> }
-        fn issue(key:i64,erased proof:Approved<key>,audit:i64 @[0])->Box<i64> @[1] ! {alloc,panic} {Box.new(key)}
-        fn finish(owner:Box<i64> @[1],view:&[i64])->i64 ! {panic} {Box.take(owner)+Slice.get(view,0)}
-        fn main()->Unit ! {io,alloc,panic} {
+        fn issue(key:i64,erased proof:Approved<key>,audit:i64 @[0])->Box<i64> @[1] ! {alloc} {Box.new(key)}
+        fn finish(owner:Box<i64> @[1],view:&[i64])->i64 ! {} {Box.take(owner)+Slice.get(view,0)}
+        fn main()->Unit ! {io, alloc} {
             let owner=issue(7,Approved.Yes::<7>,123);
             let mut values:[i64;2]=[20,30];
             let view=&mut values[..]; Slice.set(view,0,35);
@@ -93,9 +93,9 @@ fn non_bitwise_callbacks_and_dynamic_handlers_keep_the_fallback_path() {
     agrees(
         r#"
         effect Read:i64->i64;
-        fn call(value:i64)->i64 ! {Read,panic} {perform Read(value)}
-        fn branch(x:i64)->i64 ! {panic} {if x>0 {x+1}else{0}}
-        fn main()->Unit ! {io,alloc,panic} {
+        fn call(value:i64)->i64 ! {Read} {perform Read(value)}
+        fn branch(x:i64)->i64 ! {} {if x>0 {x+1}else{0}}
+        fn main()->Unit ! {io, alloc} {
             let values:Vec<i64> =[0,1,2]; let out=Vec.map_in_place(values,branch);
             print_i64(Vec.get(&out,2));
             print_i64(handle Read:i64->i64 with fn(value:i64,resume:linear once fn(i64)->i64 ! {})->i64 ! {} {resume(value ^ 1)} {call(42)});
@@ -114,7 +114,7 @@ fn aggregate_intermediates_boolean_callbacks_and_delegating_bodies_fall_back() {
         fn tag(x:i64)->i64 ! {} {x ^ 1}
         fn forward(x:i64)->i64 ! {} {tag(x)}
         fn flip(x:Bool)->Bool ! {} {!x}
-        fn main()->Unit ! {io,alloc,panic} {
+        fn main()->Unit ! {io, alloc} {
             let values:Vec<i64> = [1,2];
             let out=Vec.map_chain_in_place(values,split,join);
             let out=Vec.map_in_place(Vec.map_in_place(out,forward),tag);
@@ -129,10 +129,10 @@ fn aggregate_intermediates_boolean_callbacks_and_delegating_bodies_fall_back() {
 #[test]
 fn release_does_not_remove_arithmetic_or_slice_panics() {
     for source in [
-        "fn bad(x:i64)->i64 ! {panic} {x+1} fn main()->i64 ! {alloc,panic} {let v:Vec<i64> =[9223372036854775807];let out=Vec.map_in_place(v,bad);Vec.get(&out,0)}",
-        "fn main()->i64 ! {alloc,panic} {let v:Vec<i64> =[1];let view=&v[..];Slice.get(view,2)}",
-        "fn bad(v:&[i64])->i64 ! {panic} {let mut i=0-1;while i<Slice.len(v){return Slice.get(v,i);}0} fn main()->i64 ! {panic} {let a:[i64;1]=[1];bad(&a[..])}",
-        "fn bad(v:&[i64])->i64 ! {panic} {let mut i=0;while i<Slice.len(v){i=Slice.len(v);return Slice.get(v,i);}0} fn main()->i64 ! {panic} {let a:[i64;1]=[1];bad(&a[..])}",
+        "fn bad(x:i64)->i64 ! {} {x+1} fn main()->i64 ! {alloc} {let v:Vec<i64> =[9223372036854775807];let out=Vec.map_in_place(v,bad);Vec.get(&out,0)}",
+        "fn main()->i64 ! {alloc} {let v:Vec<i64> =[1];let view=&v[..];Slice.get(view,2)}",
+        "fn bad(v:&[i64])->i64 ! {} {let mut i=0-1;while i<Slice.len(v){return Slice.get(v,i);}0} fn main()->i64 ! {} {let a:[i64;1]=[1];bad(&a[..])}",
+        "fn bad(v:&[i64])->i64 ! {} {let mut i=0;while i<Slice.len(v){i=Slice.len(v);return Slice.get(v,i);}0} fn main()->i64 ! {} {let a:[i64;1]=[1];bad(&a[..])}",
     ] {
         let program = executable::check(source).unwrap();
         assert!(program.evaluate(&mut Vec::new()).is_err());
@@ -156,7 +156,7 @@ fn cli_release_flags_work_for_files_projects_and_argument_forwarding() {
     )
     .unwrap();
     let source = scratch.path().join("main.kush");
-    fs::write(&source,"module release_cli; use std.result.Result; fn main()->Unit ! {io,panic} {print_i64(match ENV.arg_count(){Ok(n)=>n,Err(_)=>0});}").unwrap();
+    fs::write(&source,"module release_cli; use std.result.Result; fn main()->Unit ! {io} {print_i64(match ENV.arg_count(){Ok(n)=>n,Err(_)=>0});}").unwrap();
     let cli = env!("CARGO_BIN_EXE_kush");
     for args in [
         vec!["run", "--release", "--", "--release"],
@@ -211,7 +211,7 @@ fn push_fast_paths_cover_growth_borrowed_owners_and_narrowed_vectors() {
         r#"
         struct Pair { left:Box<i64>, right:Box<i64> }
         fn narrow(x:[i64;2])->i64 ! {} {x[0]}
-        fn main()->Unit ! {alloc,panic,io} {
+        fn main()->Unit ! {alloc, io} {
             let mut values:Vec<i64> =Vec.with_capacity(1);
             let mut i=0; while i<20 { values=Vec.push(values,i); i=i+1; }
             Vec.push(&mut values,42); print_i64(Vec.get(&values,20));
@@ -232,12 +232,12 @@ fn push_fast_paths_cover_growth_borrowed_owners_and_narrowed_vectors() {
 fn slice_loop_versions_preserve_byte_views_mutation_and_control_flow() {
     agrees(
         r#"
-        fn sum(view:&[i64])->i64 ! {panic} {
+        fn sum(view:&[i64])->i64 ! {} {
             let mut result=0; let mut i=0;
             while i<Slice.len(view) { result=result+Slice.get(view,i); i=i+1; }
             result
         }
-        fn edit(view:&mut [i64])->i64 ! {panic} {
+        fn edit(view:&mut [i64])->i64 ! {} {
             let mut i=0;
             while i<Slice.len(view) {
                 Slice.set(view,i,Slice.get(view,i)+1);
@@ -245,7 +245,7 @@ fn slice_loop_versions_preserve_byte_views_mutation_and_control_flow() {
             }
             i
         }
-        fn main()->Unit ! {alloc,panic,io} {
+        fn main()->Unit ! {alloc, io} {
             let mut bytes=Bytes.from("ABC"); print_i64(sum(&bytes[..]));
             print_i64(edit(&mut bytes[..])); print_i64(sum(&bytes[..]));
             let mut array:[i64;4]=[10,20,30,40];
@@ -267,7 +267,7 @@ fn inline_vector_access_keeps_values_and_bounds_checks() {
     agrees(
         r#"
         struct Loc { offset: i64, length: i64, seq: u64, deleted: Bool }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut v: Vec<i64> = [5, 6, 7];
             v = Vec.set(v, 1, 60);
             let mut locs: Vec<Loc> = Vec.with_capacity(2);
@@ -293,9 +293,8 @@ fn inline_vector_access_keeps_values_and_bounds_checks() {
         "Vec.get(&Vec.set(v, 3, 1), 0)",
         "Vec.get(&Vec.set(v, -1, 1), 0)",
     ] {
-        let source = format!(
-            "fn main() -> i64 ! {{alloc, panic}} {{ let v: Vec<i64> = [1, 2, 3]; {access} }}"
-        );
+        let source =
+            format!("fn main() -> i64 ! {{alloc}} {{ let v: Vec<i64> = [1, 2, 3]; {access} }}");
         let program = executable::check(&source).unwrap();
         assert!(program.evaluate(&mut Vec::new()).is_err());
         let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
@@ -320,21 +319,21 @@ fn inlined_calls_agree_in_all_modes() {
         struct Facts { a: Bool, b: Bool, n: u64 }
         fn bound(f: Facts) -> Bool ! {} { f.a && f.n >= 1 }
         fn first(f: Facts) -> Bool ! {} { !f.b && bound(f) }
-        fn even(n: i64) -> Bool ! {panic} { if n == 0 { true } else { odd(n - 1) } }
-        fn odd(n: i64) -> Bool ! {panic} { if n == 0 { false } else { even(n - 1) } }
-        fn fact(n: i64) -> i64 ! {panic} { if n <= 1 { 1 } else { n * fact(n - 1) } }
-        fn boxed(x: i64) -> Box<i64> ! {alloc, panic} { Box.new(x + 1) }
+        fn even(n: i64) -> Bool ! {} { if n == 0 { true } else { odd(n - 1) } }
+        fn odd(n: i64) -> Bool ! {} { if n == 0 { false } else { even(n - 1) } }
+        fn fact(n: i64) -> i64 ! {} { if n <= 1 { 1 } else { n * fact(n - 1) } }
+        fn boxed(x: i64) -> Box<i64> ! {alloc} { Box.new(x + 1) }
         fn unbox(b: Box<i64>) -> i64 ! {} { Box.take(b) }
-        fn add(x: i64, y: i64) -> i64 ! {panic} { x + y }
-        fn twice(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(f(x)) }
-        fn inc(x: i64) -> i64 ! {panic} { add(x, 1) }
-        fn bytes(n: i64) -> Bytes ! {alloc, panic} {
+        fn add(x: i64, y: i64) -> i64 ! {} { x + y }
+        fn twice(f: fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} { f(f(x)) }
+        fn inc(x: i64) -> i64 ! {} { add(x, 1) }
+        fn bytes(n: i64) -> Bytes ! {alloc} {
             let mut b = Bytes.with_capacity(n);
             let mut i = 0;
             while i < n { b = Bytes.push(b, i % 256); i = i + 1; }
             b
         }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut i = 0;
             let mut count = 0;
             while i < 64 {
@@ -363,10 +362,10 @@ fn scalar_records_in_registers_and_pinned_agree() {
         r#"
         struct P { x: i64, ok: Bool, inner: Q }
         struct Q { a: u8, b: i64 }
-        fn sum(p: P) -> i64 ! {panic} { let Q { a, b } = p.inner; p.x + b + (if p.ok { Int.convert(a) } else { 0 }) }
-        fn bump(p: &mut P) -> Unit ! {panic} { p.x = p.x + 1; }
+        fn sum(p: P) -> i64 ! {} { let Q { a, b } = p.inner; p.x + b + (if p.ok { Int.convert(a) } else { 0 }) }
+        fn bump(p: &mut P) -> Unit ! {} { p.x = p.x + 1; }
         fn read(p: &P) -> i64 ! {} { p.x }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let mut acc = 0;
             let mut i = 0;
             let mut p = P { x: 1, ok: true, inner: Q { a: 7, b: 3 } };

@@ -11,7 +11,7 @@ effect Choose: i64 -> i64;
 
 /// Whether a queen at `column` in row `row` is attacked by the queens of the
 /// rows above, most recent in the lowest three bits of `placed`.
-fn safe(placed: i64, row: i64, column: i64) -> Bool ! {panic} {
+fn safe(placed: i64, row: i64, column: i64) -> Bool ! {} {
     let mut ok = true;
     let mut distance = 1;
     let mut rest = placed;
@@ -27,7 +27,7 @@ fn safe(placed: i64, row: i64, column: i64) -> Bool ! {panic} {
 }
 
 /// The number of ways to finish the board from `row` on.
-fn place(op: cap multi Choose ! {panic}, n: i64, row: i64, placed: i64) -> i64 ! {panic} {
+fn place(op: cap multi Choose ! {}, n: i64, row: i64, placed: i64) -> i64 ! {} {
     if row == n {
         1
     } else {
@@ -42,11 +42,11 @@ fn place(op: cap multi Choose ! {panic}, n: i64, row: i64, placed: i64) -> i64 !
 
 /// Count the solutions of the `n`-queens puzzle: every choice is tried by
 /// resuming the same continuation once per column.
-fn solutions(n: i64) -> i64 ! {alloc, panic} {
+fn solutions(n: i64) -> i64 ! {alloc} {
     handle Choose: i64 -> i64 as op with fn(
         width: i64,
         resume: multi fn(i64) -> i64 ! {},
-    ) -> i64 ! {panic} {
+    ) -> i64 ! {} {
         let mut total = 0;
         let mut column = 0;
         while column < width {
@@ -59,7 +59,7 @@ fn solutions(n: i64) -> i64 ! {alloc, panic} {
     }
 }
 
-fn main() -> i64 ! {alloc, io, panic} {
+fn main() -> i64 ! {alloc, io} {
     let mut n = 1;
     while n <= 6 {
         print_i64(solutions(n));

@@ -56,7 +56,7 @@ fn lanes_round_trip_in_every_unsigned_type() {
          use std.simd.u16x8;
          use std.simd.u32x4;
          use std.simd.u64x2;
-         fn main() -> i64 ! {io, panic} {
+         fn main() -> i64 ! {io} {
              let a = u32x4.new(1, 2, 3, 4294967295);
              print_int(u32x4.lane(a, 0, _));
              print_int(u32x4.lane(a, 1, _));
@@ -104,7 +104,7 @@ fn signed_lanes_keep_their_sign() {
          use std.simd.i16x8;
          use std.simd.i32x4;
          use std.simd.i64x2;
-         fn main() -> i64 ! {io, panic} {
+         fn main() -> i64 ! {io} {
              let a = i8x16.new(-1, -128, 127, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, -2);
              print_int(i8x16.lane(a, 0, _));
              print_int(i8x16.lane(a, 1, _));
@@ -145,7 +145,7 @@ fn splat_zero_with_lane_and_equality() {
         "use std.simd.u32x4;
          use std.simd.u8x16;
          fn flag(b: Bool) -> i64 ! {} { if b { 1 } else { 0 } }
-         fn main() -> i64 ! {io, panic} {
+         fn main() -> i64 ! {io} {
              let s = u32x4.splat(7);
              print_int(u32x4.lane(s, 3, _));
              let z = u32x4.zero();
@@ -173,7 +173,7 @@ fn reinterpretation_keeps_x86_lane_order() {
         "use std.simd.u32x4;
          use std.simd.u8x16;
          use std.simd.u64x2;
-         fn main() -> i64 ! {io, panic} {
+         fn main() -> i64 ! {io} {
              let v = u32x4.new(67305985, 0, 0, 4278190080);
              let b = u8x16.from_bits(u32x4.to_bits(v));
              print_int(u8x16.lane(b, 0, _));
@@ -220,7 +220,7 @@ fn associated_functions_are_called_through_the_type_only() {
              pub fn start(n: i64) -> Counter ! {} { Self { n: n } }
              pub fn value(self: Self) -> i64 ! {} { self.n }
          }
-         fn main() -> i64 ! {io, panic} {
+         fn main() -> i64 ! {io} {
              let c = Counter.start(41);
              print_int(c.value() + 1);
              0

@@ -15,7 +15,7 @@ struct Point {
 }
 
 trait Describe {
-    fn describe(self: Self) -> i64 ! {panic};
+    fn describe(self: Self) -> i64 ! {};
 }
 
 trait ByteCount {
@@ -24,17 +24,17 @@ trait ByteCount {
 
 impl Point {
     /// Inherent methods are available on the nominal record itself.
-    fn sum(self: Point) -> i64 ! {panic} {
+    fn sum(self: Point) -> i64 ! {} {
         self.x + self.y
     }
 
-    fn scale(self: Point, factor: i64) -> Point ! {panic} {
+    fn scale(self: Point, factor: i64) -> Point ! {} {
         Point { x: self.x * factor, y: self.y * factor }
     }
 }
 
 impl Describe for Point {
-    fn describe(self: Self) -> i64 ! {panic} {
+    fn describe(self: Self) -> i64 ! {} {
         self.x * 10 + self.y
     }
 }
@@ -46,11 +46,11 @@ impl ByteCount for Bytes {
 }
 
 /// A bounded helper calls the trait method on its concrete specialization.
-fn describe_via<T: Describe>(value: T) -> i64 ! {panic} {
+fn describe_via<T: Describe>(value: T) -> i64 ! {} {
     value.describe()
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let point = Point { x: 4, y: 2 };
     print_i64(point.sum());
 

@@ -68,11 +68,11 @@ fn shrinking_shortens_collections_and_moves_numbers_to_the_boundary() {
 }
 
 const LIB: &str = "module app.lib;
-pub fn at(v: &Vec<i64>, i: i64) -> i64 ! {panic} { v[i] }
-pub fn next(x: i64) -> i64 ! {panic} { x + 1 }
-pub fn bump(x: u8) -> u8 ! {panic} { x + 1 }
-fn byte(b: &Bytes, i: i64) -> i64 ! {panic} { b[i] }
-pub fn twice(x: i64, y: i64) -> i64 ! {panic} { x * y }
+pub fn at(v: &Vec<i64>, i: i64) -> i64 ! {} { v[i] }
+pub fn next(x: i64) -> i64 ! {} { x + 1 }
+pub fn bump(x: u8) -> u8 ! {} { x + 1 }
+fn byte(b: &Bytes, i: i64) -> i64 ! {} { b[i] }
+pub fn twice(x: i64, y: i64) -> i64 ! {} { x * y }
 ";
 
 fn fuzzed() -> (Session, Scratch) {
@@ -168,7 +168,7 @@ fn applied_suggestions_remove_the_check() {
     let source = format!(
         "fn at(v: &Vec<i64>, i: i64, {at}) -> i64 ! {{}} {{ Vec.at(v, i, _) }}
 fn next(x: i64, {next}) -> i64 ! {{}} {{ x + 1 }}
-fn main() -> i64 ! {{alloc, panic}} {{
+fn main() -> i64 ! {{alloc}} {{
     let mut v: Vec<i64> = Vec.new();
     v = v.push(4);
     if v.len() > 0 {{ at(&v, 0, _) + next(5, _) }} else {{ 0 }}
@@ -200,12 +200,12 @@ fn project() -> PathBuf {
     .unwrap();
     std::fs::write(
         path.join("src/lib.kush"),
-        "module demo.lib;\npub fn next(x: i64) -> i64 ! {panic} { x + 1 }\nfn byte(b: &Bytes, i: i64) -> i64 ! {panic} { b[i] }\n",
+        "module demo.lib;\npub fn next(x: i64) -> i64 ! {} { x + 1 }\nfn byte(b: &Bytes, i: i64) -> i64 ! {} { b[i] }\n",
     )
     .unwrap();
     std::fs::write(
         path.join("tests/main.kush"),
-        "module demo.tests.main;\n\nuse std.test;\n\n#[test]\nfn passes() -> Unit ! {panic} { test.is_true(true); }\n",
+        "module demo.tests.main;\n\nuse std.test;\n\n#[test]\nfn passes() -> Unit ! {} { test.is_true(true); }\n",
     )
     .unwrap();
     path

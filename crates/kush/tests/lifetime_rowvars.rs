@@ -59,27 +59,27 @@ fn mismatch_diagnostics_render_structural_field_lifetimes() {
     // two identical-looking rows.
     rejects(
         r#"fn second<'a, 'b>(a: &'a [i64], b: &'b [i64])
-            -> struct { view: &'b [i64] } ! {panic} {
+            -> struct { view: &'b [i64] } ! {} {
             struct { view: b }
         }
         fn install(f: fn<'a, 'b>(&'a [i64], &'b [i64])
-            -> struct { view: &'a [i64] } ! {panic}) -> Unit ! {panic} {
+            -> struct { view: &'a [i64] } ! {}) -> Unit ! {} {
             drop(f);
         }
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             let a: [i64; 1] = [1];
             let b: [i64; 1] = [2];
             install(second);
             drop(a);
             drop(b);
         }"#,
-        "expected fn<'a, 'b>(&'a [i64], &'b [i64]) -> struct { view: &'a [i64] } ! {panic}, found fn<'a, 'b>(&'a [i64], &'b [i64]) -> struct { view: &'b [i64] } ! {panic}",
+        "expected fn<'a, 'b>(&'a [i64], &'b [i64]) -> struct { view: &'a [i64] } ! {}, found fn<'a, 'b>(&'a [i64], &'b [i64]) -> struct { view: &'b [i64] } ! {}",
     );
     // The repeated-row diagnostic names both residuals with their labels.
     rejects(
         r#"fn pick<r>(a: struct { n: i64, ..r }, b: struct { n: i64, ..r })
-            -> i64 ! {panic} { drop(a); drop(b); 0 }
-        fn run<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> i64 ! {panic} {
+            -> i64 ! {} { drop(a); drop(b); 0 }
+        fn run<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> i64 ! {} {
             let first: struct { n: i64, view: &'a [i64] } = struct { n: 1, view: x };
             let second: struct { n: i64, view: &'b [i64] } = struct { n: 2, view: y };
             pick(first, second)
@@ -93,8 +93,8 @@ fn mismatch_diagnostics_render_structural_field_lifetimes() {
         r#"struct A<'a> { n: i64, view: &'a [i64] }
         struct B<'b> { n: i64, view: &'b [i64] }
         fn pick<r>(a: struct { n: i64, ..r }, b: struct { n: i64, ..r })
-            -> i64 ! {panic} { drop(a); drop(b); 0 }
-        fn run<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> i64 ! {panic} {
+            -> i64 ! {} { drop(a); drop(b); 0 }
+        fn run<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> i64 ! {} {
             pick(A { n: 1, view: x }, B { n: 2, view: y })
         }
         fn main() -> Unit ! {} {}"#,
@@ -122,8 +122,8 @@ fn an_unlabelled_structural_literal_specializes_a_borrowed_residual_row() {
     // `..r` gives it a local label. The identity helper accepts it exactly like
     // the nominal-record argument, and both backends agree.
     agrees(
-        r#"fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {panic} { v }
-        fn main() -> i64 ! {panic} {
+        r#"fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {} { v }
+        fn main() -> i64 ! {} {
             let values: [i64; 1] = [1];
             let out = keep(struct { n: 1, view: &values[..] });
             Slice.get(out.view, 0) + 41
@@ -133,10 +133,10 @@ fn an_unlabelled_structural_literal_specializes_a_borrowed_residual_row() {
     );
     // Repeated unlabelled rows of the same shape keep matching each other.
     agrees(
-        r#"fn pair<r>(a: struct { x: i64, ..r }, b: struct { x: i64, ..r }) -> i64 ! {panic} {
+        r#"fn pair<r>(a: struct { x: i64, ..r }, b: struct { x: i64, ..r }) -> i64 ! {} {
             a.x + b.x
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let left: [i64; 1] = [1];
             let right: [i64; 1] = [2];
             pair(
@@ -150,8 +150,8 @@ fn an_unlabelled_structural_literal_specializes_a_borrowed_residual_row() {
     // The label is never origin evidence: a literal borrowing a frame local
     // still cannot be returned as the caller's declared lifetime.
     rejects(
-        r#"fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {panic} { v }
-        fn bad<'a>(v: &'a [i64]) -> struct { n: i64, view: &'a [i64] } ! {panic} {
+        r#"fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {} { v }
+        fn bad<'a>(v: &'a [i64]) -> struct { n: i64, view: &'a [i64] } ! {} {
             let values: [i64; 1] = [1];
             keep(struct { n: 1, view: &values[..] })
         }
@@ -165,10 +165,10 @@ fn direct_structural_annotations_keep_their_borrow_labels() {
     // Before labels were part of the canonical row, the parameter's `view`
     // leaf had no lifetime and the explicit result could not be tied to it.
     agrees(
-        r#"fn first<'a>(v: struct { n: i64, view: &'a [i64] }) -> &'a [i64] ! {panic} {
+        r#"fn first<'a>(v: struct { n: i64, view: &'a [i64] }) -> &'a [i64] ! {} {
             v.view
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 2];
             Slice.get(first(struct { n: 1, view: &values[..] }), 0) + 2
         }"#,
@@ -181,7 +181,7 @@ fn direct_structural_annotations_keep_their_borrow_labels() {
     // it.
     rejects(
         r#"fn keep<'long: 'short, 'short>(
-            v: struct { view: &'short [i64] }) -> struct { view: &'long [i64] } ! {panic} {
+            v: struct { view: &'short [i64] }) -> struct { view: &'long [i64] } ! {} {
             v
         }
         fn main() -> Unit ! {} {}"#,
@@ -194,7 +194,7 @@ fn structural_conversions_cannot_relabel_borrowed_fields() {
     // Retained borrowed fields stay exact: a concrete `'short` source may not
     // be rewritten as `'long` merely because the erased field types match.
     rejects(
-        r#"fn keep<'long: 'short, 'short>(v: struct { view: &'short [i64] }) -> Unit ! {panic} {
+        r#"fn keep<'long: 'short, 'short>(v: struct { view: &'short [i64] }) -> Unit ! {} {
             let longer: struct { view: &'long [i64] } = v;
             drop(longer);
         }
@@ -210,16 +210,16 @@ fn row_variable_carries_a_borrowed_residual_through_a_reader() {
     // retains the owner loan until the row is consumed.
     agrees(
         r#"struct Wide<'a> { n: i64, view: &'a [i64], flag: Bool }
-        fn read<r>(v: struct { n: i64, ..r }) -> i64 ! {panic} {
+        fn read<r>(v: struct { n: i64, ..r }) -> i64 ! {} {
             let n = v.n;
             let value = Slice.get(v.view, 0);
             drop(v);
             n + value
         }
-        fn run<'a>(view: &'a [i64]) -> i64 ! {panic} {
+        fn run<'a>(view: &'a [i64]) -> i64 ! {} {
             read(Wide { n: 1, view: view, flag: true }) + 1
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 2];
             run(&values[..])
         }"#,
@@ -235,15 +235,15 @@ fn several_call_sites_keep_distinct_owner_labels() {
     // the shorter `'b` view satisfy `'a`'s (longer) contract.
     agrees(
         r#"struct Wide<'a> { n: i64, view: &'a [i64] }
-        fn read<r>(v: struct { n: i64, ..r }) -> i64 ! {panic} {
+        fn read<r>(v: struct { n: i64, ..r }) -> i64 ! {} {
             v.n + Slice.get(v.view, 0)
         }
-        fn run<'long, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {panic} {
+        fn run<'long, 'short>(long: &'long [i64], short: &'short [i64]) -> i64 ! {} {
             let a = read(Wide { n: 1, view: long });
             let b = read(Wide { n: 1, view: short });
             a + b
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let long: [i64; 2] = [20, 2];
             let short: [i64; 2] = [20, 2];
             run(&long[..], &short[..])
@@ -258,17 +258,17 @@ fn repeated_row_variables_require_matching_labels() {
     // The same residual row from every parameter: equal labels bind, distinct
     // labels stay distinct even when the erased field types are identical.
     agrees(
-        r#"fn pair<r>(a: struct { x: i64, ..r }, b: struct { x: i64, ..r }) -> i64 ! {panic} {
+        r#"fn pair<r>(a: struct { x: i64, ..r }, b: struct { x: i64, ..r }) -> i64 ! {} {
             a.x + b.x
         }
-        fn run<'a>(a: &'a [i64], b: &'a [i64]) -> i64 ! {panic} {
+        fn run<'a>(a: &'a [i64], b: &'a [i64]) -> i64 ! {} {
             let first: struct { x: i64, view: &'a [i64] } =
                 struct { x: 20, view: a };
             let second: struct { x: i64, view: &'a [i64] } =
                 struct { x: 20, view: b };
             pair(first, second)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 1] = [1];
             let b: [i64; 1] = [2];
             run(&a[..], &b[..]) + 2
@@ -277,10 +277,10 @@ fn repeated_row_variables_require_matching_labels() {
         "",
     );
     rejects(
-        r#"fn pair<r>(a: struct { x: i64, ..r }, b: struct { x: i64, ..r }) -> i64 ! {panic} {
+        r#"fn pair<r>(a: struct { x: i64, ..r }, b: struct { x: i64, ..r }) -> i64 ! {} {
             a.x + b.x
         }
-        fn run<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+        fn run<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {} {
             let first: struct { x: i64, view: &'a [i64] } =
                 struct { x: 20, view: a };
             let second: struct { x: i64, view: &'b [i64] } =
@@ -299,13 +299,13 @@ fn impl_rows_keep_borrowed_residual_labels() {
     // `Self` row retained the annotation label.
     agrees(
         r#"impl<r> struct { n: i64, ..r } {
-            fn first(self: Self) -> &[i64] ! {panic} { self.view }
+            fn first(self: Self) -> &[i64] ! {} { self.view }
         }
-        fn run<'a>(view: &'a [i64]) -> i64 ! {panic} {
+        fn run<'a>(view: &'a [i64]) -> i64 ! {} {
             let v: struct { n: i64, view: &'a [i64] } = struct { n: 1, view: view };
             Slice.get(v.first(), 0)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 2];
             run(&values[..]) + 2
         }"#,
@@ -318,11 +318,11 @@ fn impl_rows_keep_borrowed_residual_labels() {
 fn owner_mutation_and_drop_while_a_residual_borrow_is_live_are_rejected() {
     rejects(
         r#"struct Wide<'a> { n: i64, view: &'a [i64] }
-        fn read<r>(v: struct { n: i64, ..r }, values: &mut Vec<i64>) -> i64 ! {alloc, panic} {
+        fn read<r>(v: struct { n: i64, ..r }, values: &mut Vec<i64>) -> i64 ! {alloc} {
             Vec.clear(values);
             Slice.get(v.view, 0)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut data: Vec<i64> = [1, 2];
             read(Wide { n: 1, view: &data[..] }, &mut data)
         }"#,
@@ -330,10 +330,10 @@ fn owner_mutation_and_drop_while_a_residual_borrow_is_live_are_rejected() {
     );
     rejects(
         r#"struct Wide<'a> { n: i64, view: &'a [i64] }
-        fn read<r>(v: struct { n: i64, ..r }) -> i64 ! {panic} {
+        fn read<r>(v: struct { n: i64, ..r }) -> i64 ! {} {
             Slice.get(v.view, 0)
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let data: Vec<i64> = [1, 2];
             let row = Wide { n: 1, view: &data[..] };
             drop(data);
@@ -350,14 +350,14 @@ fn residual_paths_are_rebased_for_reordered_sources() {
     // Reading the view must use the target mapping, not the source index.
     agrees(
         r#"struct Wide<'a> { extra: Box<i64>, flag: Bool, n: i64, view: &'a [i64] }
-        fn read<r>(v: struct { n: i64, ..r }) -> i64 ! {panic} {
+        fn read<r>(v: struct { n: i64, ..r }) -> i64 ! {} {
             let flag = v.flag;
             let n = v.n;
             let value = Slice.get(v.view, 3);
             drop(v);
             if flag { 0 } else { n + value }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let values: [i64; 4] = [0, 1, 2, 40];
             let row = Wide {
                 extra: Box.new(1),
@@ -380,12 +380,12 @@ fn borrowed_structural_results_keep_their_labels() {
     // `lifetime_struct_results.rs`.
     agrees(
         r#"fn keep<'a>(v: struct { view: &'a [i64], n: i64 })
-            -> struct { view: &'a [i64], n: i64 } ! {panic} { v }
-        fn run<'a>(view: &'a [i64]) -> i64 ! {panic} {
+            -> struct { view: &'a [i64], n: i64 } ! {} { v }
+        fn run<'a>(view: &'a [i64]) -> i64 ! {} {
             let out = keep(struct { n: 1, view: view });
             Slice.get(out.view, 0) + out.n + 1
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 2];
             run(&values[..])
         }"#,
@@ -395,13 +395,13 @@ fn borrowed_structural_results_keep_their_labels() {
     agrees(
         r#"struct Wide<'a> { n: i64, view: &'a [i64] }
         fn keep<r>(v: struct { n: i64, ..r })
-            -> struct { n: i64, ..r } ! {panic} { v }
-        fn run<'a>(view: &'a [i64]) -> i64 ! {panic} {
+            -> struct { n: i64, ..r } ! {} { v }
+        fn run<'a>(view: &'a [i64]) -> i64 ! {} {
             let v: struct { n: i64, view: &'a [i64] } = struct { n: 1, view: view };
             let out = keep(v);
             Slice.get(out.view, 0) + out.n + 1
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let values: [i64; 2] = [40, 2];
             run(&values[..])
         }"#,
@@ -413,12 +413,12 @@ fn borrowed_structural_results_keep_their_labels() {
 #[test]
 fn structural_call_instantiates_callee_lifetime() {
     agrees(
-        r#"fn read<'a>(v: struct { view: &'a [i64] }) -> i64 ! {panic} { Slice.get(v.view, 0) }
-        fn caller<'b>(x: &'b [i64]) -> i64 ! {panic} {
+        r#"fn read<'a>(v: struct { view: &'a [i64] }) -> i64 ! {} { Slice.get(v.view, 0) }
+        fn caller<'b>(x: &'b [i64]) -> i64 ! {} {
             let row: struct { view: &'b [i64] } = struct { view: x };
             read(row)
         }
-        fn main() -> i64 ! {panic} { let x: [i64; 1] = [42]; caller(&x[..]) }"#,
+        fn main() -> i64 ! {} { let x: [i64; 1] = [42]; caller(&x[..]) }"#,
         42,
         "",
     );
@@ -427,21 +427,21 @@ fn structural_call_instantiates_callee_lifetime() {
 #[test]
 fn structural_calls_have_separate_lifetime_instantiations() {
     agrees(
-        r#"fn read<'a>(v: struct { view: &'a [i64] }) -> i64 ! {panic} { Slice.get(v.view, 0) }
-        fn caller<'b, 'c>(x: &'b [i64], y: &'c [i64]) -> i64 ! {panic} {
+        r#"fn read<'a>(v: struct { view: &'a [i64] }) -> i64 ! {} { Slice.get(v.view, 0) }
+        fn caller<'b, 'c>(x: &'b [i64], y: &'c [i64]) -> i64 ! {} {
             let first: struct { view: &'b [i64] } = struct { view: x };
             let second: struct { view: &'c [i64] } = struct { view: y };
             read(first) + read(second)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let x: [i64; 1] = [20]; let y: [i64; 1] = [22]; caller(&x[..], &y[..])
         }"#,
         42,
         "",
     );
     rejects(
-        r#"fn pair<'a>(x: struct { view: &'a [i64] }, y: struct { view: &'a [i64] }) -> Unit ! {panic} {}
-        fn caller<'b, 'c>(x: struct { view: &'b [i64] }, y: struct { view: &'c [i64] }) -> Unit ! {panic} {
+        r#"fn pair<'a>(x: struct { view: &'a [i64] }, y: struct { view: &'a [i64] }) -> Unit ! {} {}
+        fn caller<'b, 'c>(x: struct { view: &'b [i64] }, y: struct { view: &'c [i64] }) -> Unit ! {} {
             pair(x, y)
         }
         fn main() -> Unit ! {} {}"#,
@@ -452,7 +452,7 @@ fn structural_calls_have_separate_lifetime_instantiations() {
 #[test]
 fn unlabelled_annotation_preserves_retained_borrow_label() {
     rejects(
-        r#"fn keep<'long: 'short, 'short>(v: struct { view: &'short [i64] }) -> Unit ! {panic} {
+        r#"fn keep<'long: 'short, 'short>(v: struct { view: &'short [i64] }) -> Unit ! {} {
             let unlabeled: struct { view: &[i64] } = v;
             let longer: struct { view: &'long [i64] } = unlabeled;
             drop(longer);
@@ -465,13 +465,13 @@ fn unlabelled_annotation_preserves_retained_borrow_label() {
 #[test]
 fn residual_caller_lifetime_does_not_capture_same_named_callee_binder() {
     agrees(
-        r#"fn inspect<'a,r>(v: struct { x: &'a [i64], ..r }) -> i64 ! {panic} {
+        r#"fn inspect<'a,r>(v: struct { x: &'a [i64], ..r }) -> i64 ! {} {
             Slice.get(v.x, 0) + Slice.get(v.y, 0)
         }
-        fn caller<'a,'b>(v: struct { x: &'b [i64], y: &'a [i64] }) -> i64 ! {panic} {
+        fn caller<'a,'b>(v: struct { x: &'b [i64], y: &'a [i64] }) -> i64 ! {} {
             inspect(v)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let x: [i64; 1] = [20];
             let y: [i64; 1] = [22];
             caller(struct { x: &x[..], y: &y[..] })
@@ -484,10 +484,10 @@ fn residual_caller_lifetime_does_not_capture_same_named_callee_binder() {
 #[test]
 fn same_named_callee_binder_still_requires_one_invariant_identity() {
     rejects(
-        r#"fn inspect<'a,r>(v: struct { x: &'a [i64], z: &'a [i64], ..r }) -> i64 ! {panic} {
+        r#"fn inspect<'a,r>(v: struct { x: &'a [i64], z: &'a [i64], ..r }) -> i64 ! {} {
             Slice.get(v.x, 0) + Slice.get(v.y, 0) + Slice.get(v.z, 0)
         }
-        fn caller<'a,'b>(v: struct { x: &'b [i64], y: &'a [i64], z: &'a [i64] }) -> i64 ! {panic} {
+        fn caller<'a,'b>(v: struct { x: &'b [i64], y: &'a [i64], z: &'a [i64] }) -> i64 ! {} {
             inspect(v)
         }
         fn main() -> Unit ! {} {}"#,
@@ -514,8 +514,8 @@ fn unlabelled_structural_row_lifetime_has_one_diagnostic_spelling() {
     // The residual type and the actual-lifetime message must use the same
     // anonymous spelling for the label attached to the unlabelled literal.
     let error = check(
-        r#"fn pick<r>(a: struct { n: i64, ..r }, b: struct { n: i64, ..r }, c: Bool) -> struct { n: i64, ..r } ! {panic} { if c { a } else { b } }
-        fn bad<'a>(v: &'a [i64]) -> struct{n:i64, view:&'a [i64]} ! {panic} { let loc: [i64;1] = [1]; let first: struct{n:i64, view:&'a [i64]} = struct{n:1, view:v}; pick(first, struct{n:2, view:&loc[..]}, false) }
+        r#"fn pick<r>(a: struct { n: i64, ..r }, b: struct { n: i64, ..r }, c: Bool) -> struct { n: i64, ..r } ! {} { if c { a } else { b } }
+        fn bad<'a>(v: &'a [i64]) -> struct{n:i64, view:&'a [i64]} ! {} { let loc: [i64;1] = [1]; let first: struct{n:i64, view:&'a [i64]} = struct{n:1, view:v}; pick(first, struct{n:2, view:&loc[..]}, false) }
         fn main() -> Unit ! {} {}"#,
     )
     .unwrap_err();
@@ -539,12 +539,12 @@ fn branch_joined_unlabelled_row_lifetime_has_the_same_spelling() {
     // actual result lifetime. The rejection must name it with the same `'_N`
     // spelling used by the residual-row type display.
     let error = check(
-        r#"fn join<'x, r>(a: struct { n: i64, ..r }, b: struct { n: i64, ..r }, x: &'x [i64], c: Bool) -> struct { n: i64, view: &'x [i64] } ! {panic} {
+        r#"fn join<'x, r>(a: struct { n: i64, ..r }, b: struct { n: i64, ..r }, x: &'x [i64], c: Bool) -> struct { n: i64, view: &'x [i64] } ! {} {
             drop(x);
             if c { a } else { b }
         }
-        fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {panic} { v }
-        fn bad<'a>(v: &'a [i64]) -> struct { n: i64, view: &'a [i64] } ! {panic} {
+        fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {} { v }
+        fn bad<'a>(v: &'a [i64]) -> struct { n: i64, view: &'a [i64] } ! {} {
             let first = keep(struct { n: 1, view: &v[..] });
             let second = keep(struct { n: 2, view: &v[..] });
             join(first, second, v, false)

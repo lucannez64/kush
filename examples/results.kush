@@ -4,7 +4,7 @@ enum Result<T, E> { Ok(T), Err(E) }
 enum ParseError { InvalidDigit(i64), OutOfRange }
 enum Option<T> { None, Some(T) }
 
-fn digit(code: i64) -> Result<i64, ParseError> ! {panic} {
+fn digit(code: i64) -> Result<i64, ParseError> ! {} {
     if code >= 48 && code <= 57 {
         Ok(code - 48)
     } else {
@@ -12,13 +12,13 @@ fn digit(code: i64) -> Result<i64, ParseError> ! {panic} {
     }
 }
 
-fn parse_two_digits(first: i64, second: i64) -> Result<i64, ParseError> ! {panic} {
+fn parse_two_digits(first: i64, second: i64) -> Result<i64, ParseError> ! {} {
     let a = digit(first)?;
     let b = digit(second)?;
     Ok(a * 10 + b)
 }
 
-fn report(result: Result<i64, ParseError>) -> Unit ! {io, panic} {
+fn report(result: Result<i64, ParseError>) -> Unit ! {io} {
     match result {
         Ok(value) => print_i64(value),
         Err(ParseError.InvalidDigit(code)) => print_i64(code),
@@ -26,7 +26,7 @@ fn report(result: Result<i64, ParseError>) -> Unit ! {io, panic} {
     }
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     report(parse_two_digits(52, 50));
     report(parse_two_digits(65, 50));
     let mut maybe: Option<Result<i64, ParseError>> = Some(Ok(7));

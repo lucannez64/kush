@@ -51,7 +51,7 @@ fn disjunctions_are_hypotheses_and_goals() {
          fn all_cases(a: Bool, b: Bool, erased p: { a || b }, erased q: { !a }, erased r: { !b }) -> i64 ! {} {
              absurd(_)
          }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              from_branch(30) + from_ne(4) + from_else(6) + use_clause(12, _) + from_not(false, true)
          }",
         12,

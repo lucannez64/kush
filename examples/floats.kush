@@ -19,7 +19,7 @@ fn classify(x: f64) -> i64 ! {} {
     }
 }
 
-fn main() -> i64 ! {io, panic} {
+fn main() -> i64 ! {io} {
     let ratio = 7.0 / 2.0;
     let rounded: f32 = 0.1;
     print_float(ratio); // 3.5

@@ -53,30 +53,30 @@ pub const SCALAR_UNIT: i64 = 2;
 /// The largest universe level constant, as in the Rust kernel (`u32`).
 pub const MAX_LEVEL: i64 = 4294967295;
 
-pub fn tag(s: &Store, id: i64) -> i64 ! {panic} { store.get(s, id, 0) }
+pub fn tag(s: &Store, id: i64) -> i64 ! {} { store.get(s, id, 0) }
 
 /// Field `k` (0-based, after the tag) of object `id`.
-pub fn field(s: &Store, id: i64, k: i64) -> i64 ! {panic} { store.get(s, id, k + 1) }
+pub fn field(s: &Store, id: i64, k: i64) -> i64 ! {} { store.get(s, id, k + 1) }
 
-fn node0(s: &mut Store, tag: i64, range: i64) -> i64 ! {alloc, panic} {
+fn node0(s: &mut Store, tag: i64, range: i64) -> i64 ! {alloc} {
     store.begin(s, tag);
     store.finish(s, range)
 }
 
-fn node1(s: &mut Store, tag: i64, range: i64, a: i64) -> i64 ! {alloc, panic} {
+fn node1(s: &mut Store, tag: i64, range: i64, a: i64) -> i64 ! {alloc} {
     store.begin(s, tag);
     store.add(s, a);
     store.finish(s, range)
 }
 
-fn node2(s: &mut Store, tag: i64, range: i64, a: i64, b: i64) -> i64 ! {alloc, panic} {
+fn node2(s: &mut Store, tag: i64, range: i64, a: i64, b: i64) -> i64 ! {alloc} {
     store.begin(s, tag);
     store.add(s, a);
     store.add(s, b);
     store.finish(s, range)
 }
 
-fn node3(s: &mut Store, tag: i64, range: i64, a: i64, b: i64, c: i64) -> i64 ! {alloc, panic} {
+fn node3(s: &mut Store, tag: i64, range: i64, a: i64, b: i64, c: i64) -> i64 ! {alloc} {
     store.begin(s, tag);
     store.add(s, a);
     store.add(s, b);
@@ -84,7 +84,7 @@ fn node3(s: &mut Store, tag: i64, range: i64, a: i64, b: i64, c: i64) -> i64 ! {
     store.finish(s, range)
 }
 
-fn node4(s: &mut Store, tag: i64, range: i64, a: i64, b: i64, c: i64, d: i64) -> i64 ! {alloc, panic} {
+fn node4(s: &mut Store, tag: i64, range: i64, a: i64, b: i64, c: i64, d: i64) -> i64 ! {alloc} {
     store.begin(s, tag);
     store.add(s, a);
     store.add(s, b);
@@ -95,7 +95,7 @@ fn node4(s: &mut Store, tag: i64, range: i64, a: i64, b: i64, c: i64, d: i64) ->
 
 fn node6(
     s: &mut Store, tag: i64, range: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64,
-) -> i64 ! {alloc, panic} {
+) -> i64 ! {alloc} {
     store.begin(s, tag);
     store.add(s, a);
     store.add(s, b);
@@ -108,69 +108,69 @@ fn node6(
 
 // ------------------------------------------------------------------ terms
 
-fn r(s: &Store, id: i64) -> i64 ! {panic} { store.range(s, id) }
+fn r(s: &Store, id: i64) -> i64 ! {} { store.range(s, id) }
 fn max2(a: i64, b: i64) -> i64 ! {} { if a > b { a } else { b } }
 fn max3(a: i64, b: i64, c: i64) -> i64 ! {} { max2(max2(a, b), c) }
 
 /// One more than the largest free index of a term (0 when closed).
-pub fn range(s: &Store, id: i64) -> i64 ! {panic} { store.range(s, id) }
+pub fn range(s: &Store, id: i64) -> i64 ! {} { store.range(s, id) }
 
-pub fn var(s: &mut Store, index: i64) -> i64 ! {alloc, panic} { node1(s, VAR, index + 1, index) }
-pub fn global(s: &mut Store, name: i64, levels: i64) -> i64 ! {alloc, panic} {
+pub fn var(s: &mut Store, index: i64) -> i64 ! {alloc} { node1(s, VAR, index + 1, index) }
+pub fn global(s: &mut Store, name: i64, levels: i64) -> i64 ! {alloc} {
     node2(s, GLOBAL, 0, name, levels)
 }
 
-pub fn sort(s: &mut Store, level: i64) -> i64 ! {alloc, panic} { node1(s, SORT, 0, level) }
-pub fn prop(s: &mut Store) -> i64 ! {alloc, panic} { node0(s, PROP, 0) }
-pub fn pi(s: &mut Store, domain: i64, codomain: i64) -> i64 ! {alloc, panic} {
+pub fn sort(s: &mut Store, level: i64) -> i64 ! {alloc} { node1(s, SORT, 0, level) }
+pub fn prop(s: &mut Store) -> i64 ! {alloc} { node0(s, PROP, 0) }
+pub fn pi(s: &mut Store, domain: i64, codomain: i64) -> i64 ! {alloc} {
     let range = max2(r(s, domain), r(s, codomain) - 1);
     node2(s, PI, range, domain, codomain)
 }
 
-pub fn lam(s: &mut Store, domain: i64, body: i64) -> i64 ! {alloc, panic} {
+pub fn lam(s: &mut Store, domain: i64, body: i64) -> i64 ! {alloc} {
     let range = max2(r(s, domain), r(s, body) - 1);
     node2(s, LAM, range, domain, body)
 }
 
-pub fn app(s: &mut Store, function: i64, argument: i64) -> i64 ! {alloc, panic} {
+pub fn app(s: &mut Store, function: i64, argument: i64) -> i64 ! {alloc} {
     let range = max2(r(s, function), r(s, argument));
     node2(s, APP, range, function, argument)
 }
 
-pub fn nat(s: &mut Store) -> i64 ! {alloc, panic} { node0(s, NAT, 0) }
-pub fn zero(s: &mut Store) -> i64 ! {alloc, panic} { node0(s, ZERO, 0) }
-pub fn succ(s: &mut Store, value: i64) -> i64 ! {alloc, panic} { node1(s, SUCC, r(s, value), value) }
+pub fn nat(s: &mut Store) -> i64 ! {alloc} { node0(s, NAT, 0) }
+pub fn zero(s: &mut Store) -> i64 ! {alloc} { node0(s, ZERO, 0) }
+pub fn succ(s: &mut Store, value: i64) -> i64 ! {alloc} { node1(s, SUCC, r(s, value), value) }
 /// A numeral; the natural zero is the constructor `zero`, as in Rust.
-pub fn lit(s: &mut Store, natural_id: i64) -> i64 ! {alloc, panic} {
+pub fn lit(s: &mut Store, natural_id: i64) -> i64 ! {alloc} {
     if store.size(s, natural_id) == 1 { return zero(s); }
     node1(s, LIT, 0, natural_id)
 }
 
-pub fn natelim(s: &mut Store, motive: i64, z: i64, step: i64, value: i64) -> i64 ! {alloc, panic} {
+pub fn natelim(s: &mut Store, motive: i64, z: i64, step: i64, value: i64) -> i64 ! {alloc} {
     let range = max2(max2(r(s, motive), r(s, z)), max2(r(s, step), r(s, value)));
     node4(s, NATELIM, range, motive, z, step, value)
 }
 
-pub fn eq(s: &mut Store, ty: i64, left: i64, right: i64) -> i64 ! {alloc, panic} {
+pub fn eq(s: &mut Store, ty: i64, left: i64, right: i64) -> i64 ! {alloc} {
     let range = max3(r(s, ty), r(s, left), r(s, right));
     node3(s, EQ, range, ty, left, right)
 }
 
-pub fn reflexive(s: &mut Store, ty: i64, value: i64) -> i64 ! {alloc, panic} {
+pub fn reflexive(s: &mut Store, ty: i64, value: i64) -> i64 ! {alloc} {
     let range = max2(r(s, ty), r(s, value));
     node2(s, REFL, range, ty, value)
 }
 
 pub fn transport(
     s: &mut Store, ty: i64, from: i64, to: i64, motive: i64, proof: i64, value: i64,
-) -> i64 ! {alloc, panic} {
+) -> i64 ! {alloc} {
     let range = max2(max3(r(s, ty), r(s, from), r(s, to)), max3(r(s, motive), r(s, proof), r(s, value)));
     node6(s, TRANSPORT, range, ty, from, to, motive, proof, value)
 }
 
 pub fn eqelim(
     s: &mut Store, ty: i64, left: i64, right: i64, motive: i64, refl_case: i64, proof: i64,
-) -> i64 ! {alloc, panic} {
+) -> i64 ! {alloc} {
     let range = max2(
         max3(r(s, ty), r(s, left), r(s, right)),
         max3(r(s, motive), r(s, refl_case), r(s, proof)),
@@ -180,23 +180,23 @@ pub fn eqelim(
 
 pub fn indelim(
     s: &mut Store, data: i64, motive: i64, branches: i64, scrutinee: i64,
-) -> i64 ! {alloc, panic} {
+) -> i64 ! {alloc} {
     let range = max3(r(s, motive), r(s, branches), r(s, scrutinee));
     node4(s, INDELIM, range, data, motive, branches, scrutinee)
 }
 
-pub fn scalar(s: &mut Store, kind: i64) -> i64 ! {alloc, panic} { node1(s, SCALAR, 0, kind) }
-pub fn int(s: &mut Store, value: i64) -> i64 ! {alloc, panic} { node1(s, I64, 0, value) }
-pub fn boolean(s: &mut Store, value: Bool) -> i64 ! {alloc, panic} {
+pub fn scalar(s: &mut Store, kind: i64) -> i64 ! {alloc} { node1(s, SCALAR, 0, kind) }
+pub fn int(s: &mut Store, value: i64) -> i64 ! {alloc} { node1(s, I64, 0, value) }
+pub fn boolean(s: &mut Store, value: Bool) -> i64 ! {alloc} {
     node1(s, BOOL, 0, if value { 1 } else { 0 })
 }
 
-pub fn unit(s: &mut Store) -> i64 ! {alloc, panic} { node0(s, UNIT, 0) }
+pub fn unit(s: &mut Store) -> i64 ! {alloc} { node0(s, UNIT, 0) }
 
 // ------------------------------------------------------------------ lists
 
 /// Intern a list of ids.
-pub fn list(s: &mut Store, items: &Vec<i64>) -> i64 ! {alloc, panic} {
+pub fn list(s: &mut Store, items: &Vec<i64>) -> i64 ! {alloc} {
     store.begin(s, LIST);
     let mut range = 0;
     let mut i = 0;
@@ -208,24 +208,24 @@ pub fn list(s: &mut Store, items: &Vec<i64>) -> i64 ! {alloc, panic} {
     store.finish(s, range)
 }
 
-pub fn list_len(s: &Store, id: i64) -> i64 ! {panic} { store.size(s, id) - 1 }
-pub fn list_at(s: &Store, id: i64, i: i64) -> i64 ! {panic} { store.get(s, id, i + 1) }
+pub fn list_len(s: &Store, id: i64) -> i64 ! {} { store.size(s, id) - 1 }
+pub fn list_at(s: &Store, id: i64, i: i64) -> i64 ! {} { store.get(s, id, i + 1) }
 
 /// A constructor of a data declaration.
 pub fn ctor(
     s: &mut Store, name: i64, locals: i64, fields: i64, result: i64,
-) -> i64 ! {alloc, panic} {
+) -> i64 ! {alloc} {
     node4(s, CTOR, 0, name, locals, fields, result)
 }
 
 // ------------------------------------------------------------------ names
 
-pub fn name(s: &mut Store, text: &Bytes) -> i64 ! {alloc, panic} {
+pub fn name(s: &mut Store, text: &Bytes) -> i64 ! {alloc} {
     name_range(s, text, 0, text.len())
 }
 
 /// Intern the bytes `text[start..end]` as a name.
-pub fn name_range(s: &mut Store, text: &Bytes, start: i64, end: i64) -> i64 ! {alloc, panic} {
+pub fn name_range(s: &mut Store, text: &Bytes, start: i64, end: i64) -> i64 ! {alloc} {
     store.begin(s, NAME);
     let mut i = start;
     while i < end {
@@ -236,7 +236,7 @@ pub fn name_range(s: &mut Store, text: &Bytes, start: i64, end: i64) -> i64 ! {a
 }
 
 /// Append the bytes of a name.
-pub fn name_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
+pub fn name_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc} {
     let mut out = out;
     let n = store.size(s, id);
     let mut i = 1;
@@ -249,7 +249,7 @@ pub fn name_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
 
 // --------------------------------------------------------------- naturals
 
-pub fn natural_id(s: &mut Store, n: &Natural) -> i64 ! {alloc, panic} {
+pub fn natural_id(s: &mut Store, n: &Natural) -> i64 ! {alloc} {
     store.begin(s, NATURAL);
     let count = natural.limb_count(n);
     let mut i = 0;
@@ -260,7 +260,7 @@ pub fn natural_id(s: &mut Store, n: &Natural) -> i64 ! {alloc, panic} {
     store.finish(s, 0)
 }
 
-pub fn to_natural(s: &Store, id: i64) -> Natural ! {alloc, panic} {
+pub fn to_natural(s: &Store, id: i64) -> Natural ! {alloc} {
     let n = store.size(s, id);
     let mut limbs: Vec<i64> = Vec.with_capacity(n);
     let mut i = 1;
@@ -282,15 +282,15 @@ pub fn to_natural(s: &Store, id: i64) -> Natural ! {alloc, panic} {
 // sorted by parameter, and the constant stored as 0 when some offset
 // dominates it (parameters are never negative). Equal levels have equal ids.
 
-pub fn level_constant(s: &Store, id: i64) -> i64 ! {panic} { store.get(s, id, 1) }
+pub fn level_constant(s: &Store, id: i64) -> i64 ! {} { store.get(s, id, 1) }
 /// Number of (parameter, offset) pairs.
-pub fn level_pairs(s: &Store, id: i64) -> i64 ! {panic} { (store.size(s, id) - 2) / 2 }
-pub fn level_param(s: &Store, id: i64, i: i64) -> i64 ! {panic} { store.get(s, id, 2 + 2 * i) }
-pub fn level_offset(s: &Store, id: i64, i: i64) -> i64 ! {panic} { store.get(s, id, 3 + 2 * i) }
+pub fn level_pairs(s: &Store, id: i64) -> i64 ! {} { (store.size(s, id) - 2) / 2 }
+pub fn level_param(s: &Store, id: i64, i: i64) -> i64 ! {} { store.get(s, id, 2 + 2 * i) }
+pub fn level_offset(s: &Store, id: i64, i: i64) -> i64 ! {} { store.get(s, id, 3 + 2 * i) }
 
 /// Intern a level from a constant and sorted (parameter, offset) pairs
 /// flattened into `pairs`, normalizing the constant.
-fn level_from(s: &mut Store, constant: i64, pairs: &Vec<i64>) -> i64 ! {alloc, panic} {
+fn level_from(s: &mut Store, constant: i64, pairs: &Vec<i64>) -> i64 ! {alloc} {
     let mut dominated = -1;
     let mut i = 1;
     while i < pairs.len() {
@@ -307,13 +307,13 @@ fn level_from(s: &mut Store, constant: i64, pairs: &Vec<i64>) -> i64 ! {alloc, p
     store.finish(s, 0)
 }
 
-pub fn level_of(s: &mut Store, constant: i64) -> i64 ! {alloc, panic} {
+pub fn level_of(s: &mut Store, constant: i64) -> i64 ! {alloc} {
     store.begin(s, LEVEL);
     store.add(s, constant);
     store.finish(s, 0)
 }
 
-pub fn level_var(s: &mut Store, index: i64) -> i64 ! {alloc, panic} {
+pub fn level_var(s: &mut Store, index: i64) -> i64 ! {alloc} {
     store.begin(s, LEVEL);
     store.add(s, 0);
     store.add(s, index);
@@ -322,7 +322,7 @@ pub fn level_var(s: &mut Store, index: i64) -> i64 ! {alloc, panic} {
 }
 
 /// `l + 1`; an error past the largest level constant or offset.
-pub fn level_succ(s: &mut Store, l: i64) -> Result<i64, i64> ! {alloc, panic} {
+pub fn level_succ(s: &mut Store, l: i64) -> Result<i64, i64> ! {alloc} {
     let count = level_pairs(s, l);
     let constant = level_constant(s, l);
     let next = if count == 0 || constant > 0 { constant + 1 } else { 0 };
@@ -339,7 +339,7 @@ pub fn level_succ(s: &mut Store, l: i64) -> Result<i64, i64> ! {alloc, panic} {
 }
 
 /// `max(a, b)`.
-pub fn level_max(s: &mut Store, a: i64, b: i64) -> i64 ! {alloc, panic} {
+pub fn level_max(s: &mut Store, a: i64, b: i64) -> i64 ! {alloc} {
     let na = level_pairs(s, a);
     let nb = level_pairs(s, b);
     let mut pairs: Vec<i64> = Vec.with_capacity(2 * (na + nb));
@@ -368,13 +368,13 @@ pub fn level_max(s: &mut Store, a: i64, b: i64) -> i64 ! {alloc, panic} {
 }
 
 /// Whether `a <= b` under every assignment of the parameters.
-pub fn level_leq(s: &mut Store, a: i64, b: i64) -> Bool ! {alloc, panic} {
+pub fn level_leq(s: &mut Store, a: i64, b: i64) -> Bool ! {alloc} {
     level_max(s, a, b) == b
 }
 
 /// Replace each level parameter `u_i` of `l` with element `i` of the level
 /// list `levels`.
-pub fn level_instantiate(s: &mut Store, l: i64, levels: i64) -> Result<i64, i64> ! {alloc, panic} {
+pub fn level_instantiate(s: &mut Store, l: i64, levels: i64) -> Result<i64, i64> ! {alloc} {
     let mut result = level_of(s, level_constant(s, l));
     let count = level_pairs(s, l);
     let mut i = 0;
@@ -398,7 +398,7 @@ pub fn level_instantiate(s: &mut Store, l: i64, levels: i64) -> Result<i64, i64>
 
 /// The cells of a level object (constant, then parameter/offset pairs), to
 /// rebuild it with `level_from_cells` after the store is rewound.
-pub fn level_cells(s: &Store, l: i64) -> Vec<i64> ! {alloc, panic} {
+pub fn level_cells(s: &Store, l: i64) -> Vec<i64> ! {alloc} {
     let n = store.size(s, l);
     let mut cells: Vec<i64> = Vec.with_capacity(n);
     let mut i = 1;
@@ -409,7 +409,7 @@ pub fn level_cells(s: &Store, l: i64) -> Vec<i64> ! {alloc, panic} {
     cells
 }
 
-pub fn level_from_cells(s: &mut Store, cells: &Vec<i64>) -> i64 ! {alloc, panic} {
+pub fn level_from_cells(s: &mut Store, cells: &Vec<i64>) -> i64 ! {alloc} {
     store.begin(s, LEVEL);
     let mut i = 0;
     while i < cells.len() {

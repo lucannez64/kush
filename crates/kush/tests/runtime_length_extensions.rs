@@ -61,9 +61,9 @@ fn generic_functions_take_and_return_runtime_length_arrays() {
         fn first<T>(n: i64, a: [T; n <= 8], erased ok: { 0 < n && n <= 8 }) -> T ! {} {
             a[0]
         }
-        fn make<C: Nat>(n: i64) -> [i64; n <= C] ! {panic} { Array.fill(n, 3) }
+        fn make<C: Nat>(n: i64) -> [i64; n <= C] ! {} { Array.fill(n, 3) }
         fn count<T, C: Nat>(n: i64, a: &[T; n <= C]) -> i64 ! {} { DynArray.len(a) }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let k: i64 = 3;
             let b: [i64; k <= 8] = make::<8>(k);
             let c: [i64; k <= 4] = make::<4>(k);
@@ -75,7 +75,7 @@ fn generic_functions_take_and_return_runtime_length_arrays() {
     let stats = agrees(
         r#"
         fn keep<T>(n: i64, a: [T; n <= 4]) -> [T; n <= 4] ! {} { a }
-        fn main() -> i64 ! {panic, alloc} {
+        fn main() -> i64 ! {alloc} {
             let k: i64 = 2;
             let a: [Box<i64>; k <= 4] = [Box.new(20), Box.new(22)];
             let b: [Box<i64>; k <= 4] = keep(k, a);
@@ -94,11 +94,11 @@ fn impl_methods_and_trait_items_substitute_the_callers_binder() {
     agrees(
         r#"
         trait Summer {
-            fn sum_up(self: &Self, n: i64, a: &[i64; n <= 8]) -> i64 ! {panic};
+            fn sum_up(self: &Self, n: i64, a: &[i64; n <= 8]) -> i64 ! {};
         }
         struct Base { v: i64 }
         impl Summer for Base {
-            fn sum_up(self: &Self, n: i64, a: &[i64; n <= 8]) -> i64 ! {panic} {
+            fn sum_up(self: &Self, n: i64, a: &[i64; n <= 8]) -> i64 ! {} {
                 let mut i = 0;
                 let mut acc = self.v;
                 while i < n { acc = acc + a[i]; i = i + 1; }
@@ -106,7 +106,7 @@ fn impl_methods_and_trait_items_substitute_the_callers_binder() {
             }
         }
         impl Base {
-            fn make(self: &Base, n: i64) -> [i64; n <= 8] ! {panic} { Array.fill(n, self.v) }
+            fn make(self: &Base, n: i64) -> [i64; n <= 8] ! {} { Array.fill(n, self.v) }
         }
         struct W<T> { x: T }
         impl<T> W<T> {
@@ -114,10 +114,10 @@ fn impl_methods_and_trait_items_substitute_the_callers_binder() {
                 a[0]
             }
         }
-        fn twice<T: Summer>(x: T, k: i64, b: &[i64; k <= 8]) -> i64 ! {panic} {
+        fn twice<T: Summer>(x: T, k: i64, b: &[i64; k <= 8]) -> i64 ! {} {
             x.sum_up(k, b) * 2
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let k: i64 = 3;
             let h = Base { v: 1 };
             let b: [i64; k <= 8] = h.make(k);
@@ -136,12 +136,12 @@ fn generic_and_method_calls_reject_mismatched_binders() {
     let base = r#"
         struct Base { v: i64 }
         impl Base {
-            fn sum_up(self: &Base, n: i64, a: &[i64; n <= 8]) -> i64 ! {panic} { self.v + a[0] }
-            fn make(self: &Base, n: i64) -> [i64; n <= 8] ! {panic} { Array.fill(n, self.v) }
+            fn sum_up(self: &Base, n: i64, a: &[i64; n <= 8]) -> i64 ! {} { self.v + a[0] }
+            fn make(self: &Base, n: i64) -> [i64; n <= 8] ! {} { Array.fill(n, self.v) }
         }
-        fn first<T>(n: i64, a: [T; n <= 8]) -> T ! {panic} { a[0] }
+        fn first<T>(n: i64, a: [T; n <= 8]) -> T ! {} { a[0] }
     "#;
-    let program = |body: &str| format!("{base}\nfn main() -> i64 ! {{panic}} {{\n{body}\n}}");
+    let program = |body: &str| format!("{base}\nfn main() -> i64 ! {{}} {{\n{body}\n}}");
     rejects(
         &program(
             "let k: i64 = 3; let j: i64 = 3; let h = Base { v: 1 };
@@ -188,10 +188,10 @@ fn generic_and_method_calls_reject_mismatched_binders() {
     // A trait and its impl must spell the binder the same way.
     rejects(
         r#"
-        trait Summer { fn s(self: Self, n: i64, a: [i64; n <= 8]) -> i64 ! {panic}; }
+        trait Summer { fn s(self: Self, n: i64, a: [i64; n <= 8]) -> i64 ! {}; }
         struct Base { v: i64 }
         impl Summer for Base {
-            fn s(self: Self, m: i64, a: [i64; m <= 8]) -> i64 ! {panic} { a[0] }
+            fn s(self: Self, m: i64, a: [i64; m <= 8]) -> i64 ! {} { a[0] }
         }
         fn main() -> i64 ! {} { 0 }"#,
         "does not match the trait signature exactly",
@@ -209,12 +209,12 @@ fn trait_objects_cannot_carry_runtime_length_methods() {
     // A dynamic call has no static callee whose binders could be replaced.
     rejects(
         r#"
-        trait Summer { fn s(self: Self, n: i64, a: [i64; n <= 8]) -> i64 ! {panic}; }
+        trait Summer { fn s(self: Self, n: i64, a: [i64; n <= 8]) -> i64 ! {}; }
         struct Base { v: i64 }
         impl Summer for Base {
-            fn s(self: Self, n: i64, a: [i64; n <= 8]) -> i64 ! {panic} { a[0] }
+            fn s(self: Self, n: i64, a: [i64; n <= 8]) -> i64 ! {} { a[0] }
         }
-        fn main() -> i64 ! {panic} { let h = Base { v: 1 }; let d: dyn Summer = h; 0 }"#,
+        fn main() -> i64 ! {} { let h = Base { v: 1 }; let d: dyn Summer = h; 0 }"#,
         "mentions a runtime-length array [T; n <= C]; call it through a concrete receiver",
     );
 }
@@ -227,7 +227,7 @@ fn recursive_calls_cannot_capture_their_own_length_binder() {
     // and the proved read `y[i]` went out of bounds.
     rejects(
         r#"
-        fn go<T>(n: i64, x: T, depth: i64, erased ok: { 0 <= n && n <= 4 }) -> i64 ! {panic} {
+        fn go<T>(n: i64, x: T, depth: i64, erased ok: { 0 <= n && n <= 4 }) -> i64 ! {} {
             let a: [i64; n <= 4] = Array.fill(n, 5);
             if depth == 0 {
                 go::<[i64; n <= 4]>(1, a, 1, _)
@@ -244,7 +244,7 @@ fn recursive_calls_cannot_capture_their_own_length_binder() {
                 }
             }
         }
-        fn main() -> i64 ! {panic} { go::<i64>(0, 0, 0, _) }"#,
+        fn main() -> i64 ! {} { go::<i64>(0, 0, 0, _) }"#,
         "a type argument of 'go' mentions its own length binder 'n'",
     );
     // The same through a generic impl's arguments.
@@ -252,7 +252,7 @@ fn recursive_calls_cannot_capture_their_own_length_binder() {
         r#"
         struct W<T> { x: T }
         impl<T> W<T> {
-            fn go(self: W<T>, n: i64, depth: i64, erased ok: { 0 <= n && n <= 4 }) -> i64 ! {panic} {
+            fn go(self: W<T>, n: i64, depth: i64, erased ok: { 0 <= n && n <= 4 }) -> i64 ! {} {
                 let a: [i64; n <= 4] = Array.fill(n, 5);
                 if depth == 0 {
                     let w2 = W { x: a };
@@ -261,7 +261,7 @@ fn recursive_calls_cannot_capture_their_own_length_binder() {
                 } else { 0 }
             }
         }
-        fn main() -> i64 ! {panic} { let w = W { x: 0 }; w.go(0, 0, _) }"#,
+        fn main() -> i64 ! {} { let w = W { x: 0 }; w.go(0, 0, _) }"#,
         "a type argument of 'go' mentions its own length binder 'n'",
     );
     // Review regression: the same through an inherited trait default, whose
@@ -298,7 +298,7 @@ fn recursive_calls_cannot_capture_their_own_length_binder() {
             let b: [i64; n <= 4] = id::<[i64; n <= 4]>(a);
             b[0]
         }
-        fn main() -> i64 ! {panic} { let k: i64 = 2; go(k, _) }"#,
+        fn main() -> i64 ! {} { let k: i64 = 2; go(k, _) }"#,
         5,
     );
 }
@@ -313,13 +313,13 @@ fn signatures_rebind_lengths_inside_containers_tuples_records_and_unions() {
         r#"
         enum Maybe<T> { Some(T), None }
         struct Pair<T> { a: T, b: i64 }
-        fn rows(n: i64, count: i64) -> Vec<[i64; n <= 4]> ! {panic, alloc} {
+        fn rows(n: i64, count: i64) -> Vec<[i64; n <= 4]> ! {alloc} {
             let mut v: Vec<[i64; n <= 4]> = Vec.new();
             let mut i = 0;
             while i < count { v = Vec.push(v, Array.fill(n, i)); i = i + 1; }
             v
         }
-        fn summed(n: i64, v: &Vec<[i64; n <= 4]>) -> i64 ! {panic} {
+        fn summed(n: i64, v: &Vec<[i64; n <= 4]>) -> i64 ! {} {
             let mut acc = 0;
             let mut i = 0;
             while i < Vec.len(v) {
@@ -334,16 +334,16 @@ fn signatures_rebind_lengths_inside_containers_tuples_records_and_unions() {
             let (x, y) = p;
             Pair { a: Box.take(y), b: DynArray.len(&x) }
         }
-        fn opt(n: i64, o: Maybe<[i64; n <= 4]>) -> i64 ! {panic} {
+        fn opt(n: i64, o: Maybe<[i64; n <= 4]>) -> i64 ! {} {
             match o { Maybe.Some(a) => DynArray.len(&a), Maybe.None => 0 }
         }
         fn either(n: i64, u: [i64; n <= 4] | Bool) -> i64 ! {} {
             match u { [i64; n <= 4] @ a => DynArray.len(&a), Bool @ b => 100 }
         }
-        fn mk(n: i64) -> struct { xs: [i64; n <= 4], tag: i64 } ! {panic} {
+        fn mk(n: i64) -> struct { xs: [i64; n <= 4], tag: i64 } ! {} {
             struct { xs: Array.fill(n, 4), tag: 1 }
         }
-        fn main() -> i64 ! {panic, alloc} {
+        fn main() -> i64 ! {alloc} {
             let k: i64 = 3;
             let v: Vec<[i64; k <= 4]> = rows(k, 3);
             let t = summed(k, &v);                         // 0*3 + 1*3 + 2*3 = 9
@@ -361,11 +361,11 @@ fn signatures_rebind_lengths_inside_containers_tuples_records_and_unions() {
     // A generic element inside a nested position.
     agrees(
         r#"
-        fn heads<T>(n: i64, v: &Vec<[T; n <= 4]>, erased ok: { 0 < n && n <= 4 }) -> T ! {panic} {
+        fn heads<T>(n: i64, v: &Vec<[T; n <= 4]>, erased ok: { 0 < n && n <= 4 }) -> T ! {} {
             let row: [T; n <= 4] = Vec.get(v, 0);
             row[0]
         }
-        fn main() -> i64 ! {panic, alloc} {
+        fn main() -> i64 ! {alloc} {
             let k: i64 = 2;
             let mut v: Vec<[i64; k <= 4]> = Vec.new();
             v = Vec.push(v, [7, 8]);
@@ -376,11 +376,11 @@ fn signatures_rebind_lengths_inside_containers_tuples_records_and_unions() {
     // Owning elements inside a nested array drop exactly once.
     let stats = agrees(
         r#"
-        fn wrap(n: i64, a: [Box<i64>; n <= 4]) -> Vec<[Box<i64>; n <= 4]> ! {alloc, panic} {
+        fn wrap(n: i64, a: [Box<i64>; n <= 4]) -> Vec<[Box<i64>; n <= 4]> ! {alloc} {
             let v: Vec<[Box<i64>; n <= 4]> = Vec.new();
             Vec.push(v, a)
         }
-        fn main() -> i64 ! {panic, alloc} {
+        fn main() -> i64 ! {alloc} {
             let k: i64 = 2;
             let a: [Box<i64>; k <= 4] = [Box.new(1), Box.new(2)];
             let v: Vec<[Box<i64>; k <= 4]> = wrap(k, a);
@@ -396,7 +396,7 @@ fn nested_signature_binders_reject_mismatches_and_unsubstitutable_positions() {
     rejects(
         r#"
         fn s(n: i64, v: &Vec<[i64; n <= 4]>) -> i64 ! {} { 0 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let k: i64 = 2; let j: i64 = 2;
             let v: Vec<[i64; j <= 4]> = Vec.new();
             s(k, &v)
@@ -453,19 +453,19 @@ fn exclusive_patterns_bind_disjoint_element_references() {
     agrees(
         r#"
         struct Point { x: i64, y: i64 }
-        fn bump(n: i64, a: &mut [i64; n <= 4]) -> Unit ! {panic} {
+        fn bump(n: i64, a: &mut [i64; n <= 4]) -> Unit ! {} {
             match a {
                 [x, ..rest] => { *x = *x + 100; Slice.set(rest, 0, 7); },
                 _ => {},
             }
         }
-        fn bump_points(a: &mut DynArray<Point, 4>) -> Unit ! {panic} {
+        fn bump_points(a: &mut DynArray<Point, 4>) -> Unit ! {} {
             match a {
                 [p, .., q] => { p.x = 50; q.y = 60; },
                 _ => {},
             }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let k: i64 = 3;
             let mut a: [i64; k <= 4] = [1, 2, 3];
             bump(k, &mut a);
@@ -497,7 +497,7 @@ fn exclusive_patterns_bind_disjoint_element_references() {
     agrees(
         r#"
         fn swap(p: &mut i64, q: &mut i64) -> Unit ! {} { let t = *p; *p = *q; *q = t; }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [3, 4, 5, 6];
             match &mut a { [x, .., y] => swap(x, y), _ => {} };
             match &mut a {
@@ -519,7 +519,7 @@ fn exclusive_patterns_bind_disjoint_element_references() {
     agrees(
         r#"
         fn swap(p: &mut i64, q: &mut i64) -> Unit ! {} { let t = *p; *p = *q; *q = t; }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [3, 4, 5];
             {
                 let v: &mut [i64] = &mut a[..];
@@ -536,12 +536,12 @@ fn exclusive_patterns_bind_disjoint_element_references() {
     // A `&mut` parameter scrutinee is reborrowed, not consumed.
     agrees(
         r#"
-        fn first(a: &mut DynArray<i64, 4>) -> i64 ! {panic} {
+        fn first(a: &mut DynArray<i64, 4>) -> i64 ! {} {
             let r: &mut i64 = match a { [x, ..] => x, _ => return 0 };
             *r = 1;
             DynArray.get(a, 0) + DynArray.len(a)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut b: DynArray<i64, 4> = [5, 2];
             let u = first(&mut b);
             let mut c: DynArray<(i64, i64), 4> = [(1, 2), (3, 4)];
@@ -559,7 +559,7 @@ fn exclusive_pattern_bindings_suspend_the_array() {
         format!(
             "struct H {{ xs: DynArray<i64, 4>, n: i64 }}
             fn eat(a: DynArray<i64, 4>) -> i64 ! {{}} {{ 0 }}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let mut a: DynArray<i64, 4> = [1, 2, 3];
                 let mut h = H {{ xs: [1, 2], n: 4 }};
                 {body}
@@ -621,20 +621,20 @@ fn exclusive_pattern_bindings_suspend_the_array() {
     }
     rejects(
         r#"
-        fn upd(a: &mut DynArray<i64, 4>) -> i64 ! {panic} {
+        fn upd(a: &mut DynArray<i64, 4>) -> i64 ! {} {
             match a { [x, ..] => { let n = DynArray.len(a); *x = n; }, _ => {} }
             0
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "cannot use an owner while an exclusive '&mut [T]' view of it is live",
     );
     rejects(
         r#"
         struct H { xs: DynArray<i64, 4>, n: i64 }
-        fn upd(h: &mut H) -> Unit ! {panic} {
+        fn upd(h: &mut H) -> Unit ! {} {
             match &mut h.xs { [x, ..] => { *h = H { xs: [], n: 0 }; *x = 42; }, _ => {} }
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "cannot write through a reference while a view, element reference, or pattern binding derived from it is live",
     );
 }
@@ -643,7 +643,7 @@ fn exclusive_pattern_bindings_suspend_the_array() {
 fn exclusive_patterns_reject_owning_elements_and_shared_storage() {
     rejects(
         r#"
-        fn main() -> i64 ! {panic, alloc} {
+        fn main() -> i64 ! {alloc} {
             let mut a: DynArray<Box<i64>, 4> = [Box.new(1)];
             match &mut a { [x, ..] => 0, _ => 1 }
         }"#,
@@ -651,7 +651,7 @@ fn exclusive_patterns_reject_owning_elements_and_shared_storage() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: DynArray<i64, 4> = [1, 2];
             match &mut a { [x, ..] => { *x = 3; }, _ => {} }
             0
@@ -660,7 +660,7 @@ fn exclusive_patterns_reject_owning_elements_and_shared_storage() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [1, 2];
             match &mut a { [x, x] => { *x = 3; }, _ => {} }
             0
@@ -675,7 +675,7 @@ fn exclusive_patterns_reject_owning_elements_and_shared_storage() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut a: DynArray<i64, 4> = [1, 2];
             match &mut a { [x, ..] => 0, y => 1 }
         }"#,
@@ -689,7 +689,7 @@ fn exclusive_pattern_arms_release_owners_on_every_exit() {
     // live around the exclusive bindings: every box is released once.
     let stats = agrees(
         r#"
-        fn pick(a: &mut DynArray<i64, 4>, b: Box<i64>) -> i64 ! {panic, alloc} {
+        fn pick(a: &mut DynArray<i64, 4>, b: Box<i64>) -> i64 ! {alloc} {
             let keep = Box.new(5);
             match a {
                 [x, ..] if *x > 10 => { *x = 0; return Box.read(&b) + Box.read(&keep); },
@@ -698,7 +698,7 @@ fn exclusive_pattern_arms_release_owners_on_every_exit() {
             }
             Box.read(&keep)
         }
-        fn main() -> i64 ! {panic, alloc} {
+        fn main() -> i64 ! {alloc} {
             let mut a: DynArray<i64, 4> = [20, 2];
             let first = pick(&mut a, Box.new(7));     // 12, a = [0, 2]
             let second = pick(&mut a, Box.new(9));    // 5,  a = [1, 9]
@@ -772,7 +772,7 @@ fn rebinding_never_merges_union_members() {
         fn f(n: i64, m: i64, a: [i64; n <= 4], b: [i64; m <= 4], pick: Bool) -> [i64; n <= 4] | [i64; m <= 4] ! {} {
             if pick { a } else { b }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let k: i64 = 4;
             let j: i64 = 2;
             let x: [i64; k <= 4] = Array.fill(k, 5);
@@ -931,10 +931,10 @@ fn recursive_calls_forward_their_own_binders() {
     // in a self-call maps a binder to itself, which is sound and accepted.
     agrees(
         r#"
-fn f(n: i64, a: [i64; n <= 4], d: i64) -> i64 ! {panic} {
+fn f(n: i64, a: [i64; n <= 4], d: i64) -> i64 ! {} {
     if d == 0 { DynArray.len(&a) } else { f(n, a, d - 1) }
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let k: i64 = 3;
     let a: [i64; k <= 4] = Array.fill(k, 5);
     f(k, a, 2)
@@ -943,10 +943,10 @@ fn main() -> i64 ! {panic} {
     );
     agrees(
         r#"
-        fn f(n: i64, m: i64, a: [i64; n <= 4], b: [i64; m <= 4], d: i64) -> i64 ! {panic} {
+        fn f(n: i64, m: i64, a: [i64; n <= 4], b: [i64; m <= 4], d: i64) -> i64 ! {} {
             if d == 0 { DynArray.len(&a) * 10 + DynArray.len(&b) } else { f(m, n, b, a, d - 1) }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let k: i64 = 4;
             let j: i64 = 1;
             let a: [i64; k <= 4] = Array.fill(k, 5);

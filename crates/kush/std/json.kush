@@ -25,7 +25,7 @@ pub fn position(error: Error) -> i64 ! {} {
     }
 }
 
-pub fn message(error: Error) -> Bytes ! {alloc, panic} {
+pub fn message(error: Error) -> Bytes ! {alloc} {
     match error {
         Error.Unexpected(_) => Bytes.from("unexpected byte or end of input"),
         Error.InvalidNumber(_) => Bytes.from("invalid JSON number"),
@@ -37,7 +37,7 @@ pub fn message(error: Error) -> Bytes ! {alloc, panic} {
 }
 
 fn digit(byte: i64) -> Bool ! {} { byte >= 48 && byte <= 57 }
-fn skip(source: &[i64], start: i64) -> i64 ! {panic} {
+fn skip(source: &[i64], start: i64) -> i64 ! {} {
     let mut at = start;
     while at < Slice.len(source) {
         let b = Slice.get(source, at);
@@ -47,13 +47,13 @@ fn skip(source: &[i64], start: i64) -> i64 ! {panic} {
     at
 }
 
-fn hex(byte: i64) -> i64 ! {panic} {
+fn hex(byte: i64) -> i64 ! {} {
     if digit(byte) { byte - 48 } else {
         if byte >= 65 && byte <= 70 { byte - 55 } else { if byte >= 97 && byte <= 102 { byte - 87 } else { -1 } }
     }
 }
 
-fn hex4(source: &[i64], at: i64) -> Result<i64, Error> ! {panic} {
+fn hex4(source: &[i64], at: i64) -> Result<i64, Error> ! {} {
     if at + 4 > Slice.len(source) { return Err(Error.InvalidUnicode(at)); }
     let mut code = 0;
     let mut i = 0;
@@ -67,7 +67,7 @@ fn hex4(source: &[i64], at: i64) -> Result<i64, Error> ! {panic} {
 }
 
 // Validate one raw UTF-8 scalar, rejecting overlongs, surrogates and > U+10FFFF.
-fn utf8(source: &[i64], at: i64) -> Result<i64, Error> ! {panic} {
+fn utf8(source: &[i64], at: i64) -> Result<i64, Error> ! {} {
     let lead = Slice.get(source, at);
     let mut width = 0;
     if lead >= 194 && lead <= 223 { width = 2; }
@@ -88,7 +88,7 @@ fn utf8(source: &[i64], at: i64) -> Result<i64, Error> ! {panic} {
     Ok(width)
 }
 
-fn encode(out: Bytes, code: i64) -> Bytes ! {alloc, panic} {
+fn encode(out: Bytes, code: i64) -> Bytes ! {alloc} {
     let mut out = out;
     if code < 128 { out = Bytes.push(out, code); } else {
         if code < 2048 {
@@ -110,7 +110,7 @@ fn encode(out: Bytes, code: i64) -> Bytes ! {alloc, panic} {
     out
 }
 
-fn string(source: &[i64], start: i64) -> Result<Text, Error> ! {alloc, panic} {
+fn string(source: &[i64], start: i64) -> Result<Text, Error> ! {alloc} {
     let mut out = Bytes.with_capacity(16);
     let mut at = start + 1;
     while at < Slice.len(source) {
@@ -159,7 +159,7 @@ fn string(source: &[i64], start: i64) -> Result<Text, Error> ! {alloc, panic} {
     Err(Error.Unexpected(at))
 }
 
-fn number_end(source: &[i64], start: i64) -> Result<i64, Error> ! {panic} {
+fn number_end(source: &[i64], start: i64) -> Result<i64, Error> ! {} {
     let mut at = start;
     if at < Slice.len(source) && Slice.get(source, at) == 45 { at = at + 1; }
     if at == Slice.len(source) || !digit(Slice.get(source, at)) { return Err(Error.InvalidNumber(at)); }
@@ -180,14 +180,14 @@ fn number_end(source: &[i64], start: i64) -> Result<i64, Error> ! {panic} {
     Ok(at)
 }
 
-fn copy(source: &[i64], start: i64, end: i64) -> Bytes ! {alloc, panic} {
+fn copy(source: &[i64], start: i64, end: i64) -> Bytes ! {alloc} {
     let mut out = Bytes.with_capacity(end - start);
     let mut at = start;
     while at < end { out = Bytes.push_reserved(out, Slice.get(source, at)); at = at + 1; }
     out
 }
 
-fn keyword(source: &[i64], at: i64, word: &Bytes) -> Result<i64, Error> ! {panic} {
+fn keyword(source: &[i64], at: i64, word: &Bytes) -> Result<i64, Error> ! {} {
     let mut i = 0;
     while i < Bytes.len(word) {
         if at + i >= Slice.len(source) || Slice.get(source, at + i) != Bytes.get(word, i) {
@@ -198,7 +198,7 @@ fn keyword(source: &[i64], at: i64, word: &Bytes) -> Result<i64, Error> ! {panic
     Ok(at + i)
 }
 
-fn reverse_items(list: Items) -> Items ! {alloc, panic} {
+fn reverse_items(list: Items) -> Items ! {alloc} {
     let mut list = list;
     let mut out = Items.End;
     loop {
@@ -210,7 +210,7 @@ fn reverse_items(list: Items) -> Items ! {alloc, panic} {
     out
 }
 
-fn reverse_members(list: Members) -> Members ! {alloc, panic} {
+fn reverse_members(list: Members) -> Members ! {alloc} {
     let mut list = list;
     let mut out = Members.End;
     loop {
@@ -222,7 +222,7 @@ fn reverse_members(list: Members) -> Members ! {alloc, panic} {
     out
 }
 
-fn array(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {alloc, panic} {
+fn array(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {alloc} {
     let mut at = skip(source, start + 1);
     let mut list = Items.End;
     let mut count = 0;
@@ -243,7 +243,7 @@ fn array(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {all
     Ok(Parsed { value: Value.Array(Box.new(reverse_items(list))), next: at + 1 })
 }
 
-fn object(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {alloc, panic} {
+fn object(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {alloc} {
     let mut at = skip(source, start + 1);
     let mut list = Members.End;
     let mut count = 0;
@@ -268,7 +268,7 @@ fn object(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {al
     Ok(Parsed { value: Value.Object(Box.new(reverse_members(list))), next: at + 1 })
 }
 
-fn value(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {alloc, panic} {
+fn value(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {alloc} {
     let at = skip(source, start);
     if depth > 8 { return Err(Error.Limit(at)); }
     if at == Slice.len(source) { return Err(Error.Unexpected(at)); }
@@ -303,7 +303,7 @@ fn value(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {all
 }
 
 /// Parse one complete UTF-8 JSON text. Numbers retain their exact lexical bytes.
-pub fn parse(source: &[i64]) -> Result<Value, Error> ! {alloc, panic} {
+pub fn parse(source: &[i64]) -> Result<Value, Error> ! {alloc} {
     if Slice.len(source) > 65536 { return Err(Error.Limit(65536)); }
     let Parsed { value: value, next: next } = value(source, 0, 0)?;
     let next = skip(source, next);
@@ -311,14 +311,14 @@ pub fn parse(source: &[i64]) -> Result<Value, Error> ! {alloc, panic} {
     Ok(value)
 }
 
-fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
     let mut out = out;
     let mut at = 0;
     while at < Bytes.len(text) { out = Bytes.push(out, Bytes.get(text, at)); at = at + 1; }
     out
 }
 
-fn quoted(text: Bytes, out: Bytes) -> Result<Bytes, Error> ! {alloc, panic} {
+fn quoted(text: Bytes, out: Bytes) -> Result<Bytes, Error> ! {alloc} {
     let mut out = Bytes.push(out, 34);
     let mut at = 0;
     while at < Bytes.len(&text) {
@@ -354,7 +354,7 @@ fn quoted(text: Bytes, out: Bytes) -> Result<Bytes, Error> ! {alloc, panic} {
     Ok(Bytes.push(out, 34))
 }
 
-fn emit(value: Value, out: Bytes, depth: i64) -> Result<Bytes, Error> ! {alloc, panic} {
+fn emit(value: Value, out: Bytes, depth: i64) -> Result<Bytes, Error> ! {alloc} {
     if depth > 8 { return Err(Error.Limit(0)); }
     match value {
         Value.Null => { let text = Bytes.from("null"); Ok(append(out, &text)) },
@@ -409,6 +409,6 @@ fn emit(value: Value, out: Bytes, depth: i64) -> Result<Bytes, Error> ! {alloc, 
 }
 
 /// Consume an owned tree and write compact JSON, validating user-built leaves.
-pub fn stringify(value: Value) -> Result<Bytes, Error> ! {alloc, panic} {
+pub fn stringify(value: Value) -> Result<Bytes, Error> ! {alloc} {
     emit(value, Bytes.with_capacity(256), 0)
 }

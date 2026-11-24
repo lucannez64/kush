@@ -14,13 +14,13 @@ pub const MAX_DEPTH: i64 = 8;
 
 /// Search with depths 1, 2, ... up to `MAX_DEPTH`; the proof and the depth
 /// it was found at, or `state.FAIL`.
-fn deepen(goal: i64) -> (i64, i64) ! {Goal, alloc, panic} {
+fn deepen(goal: i64) -> (i64, i64) ! {Goal, alloc} {
     let mut depth = 1;
     while depth <= MAX_DEPTH {
         let proof = handle Choose: i64 -> i64 as op with fn(
             n: i64,
             resume: multi fn(i64) -> i64 ! {},
-        ) -> i64 ! {panic} {
+        ) -> i64 ! {} {
             // Depth first: the first alternative that gives a proof wins.
             let mut i = 0;
             while i < n {
@@ -44,11 +44,11 @@ fn deepen(goal: i64) -> (i64, i64) ! {Goal, alloc, panic} {
 }
 
 /// Run the search with the engine's handler around it.
-pub fn prove(st: &mut State, goal: i64) -> (i64, i64) ! {alloc, panic} {
+pub fn prove(st: &mut State, goal: i64) -> (i64, i64) ! {alloc} {
     handle Goal: Query -> i64 with fn(
         q: Query,
         resume: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {alloc, panic} {
+    ) -> i64 ! {alloc} {
         resume(state.answer(st, q))
     } {
         deepen(goal)

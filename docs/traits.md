@@ -42,21 +42,21 @@ record receivers are described in the borrowing section:
 struct Point { x: i64, y: i64 }
 
 impl Point {
-    fn sum(self: Point) -> i64 ! {panic} {
+    fn sum(self: Point) -> i64 ! {} {
         self.x + self.y
     }
 
-    fn scale(self: Point, factor: i64) -> Point ! {panic} {
+    fn scale(self: Point, factor: i64) -> Point ! {} {
         Point { x: self.x * factor, y: self.y * factor }
     }
 }
 
 trait Describe {
-    fn describe(self: Self) -> i64 ! {panic};
+    fn describe(self: Self) -> i64 ! {};
 }
 
 impl Describe for Point {
-    fn describe(self: Self) -> i64 ! {panic} {
+    fn describe(self: Self) -> i64 ! {} {
         self.x * 10 + self.y
     }
 }
@@ -75,15 +75,15 @@ and `Grade` parameters:
 
 ```kush
 trait Convert<T> {
-    fn render(self: Self) -> T ! {panic};
+    fn render(self: Self) -> T ! {};
 }
 
 impl Convert<i64> for Point {
-    fn render(self: Self) -> i64 ! {panic} { self.x * 10 + self.y }
+    fn render(self: Self) -> i64 ! {} { self.x * 10 + self.y }
 }
 
 impl Convert<Bool> for Point {
-    fn render(self: Self) -> Bool ! {panic} { self.x == 0 }
+    fn render(self: Self) -> Bool ! {} { self.x == 0 }
 }
 ```
 
@@ -162,16 +162,16 @@ A trait method may declare a body instead of ending in `;`:
 
 ```kush
 trait Scaled {
-    fn base(self: Self) -> i64 ! {panic};
+    fn base(self: Self) -> i64 ! {};
 
-    fn scaled(self: Self, factor: i64) -> i64 ! {panic} {
+    fn scaled(self: Self, factor: i64) -> i64 ! {} {
         self.base() * factor
     }
 }
 
 struct Point { x: i64 }
 impl Scaled for Point {
-    fn base(self: Self) -> i64 ! {panic} { self.x + 1 }
+    fn base(self: Self) -> i64 ! {} { self.x + 1 }
     // `scaled` is inherited.
 }
 ```
@@ -308,7 +308,7 @@ Tests: `crates/kush/tests/simd_types.rs`.
 A generic type parameter may declare a declared trait as its bound:
 
 ```kush
-fn describe_via<T: Describe>(value: T) -> i64 ! {panic} {
+fn describe_via<T: Describe>(value: T) -> i64 ! {} {
     value.describe()
 }
 ```
@@ -323,7 +323,7 @@ A bound may carry trait arguments, and those arguments may mention the
 enclosing function's generic parameters:
 
 ```kush
-fn convert_point<T: Convert<i64>>(value: T) -> i64 ! {panic} {
+fn convert_point<T: Convert<i64>>(value: T) -> i64 ! {} {
     value.Convert::<i64>.render()
 }
 ```
@@ -357,8 +357,8 @@ struct Point { x: i64 }
 trait Scaled {
     type Out;
     const FACTOR: i64;
-    fn scaled(self: Self) -> Self.Out ! {panic};
-    fn bumped(self: Self) -> Self.Out ! {panic} {
+    fn scaled(self: Self) -> Self.Out ! {};
+    fn bumped(self: Self) -> Self.Out ! {} {
         self.scaled() + Self.FACTOR
     }
 }
@@ -366,7 +366,7 @@ trait Scaled {
 impl Scaled for Point {
     type Out = i64;
     const FACTOR: i64 = 3;
-    fn scaled(self: Self) -> i64 ! {panic} { self.x * Self.FACTOR }
+    fn scaled(self: Self) -> i64 ! {} { self.x * Self.FACTOR }
 }
 ```
 
@@ -421,11 +421,11 @@ An impl header may take ordinary type parameters:
 
 ```kush
 struct Wrapper<T> { value: T }
-trait Show { type Out; fn show(self: Self) -> Self.Out ! {panic}; }
+trait Show { type Out; fn show(self: Self) -> Self.Out ! {}; }
 
 impl<T> Show for Wrapper<T> {
     type Out = T;
-    fn show(self: Self) -> T ! {panic} { self.value }
+    fn show(self: Self) -> T ! {} { self.value }
 }
 ```
 
@@ -433,7 +433,7 @@ A parameter may carry one declared trait bound, forming a blanket impl:
 
 ```kush
 impl<T: Show> Loud for Wrapper<T> {
-    fn loud(self: Self) -> i64 ! {panic} { self.value.show() * 2 }
+    fn loud(self: Self) -> i64 ! {} { self.value.show() * 2 }
 }
 ```
 
@@ -442,7 +442,7 @@ Trait arguments may also be patterns over the impl parameters:
 ```kush
 impl<T> Convert<T> for Wrapper<T> {
     type Out = T;
-    fn render(self: Self) -> T ! {panic} { self.value }
+    fn render(self: Self) -> T ! {} { self.value }
 }
 ```
 
@@ -454,14 +454,14 @@ array lengths or `Nat` trait arguments. An impl header may declare `N: Nat` and
 
 ```kush
 struct Buffer<N: Nat> { data: [i64; N] }
-trait First { fn first(self: Self) -> i64 ! {panic}; }
+trait First { fn first(self: Self) -> i64 ! {}; }
 impl<N: Nat> First for Buffer<N> {
-    fn first(self: Self) -> i64 ! {panic} { self.data[0] }
+    fn first(self: Self) -> i64 ! {} { self.data[0] }
 }
 
-trait Weighted<G: Grade> { fn weighted(self: Self) -> i64 ! {panic}; }
+trait Weighted<G: Grade> { fn weighted(self: Self) -> i64 ! {}; }
 impl<G: Grade> Weighted<G> for Point {
-    fn weighted(self: Self) -> i64 ! {panic} { self.x }
+    fn weighted(self: Self) -> i64 ! {} { self.x }
 }
 ```
 
@@ -533,11 +533,11 @@ vtable, fat pointer, erased function pointer, or runtime allocation.
 struct Point { x: i64 }
 struct Flag { on: Bool }
 
-trait Describe { fn describe(self: Self) -> i64 ! {panic}; }
-impl Describe for Point { fn describe(self: Self) -> i64 ! {panic} { self.x } }
-impl Describe for Flag { fn describe(self: Self) -> i64 ! {panic} { if self.on { 1 } else { 0 } } }
+trait Describe { fn describe(self: Self) -> i64 ! {}; }
+impl Describe for Point { fn describe(self: Self) -> i64 ! {} { self.x } }
+impl Describe for Flag { fn describe(self: Self) -> i64 ! {} { if self.on { 1 } else { 0 } } }
 
-fn main() -> i64 ! {io, panic} {
+fn main() -> i64 ! {io} {
     let object: dyn Describe = Point { x: 9 };
     print_i64(object.describe());
     0

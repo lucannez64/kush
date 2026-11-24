@@ -12,13 +12,13 @@ fn window<'a>(view: &'a mut [i64]) -> Window<'a, i64> ! {} {
     Window { view: view, start: 2 }
 }
 
-fn tail<'a>(window: Window<'a, i64>) -> Window<'a, i64> ! {panic} {
+fn tail<'a>(window: Window<'a, i64>) -> Window<'a, i64> ! {} {
     let Window { view, start } = window;
     let child = &mut view[1..];
     Window { view: child, start: start + 1 }
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let mut values: [i64; 4] = [1, 2, 3, 4];
     let window = tail(window(&mut values[..]));
     let Window { view, start } = window;

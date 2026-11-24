@@ -4,7 +4,7 @@ use std.result.Result;
 use std.text;
 use otp_tui.adapter;
 
-pub fn append(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn append(out: Bytes, value: &Bytes) -> Bytes ! {alloc} {
     let mut result = out;
     let mut i = 0;
     while i < Bytes.len(value) {
@@ -15,7 +15,7 @@ pub fn append(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
 }
 
 // Keep selection valid after navigation, deletion, or an empty session.
-pub fn navigate(selected: i64, count: i64, event: i64) -> i64 ! {panic} {
+pub fn navigate(selected: i64, count: i64, event: i64) -> i64 ! {} {
     if count == 0 { return 0; }
     let mut next = selected;
     if event == 5 { next = next - 1; }
@@ -29,11 +29,11 @@ pub fn navigate(selected: i64, count: i64, event: i64) -> i64 ! {panic} {
     next
 }
 
-fn failure() -> Bytes ! {io, alloc, panic} {
+fn failure() -> Bytes ! {io, alloc} {
     match adapter.last_error() { Ok(message) => message, Err(_) => Bytes.from("Operation failed") }
 }
 
-pub fn frame(store: &adapter.Store, selected: i64, editing: Bool, input_len: i64, status: &Bytes, timestamp: i64, rows: i64) -> Bytes ! {io, alloc, panic} {
+pub fn frame(store: &adapter.Store, selected: i64, editing: Bool, input_len: i64, status: &Bytes, timestamp: i64, rows: i64) -> Bytes ! {io, alloc} {
     let mut out = Bytes.from("OTP TUI — Kush + Rust\nSession only: entries disappear on exit.\n\n  #  Label                         Code        Remaining\n----------------------------------------------------------\n");
     let count = adapter.count(store);
     let mut i = 0;
@@ -69,7 +69,7 @@ pub fn frame(store: &adapter.Store, selected: i64, editing: Bool, input_len: i64
     append(out, &Bytes.from("\n"))
 }
 
-pub fn run(store: &adapter.Store, terminal: adapter.Terminal) -> Result<Unit, i64> ! {io, alloc, panic} {
+pub fn run(store: &adapter.Store, terminal: adapter.Terminal) -> Result<Unit, i64> ! {io, alloc} {
     let mut selected = 0;
     let mut editing = false;
     let mut input = Bytes.from("");

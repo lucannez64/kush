@@ -3,11 +3,11 @@ module std.path;
 /// Byte-oriented POSIX path helpers. The host filesystem calls accept the same
 /// bytes; no normalization or symlink resolution is performed here.
 
-pub fn is_absolute(path: &Bytes) -> Bool ! {panic} {
+pub fn is_absolute(path: &Bytes) -> Bool ! {} {
     Bytes.len(path) > 0 && Bytes.get(path, 0) == 47
 }
 
-pub fn basename(path: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn basename(path: &Bytes) -> Bytes ! {alloc} {
     let n = Bytes.len(path);
     let mut end = n;
     while end > 0 && Bytes.get(path, end - 1) == 47 { end = end - 1; }
@@ -23,7 +23,7 @@ pub fn basename(path: &Bytes) -> Bytes ! {alloc, panic} {
     out
 }
 
-pub fn dirname(path: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn dirname(path: &Bytes) -> Bytes ! {alloc} {
     let n = Bytes.len(path);
     let mut end = n;
     while end > 1 && Bytes.get(path, end - 1) == 47 { end = end - 1; }
@@ -39,7 +39,7 @@ pub fn dirname(path: &Bytes) -> Bytes ! {alloc, panic} {
     out
 }
 
-pub fn extension(path: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn extension(path: &Bytes) -> Bytes ! {alloc} {
     let name = basename(path);
     let n = Bytes.len(&name);
     let mut at = n;
@@ -59,7 +59,7 @@ pub fn extension(path: &Bytes) -> Bytes ! {alloc, panic} {
     Bytes.with_capacity(0)
 }
 
-fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc} {
     let mut out = out;
     let mut i = 0;
     while i < Bytes.len(text) {
@@ -69,7 +69,7 @@ fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
     out
 }
 
-fn copy(text: &Bytes) -> Bytes ! {alloc, panic} {
+fn copy(text: &Bytes) -> Bytes ! {alloc} {
     let mut out = Bytes.with_capacity(Bytes.len(text));
     let mut i = 0;
     while i < Bytes.len(text) {
@@ -81,7 +81,7 @@ fn copy(text: &Bytes) -> Bytes ! {alloc, panic} {
 
 /// Join two paths with exactly one separator. An absolute second component
 /// replaces the first.
-pub fn join(first: &Bytes, second: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn join(first: &Bytes, second: &Bytes) -> Bytes ! {alloc} {
     if is_absolute(second) { return copy(second); }
     if Bytes.len(first) == 0 { return copy(second); }
     if Bytes.len(second) == 0 { return copy(first); }

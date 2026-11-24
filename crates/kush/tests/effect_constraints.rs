@@ -2,7 +2,7 @@
 //!
 //! `<e: Effects - alloc>` and `<e: Effects - (alloc | suspend)>` restrict which
 //! concrete rows a specialization may supply. Separately, a declared row may
-//! subtract effects (`{e - io}`) inside the finite four-bit row algebra.
+//! subtract effects (`{e - io}`) inside the finite row algebra.
 use kush::executable::{MemoryStats, check};
 
 fn run(source: &str) -> (i64, MemoryStats) {
@@ -55,21 +55,21 @@ fn native_agrees(source: &str, expected: i64) {
 
 #[test]
 fn inferred_callback_row_must_respect_the_exclusion() {
-    let source = "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+    let source = "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
                  f(x)
              }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }";
+             fn main() -> i64 ! {} { apply(inc, 41) }";
     assert_eq!(value(source), 42);
     native_agrees(source, 42);
     // An explicit empty/pure row is also allowed.
     assert_eq!(
         value(
             "fn id(x: i64) -> i64 ! {} { x }
-             fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+             fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
                  f(x)
              }
-             fn main() -> i64 ! {panic} { apply(id, 42) }"
+             fn main() -> i64 ! {} { apply(id, 42) }"
         ),
         42
     );
@@ -79,32 +79,32 @@ fn inferred_callback_row_must_respect_the_exclusion() {
 fn explicit_effect_arguments_are_checked() {
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
                  f(x)
              }
-             fn main() -> i64 ! {panic} { apply::<panic>(inc, 41) }"
+             fn main() -> i64 ! {io} { apply::<io>(inc, 41) }"
         ),
         42
     );
     assert_eq!(
         value(
-            "fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+            "fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
              fn apply<e: Effects - (alloc | suspend)>(
                  f: fn(i64) -> i64 ! {e}, x: i64
-             ) -> i64 ! {panic, e} { f(x) }
-             fn main() -> i64 ! {io, panic} { apply::<io | panic>(io_inc, 41) }"
+             ) -> i64 ! {e} { f(x) }
+             fn main() -> i64 ! {io} { apply::<io>(io_inc, 41) }"
         ),
         42
     );
     // The same union may be written without redundant parentheses.
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
              fn apply<e: Effects - alloc | suspend>(
                  f: fn(i64) -> i64 ! {e}, x: i64
-             ) -> i64 ! {panic, e} { f(x) }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+             ) -> i64 ! {e} { f(x) }
+             fn main() -> i64 ! {} { apply(inc, 41) }"
         ),
         42
     );
@@ -117,22 +117,22 @@ fn noalloc_and_nosuspend_contracts_accept_fully_constrained_rows() {
     assert_eq!(
         value(
             "
-             fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+             fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
                  f(x)
              }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { apply(inc, 41) }"
         ),
         42
     );
     assert_eq!(
         value(
             "
-             fn apply<e: Effects - suspend>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+             fn apply<e: Effects - suspend>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
                  f(x)
              }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { apply(inc, 41) }"
         ),
         42
     );
@@ -141,9 +141,9 @@ fn noalloc_and_nosuspend_contracts_accept_fully_constrained_rows() {
             "
              fn apply<e: Effects - (alloc | suspend)>(
                  f: fn(i64) -> i64 ! {e}, x: i64
-             ) -> i64 ! {panic, e} { f(x) }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+             ) -> i64 ! {e} { f(x) }
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { apply(inc, 41) }"
         ),
         42
     );
@@ -151,9 +151,9 @@ fn noalloc_and_nosuspend_contracts_accept_fully_constrained_rows() {
         "
          fn apply<e: Effects - (alloc | suspend)>(
              f: fn(i64) -> i64 ! {e}, x: i64
-         ) -> i64 ! {panic, e} { f(x) }
-         fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn main() -> i64 ! {panic} { apply(inc, 41) }",
+         ) -> i64 ! {e} { f(x) }
+         fn inc(x: i64) -> i64 ! {} { x + 1 }
+         fn main() -> i64 ! {} { apply(inc, 41) }",
         42,
     );
 }
@@ -162,38 +162,38 @@ fn noalloc_and_nosuspend_contracts_accept_fully_constrained_rows() {
 fn a_forwarded_row_is_checked_at_the_inner_specialization() {
     assert_eq!(
         value(
-            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn inner<d: Effects - alloc>(f: fn(i64) -> i64 ! {d}, x: i64) -> i64 ! {panic, d} {
+            "fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn inner<d: Effects - alloc>(f: fn(i64) -> i64 ! {d}, x: i64) -> i64 ! {d} {
                  f(x)
              }
-             fn outer<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+             fn outer<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
                  inner::<e>(f, x)
              }
-             fn main() -> i64 ! {panic} { outer(inc, 41) }"
+             fn main() -> i64 ! {} { outer(inc, 41) }"
         ),
         42
     );
     rejects(
-        "fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
-         fn inner<d: Effects - alloc>(f: fn(i64) -> i64 ! {d}, x: i64) -> i64 ! {panic, d} {
+        "fn alloc_id(x: i64) -> i64 ! {alloc} { x }
+         fn inner<d: Effects - alloc>(f: fn(i64) -> i64 ! {d}, x: i64) -> i64 ! {d} {
              f(x)
          }
-         fn outer<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+         fn outer<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
              inner::<e>(f, x)
          }
-         fn main() -> i64 ! {alloc, panic} { outer(alloc_id, 1) }",
+         fn main() -> i64 ! {alloc} { outer(alloc_id, 1) }",
         "is excluded by",
     );
     // Inference of the inner row from the forwarded callable is checked too.
     rejects(
-        "fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
-         fn inner<d: Effects - alloc>(f: fn(i64) -> i64 ! {d}, x: i64) -> i64 ! {panic, d} {
+        "fn alloc_id(x: i64) -> i64 ! {alloc} { x }
+         fn inner<d: Effects - alloc>(f: fn(i64) -> i64 ! {d}, x: i64) -> i64 ! {d} {
              f(x)
          }
-         fn outer<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+         fn outer<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
              inner(f, x)
          }
-         fn main() -> i64 ! {alloc, panic} { outer(alloc_id, 1) }",
+         fn main() -> i64 ! {alloc} { outer(alloc_id, 1) }",
         "is excluded by",
     );
 }
@@ -201,28 +201,28 @@ fn a_forwarded_row_is_checked_at_the_inner_specialization() {
 #[test]
 fn allocating_or_suspending_specializations_are_rejected() {
     rejects(
-        "fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
-         fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+        "fn alloc_id(x: i64) -> i64 ! {alloc} { x }
+         fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
              f(x)
          }
-         fn main() -> i64 ! {alloc, panic} { apply::<alloc | panic>(alloc_id, 1) }",
+         fn main() -> i64 ! {alloc} { apply::<alloc>(alloc_id, 1) }",
         "is excluded by",
     );
     rejects(
-        "fn suspend_id(x: i64) -> i64 ! {suspend, panic} { x }
-         fn apply<e: Effects - suspend>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+        "fn suspend_id(x: i64) -> i64 ! {suspend} { x }
+         fn apply<e: Effects - suspend>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
              f(x)
          }
-         fn main() -> i64 ! {suspend, panic} { apply::<suspend | panic>(suspend_id, 1) }",
+         fn main() -> i64 ! {suspend} { apply::<suspend>(suspend_id, 1) }",
         "is excluded by",
     );
     // An inferred row that includes the excluded effect is rejected too.
     rejects(
-        "fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
-         fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+        "fn alloc_id(x: i64) -> i64 ! {alloc} { x }
+         fn apply<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
              f(x)
          }
-         fn main() -> i64 ! {alloc, panic} { apply(alloc_id, 1) }",
+         fn main() -> i64 ! {alloc} { apply(alloc_id, 1) }",
         "is excluded by",
     );
 }
@@ -233,22 +233,22 @@ fn removed_contract_attributes_point_at_the_row() {
     // contract; the attributes are rejected with a pointer to it.
     rejects(
         "#[noalloc]
-         fn poly<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
-         fn main() -> i64 ! {panic} { 42 }",
+         fn poly<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}) -> i64 ! {e} { f(1) }
+         fn main() -> i64 ! {} { 42 }",
         "#[noalloc] was removed: the effect row is the contract",
     );
     rejects(
         "#[nosuspend]
          fn poly(x: i64) -> i64 ! {} { x }
-         fn main() -> i64 ! {panic} { 42 }",
+         fn main() -> i64 ! {} { 42 }",
         "exclude it from the row variable, as in 'e: Effects - suspend'",
     );
     // The row alone keeps the promise: an excluded variable cannot be
     // specialized with the effect.
     rejects(
-        "fn poly<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
-         fn grow(x: i64) -> i64 ! {alloc, panic} { Box.take(Box.new(x)) }
-         fn main() -> i64 ! {alloc, panic} { poly(grow) }",
+        "fn poly<e: Effects - alloc>(f: fn(i64) -> i64 ! {e}) -> i64 ! {e} { f(1) }
+         fn grow(x: i64) -> i64 ! {alloc} { Box.take(Box.new(x)) }
+         fn main() -> i64 ! {alloc} { poly(grow) }",
         "is excluded by",
     );
 }
@@ -256,38 +256,38 @@ fn removed_contract_attributes_point_at_the_row() {
 #[test]
 fn constraints_are_rejected_on_non_effects_binders_and_unsupported_declarations() {
     rejects(
-        "fn f<T: Type - alloc>(x: T) -> T ! {panic} { x }
-         fn main() -> i64 ! {panic} { 0 }",
+        "fn f<T: Type - alloc>(x: T) -> T ! {} { x }
+         fn main() -> i64 ! {} { 0 }",
         "effect exclusions require an effect-row binder",
     );
     rejects(
         "type Mapper<e: Effects - alloc> = fn(i64) -> i64 ! {e};
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "only supported on executable function and method effect binders",
     );
     rejects(
         "struct S<e: Effects - alloc> { x: i64 }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "only supported on executable function and method effect binders",
     );
     rejects(
         "enum E<e: Effects - alloc> { A }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "only supported on executable function and method effect binders",
     );
     rejects(
         "trait T<e: Effects - alloc> { fn m(self: Self) -> i64 ! {e}; }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "only supported on executable function and method effect binders",
     );
     rejects(
         "total fn f<e: Effects - alloc>(x: i64) -> i64 ! {} { x }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "only supported on executable function and method effect binders",
     );
     rejects(
         "prop P<e: Effects - alloc> { Mk }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "only supported on executable function and method effect binders",
     );
 }
@@ -296,33 +296,33 @@ fn constraints_are_rejected_on_non_effects_binders_and_unsupported_declarations(
 fn effect_exclusions_must_name_concrete_effects() {
     rejects(
         "fn f<e: Effects - T, T: Type>(x: i64) -> i64 ! {e} { x }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "unknown name 'T'",
     );
     // An in-scope effect or type variable is not a concrete effect.
     rejects(
         "fn f<T: Type, e: Effects - T>(x: i64) -> i64 ! {e} { x }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "is not a concrete effect",
     );
     rejects(
         "fn f<d: Effects, e: Effects - d>(x: i64) -> i64 ! {e} { x }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "is not a concrete effect",
     );
     rejects(
         "fn f<e: Effects - NoSuchEffect>(x: i64) -> i64 ! {e} { x }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "unknown name 'NoSuchEffect'",
     );
     rejects(
         "fn f<e: Effects - i64>(x: i64) -> i64 ! {e} { x }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "is not a concrete effect",
     );
     rejects(
         "fn f<e: Effects - Vec>(x: i64) -> i64 ! {e} { x }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "is not a concrete effect",
     );
 }
@@ -334,15 +334,15 @@ fn trait_and_impl_method_contracts_include_the_constraint() {
             "trait Apply {
                  fn apply<e: Effects - alloc>(
                      self: Self, f: fn(i64) -> i64 ! {e}
-                 ) -> i64 ! {panic, e};
+                 ) -> i64 ! {e};
              }
              impl Apply for i64 {
                  fn apply<e: Effects - alloc>(
                      self: Self, f: fn(i64) -> i64 ! {e}
-                 ) -> i64 ! {panic, e} { f(self) }
+                 ) -> i64 ! {e} { f(self) }
              }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { let n = 41; n.apply(inc) }"
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { let n = 41; n.apply(inc) }"
         ),
         42
     );
@@ -353,11 +353,11 @@ fn trait_and_impl_method_contracts_include_the_constraint() {
             "trait Apply {
                  fn apply<e: Effects - alloc>(
                      self: Self, f: fn(i64) -> i64 ! {e}
-                 ) -> i64 ! {panic, e} { f(self) }
+                 ) -> i64 ! {e} { f(self) }
              }
              impl Apply for i64 {}
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { let n = 41; n.apply(inc) }"
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { let n = 41; n.apply(inc) }"
         ),
         42
     );
@@ -367,15 +367,15 @@ fn trait_and_impl_method_contracts_include_the_constraint() {
             "trait Apply {
                  fn apply<e: Effects - (alloc | suspend)>(
                      self: Self, f: fn(i64) -> i64 ! {e}
-                 ) -> i64 ! {panic, e};
+                 ) -> i64 ! {e};
              }
              impl Apply for i64 {
                  fn apply<e: Effects - (suspend | alloc)>(
                      self: Self, f: fn(i64) -> i64 ! {e}
-                 ) -> i64 ! {panic, e} { f(self) }
+                 ) -> i64 ! {e} { f(self) }
              }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { let n = 41; n.apply(inc) }"
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { let n = 41; n.apply(inc) }"
         ),
         42
     );
@@ -384,28 +384,28 @@ fn trait_and_impl_method_contracts_include_the_constraint() {
         "trait Apply {
              fn apply<e: Effects - alloc>(
                  self: Self, f: fn(i64) -> i64 ! {e}
-             ) -> i64 ! {panic, e};
+             ) -> i64 ! {e};
          }
          impl Apply for i64 {
              fn apply<e: Effects>(
                  self: Self, f: fn(i64) -> i64 ! {e}
-             ) -> i64 ! {panic, e} { f(self) }
+             ) -> i64 ! {e} { f(self) }
          }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "does not match the trait signature exactly",
     );
     rejects(
         "trait Apply {
              fn apply<e: Effects>(
                  self: Self, f: fn(i64) -> i64 ! {e}
-             ) -> i64 ! {panic, e};
+             ) -> i64 ! {e};
          }
          impl Apply for i64 {
              fn apply<e: Effects - alloc>(
                  self: Self, f: fn(i64) -> i64 ! {e}
-             ) -> i64 ! {panic, e} { f(self) }
+             ) -> i64 ! {e} { f(self) }
          }
-         fn main() -> i64 ! {panic} { 0 }",
+         fn main() -> i64 ! {} { 0 }",
         "does not match the trait signature exactly",
     );
 }
@@ -417,35 +417,35 @@ fn trait_and_impl_method_contracts_include_the_constraint() {
 #[test]
 fn row_subtraction_removes_concrete_effects_from_a_polymorphic_row() {
     let source = "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
-                      -> i64 ! {panic, e - io} { f(x) }
-                  fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-                  fn main() -> i64 ! {panic} { apply(inc, 41) }";
+                      -> i64 ! {e - io} { f(x) }
+                  fn inc(x: i64) -> i64 ! {} { x + 1 }
+                  fn main() -> i64 ! {} { apply(inc, 41) }";
     assert_eq!(value(source), 42);
     native_agrees(source, 42);
     // A union on the right of `-` removes every named effect.
     assert_eq!(
         value(
             "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
-                 -> i64 ! {panic, e - (io | alloc)} { f(x) }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+                 -> i64 ! {e - (io | alloc)} { f(x) }
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { apply(inc, 41) }"
         ),
         42
     );
     // Subtraction is part of a higher-order row too: the callback may not be
     // specialized with the removed effect.
     rejects(
-        "fn take<e: Effects>(f: fn(i64) -> i64 ! {e - io}) -> i64 ! {panic, e} { f(1) }
-         fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
-         fn main() -> i64 ! {io, panic} { take(io_inc) }",
+        "fn take<e: Effects>(f: fn(i64) -> i64 ! {e - io}) -> i64 ! {e} { f(1) }
+         fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
+         fn main() -> i64 ! {io} { take(io_inc) }",
         "is excluded by",
     );
     // The checked function body still needs every effect it actually performs;
     // subtraction in the declared row cannot hide the callback's io.
     rejects(
-        "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e - io} { f(1) }
-         fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
-         fn main() -> i64 ! {io, panic} { apply(io_inc) }",
+        "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}) -> i64 ! {e - io} { f(1) }
+         fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
+         fn main() -> i64 ! {io} { apply(io_inc) }",
         "requires effects {io}",
     );
     // A row subtraction that leaves a concrete effect is still checked by the
@@ -453,9 +453,9 @@ fn row_subtraction_removes_concrete_effects_from_a_polymorphic_row() {
     assert_eq!(
         value(
             "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
-                 -> i64 ! {panic, e - io} { f(x) }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { apply::<panic>(inc, 41) }"
+                 -> i64 ! {e - io} { f(x) }
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {alloc} { apply::<alloc>(inc, 41) }"
         ),
         42
     );
@@ -463,21 +463,21 @@ fn row_subtraction_removes_concrete_effects_from_a_polymorphic_row() {
 
 #[test]
 fn row_subtraction_solves_principal_minimal_rows() {
-    // `e - io` only needs to cover panic, so the principal (least) solution is
-    // e = {panic}; the solver does not arbitrarily pick a larger row.
+    // `e - io` only needs to cover alloc, so the principal (least) solution is
+    // e = {alloc}; the solver does not arbitrarily pick a larger row.
     let source = "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e})
-                      -> i64 ! {panic, e - io} { f(1) }
-                  fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-                  fn main() -> i64 ! {panic} { apply(inc) }";
+                      -> i64 ! {e - io} { f(1) }
+                  fn inc(x: i64) -> i64 ! {alloc} { x + 1 }
+                  fn main() -> i64 ! {alloc} { apply(inc) }";
     assert_eq!(value(source), 2);
-    // Two unbound rows with subtraction remain in the finite four-bit
+    // Two unbound rows with subtraction remain in the finite builtin
     // universe: the solver enumerates all assignments and rejects incomparable
     // minima rather than choosing one.
     rejects(
         "fn apply<e: Effects, f: Effects>(g: fn(i64) -> i64 ! {e - io, f})
-             -> i64 ! {panic, e, f} { g(1) }
-         fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-         fn main() -> i64 ! {panic} { apply(inc) }",
+             -> i64 ! {e, f} { g(1) }
+         fn inc(x: i64) -> i64 ! {alloc} { x + 1 }
+         fn main() -> i64 ! {alloc} { apply(inc) }",
         "incomparable minimal",
     );
 }
@@ -491,30 +491,30 @@ fn unconstrained_rows_default_to_the_principal_lower_bound() {
     // No callable argument mentions `e`, so the principal choice is `{}`.
     assert_eq!(
         value(
-            "fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { x }
-             fn main() -> i64 ! {panic} { apply(41) + 1 }"
+            "fn apply<e: Effects>(x: i64) -> i64 ! {e} { x }
+             fn main() -> i64 ! {} { apply(41) + 1 }"
         ),
         42
     );
     // A required lower bound defaults to exactly the required bits.
     assert_eq!(
         value(
-            "fn apply<e: Effects + io>(x: i64) -> i64 ! {panic, e} { x }
-             fn main() -> i64 ! {io, panic} { apply(41) + 1 }"
+            "fn apply<e: Effects + io>(x: i64) -> i64 ! {e} { x }
+             fn main() -> i64 ! {io} { apply(41) + 1 }"
         ),
         42
     );
     rejects(
-        "fn apply<e: Effects + io>(x: i64) -> i64 ! {panic, e} { x }
-         fn main() -> i64 ! {panic} { apply(41) }",
+        "fn apply<e: Effects + io>(x: i64) -> i64 ! {e} { x }
+         fn main() -> i64 ! {} { apply(41) }",
         "requires effects {io}",
     );
     // Defaulting never hides the body: the body is checked under the chosen
     // empty specialization.
     rejects(
-        "fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
-         fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { alloc_id(x) }
-         fn main() -> i64 ! {alloc, panic} { apply(41) }",
+        "fn alloc_id(x: i64) -> i64 ! {alloc} { x }
+         fn apply<e: Effects>(x: i64) -> i64 ! {e} { alloc_id(x) }
+         fn main() -> i64 ! {alloc} { apply(41) }",
         "requires effects {alloc}",
     );
 }
@@ -522,24 +522,24 @@ fn unconstrained_rows_default_to_the_principal_lower_bound() {
 #[test]
 fn recursive_row_expressions_share_one_variable_with_subtraction() {
     let source = r#"
-        fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
-        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
+        fn inc(x: i64) -> i64 ! {} { x + 1 }
         fn split<e: Effects>(
             f: fn(i64) -> i64 ! {e},
             g: fn(i64) -> i64 ! {e - io},
-        ) -> i64 ! {panic, e} { f(g(1)) }
-        fn main() -> i64 ! {io, panic} { split(io_inc, inc) }"#;
+        ) -> i64 ! {e} { f(g(1)) }
+        fn main() -> i64 ! {io} { split(io_inc, inc) }"#;
     assert_eq!(value(source), 3);
     native_agrees(source, 3);
     // The same variable cannot simultaneously require `io` and subtract it
     // from the second callback's row when the second callback performs it.
     rejects(
-        "fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        "fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
          fn split<e: Effects>(
              f: fn(i64) -> i64 ! {e},
              g: fn(i64) -> i64 ! {e - io},
-         ) -> i64 ! {panic, e} { f(g(1)) }
-         fn main() -> i64 ! {io, panic} { split(io_inc, io_inc) }",
+         ) -> i64 ! {e} { f(g(1)) }
+         fn main() -> i64 ! {io} { split(io_inc, io_inc) }",
         "no specialization of the effect row parameters",
     );
 }
@@ -549,37 +549,37 @@ fn nested_difference_rows_are_finite_and_checked() {
     // Union and subtraction nest arbitrarily; `(e | alloc) - io - alloc`
     // leaves exactly `e - io`.
     let source = r#"
-        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn inc(x: i64) -> i64 ! {} { x + 1 }
         fn take<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
-            -> i64 ! {panic, (e | alloc) - io - alloc} { f(x) }
-        fn main() -> i64 ! {panic} { take(inc, 41) }"#;
+            -> i64 ! {(e | alloc) - io - alloc} { f(x) }
+        fn main() -> i64 ! {} { take(inc, 41) }"#;
     assert_eq!(value(source), 42);
     native_agrees(source, 42);
     rejects(
-        "fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        "fn io_inc(x: i64) -> i64 ! {io} { x + 1 }
          fn take<e: Effects>(f: fn(i64) -> i64 ! {e})
-             -> i64 ! {panic, (e | alloc) - io} { f(1) }
-         fn main() -> i64 ! {io, panic} { take(io_inc) }",
+             -> i64 ! {(e | alloc) - io} { f(1) }
+         fn main() -> i64 ! {io} { take(io_inc) }",
         "requires effects {",
     );
 }
 
 #[test]
 fn effect_row_aliases_expand_transparently() {
-    let source = "effect row IoPanic = {io, panic};
-                  fn io_inc(x: i64) -> i64 ! {IoPanic} { x + 1 }
+    let source = "effect row IoAlloc = {io, alloc};
+                  fn io_inc(x: i64) -> i64 ! {IoAlloc} { x + 1 }
                   fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
-                      -> i64 ! {panic, e} { f(x) }
-                  fn main() -> i64 ! {IoPanic} { apply(io_inc, 41) }";
+                      -> i64 ! {e} { f(x) }
+                  fn main() -> i64 ! {IoAlloc} { apply(io_inc, 41) }";
     assert_eq!(value(source), 42);
     native_agrees(source, 42);
     // An alias may name another alias, and may be unioned with concrete names.
     assert_eq!(
         value(
             "effect row Io = {io};
-             effect row IoPanic = {Io, panic};
-             fn inc(x: i64) -> i64 ! {IoPanic} { x + 1 }
-             fn main() -> i64 ! {Io | panic} { inc(41) }"
+             effect row IoAlloc = {Io, alloc};
+             fn inc(x: i64) -> i64 ! {IoAlloc} { x + 1 }
+             fn main() -> i64 ! {Io | alloc} { inc(41) }"
         ),
         42
     );
@@ -588,9 +588,9 @@ fn effect_row_aliases_expand_transparently() {
         value(
             "effect row Io = {io};
              fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
-                 -> i64 ! {panic, e - Io} { f(x) }
-             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+                 -> i64 ! {e - Io} { f(x) }
+             fn inc(x: i64) -> i64 ! {} { x + 1 }
+             fn main() -> i64 ! {} { apply(inc, 41) }"
         ),
         42
     );
@@ -599,18 +599,18 @@ fn effect_row_aliases_expand_transparently() {
 #[test]
 fn effect_row_aliases_cannot_hide_required_effects() {
     rejects(
-        "effect row IoPanic = {io, panic};
-         fn io_inc(x: i64) -> i64 ! {IoPanic} { x + 1 }
-         fn main() -> i64 ! {panic} { io_inc(1) }",
+        "effect row IoAlloc = {io, alloc};
+         fn io_inc(x: i64) -> i64 ! {IoAlloc} { x + 1 }
+         fn main() -> i64 ! {alloc} { io_inc(1) }",
         "requires effects {io}",
     );
     // An alias used in a subtraction position is still checked by the body.
     rejects(
         "effect row Io = {io};
-         fn io_id(x: i64) -> i64 ! {io, panic} { x }
+         fn io_id(x: i64) -> i64 ! {io} { x }
          fn apply<e: Effects>(f: fn(i64) -> i64 ! {e})
-             -> i64 ! {panic, e - Io} { f(1) }
-         fn main() -> i64 ! {io, panic} { apply(io_id) }",
+             -> i64 ! {e - Io} { f(1) }
+         fn main() -> i64 ! {io} { apply(io_id) }",
         "requires effects {io}",
     );
 }
@@ -630,7 +630,7 @@ fn effect_row_aliases_are_finite_and_cannot_take_arguments() {
     );
     rejects(
         "effect row Io = {io};
-         fn main() -> i64 ! {panic} { let x: Io = 1; x }",
+         fn main() -> i64 ! {} { let x: Io = 1; x }",
         "is not a runtime type",
     );
 }
@@ -642,10 +642,10 @@ fn effect_row_aliases_are_finite_and_cannot_take_arguments() {
 #[test]
 fn per_bit_solver_handles_more_than_three_unbound_rows() {
     let source = r#"
-        fn f1(x: i64) -> i64 ! {io, panic} { x + 1 }
-        fn f2(x: i64) -> i64 ! {alloc, panic} { x + 1 }
-        fn f3(x: i64) -> i64 ! {suspend, panic} { x + 1 }
-        fn f4(x: i64) -> i64 ! {panic} { x + 1 }
+        fn f1(x: i64) -> i64 ! {io} { x + 1 }
+        fn f2(x: i64) -> i64 ! {alloc} { x + 1 }
+        fn f3(x: i64) -> i64 ! {suspend} { x + 1 }
+        fn f4(x: i64) -> i64 ! {} { x + 1 }
         fn f5(x: i64) -> i64 ! {} { x }
         fn five<
             e1: Effects,
@@ -660,10 +660,10 @@ fn per_bit_solver_handles_more_than_three_unbound_rows() {
             g4: fn(i64) -> i64 ! {e4},
             g5: fn(i64) -> i64 ! {e5},
             x: i64,
-        ) -> i64 ! {panic, e1, e2, e3, e4, e5} {
+        ) -> i64 ! {e1, e2, e3, e4, e5} {
             g5(g4(g3(g2(g1(x)))))
         }
-        fn main() -> i64 ! {io, alloc, suspend, panic} {
+        fn main() -> i64 ! {io, alloc, suspend} {
             five(f1, f2, f3, f4, f5, 40)
         }"#;
     assert_eq!(value(source), 44);
@@ -672,10 +672,10 @@ fn per_bit_solver_handles_more_than_three_unbound_rows() {
     // that omitted io, proving the solver still checks every bit.
     rejects(
         r#"
-        fn f1(x: i64) -> i64 ! {io, panic} { x + 1 }
-        fn f2(x: i64) -> i64 ! {panic} { x + 1 }
-        fn f3(x: i64) -> i64 ! {panic} { x + 1 }
-        fn f4(x: i64) -> i64 ! {panic} { x + 1 }
+        fn f1(x: i64) -> i64 ! {io} { x + 1 }
+        fn f2(x: i64) -> i64 ! {} { x + 1 }
+        fn f3(x: i64) -> i64 ! {} { x + 1 }
+        fn f4(x: i64) -> i64 ! {} { x + 1 }
         fn f5(x: i64) -> i64 ! {} { x }
         fn five<
             e1: Effects,
@@ -690,10 +690,10 @@ fn per_bit_solver_handles_more_than_three_unbound_rows() {
             g4: fn(i64) -> i64 ! {e4},
             g5: fn(i64) -> i64 ! {e5},
             x: i64,
-        ) -> i64 ! {panic, e1, e2, e3, e4, e5} {
+        ) -> i64 ! {e1, e2, e3, e4, e5} {
             g5(g4(g3(g2(g1(x)))))
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             five(f1, f2, f3, f4, f5, 40)
         }"#,
         "requires effects {io}",
@@ -707,13 +707,13 @@ fn declared_effects_use_bounded_per_bit_solving_for_eight_full_rows() {
         effect D: i64 -> i64; effect E: i64 -> i64; effect F: i64 -> i64;
         effect G: i64 -> i64; effect H: i64 -> i64; effect I: i64 -> i64;
         effect J: i64 -> i64; effect K: i64 -> i64; effect L: i64 -> i64;
-        fn all() -> i64 ! {A,B,C,D,E,F,G,H,I,J,K,L,panic,io,alloc,suspend} {0}
+        fn all() -> i64 ! {A, B, C, D, E, F, G, H, I, J, K, L, io, alloc, suspend} {0}
         fn f<e1: Effects, e2: Effects, e3: Effects, e4: Effects,
              e5: Effects, e6: Effects, e7: Effects, e8: Effects>(
              a: fn() -> i64 ! {e1}, b: fn() -> i64 ! {e2}, c: fn() -> i64 ! {e3},
              d: fn() -> i64 ! {e4}, e: fn() -> i64 ! {e5}, g: fn() -> i64 ! {e6},
-             h: fn() -> i64 ! {e7}, i: fn() -> i64 ! {e8}) -> i64 ! {panic} {0}
-        fn main() -> i64 ! {panic} {f(all,all,all,all,all,all,all,all)}
+             h: fn() -> i64 ! {e7}, i: fn() -> i64 ! {e8}) -> i64 ! {} {0}
+        fn main() -> i64 ! {} {f(all,all,all,all,all,all,all,all)}
     "#;
     check(source).unwrap();
 }

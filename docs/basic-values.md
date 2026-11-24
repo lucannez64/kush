@@ -52,8 +52,8 @@ Explicit conversion forms are builtins, not implicit coercions:
 The target comes from the expected type or an explicit `::<T>`. The
 Option-returning forms require the conventional `Option<T>` enum in scope.
 `u64.MAX`, `i32.MIN`, and the corresponding constants for every width are
-available. Integer arithmetic requires the `panic` effect; `print_int` (any
-integer width) requires `io` and `panic`.
+available. Integer arithmetic may panic on overflow (`panic` is not an effect, so it
+adds nothing to the row); `print_int` (any integer width) requires `io`.
 
 ## Char
 
@@ -139,7 +139,7 @@ representation as `Bytes`. It is a distinct static type, not an alias:
 arbitrary `Bytes` cannot be passed where a `String` is expected.
 
 A string literal is a `String` value and allocates one buffer; it requires the
-`alloc` and `panic` effects. `String.from("literal")` accepts exactly one
+`alloc` effect. `String.from("literal")` accepts exactly one
 literal and has the same effect contract. It rejects a runtime value; use the
 checked conversion instead.
 

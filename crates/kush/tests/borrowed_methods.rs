@@ -58,17 +58,17 @@ fn inherent_shared_and_exclusive_receivers_update_in_both_backends() {
         r#"
         struct Point { x: i64, y: i64 }
         impl Point {
-            fn sum(self: &Self) -> i64 ! {panic} { self.x + self.y }
-            fn sugar_sum(&self) -> i64 ! {panic} { self.x + self.y }
-            fn bump(&mut self, by: i64) -> Unit ! {panic} {
+            fn sum(self: &Self) -> i64 ! {} { self.x + self.y }
+            fn sugar_sum(&self) -> i64 ! {} { self.x + self.y }
+            fn bump(&mut self, by: i64) -> Unit ! {} {
                 self.x = self.x + by;
                 self.y = self.y + by;
             }
-            fn bump_y(self: &mut Self, by: i64) -> Unit ! {panic} {
+            fn bump_y(self: &mut Self, by: i64) -> Unit ! {} {
                 self.y = self.y + by;
             }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut p = Point { x: 1, y: 2 };
             print_i64(p.sum());
             print_i64(p.sugar_sum());
@@ -89,12 +89,12 @@ fn ordinary_record_reference_parameters_read_and_write() {
     agrees(
         r#"
         struct Point { x: i64, y: i64 }
-        fn sum(p: &Point) -> i64 ! {panic} { p.x + p.y }
-        fn shift(p: &mut Point, by: i64) -> Unit ! {panic} {
+        fn sum(p: &Point) -> i64 ! {} { p.x + p.y }
+        fn shift(p: &mut Point, by: i64) -> Unit ! {} {
             p.x = p.x + by;
             p.y = p.y + by;
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut p = Point { x: 4, y: 5 };
             print_i64(sum(&p));
             shift(&mut p, 2);
@@ -114,14 +114,14 @@ fn nested_copyable_records_and_inline_arrays_are_readable() {
         struct Inner { x: i64 }
         struct Outer { inner: Inner, note: i64, values: [i64; 2] }
         impl Outer {
-            fn sum_all(&self) -> i64 ! {panic} {
+            fn sum_all(&self) -> i64 ! {} {
                 self.inner.x + self.note + self.values[0] + self.values[1]
             }
-            fn set_inner(&mut self, value: i64) -> Unit ! {panic} {
+            fn set_inner(&mut self, value: i64) -> Unit ! {} {
                 self.inner.x = value;
             }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut o = Outer { inner: Inner { x: 1 }, note: 2, values: [3, 4] };
             print_i64(o.sum_all());
             o.set_inner(10);
@@ -140,10 +140,10 @@ fn owning_record_metadata_is_not_duplicated_and_still_cleans_up() {
         r#"
         struct Meta { token: Box<i64>, x: i64 }
         impl Meta {
-            fn value(&self) -> i64 ! {panic} { self.x }
-            fn assign_x(&mut self, value: i64) -> Unit ! {panic} { self.x = value; }
+            fn value(&self) -> i64 ! {} { self.x }
+            fn assign_x(&mut self, value: i64) -> Unit ! {} { self.x = value; }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut m = Meta { token: Box.new(40), x: 1 };
             print_i64(m.value());
             m.assign_x(2);
@@ -165,13 +165,13 @@ fn shared_borrows_may_alias_but_exclusive_borrows_do_not() {
     agrees(
         r#"
         struct Point { x: i64, y: i64 }
-        fn sum(a: &Point, b: &Point) -> i64 ! {panic} {
+        fn sum(a: &Point, b: &Point) -> i64 ! {} {
             a.x + a.y + b.x + b.y
         }
-        fn twice(a: &mut Point, b: &Point) -> Unit ! {panic} {
+        fn twice(a: &mut Point, b: &Point) -> Unit ! {} {
             a.x = a.x + b.x;
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 1, y: 2 };
             let q = Point { x: 3, y: 4 };
             let a = sum(&p, &p);
@@ -189,8 +189,8 @@ fn exclusive_borrows_reject_shared_aliases_moves_reads_and_replacement() {
     rejects(
         r#"
         struct P { x: i64 }
-        impl P { fn bump(&mut self) -> Unit ! {panic} { self.x = self.x + 1; } }
-        fn main() -> Unit ! {panic} {
+        impl P { fn bump(&mut self) -> Unit ! {} { self.x = self.x + 1; } }
+        fn main() -> Unit ! {} {
             let p = P { x: 1 };
             p.bump();
         }
@@ -202,8 +202,8 @@ fn exclusive_borrows_reject_shared_aliases_moves_reads_and_replacement() {
     agrees(
         r#"
         struct P { x: i64 }
-        impl P { fn bump(&mut self, by: i64) -> Unit ! {panic} { self.x = self.x + by; } }
-        fn main() -> i64 ! {panic} {
+        impl P { fn bump(&mut self, by: i64) -> Unit ! {} { self.x = self.x + by; } }
+        fn main() -> i64 ! {} {
             let mut p = P { x: 1 };
             p.bump(p.x);
             p.x
@@ -217,8 +217,8 @@ fn exclusive_borrows_reject_shared_aliases_moves_reads_and_replacement() {
     rejects(
         r#"
         struct P { x: i64 }
-        impl P { fn mix(&mut self, other: &P) -> Unit ! {panic} { self.x = self.x + other.x; } }
-        fn main() -> Unit ! {panic} {
+        impl P { fn mix(&mut self, other: &P) -> Unit ! {} { self.x = self.x + other.x; } }
+        fn main() -> Unit ! {} {
             let mut p = P { x: 1 };
             p.mix(&p);
         }
@@ -228,8 +228,8 @@ fn exclusive_borrows_reject_shared_aliases_moves_reads_and_replacement() {
     rejects(
         r#"
         struct P { x: i64 }
-        fn take(a: &mut P, b: &P) -> Unit ! {panic} { a.x = b.x; }
-        fn main() -> Unit ! {panic} {
+        fn take(a: &mut P, b: &P) -> Unit ! {} { a.x = b.x; }
+        fn main() -> Unit ! {} {
             let mut p = P { x: 1 };
             take(&mut p, &p);
         }
@@ -239,8 +239,8 @@ fn exclusive_borrows_reject_shared_aliases_moves_reads_and_replacement() {
     rejects(
         r#"
         struct P { x: i64 }
-        fn take(a: &P, b: &mut P) -> Unit ! {panic} { b.x = a.x; }
-        fn main() -> Unit ! {panic} {
+        fn take(a: &P, b: &mut P) -> Unit ! {} { b.x = a.x; }
+        fn main() -> Unit ! {} {
             let mut p = P { x: 1 };
             take(&p, &mut p);
         }
@@ -250,8 +250,8 @@ fn exclusive_borrows_reject_shared_aliases_moves_reads_and_replacement() {
     rejects(
         r#"
         struct P { x: i64 }
-        fn take(a: &P, extra: i64) -> Unit ! {panic} {}
-        fn main() -> Unit ! {panic} {
+        fn take(a: &P, extra: i64) -> Unit ! {} {}
+        fn main() -> Unit ! {} {
             let mut p = P { x: 1 };
             take(&p, { p = P { x: 2 }; 0 });
         }
@@ -261,8 +261,8 @@ fn exclusive_borrows_reject_shared_aliases_moves_reads_and_replacement() {
     rejects(
         r#"
         struct P { x: i64 }
-        fn take(a: &P, extra: i64) -> Unit ! {panic} {}
-        fn main() -> Unit ! {panic} {
+        fn take(a: &P, extra: i64) -> Unit ! {} {}
+        fn main() -> Unit ! {} {
             let p = P { x: 1 };
             take(&p, { drop(p); 0 });
         }
@@ -272,8 +272,8 @@ fn exclusive_borrows_reject_shared_aliases_moves_reads_and_replacement() {
     rejects(
         r#"
         struct P { x: i64 }
-        impl P { fn probe_mut(self: &mut Self) -> Unit ! {panic} {} }
-        fn main() -> Unit ! {panic} {
+        impl P { fn probe_mut(self: &mut Self) -> Unit ! {} {} }
+        fn main() -> Unit ! {} {
             let p = P { x: 1 };
             p.probe_mut();
         }
@@ -287,8 +287,8 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
     rejects(
         r#"
         struct P { x: i64 }
-        impl P { fn peek_value(&self) -> i64 ! {panic} { self.x } }
-        fn main() -> i64 ! {panic} { P { x: 1 }.peek_value() }
+        impl P { fn peek_value(&self) -> i64 ! {} { self.x } }
+        fn main() -> i64 ! {} { P { x: 1 }.peek_value() }
         "#,
         "bind a temporary to a local",
     );
@@ -298,8 +298,8 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
     rejects(
         r#"
         struct P { x: i64 }
-        fn peek_ref(p: &P) -> i64 ! {panic} { p.x }
-        fn main() -> i64 ! {panic} { let p = P { x: 1 }; peek_ref(&p.x) }
+        fn peek_ref(p: &P) -> i64 ! {} { p.x }
+        fn main() -> i64 ! {} { let p = P { x: 1 }; peek_ref(&p.x) }
         "#,
         "type mismatch",
     );
@@ -308,8 +308,8 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
     agrees(
         r#"
         struct P { x: i64 }
-        fn peek_ref(p: &P) -> i64 ! {panic} { p.x }
-        fn main() -> i64 ! {panic} { let p = P { x: 1 }; let r = &p; peek_ref(r) }
+        fn peek_ref(p: &P) -> i64 ! {} { p.x }
+        fn main() -> i64 ! {} { let p = P { x: 1 }; let r = &p; peek_ref(r) }
         "#,
         1,
         "",
@@ -317,11 +317,11 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
     rejects(
         r#"
         struct P { x: i64 }
-        fn escape<'a>(p: &'a P) -> &'a P ! {panic} {
+        fn escape<'a>(p: &'a P) -> &'a P ! {} {
             let local = P { x: 1 };
             &local
         }
-        fn main() -> Unit ! {panic} {}
+        fn main() -> Unit ! {} {}
         "#,
         "escapes",
     );
@@ -330,8 +330,8 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
     agrees(
         r#"
         struct P { token: Box<i64>, x: i64 }
-        impl P { fn token_value(&self) -> i64 ! {panic} { self.token.read() } }
-        fn main() -> i64 ! {alloc, panic} {
+        impl P { fn token_value(&self) -> i64 ! {} { self.token.read() } }
+        fn main() -> i64 ! {alloc} {
             let p = P { token: Box.new(41), x: 1 };
             p.token_value() + p.x
         }
@@ -342,8 +342,8 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
     rejects(
         r#"
         struct P { token: Box<i64>, x: i64 }
-        impl P { fn replace(&mut self) -> Unit ! {alloc, panic} { self.token = Box.new(1); } }
-        fn main() -> Unit ! {panic} {}
+        impl P { fn replace(&mut self) -> Unit ! {alloc} { self.token = Box.new(1); } }
+        fn main() -> Unit ! {} {}
         "#,
         "owns storage",
     );
@@ -354,8 +354,8 @@ fn shared_receivers_cannot_write_or_be_upgraded() {
     rejects(
         r#"
         struct P { x: i64 }
-        impl P { fn bad(self: &Self) -> Unit ! {panic} { self.x = 1; } }
-        fn main() -> Unit ! {panic} {}
+        impl P { fn bad(self: &Self) -> Unit ! {} { self.x = 1; } }
+        fn main() -> Unit ! {} {}
         "#,
         "shared reference",
     );
@@ -363,18 +363,18 @@ fn shared_receivers_cannot_write_or_be_upgraded() {
         r#"
         struct P { x: i64 }
         impl P {
-            fn bump(&mut self) -> Unit ! {panic} { self.x = self.x + 1; }
-            fn call(&self) -> Unit ! {panic} { self.bump(); }
+            fn bump(&mut self) -> Unit ! {} { self.x = self.x + 1; }
+            fn call(&self) -> Unit ! {} { self.bump(); }
         }
-        fn main() -> Unit ! {panic} {}
+        fn main() -> Unit ! {} {}
         "#,
         "but the receiver is a shared reference",
     );
     rejects(
         r#"
         struct View<'a> { view: &'a [i64] }
-        fn bad<'a>(view: &mut View<'a>, other: &'a [i64]) -> Unit ! {panic} { view.view = other; }
-        fn main() -> Unit ! {panic} {}
+        fn bad<'a>(view: &mut View<'a>, other: &'a [i64]) -> Unit ! {} { view.view = other; }
+        fn main() -> Unit ! {} {}
         "#,
         "non-borrowed record fields",
     );
@@ -386,14 +386,14 @@ fn borrowed_trait_receivers_keep_exact_contracts() {
         r#"
         struct Point { x: i64, y: i64 }
         trait Describe {
-            fn describe(self: &Self) -> i64 ! {panic};
-            fn add(&mut self, by: i64) -> Unit ! {panic};
+            fn describe(self: &Self) -> i64 ! {};
+            fn add(&mut self, by: i64) -> Unit ! {};
         }
         impl Describe for Point {
-            fn describe(self: &Self) -> i64 ! {panic} { self.x * 10 + self.y }
-            fn add(self: &mut Self, by: i64) -> Unit ! {panic} { self.x = self.x + by; }
+            fn describe(self: &Self) -> i64 ! {} { self.x * 10 + self.y }
+            fn add(self: &mut Self, by: i64) -> Unit ! {} { self.x = self.x + by; }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut p = Point { x: 1, y: 2 };
             print_i64(p.describe());
             p.add(2);
@@ -407,18 +407,18 @@ fn borrowed_trait_receivers_keep_exact_contracts() {
     rejects(
         r#"
         struct Point { x: i64 }
-        trait Get { fn value_of(self: &Self) -> i64 ! {panic}; }
-        impl Get for Point { fn value_of(self: Point) -> i64 ! {panic} { self.x } }
-        fn main() -> Unit ! {panic} {}
+        trait Get { fn value_of(self: &Self) -> i64 ! {}; }
+        impl Get for Point { fn value_of(self: Point) -> i64 ! {} { self.x } }
+        fn main() -> Unit ! {} {}
         "#,
         "does not match the trait signature",
     );
     rejects(
         r#"
         struct Point { x: i64 }
-        trait Get { fn value_of(self: &Self) -> i64 ! {panic}; }
-        impl Get for Point { fn value_of(self: &mut Self) -> i64 ! {panic} { self.x } }
-        fn main() -> Unit ! {panic} {}
+        trait Get { fn value_of(self: &Self) -> i64 ! {}; }
+        impl Get for Point { fn value_of(self: &mut Self) -> i64 ! {} { self.x } }
+        fn main() -> Unit ! {} {}
         "#,
         "does not match the trait signature",
     );
@@ -430,15 +430,15 @@ fn generic_bounded_helpers_borrow_without_erasing_the_bound() {
         r#"
         struct Point { x: i64, y: i64 }
         trait Describe {
-            fn describe(self: &Self) -> i64 ! {panic};
+            fn describe(self: &Self) -> i64 ! {};
         }
         impl Describe for Point {
-            fn describe(self: &Self) -> i64 ! {panic} { self.x * 10 + self.y }
+            fn describe(self: &Self) -> i64 ! {} { self.x * 10 + self.y }
         }
-        fn describe_via<T: Describe>(value: T) -> i64 ! {panic} {
+        fn describe_via<T: Describe>(value: T) -> i64 ! {} {
             value.describe()
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Point { x: 4, y: 2 };
             describe_via(p)
         }
@@ -449,11 +449,11 @@ fn generic_bounded_helpers_borrow_without_erasing_the_bound() {
     rejects(
         r#"
         struct Point { x: i64 }
-        trait Describe { fn describe(self: &Self) -> i64 ! {panic}; }
-        fn describe_via<T: Describe>(value: T) -> i64 ! {panic} {
+        trait Describe { fn describe(self: &Self) -> i64 ! {}; }
+        fn describe_via<T: Describe>(value: T) -> i64 ! {} {
             value.describe()
         }
-        fn main() -> i64 ! {panic} { describe_via(Point { x: 1 }) }
+        fn main() -> i64 ! {} { describe_via(Point { x: 1 }) }
         "#,
         "does not implement trait",
     );
@@ -464,11 +464,11 @@ fn borrowed_helpers_keep_noalloc_and_nosuspend_contracts() {
     agrees(
         r#"
         struct Point { x: i64, y: i64 }
-        fn sum(p: &Point) -> i64 ! {panic} { p.x + p.y }
-        fn shift(p: &mut Point, by: i64) -> Unit ! {panic} {
+        fn sum(p: &Point) -> i64 ! {} { p.x + p.y }
+        fn shift(p: &mut Point, by: i64) -> Unit ! {} {
             p.x = p.x + by;
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = Point { x: 20, y: 21 };
             shift(&mut p, 1);
             sum(&p)
@@ -481,8 +481,8 @@ fn borrowed_helpers_keep_noalloc_and_nosuspend_contracts() {
         r#"
         struct Point { x: i64 }
         #[noalloc]
-        fn bad(p: &Point) -> i64 ! {alloc, panic} { Box.take(Box.new(1)) }
-        fn main() -> Unit ! {panic} {}
+        fn bad(p: &Point) -> i64 ! {alloc} { Box.take(Box.new(1)) }
+        fn main() -> Unit ! {} {}
         "#,
         "#[noalloc] was removed",
     );
@@ -493,12 +493,12 @@ fn borrowed_receiver_dispatch_is_disambiguated_and_scoped() {
     agrees(
         r#"
         struct P { x: i64 }
-        trait First { fn label(self: &Self) -> i64 ! {panic}; }
-        trait Second { fn label(self: &Self) -> i64 ! {panic}; }
-        impl First for P { fn label(self: &Self) -> i64 ! {panic} { self.x + 10 } }
-        impl Second for P { fn label(self: &Self) -> i64 ! {panic} { self.x + 20 } }
-        fn sum(a: &P, b: &P) -> i64 ! {panic} { a.x + b.x }
-        fn main() -> i64 ! {panic} {
+        trait First { fn label(self: &Self) -> i64 ! {}; }
+        trait Second { fn label(self: &Self) -> i64 ! {}; }
+        impl First for P { fn label(self: &Self) -> i64 ! {} { self.x + 10 } }
+        impl Second for P { fn label(self: &Self) -> i64 ! {} { self.x + 20 } }
+        fn sum(a: &P, b: &P) -> i64 ! {} { a.x + b.x }
+        fn main() -> i64 ! {} {
             let p = P { x: 1 };
             let a = p.First.label();
             let b = p.Second.label();
@@ -517,11 +517,11 @@ fn borrowing_a_linear_record_does_not_consume_or_launder_it() {
         r#"
         #[linear]
         struct Token { id: i64 }
-        impl Token { fn token_id(self: &Self) -> i64 ! {panic} { self.id } }
-        fn consume(token: Token) -> i64 ! {panic} {
+        impl Token { fn token_id(self: &Self) -> i64 ! {} { self.id } }
+        fn consume(token: Token) -> i64 ! {} {
             match token { Token { id } => id }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let token = Token { id: 7 };
             let first = token.token_id();
             let second = token.token_id();
@@ -535,8 +535,8 @@ fn borrowing_a_linear_record_does_not_consume_or_launder_it() {
         r#"
         #[linear]
         struct Token { id: i64 }
-        impl Token { fn token_id(self: &Self) -> i64 ! {panic} { self.id } }
-        fn main() -> i64 ! {panic} {
+        impl Token { fn token_id(self: &Self) -> i64 ! {} { self.id } }
+        fn main() -> i64 ! {} {
             let token = Token { id: 7 };
             token.token_id();
             0
@@ -553,8 +553,8 @@ fn borrowed_fields_and_temporary_reference_arguments_stay_rejected() {
     agrees(
         r#"
         struct View<'a> { view: &'a [i64], note: i64 }
-        fn peek<'a>(v: &View<'a>) -> i64 ! {panic} { Slice.len(v.view) + v.note }
-        fn main() -> i64 ! {panic} {
+        fn peek<'a>(v: &View<'a>) -> i64 ! {} { Slice.len(v.view) + v.note }
+        fn main() -> i64 ! {} {
             let data: [i64; 3] = [1, 2, 3];
             let v = View { view: &data[..], note: 1 };
             peek(&v)
@@ -566,8 +566,8 @@ fn borrowed_fields_and_temporary_reference_arguments_stay_rejected() {
     rejects(
         r#"
         struct View<'a> { view: &'a mut [i64], note: i64 }
-        fn peek<'a>(v: &View<'a>) -> i64 ! {panic} { Slice.len(v.view) }
-        fn main() -> Unit ! {panic} {}
+        fn peek<'a>(v: &View<'a>) -> i64 ! {} { Slice.len(v.view) }
+        fn main() -> Unit ! {} {}
         "#,
         "cannot be read through a record reference",
     );
@@ -576,8 +576,8 @@ fn borrowed_fields_and_temporary_reference_arguments_stay_rejected() {
         #[linear]
         struct Inner { x: i64 }
         struct Holder { inner: Inner }
-        fn peek(h: &Holder) -> i64 ! {panic} { h.inner.x }
-        fn main() -> Unit ! {panic} {}
+        fn peek(h: &Holder) -> i64 ! {} { h.inner.x }
+        fn main() -> Unit ! {} {}
         "#,
         "owns storage or contains a borrow",
     );
@@ -586,8 +586,8 @@ fn borrowed_fields_and_temporary_reference_arguments_stay_rejected() {
     agrees(
         r#"
         struct P { x: i64 }
-        fn peek(p: &P) -> i64 ! {panic} { p.x }
-        fn main() -> i64 ! {panic} { peek(&P { x: 1 }) }
+        fn peek(p: &P) -> i64 ! {} { p.x }
+        fn main() -> i64 ! {} { peek(&P { x: 1 }) }
         "#,
         1,
         "",
@@ -596,8 +596,8 @@ fn borrowed_fields_and_temporary_reference_arguments_stay_rejected() {
     rejects(
         r#"
         struct P { values: [i64; 2] }
-        fn peek(p: &P) -> i64 ! {panic} { p.values[0] }
-        fn main() -> i64 ! {panic} {
+        fn peek(p: &P) -> i64 ! {} { p.values[0] }
+        fn main() -> i64 ! {} {
             let p = P { values: [1, 2] };
             peek(&p.values[0])
         }
@@ -612,10 +612,10 @@ fn owner_becomes_usable_again_after_the_borrow_expression() {
         r#"
         struct P { x: i64, y: i64 }
         impl P {
-            fn sum(&self) -> i64 ! {panic} { self.x + self.y }
-            fn bump(&mut self, by: i64) -> Unit ! {panic} { self.x = self.x + by; }
+            fn sum(&self) -> i64 ! {} { self.x + self.y }
+            fn bump(&mut self, by: i64) -> Unit ! {} { self.x = self.x + by; }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut p = P { x: 1, y: 2 };
             let before = p.sum();
             p.bump(4);
@@ -647,10 +647,10 @@ fn exclusive_record_loans_block_later_method_aliases() {
         r#"
         struct P { x: i64 }
         impl P {
-            fn bump(&mut self, by: i64) -> Unit ! {panic} { self.x = self.x + by; }
-            fn peek(&self) -> i64 ! {panic} { self.x }
+            fn bump(&mut self, by: i64) -> Unit ! {} { self.x = self.x + by; }
+            fn peek(&self) -> i64 ! {} { self.x }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = P { x: 3 };
             p.bump(p.peek());
             p.x
@@ -664,9 +664,9 @@ fn exclusive_record_loans_block_later_method_aliases() {
         r#"
         struct P { x: i64 }
         impl P {
-            fn mix(&mut self, other: &P) -> Unit ! {panic} { self.x = self.x + other.x; }
+            fn mix(&mut self, other: &P) -> Unit ! {} { self.x = self.x + other.x; }
         }
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             let mut p = P { x: 1 };
             p.mix(&p);
         }
@@ -684,21 +684,21 @@ const EXCL_VIEW: &str = r#"
 struct S { v: i64, arr: DynArray<i64, 2>, name: String }
 struct T { v: i64 }
 trait Swap {
-    fn swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64] ! {panic};
-    fn look(self: &Self) -> i64 ! {panic};
-    fn bump(self: &mut Self) -> i64 ! {panic};
+    fn swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64] ! {};
+    fn look(self: &Self) -> i64 ! {};
+    fn bump(self: &mut Self) -> i64 ! {};
 }
 impl Swap for S {
     // Returns a view of the receiver's own inline storage.
-    fn swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64] ! {panic} { self.v = self.v + 1; &self.arr[..] }
-    fn look(self: &Self) -> i64 ! {panic} { self.v }
-    fn bump(self: &mut Self) -> i64 ! {panic} { self.v = self.v + 100; self.v }
+    fn swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64] ! {} { self.v = self.v + 1; &self.arr[..] }
+    fn look(self: &Self) -> i64 ! {} { self.v }
+    fn bump(self: &mut Self) -> i64 ! {} { self.v = self.v + 100; self.v }
 }
 impl Swap for T {
     // Returns the argument view.
-    fn swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64] ! {panic} { self.v = self.v + 2; v }
-    fn look(self: &Self) -> i64 ! {panic} { self.v }
-    fn bump(self: &mut Self) -> i64 ! {panic} { self.v = self.v + 100; self.v }
+    fn swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64] ! {} { self.v = self.v + 2; v }
+    fn look(self: &Self) -> i64 ! {} { self.v }
+    fn bump(self: &mut Self) -> i64 ! {} { self.v = self.v + 100; self.v }
 }
 "#;
 
@@ -707,7 +707,7 @@ fn shared_reads_are_allowed_while_an_exclusive_call_view_is_live() {
     let stats = agrees(
         &format!(
             r#"{EXCL_VIEW}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn main() -> i64 ! {{io, alloc}} {{
                 let other = [10, 20];
                 let mut s = S {{ v: 5, arr: [3, 4], name: String.from("s") }};
                 let w = s.swapv(&other[..]);
@@ -748,7 +748,7 @@ fn exclusive_call_views_still_block_writes_and_moves_of_the_receiver() {
         rejects(
             &format!(
                 r#"{EXCL_VIEW}
-                fn main() -> i64 ! {{io, alloc, panic}} {{
+                fn main() -> i64 ! {{io, alloc}} {{
                     let other = [10, 20];
                     let mut s = S {{ v: 5, arr: [3, 4], name: String.from("s") }};
                     let w = s.swapv(&other[..]);

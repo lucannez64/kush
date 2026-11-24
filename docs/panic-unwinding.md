@@ -48,8 +48,8 @@ own buffer, so a panic passes through them like any other foreign abort.
 
 - **Which calls are tested.** `suspend::mark_abort_calls` already wraps
   calls that may abort in `AbortCall { exits, propagates }`. With unwinding,
-  every call to a function whose row has `panic`, and every call to a
-  runtime helper that can panic, is wrapped with `propagates` (or, inside an
+  every call (any function may panic, so no row rules one out) and every
+  call to a runtime helper that can panic is wrapped with `propagates` (or, inside an
   abortive scope, with its exits too). A call that cannot panic costs
   nothing; one that can costs a load, a test and a branch (measured within
   noise for abortive calls).
@@ -109,8 +109,11 @@ fn discard(file: File) -> Unit ! {io} { let _ = close(file); }
 - The function takes the value by move and returns `Unit`; it is in the same
   module as the type (it may read private fields). Its row may include `io`,
   `alloc` and `suspend` (a `Responder` answers 500, which writes to a
-  socket), but not `panic` or declared operations: a panic while unwinding
-  aborts the process.
+  socket), but not declared operations. Since FND-ROWS-PANIC (2026-11-24)
+  `panic` is not an effect, so a cleanup may panic: that panic ends the
+  cleanup and unwinding goes on, in both backends (`unwind_cleanup` in the
+  evaluator, `kush_unwind_hold`/`restore` natively). A panic in an
+  allocator release callback or an arena strategy aborts instead.
 - Without `unwind = ...` the value is leaked, and the report printed with
   the panic names its type.
 - std uses it for `std.file.File`, `std.net.Conn` and `Listener` (close the
@@ -126,15 +129,14 @@ Two places stop a panic:
 1. **A catch call** in a task or `main`:
 
    ```kush
-   match Task.catch(fn() -> i64 ! {io, panic} { risky() }) {
+   match Task.catch(fn() -> i64 ! {io} { risky() }) {
        Result.Ok(value) => value,
        Result.Err(panicked) => -1,
    }
    ```
 
    `Task.catch(f)` runs `f` in the calling task and returns `Result<T,
-   Panic>`; `Panic` carries the panic's kind and source position. The body's
-   row loses `panic`. It is a call boundary, not a task, so it costs no
+   Panic>`; `Panic` carries the panic's kind and source position. It is a call boundary, not a task, so it costs no
    stack and no spawn: `std.web` uses it around each handler instead of an
    isolated task.
 2. **A thread body.** `Thread.join` of a thread whose body panicked reports

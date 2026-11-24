@@ -481,7 +481,7 @@ fn compress_any(
 }
 
 /// An empty hash.
-pub fn new() -> Hasher ! {alloc, panic} {
+pub fn new() -> Hasher ! {alloc} {
     Hasher {
         state: (0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
                 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19),
@@ -491,7 +491,7 @@ pub fn new() -> Hasher ! {alloc, panic} {
 }
 
 /// Hash `data` after everything given so far.
-pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc, panic} {
+pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc} {
     let Hasher { state, block, length } = hasher;
     let fast = cpu.sha();
     let mut state = state;
@@ -523,7 +523,7 @@ pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc, panic} {
     Hasher { state: state, block: block, length: length }
 }
 
-fn push_word(out: Bytes, v: u32) -> Bytes ! {alloc, panic} {
+fn push_word(out: Bytes, v: u32) -> Bytes ! {alloc} {
     let out = Bytes.push(out, Int.convert(v >> 24));
     let out = Bytes.push(out, Int.convert((v >> 16) & 255));
     let out = Bytes.push(out, Int.convert((v >> 8) & 255));
@@ -531,7 +531,7 @@ fn push_word(out: Bytes, v: u32) -> Bytes ! {alloc, panic} {
 }
 
 /// The 32-byte digest of everything given.
-pub fn finish(hasher: Hasher) -> Bytes ! {alloc, panic} {
+pub fn finish(hasher: Hasher) -> Bytes ! {alloc} {
     // Padding: 0x80, zeros up to 56 mod 64, then the bit length (big-endian).
     let bits: u64 = Int.wrapping_mul(hasher.length, 8);
     let pending = Bytes.len(&hasher.block);
@@ -575,6 +575,6 @@ pub fn finish(hasher: Hasher) -> Bytes ! {alloc, panic} {
 }
 
 /// The 32-byte SHA-256 digest of `data`.
-pub fn digest(data: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn digest(data: &Bytes) -> Bytes ! {alloc} {
     finish(update(new(), data))
 }

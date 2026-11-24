@@ -80,7 +80,7 @@ fn voice() -> Voice ! {} {
     }
 }
 
-pub fn new() -> Apu ! {alloc, panic} {
+pub fn new() -> Apu ! {alloc} {
     let mut wave_ram: Vec<u8> = Vec.with_capacity(16);
     let mut i = 0;
     while i < 16 {
@@ -129,14 +129,14 @@ fn wide(value: u8) -> i64 ! {} ensures { result == value } { Int.convert(value) 
 
 // --- Frame sequencer -----------------------------------------------------------
 
-fn clock_length(v: &mut Voice) -> Unit ! {panic} {
+fn clock_length(v: &mut Voice) -> Unit ! {} {
     if v.length_enabled && v.length > 0 {
         v.length = v.length - 1;
         if v.length == 0 { v.enabled = false; }
     }
 }
 
-fn clock_envelope(v: &mut Voice) -> Unit ! {panic} {
+fn clock_envelope(v: &mut Voice) -> Unit ! {} {
     if v.envelope_period == 0 { return; }
     v.envelope_timer = v.envelope_timer - 1;
     if v.envelope_timer <= 0 {
@@ -147,7 +147,7 @@ fn clock_envelope(v: &mut Voice) -> Unit ! {panic} {
 }
 
 /// The frequency the sweep would set next; past 2047 it silences channel 1.
-fn sweep_target(a: &mut Apu) -> i64 ! {panic} {
+fn sweep_target(a: &mut Apu) -> i64 ! {} {
     let delta = a.sweep_shadow >> a.sweep_shift;
     let target = if a.sweep_negate {
         a.sweep_negated = true;
@@ -159,7 +159,7 @@ fn sweep_target(a: &mut Apu) -> i64 ! {panic} {
     target
 }
 
-fn clock_sweep(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {panic} {
+fn clock_sweep(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {} {
     a.sweep_timer = a.sweep_timer - 1;
     if a.sweep_timer > 0 { return; }
     a.sweep_timer = if a.sweep_period == 0 { 8 } else { a.sweep_period };
@@ -175,7 +175,7 @@ fn clock_sweep(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {panic
 }
 
 /// One frame-sequencer step, on a falling edge of divider bit 12.
-pub fn sequence(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {panic} {
+pub fn sequence(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {} {
     if !a.powered { return; }
     let step = a.step;
     if step % 2 == 0 {
@@ -195,7 +195,7 @@ pub fn sequence(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {pani
 
 // --- Register writes ----------------------------------------------------------
 
-fn write_envelope(v: &mut Voice, value: i64) -> Unit ! {panic} {
+fn write_envelope(v: &mut Voice, value: i64) -> Unit ! {} {
     v.envelope_up = (value & 0x08) != 0;
     v.envelope_period = value & 0x07;
     v.dac = (value & 0xF8) != 0;
@@ -205,7 +205,7 @@ fn write_envelope(v: &mut Voice, value: i64) -> Unit ! {panic} {
 /// NRx4's length-enable bit. Enabling it in the first half of a length
 /// period (when the next sequencer step does not clock lengths) clocks the
 /// counter once at once.
-fn write_length_enable(v: &mut Voice, value: i64, step: i64) -> Unit ! {panic} {
+fn write_length_enable(v: &mut Voice, value: i64, step: i64) -> Unit ! {} {
     let was = v.length_enabled;
     v.length_enabled = (value & 0x40) != 0;
     if !was && v.length_enabled && step % 2 == 1 && v.length > 0 {
@@ -215,7 +215,7 @@ fn write_length_enable(v: &mut Voice, value: i64, step: i64) -> Unit ! {panic} {
 }
 
 /// A trigger: restart the channel, reloading an expired length counter.
-fn trigger(v: &mut Voice, full_length: i64, step: i64, initial_volume: i64) -> Unit ! {panic} {
+fn trigger(v: &mut Voice, full_length: i64, step: i64, initial_volume: i64) -> Unit ! {} {
     v.enabled = v.dac;
     if v.length == 0 {
         v.length = full_length;
@@ -225,11 +225,11 @@ fn trigger(v: &mut Voice, full_length: i64, step: i64, initial_volume: i64) -> U
     v.envelope_timer = v.envelope_period;
 }
 
-fn square_period(v: &Voice) -> i64 ! {panic} { (2048 - v.frequency) * 4 }
+fn square_period(v: &Voice) -> i64 ! {} { (2048 - v.frequency) * 4 }
 
 /// A write to 0xFF10-0xFF3F (`register` is the offset from 0xFF00). The
 /// register byte itself is stored by the caller.
-pub fn write(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80, register: i64, value: u8) -> Unit ! {alloc, panic} {
+pub fn write(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80, register: i64, value: u8) -> Unit ! {alloc} {
     let v = wide(value);
     if register >= 0x30 && register < 0x40 {
         a.wave_ram[register - 0x30] = value;
@@ -373,14 +373,14 @@ pub fn write(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80, register: i64, val
 // --- Running ------------------------------------------------------------------
 
 /// The digital output (0-15) of a channel, or -1 when its DAC is off.
-fn square_level(v: &Voice) -> i64 ! {panic} {
+fn square_level(v: &Voice) -> i64 ! {} {
     if !v.dac { return -1; }
     if !v.enabled { return 0; }
     let pattern = match v.duty { 0 => 0x01, 1 => 0x81, 2 => 0x87, _ => 0x7E };
     if ((pattern >> (7 - v.position)) & 1) == 1 { v.volume } else { 0 }
 }
 
-fn wave_level(a: &Apu) -> i64 ! {panic} {
+fn wave_level(a: &Apu) -> i64 ! {} {
     if !a.wave.dac { return -1; }
     if !a.wave.enabled { return 0; }
     let byte = wide(a.wave_ram[(a.wave.position >> 1) & 15]);
@@ -388,18 +388,18 @@ fn wave_level(a: &Apu) -> i64 ! {panic} {
     sample >> a.wave_shift
 }
 
-fn noise_level(a: &Apu) -> i64 ! {panic} {
+fn noise_level(a: &Apu) -> i64 ! {} {
     if !a.noise.dac { return -1; }
     if !a.noise.enabled { return 0; }
     if (a.lfsr & 1) == 0 { a.noise.volume } else { 0 }
 }
 
 /// A DAC turns 0-15 into -15..15; a disabled DAC outputs nothing.
-fn analog(level: i64) -> i64 ! {panic} {
+fn analog(level: i64) -> i64 ! {} {
     if level < 0 { 0 } else { level * 2 - 15 }
 }
 
-fn advance_square(v: &mut Voice, cycles: i64) -> Unit ! {panic} {
+fn advance_square(v: &mut Voice, cycles: i64) -> Unit ! {} {
     v.timer = v.timer - cycles;
     while v.timer <= 0 {
         v.timer = v.timer + (2048 - v.frequency) * 4;
@@ -409,14 +409,14 @@ fn advance_square(v: &mut Voice, cycles: i64) -> Unit ! {panic} {
 
 /// Four-cycle steps until `tick` mixes a sample. Before then, one `tick`
 /// over several steps leaves the channels exactly as one per step would.
-pub fn quiet(a: &Apu) -> i64 ! {panic} {
+pub fn quiet(a: &Apu) -> i64 ! {} {
     let step = 4 * SAMPLE_RATE;
     (CLOCK - a.sample_clock + step - 1) / step
 }
 
 /// Advance the channels by `cycles` clock cycles and produce the samples
 /// that fall in that time.
-pub fn tick(a: &mut Apu, cycles: i64) -> Unit ! {alloc, panic} {
+pub fn tick(a: &mut Apu, cycles: i64) -> Unit ! {alloc} {
     if a.powered {
         advance_square(&mut a.square1, cycles);
         advance_square(&mut a.square2, cycles);
@@ -440,7 +440,7 @@ pub fn tick(a: &mut Apu, cycles: i64) -> Unit ! {alloc, panic} {
     }
 }
 
-fn mix(a: &mut Apu) -> Unit ! {alloc, panic} {
+fn mix(a: &mut Apu) -> Unit ! {alloc} {
     let levels = (
         analog(square_level(&a.square1)),
         analog(square_level(&a.square2)),

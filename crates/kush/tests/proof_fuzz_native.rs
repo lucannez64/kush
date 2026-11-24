@@ -57,8 +57,8 @@ fn run(source: &str) -> Run {
 
 #[test]
 fn an_overflow_names_its_site() {
-    let run = run("fn add(a: i64, b: i64) -> i64 ! {panic} { a + b }
-fn main() -> i64 ! {panic} { add(1, 2) + add(9223372036854775807, 1) }");
+    let run = run("fn add(a: i64, b: i64) -> i64 ! {} { a + b }
+fn main() -> i64 ! {} { add(1, 2) + add(9223372036854775807, 1) }");
     assert_eq!(run.failed_text(), "a + b");
     let site = run.site("a + b");
     assert_eq!(run.record.sites[site].hits, 2);
@@ -67,12 +67,12 @@ fn main() -> i64 ! {panic} { add(1, 2) + add(9223372036854775807, 1) }");
 
 #[test]
 fn margins_measure_the_distance_from_failing() {
-    let run = run("fn bump(x: u8, y: u8) -> u8 ! {panic} { x + y }
-fn neg(x: i8) -> i8 ! {panic} { -x }
-fn at(v: &Vec<i64>, i: i64) -> i64 ! {panic} { v[i] }
-fn div(a: i64, b: i64) -> i64 ! {panic} { a / b }
-fn shift(a: u8, b: u8) -> u8 ! {panic} { a >> b }
-fn main() -> i64 ! {alloc, panic} {
+    let run = run("fn bump(x: u8, y: u8) -> u8 ! {} { x + y }
+fn neg(x: i8) -> i8 ! {} { -x }
+fn at(v: &Vec<i64>, i: i64) -> i64 ! {} { v[i] }
+fn div(a: i64, b: i64) -> i64 ! {} { a / b }
+fn shift(a: u8, b: u8) -> u8 ! {} { a >> b }
+fn main() -> i64 ! {alloc} {
     let mut v: Vec<i64> = Vec.new();
     v = v.push(1);
     v = v.push(2);
@@ -101,25 +101,25 @@ fn main() -> i64 ! {alloc, panic} {
 
 #[test]
 fn bounds_division_and_shift_failures_name_their_sites() {
-    let bounds = run("fn at(v: &Vec<i64>, i: i64) -> i64 ! {panic} { v[i] }
-fn main() -> i64 ! {alloc, panic} {
+    let bounds = run("fn at(v: &Vec<i64>, i: i64) -> i64 ! {} { v[i] }
+fn main() -> i64 ! {alloc} {
     let mut v: Vec<i64> = Vec.new();
     v = v.push(1);
     at(&v, 0) + at(&v, 3)
 }");
     assert_eq!(bounds.failed_text(), "v[i]");
-    let division = run("fn div(a: i64, b: i64) -> i64 ! {panic} { a / b }
-fn main() -> i64 ! {panic} { div(1, 0) }");
+    let division = run("fn div(a: i64, b: i64) -> i64 ! {} { a / b }
+fn main() -> i64 ! {} { div(1, 0) }");
     assert_eq!(division.failed_text(), "a / b");
-    let shift = run("fn shift(a: u8, b: u8) -> u8 ! {panic} { a << b }
-fn main() -> i64 ! {panic} { Int.convert(shift(1, 8)) }");
+    let shift = run("fn shift(a: u8, b: u8) -> u8 ! {} { a << b }
+fn main() -> i64 ! {} { Int.convert(shift(1, 8)) }");
     assert_eq!(shift.failed_text(), "a << b");
 }
 
 #[test]
 fn a_panic_after_a_site_is_not_attributed_to_it() {
-    let run = run("fn add(a: i64, b: i64) -> i64 ! {panic} { a + b }
-fn main() -> i64 ! {alloc, panic} {
+    let run = run("fn add(a: i64, b: i64) -> i64 ! {} { a + b }
+fn main() -> i64 ! {alloc} {
     let n = add(1, 2) - 4;
     let v: Vec<i64> = Vec.with_capacity(n);
     Vec.len(&v)
@@ -130,8 +130,8 @@ fn main() -> i64 ! {alloc, panic} {
 
 #[test]
 fn an_unreached_site_keeps_its_initial_record() {
-    let run = run("fn add(a: i64, b: i64) -> i64 ! {panic} { a + b }
-fn main() -> i64 ! {panic} { if false { add(1, 2) } else { 0 } }");
+    let run = run("fn add(a: i64, b: i64) -> i64 ! {} { a + b }
+fn main() -> i64 ! {} { if false { add(1, 2) } else { 0 } }");
     let site = run.record.sites[run.site("a + b")];
     assert_eq!((site.hits, site.margin), (0, i64::MAX));
 }
@@ -139,8 +139,8 @@ fn main() -> i64 ! {panic} { if false { add(1, 2) } else { 0 } }");
 #[test]
 fn an_ordinary_build_writes_no_record() {
     let program = check(
-        "fn add(a: i64, b: i64) -> i64 ! {panic} { a + b }
-fn main() -> i64 ! {panic} { add(1, 2) }",
+        "fn add(a: i64, b: i64) -> i64 ! {} { a + b }
+fn main() -> i64 ! {} { add(1, 2) }",
     )
     .unwrap();
     let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
@@ -159,13 +159,13 @@ fn main() -> i64 ! {panic} { add(1, 2) }",
 fn deferred_overflow_is_off_in_fuzz_builds() {
     // A counted reduction loop is deferred on LLVM and with
     // --deferred-overflow; a fuzz build still fails at the addition itself.
-    let run = run("fn sum(v: &Vec<i64>) -> i64 ! {panic} {
+    let run = run("fn sum(v: &Vec<i64>) -> i64 ! {} {
     let mut total = 0;
     let mut i = 0;
     while i < v.len() { total = total + v[i]; i = i + 1; }
     total
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let mut v: Vec<i64> = Vec.new();
     v = v.push(9223372036854775807);
     v = v.push(1);

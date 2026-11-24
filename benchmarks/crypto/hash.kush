@@ -13,7 +13,7 @@ fn now() -> i64 ! {io} {
     match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => 0 }
 }
 
-fn report(name: i64, mib: i64, start: i64, digest: &Bytes) -> Unit ! {io, panic} {
+fn report(name: i64, mib: i64, start: i64, digest: &Bytes) -> Unit ! {io} {
     let elapsed = (now() - start) / 1000000;
     print_i64(name);
     print_i64(mib);
@@ -21,7 +21,7 @@ fn report(name: i64, mib: i64, start: i64, digest: &Bytes) -> Unit ! {io, panic}
     print_i64(Bytes.get(digest, 0));
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let mib = 64;
     let n = mib * 1048576;
     let mut data = Bytes.with_capacity(n);

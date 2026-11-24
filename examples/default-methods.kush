@@ -20,27 +20,27 @@ struct Other {
 }
 
 trait Scaled {
-    fn base(self: Self) -> i64 ! {panic};
+    fn base(self: Self) -> i64 ! {};
 
     /// Inherited defaults dispatch to the impl's override of `base`.
-    fn scaled(self: Self, factor: i64) -> i64 ! {panic} {
+    fn scaled(self: Self, factor: i64) -> i64 ! {} {
         self.base() * factor
     }
 
     /// A default body may call another inherited default.
-    fn quadrupled(self: Self) -> i64 ! {panic} {
+    fn quadrupled(self: Self) -> i64 ! {} {
         self.scaled(2) * 2
     }
 }
 
 impl Scaled for Point {
-    fn base(self: Self) -> i64 ! {panic} {
+    fn base(self: Self) -> i64 ! {} {
         self.x + 1
     }
 }
 
 impl Scaled for Other {
-    fn base(self: Self) -> i64 ! {panic} {
+    fn base(self: Self) -> i64 ! {} {
         self.x + 100
     }
 }
@@ -48,7 +48,7 @@ impl Scaled for Other {
 trait Choose {
     /// `Self` is substituted with the concrete impl target in the parameters,
     /// the result, and the body.
-    fn choose(self: Self, other: Self) -> Self ! {panic} {
+    fn choose(self: Self, other: Self) -> Self ! {} {
         if self.x >= other.x { self } else { other }
     }
 }
@@ -56,21 +56,21 @@ trait Choose {
 impl Choose for Point {}
 
 trait Wrap<T> {
-    fn value(self: Self) -> T ! {panic};
+    fn value(self: Self) -> T ! {};
 
     /// The trait's `T` is substituted into the default signature and body.
-    fn wrapped(self: Self) -> T ! {panic} {
+    fn wrapped(self: Self) -> T ! {} {
         self.value()
     }
 }
 
 impl Wrap<i64> for Point {
-    fn value(self: Self) -> i64 ! {panic} {
+    fn value(self: Self) -> i64 ! {} {
         self.x
     }
 }
 
-fn main() -> i64 ! {io, panic} {
+fn main() -> i64 ! {io} {
     let point = Point { x: 4 };
     let other = Other { x: 4 };
     print_i64(point.scaled(2));

@@ -17,19 +17,19 @@ use kernel.term;
 
 /// Read one term and print it back.
 
-fn round(s: &mut Store, source: &Bytes) -> Bytes ! {alloc, panic} {
+fn round(s: &mut Store, source: &Bytes) -> Bytes ! {alloc} {
     match reader.read_term(s, source) {
         Result.Ok(id) => printer.term_into(s, Bytes.with_capacity(0), id),
         Result.Err(at) => text.format_i64_into(Bytes.from("error at "), at),
     }
 }
 
-fn same(actual: &Bytes, expected: &Bytes) -> Unit ! {panic} {
+fn same(actual: &Bytes, expected: &Bytes) -> Unit ! {} {
     test.is_true(text.eq(actual, expected));
 }
 
 #[test]
-fn equal_terms_share_one_id() -> Unit ! {io, alloc, panic} {
+fn equal_terms_share_one_id() -> Unit ! {io, alloc} {
     let mut s = store.new();
     let n1 = term.nat(&mut s);
     let a = term.pi(&mut s, n1, n1);
@@ -46,7 +46,7 @@ fn equal_terms_share_one_id() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn the_store_grows_and_keeps_every_id() -> Unit ! {io, alloc, panic} {
+fn the_store_grows_and_keeps_every_id() -> Unit ! {io, alloc} {
     let mut s = store.new();
     let mut ids: Vec<i64> = Vec.new();
     let mut i = 0;
@@ -63,7 +63,7 @@ fn the_store_grows_and_keeps_every_id() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn levels_are_canonical() -> Unit ! {io, alloc, panic} {
+fn levels_are_canonical() -> Unit ! {io, alloc} {
     let mut s = store.new();
     let u0 = term.level_var(&mut s, 0);
     let u1 = term.level_var(&mut s, 1);
@@ -83,7 +83,7 @@ fn levels_are_canonical() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn terms_round_trip_canonically() -> Unit ! {io, alloc, panic} {
+fn terms_round_trip_canonically() -> Unit ! {io, alloc} {
     let mut s = store.new();
     same(&round(&mut s, &Bytes.from("(pi nat (sort 0))")), &Bytes.from("(pi nat (sort 0))"));
     same(&round(&mut s, &Bytes.from("(sort (max (u 0) (succ (u 0))))")), &Bytes.from("(sort (succ (u 0)))"));
@@ -108,7 +108,7 @@ fn terms_round_trip_canonically() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn items_round_trip() -> Unit ! {io, alloc, panic} {
+fn items_round_trip() -> Unit ! {io, alloc} {
     let mut s = store.new();
     let source = Bytes.from("(def id 1 (pi (sort (u 0)) (pi (var 0) (var 1))) (lam (sort (u 0)) (lam (var 0) (var 0))))\n(data Fin 0 type (nat) (ctor FZero (nat) () ((succ (var 0)))) (ctor FSucc (nat) ((app (global Fin) (var 0))) ((succ (var 1)))))\n(data Two 0 prop () (ctor First () () ()) (ctor Second () () ()))\n(check (global First) (global Two))\n(infer (global id 0))\n(normalize (global id 0))\n");
     let items = match reader.read(&mut s, &source) {
@@ -127,19 +127,19 @@ fn items_round_trip() -> Unit ! {io, alloc, panic} {
     test.is_true(match reader.read(&mut s, &bad) { Result.Ok(_) => false, Result.Err(at) => at == 20 });
 }
 
-fn parse(s: &mut Store, source: &Bytes) -> i64 ! {alloc, panic} {
+fn parse(s: &mut Store, source: &Bytes) -> i64 ! {alloc} {
     match reader.read_term(s, source) {
         Result.Ok(id) => id,
         Result.Err(_) => panic(),
     }
 }
 
-fn shows(s: &Store, id: i64, expected: &Bytes) -> Unit ! {alloc, panic} {
+fn shows(s: &Store, id: i64, expected: &Bytes) -> Unit ! {alloc} {
     same(&printer.term_into(s, Bytes.with_capacity(0), id), expected);
 }
 
 /// A list of terms parsed from `(t ...)` source.
-fn terms(s: &mut Store, items: &Bytes) -> i64 ! {alloc, panic} {
+fn terms(s: &mut Store, items: &Bytes) -> i64 ! {alloc} {
     let wrapped = parse(s, items);
     // `(app f a)` gives two items; build the list from an application spine.
     let mut list: Vec<i64> = Vec.new();
@@ -148,7 +148,7 @@ fn terms(s: &mut Store, items: &Bytes) -> i64 ! {alloc, panic} {
 }
 
 #[test]
-fn shifting_moves_only_free_indices_at_or_above_the_cutoff() -> Unit ! {io, alloc, panic} {
+fn shifting_moves_only_free_indices_at_or_above_the_cutoff() -> Unit ! {io, alloc} {
     let mut s = store.new();
     let t = parse(&mut s, &Bytes.from("(lam nat (app (var 0) (var 1)))"));
     let up = subst.shift(&mut s, t, 2, 0);
@@ -165,7 +165,7 @@ fn shifting_moves_only_free_indices_at_or_above_the_cutoff() -> Unit ! {io, allo
 }
 
 #[test]
-fn substitution_lowers_indices_and_never_captures() -> Unit ! {io, alloc, panic} {
+fn substitution_lowers_indices_and_never_captures() -> Unit ! {io, alloc} {
     let mut s = store.new();
     let body = parse(&mut s, &Bytes.from("(app (var 0) (var 1))"));
     let five = parse(&mut s, &Bytes.from("(lit 5)"));
@@ -184,7 +184,7 @@ fn substitution_lowers_indices_and_never_captures() -> Unit ! {io, alloc, panic}
 }
 
 #[test]
-fn outer_binders_are_rewritten_in_parallel() -> Unit ! {io, alloc, panic} {
+fn outer_binders_are_rewritten_in_parallel() -> Unit ! {io, alloc} {
     let mut s = store.new();
     // Arguments are outermost first: (var 1) is the first, (var 0) the second.
     let args = terms(&mut s, &Bytes.from("(app (lit 1) (lit 2))"));
@@ -206,7 +206,7 @@ fn outer_binders_are_rewritten_in_parallel() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn universe_parameters_are_instantiated_everywhere() -> Unit ! {io, alloc, panic} {
+fn universe_parameters_are_instantiated_everywhere() -> Unit ! {io, alloc} {
     let mut s = store.new();
     let t = parse(&mut s, &Bytes.from("(pi (sort (u 0)) (app (global id (max 1 (u 1))) (sort (succ (u 1)))))"));
     let three = term.level_of(&mut s, 3);
@@ -226,7 +226,7 @@ fn universe_parameters_are_instantiated_everywhere() -> Unit ! {io, alloc, panic
 }
 
 #[test]
-fn shared_subterms_are_visited_once() -> Unit ! {io, alloc, panic} {
+fn shared_subterms_are_visited_once() -> Unit ! {io, alloc} {
     let mut s = store.new();
     // t(k+1) = app(t(k), t(k)): 2^60 nodes as a tree, 61 in the store.
     let mut t = term.var(&mut s, 0);
@@ -244,7 +244,7 @@ fn shared_subterms_are_visited_once() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn spines_split_and_rebuild_applications() -> Unit ! {io, alloc, panic} {
+fn spines_split_and_rebuild_applications() -> Unit ! {io, alloc} {
     let mut s = store.new();
     let t = parse(&mut s, &Bytes.from("(app (app (app (global f) zero) nat) (var 0))"));
     let head = subst.head(&s, t);
@@ -256,7 +256,7 @@ fn spines_split_and_rebuild_applications() -> Unit ! {io, alloc, panic} {
     test.equal_i64(subst.apply(&mut s, head, &args), t);
 }
 
-fn reduce(k: &mut engine.Kernel, source: &Bytes, full: Bool) -> Bytes ! {alloc, panic} {
+fn reduce(k: &mut engine.Kernel, source: &Bytes, full: Bool) -> Bytes ! {alloc} {
     let t = parse(&mut k.store, source);
     engine.begin(k);
     let result = if full { normal.normal(k, t) } else { normal.whnf(k, t) };
@@ -267,7 +267,7 @@ fn reduce(k: &mut engine.Kernel, source: &Bytes, full: Bool) -> Bytes ! {alloc, 
 }
 
 #[test]
-fn weak_head_reduction_stops_at_the_head() -> Unit ! {io, alloc, panic} {
+fn weak_head_reduction_stops_at_the_head() -> Unit ! {io, alloc} {
     let mut k = engine.new();
     let name = term.name(&mut k.store, &Bytes.from("two"));
     let ty = term.nat(&mut k.store);
@@ -289,7 +289,7 @@ fn weak_head_reduction_stops_at_the_head() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn reduction_budgets_fail_closed() -> Unit ! {io, alloc, panic} {
+fn reduction_budgets_fail_closed() -> Unit ! {io, alloc} {
     let mut k = engine.new();
     let deep = Bytes.from("(natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 20))");
     same(&reduce(&mut k, &deep, true), &Bytes.from("(lit 20)"));
@@ -304,7 +304,7 @@ fn reduction_budgets_fail_closed() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn definitions_are_admitted_only_after_checking() -> Unit ! {io, alloc, panic} {
+fn definitions_are_admitted_only_after_checking() -> Unit ! {io, alloc} {
     let mut k = engine.new();
     let two = term.name(&mut k.store, &Bytes.from("two"));
     let ty = parse(&mut k.store, &Bytes.from("nat"));
@@ -325,7 +325,7 @@ fn definitions_are_admitted_only_after_checking() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn data_families_are_admitted_and_eliminated() -> Unit ! {io, alloc, panic} {
+fn data_families_are_admitted_and_eliminated() -> Unit ! {io, alloc} {
     let mut k = engine.new();
     let source = Bytes.from("(data Even 0 type () (ctor E0 () () ()) (ctor ES () ((global Even)) ()))\n(data Bad 0 type () (ctor B () ((pi (global Bad) nat)) ()))\n");
     let items = match reader.read(&mut k.store, &source) {
@@ -359,12 +359,12 @@ fn data_families_are_admitted_and_eliminated() -> Unit ! {io, alloc, panic} {
     same(&value, &Bytes.from("(lit 2)"));
 }
 
-fn show(k: &engine.Kernel, id: i64) -> Bytes ! {alloc, panic} {
+fn show(k: &engine.Kernel, id: i64) -> Bytes ! {alloc} {
     printer.term_into(&k.store, Bytes.with_capacity(0), id)
 }
 
 #[test]
-fn the_api_works_in_a_context() -> Unit ! {io, alloc, panic} {
+fn the_api_works_in_a_context() -> Unit ! {io, alloc} {
     let mut k = engine.new();
     let nat = parse(&mut k.store, &Bytes.from("nat"));
     let mut context: Vec<i64> = Vec.new();
@@ -394,7 +394,7 @@ fn the_api_works_in_a_context() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn failures_say_which_term_failed_and_why() -> Unit ! {io, alloc, panic} {
+fn failures_say_which_term_failed_and_why() -> Unit ! {io, alloc} {
     let mut k = engine.new();
     let nat = parse(&mut k.store, &Bytes.from("nat"));
     let sort = parse(&mut k.store, &Bytes.from("(sort 0)"));
@@ -422,7 +422,7 @@ fn failures_say_which_term_failed_and_why() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn abstraction_builds_rewrite_motives() -> Unit ! {io, alloc, panic} {
+fn abstraction_builds_rewrite_motives() -> Unit ! {io, alloc} {
     let mut k = engine.new();
     // Every occurrence of `succ zero` becomes the new variable.
     let t = parse(&mut k.store, &Bytes.from("(app (app (global f) (succ zero)) (succ zero))"));
@@ -441,7 +441,7 @@ fn abstraction_builds_rewrite_motives() -> Unit ! {io, alloc, panic} {
 }
 
 #[test]
-fn rewinding_drops_new_objects_and_keeps_old_ones() -> Unit ! {io, alloc, panic} {
+fn rewinding_drops_new_objects_and_keeps_old_ones() -> Unit ! {io, alloc} {
     let mut s = store.new();
     let kept = parse(&mut s, &Bytes.from("(pi nat (sort 0))"));
     let start = store.mark(&s);
@@ -466,7 +466,7 @@ fn rewinding_drops_new_objects_and_keeps_old_ones() -> Unit ! {io, alloc, panic}
 }
 
 #[test]
-fn checking_a_definition_leaves_only_its_entry_behind() -> Unit ! {io, alloc, panic} {
+fn checking_a_definition_leaves_only_its_entry_behind() -> Unit ! {io, alloc} {
     let mut k = engine.new();
     let name = term.name(&mut k.store, &Bytes.from("thirty"));
     let ty = parse(&mut k.store, &Bytes.from("(eq nat (natelim (lam nat nat) zero (lam nat (lam nat (succ (var 0)))) (lit 30)) (lit 30))"));
@@ -491,7 +491,7 @@ fn checking_a_definition_leaves_only_its_entry_behind() -> Unit ! {io, alloc, pa
 
 /// Read arbitrary bytes as an exchange file and print what was read.
 #[fuzz]
-fn read_any(input: &Bytes) -> Unit ! {alloc, panic} {
+fn read_any(input: &Bytes) -> Unit ! {alloc} {
     let mut k = engine.new();
     match reader.read(&mut k.store, input) {
         Result.Ok(items) => {
@@ -509,7 +509,7 @@ fn read_any(input: &Bytes) -> Unit ! {alloc, panic} {
 /// Read arbitrary bytes as an exchange file, then admit and answer every
 /// item, as `kernel check` does.
 #[fuzz]
-fn check_any(input: &Bytes) -> Unit ! {alloc, panic} {
+fn check_any(input: &Bytes) -> Unit ! {alloc} {
     let mut k = engine.new();
     let items = match reader.read(&mut k.store, input) {
         Result.Ok(items) => items,

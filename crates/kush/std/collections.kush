@@ -7,7 +7,7 @@ use std.option.Option;
 /// the capacity is `Slice.len(items)`. `set_contains`, `map_get`, and the
 /// mutating helpers use linear lookup. Insertion order is preserved.
 
-pub fn set_contains(items: &[i64], count: i64, value: i64) -> Bool ! {panic} {
+pub fn set_contains(items: &[i64], count: i64, value: i64) -> Bool ! {} {
     let mut i = 0;
     while i < count {
         if Slice.get(items, i) == value { return true; }
@@ -18,7 +18,7 @@ pub fn set_contains(items: &[i64], count: i64, value: i64) -> Bool ! {panic} {
 
 /// Insert one value and return the new count. Duplicates and a full slice leave
 /// the count unchanged.
-pub fn set_add(items: &mut [i64], count: i64, value: i64) -> i64 ! {panic} {
+pub fn set_add(items: &mut [i64], count: i64, value: i64) -> i64 ! {} {
     let mut i = 0;
     let mut present = false;
     while i < count {
@@ -31,7 +31,7 @@ pub fn set_add(items: &mut [i64], count: i64, value: i64) -> i64 ! {panic} {
 }
 
 /// Remove every occurrence of `value` and return the new count.
-pub fn set_remove(items: &mut [i64], count: i64, value: i64) -> i64 ! {panic} {
+pub fn set_remove(items: &mut [i64], count: i64, value: i64) -> i64 ! {} {
     let mut read = 0;
     let mut write = 0;
     while read < count {
@@ -46,7 +46,7 @@ pub fn set_remove(items: &mut [i64], count: i64, value: i64) -> i64 ! {panic} {
 }
 
 /// Append the live members to an existing byte buffer.
-pub fn set_write(items: &[i64], count: i64, out: Bytes) -> Bytes ! {alloc, panic} {
+pub fn set_write(items: &[i64], count: i64, out: Bytes) -> Bytes ! {alloc} {
     let mut out = out;
     let mut i = 0;
     while i < count {
@@ -56,7 +56,7 @@ pub fn set_write(items: &[i64], count: i64, out: Bytes) -> Bytes ! {alloc, panic
     out
 }
 
-pub fn map_get(keys: &[i64], values: &[i64], count: i64, key: i64) -> Option<i64> ! {panic} {
+pub fn map_get(keys: &[i64], values: &[i64], count: i64, key: i64) -> Option<i64> ! {} {
     let mut i = 0;
     let mut found = false;
     let mut answer = 0;
@@ -79,7 +79,7 @@ pub fn map_set(
     count: i64,
     key: i64,
     value: i64,
-) -> i64 ! {panic} {
+) -> i64 ! {} {
     let mut i = 0;
     let mut existing = -1;
     while i < count {
@@ -101,7 +101,7 @@ pub fn map_remove(
     values: &mut [i64],
     count: i64,
     key: i64,
-) -> i64 ! {panic} {
+) -> i64 ! {} {
     let mut at = 0;
     let mut found = -1;
     while at < count {
@@ -119,7 +119,7 @@ pub fn map_remove(
 }
 
 /// Append the live keys to an existing byte buffer.
-pub fn map_write_keys(keys: &[i64], count: i64, out: Bytes) -> Bytes ! {alloc, panic} {
+pub fn map_write_keys(keys: &[i64], count: i64, out: Bytes) -> Bytes ! {alloc} {
     let mut out = out;
     let mut i = 0;
     while i < count {

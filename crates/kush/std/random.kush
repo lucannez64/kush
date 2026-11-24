@@ -12,7 +12,7 @@ use std.result.Result;
 use std.sys;
 
 /// `count` random bytes; `Err(22)` (EINVAL) when `count` is negative.
-pub fn bytes(count: i64) -> Result<Bytes, i64> ! {io, alloc, panic} {
+pub fn bytes(count: i64) -> Result<Bytes, i64> ! {io, alloc} {
     if count < 0 {
         return Result.Err(22);
     }

@@ -50,7 +50,7 @@ fn a_constant_and_a_runtime_index_conflict_unless_proved_distinct() {
     // treated as disjoint, aliasing one element through two `&mut`.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let i = 1;
             let p = &mut xs[1];
@@ -63,7 +63,7 @@ fn a_constant_and_a_runtime_index_conflict_unless_proved_distinct() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut v: Vec<i64> = [1, 2, 3];
             let i = 1;
             let p = &mut v[i];
@@ -77,7 +77,7 @@ fn a_constant_and_a_runtime_index_conflict_unless_proved_distinct() {
     // Proved distinct from the constant: accepted.
     agrees(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let i = 2;
             {
@@ -97,7 +97,7 @@ fn a_constant_and_a_runtime_index_conflict_unless_proved_distinct() {
 fn equal_or_unproved_runtime_indices_conflict() {
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let i = 0;
             let j = 0;
@@ -109,18 +109,18 @@ fn equal_or_unproved_runtime_indices_conflict() {
     );
     rejects(
         r#"
-        fn f(v: &mut [i64], i: i64, j: i64) -> i64 ! {panic} {
+        fn f(v: &mut [i64], i: i64, j: i64) -> i64 ! {} {
             let p = &mut v[i];
             let q = &mut v[j];
             *p + *q
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         OVERLAP,
     );
     // The same expression after the index returns to its old value.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let mut i = 0;
             let p = &mut xs[i];
@@ -134,7 +134,7 @@ fn equal_or_unproved_runtime_indices_conflict() {
     // An index whose address was taken by `&mut` is opaque to the facts.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let mut i = 0;
             let r = &mut i;
@@ -148,20 +148,20 @@ fn equal_or_unproved_runtime_indices_conflict() {
     // A disequality only holds inside its branch.
     rejects(
         r#"
-        fn f(v: &mut [i64], i: i64, j: i64) -> i64 ! {panic} {
+        fn f(v: &mut [i64], i: i64, j: i64) -> i64 ! {} {
             if i != j { 0 } else {
                 let p = &mut v[i];
                 let q = &mut v[j];
                 *p + *q
             }
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         OVERLAP,
     );
     // Shared element references never conflict with each other.
     agrees(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let xs: [i64; 3] = [1, 2, 3];
             let i = 0;
             let p = &xs[i];
@@ -178,7 +178,7 @@ fn established_facts_prove_distinct_indices() {
     // `i != j`, an order, and a loop index with its successor.
     agrees(
         r#"
-        fn swap(v: &mut [i64], i: i64, j: i64) -> Unit ! {panic} {
+        fn swap(v: &mut [i64], i: i64, j: i64) -> Unit ! {} {
             if i != j {
                 let p = &mut v[i];
                 let q = &mut v[j];
@@ -187,7 +187,7 @@ fn established_facts_prove_distinct_indices() {
                 *q = t;
             }
         }
-        fn ordered(v: &mut [i64], i: i64, j: i64) -> i64 ! {panic} {
+        fn ordered(v: &mut [i64], i: i64, j: i64) -> i64 ! {} {
             if i < j {
                 let p = &mut v[i];
                 let q = &mut v[j];
@@ -195,7 +195,7 @@ fn established_facts_prove_distinct_indices() {
                 *p
             } else { 0 }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut xs: Vec<i64> = [1, 2, 3, 4];
             swap(&mut xs[..], 0, 3);
             swap(&mut xs[..], 2, 2);
@@ -215,7 +215,7 @@ fn established_facts_prove_distinct_indices() {
     // A reassigned index: the new version differs from the old one.
     agrees(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let mut i = 0;
             {
@@ -234,7 +234,7 @@ fn established_facts_prove_distinct_indices() {
     // row index is unknown.
     agrees(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut m: [[i64; 2]; 2] = [[1, 2], [3, 4]];
             let i = 1;
             {
@@ -250,8 +250,8 @@ fn established_facts_prove_distinct_indices() {
     // Two calls in one expression: arguments are retained together.
     agrees(
         r#"
-        fn add(left: &mut i64, right: &mut i64) -> Unit ! {panic} { *left = *left + *right; }
-        fn main() -> i64 ! {panic} {
+        fn add(left: &mut i64, right: &mut i64) -> Unit ! {} { *left = *left + *right; }
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let i = 0;
             add(&mut xs[i], &mut xs[i + 2]);
@@ -262,8 +262,8 @@ fn established_facts_prove_distinct_indices() {
     );
     rejects(
         r#"
-        fn add(left: &mut i64, right: &mut i64) -> Unit ! {panic} { *left = *left + *right; }
-        fn main() -> i64 ! {panic} {
+        fn add(left: &mut i64, right: &mut i64) -> Unit ! {} { *left = *left + *right; }
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let i = 0;
             add(&mut xs[i], &mut xs[i * 1]);
@@ -277,7 +277,7 @@ fn established_facts_prove_distinct_indices() {
 fn slice_view_element_references_use_index_facts() {
     agrees(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             {
                 let s: &mut [i64] = &mut xs[..];
@@ -294,7 +294,7 @@ fn slice_view_element_references_use_index_facts() {
     );
     agrees(
         r#"
-        fn rotate(s: &mut [i64]) -> Unit ! {panic} {
+        fn rotate(s: &mut [i64]) -> Unit ! {} {
             let n = Slice.len(s);
             let mut i = 0;
             while i + 1 < n {
@@ -306,7 +306,7 @@ fn slice_view_element_references_use_index_facts() {
                 i = i + 1;
             }
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut d: DynArray<i64, 4> = [1, 2, 3];
             rotate(&mut d[..]);
             DynArray.get(&d, 0) * 100 + DynArray.get(&d, 1) * 10 + DynArray.get(&d, 2)
@@ -316,7 +316,7 @@ fn slice_view_element_references_use_index_facts() {
     );
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let s: &mut [i64] = &mut xs[..];
             let i = 2;
@@ -336,7 +336,7 @@ fn proofs_never_cross_a_loop_iteration_through_stored_loans() {
     // it keeps no index identity and conflicts.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let mut b: Box<&mut i64> = Box.new(&mut xs[3]);
             let mut i = 0;
@@ -355,7 +355,7 @@ fn proofs_never_cross_a_loop_iteration_through_stored_loans() {
     // exclusively borrowed against a new reference to the same element.
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let mut b: Box<&mut i64> = Box.new(&mut xs[0]);
             let q = &mut xs[0];
@@ -373,7 +373,7 @@ fn review_an_exclusive_view_is_not_read_inside_its_own_element_index() {
     // rejected (documented); computing the index first is accepted.
     rejects(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let s: &mut [i64] = &mut xs[..];
             let p = &mut s[Slice.get(s, 0)];
@@ -383,7 +383,7 @@ fn review_an_exclusive_view_is_not_read_inside_its_own_element_index() {
     );
     agrees(
         r#"
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut xs: [i64; 4] = [1, 2, 3, 4];
             let s: &mut [i64] = &mut xs[..];
             let i = Slice.get(s, 0);

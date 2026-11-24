@@ -47,7 +47,7 @@ pub fn queued(audio: &Audio) -> i64 ! {io} {
 }
 
 /// Append one sample, clamped to the 16-bit range, in the queue's format.
-pub fn push(out: Bytes, sample: i64) -> Bytes ! {alloc, panic} {
+pub fn push(out: Bytes, sample: i64) -> Bytes ! {alloc} {
     let clamped = if sample > 32767 { 32767 } else if sample < -32768 { -32768 } else { sample };
     let bits = if clamped < 0 { clamped + 65536 } else { clamped };
     out.push(bits & 0xFF).push(bits >> 8)

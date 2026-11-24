@@ -10,10 +10,10 @@ carries such an obligation.
 ```kush
 use std.task.TaskExit;
 
-fn make() -> Box<i64> @[1] ! {alloc, panic} { Box.new(42) }
+fn make() -> Box<i64> @[1] ! {alloc} { Box.new(42) }
 
-fn main() -> i64 ! {alloc, panic, suspend} {
-    Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+fn main() -> i64 ! {alloc, suspend} {
+    Task.scope(fn() -> i64 ! {alloc, suspend} {
         let task: Task<Box<i64>> = Task.spawn(make);
         match Task.join(task) {
             TaskExit.Completed(b) => Box.take(b),
@@ -56,7 +56,7 @@ the payload. This is the explicit cleanup/transfer contract; no obligation is
 dropped merely because a cancellation bit was set.
 
 ```kush
-fn make() -> Box<i64> @[1] ! {alloc, panic, suspend} {
+fn make() -> Box<i64> @[1] ! {alloc, suspend} {
     let cancelled = Task.yield();
     Box.new(if cancelled { 7 } else { 9 })
 }
@@ -67,7 +67,7 @@ The same rule preserves a linear capture that the body returns:
 
 ```kush
 let b = Box.new(11);
-let task: Task<Box<i64>> = Task.spawn(fn() -> Box<i64> @[1] ! {alloc, panic, suspend} {
+let task: Task<Box<i64>> = Task.spawn(fn() -> Box<i64> @[1] ! {alloc, suspend} {
     let _cancelled = Task.yield();
     b
 });

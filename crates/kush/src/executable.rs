@@ -17,7 +17,12 @@ pub(crate) mod anf;
 mod recursive_lifetimes;
 
 type Result<T> = std::result::Result<T, Diagnostic>;
-pub(crate) const PANIC: u16 = 1;
+/// FND-ROWS-PANIC: `panic` is not an effect; any function may panic. The
+/// constant is the empty set, so no row contains it and `require(PANIC)`
+/// always holds. Code generation must not read "may not panic" from a row:
+/// native tests the abort word after every call in unwinding programs.
+/// (Bit 0 stays unused; declared operations start at `1 << 4`.)
+pub(crate) const PANIC: u16 = 0;
 /// CAP-CAPTURING-LEXICAL: operation ids above this name private frames of
 /// capability-only capturing handlers; no declared operation reaches them.
 pub(crate) const PRIVATE_OPERATION_BASE: usize = 1 << 20;
@@ -2969,7 +2974,10 @@ fn block_any(block: &ast::Block, predicate: &dyn Fn(&ast::ExprKind) -> bool) -> 
 /// A callback is eligible only when:
 ///
 /// * it is a noncapturing `fn(...)` value;
-/// * its declared effect row contains neither `io`, `suspend`, nor `panic`;
+/// * its declared effect row contains neither `io` nor `suspend`;
+/// * its body has no operation that can panic (`fusion_may_panic`): since
+///   FND-ROWS-PANIC a row no longer says so, and fusing two callbacks that
+///   may panic would change which panic is reported;
 /// * its body is structurally total: no loops, no direct or indirect recursion,
 ///   no indirect calls, and no task operations;
 /// * every direct callee is itself eligible.
@@ -3016,6 +3024,40 @@ fn fusion_function_safe(
     safe
 }
 
+/// FND-ROWS-PANIC: whether this node (not its children) may panic: checked
+/// integer arithmetic and negation, range slicing, builtin operations (bounds,
+/// capacity and infallible allocation), and fixed-capacity array writes.
+/// Conservative: arithmetic the prover showed in range still counts, and
+/// every builtin call is treated as able to panic.
+fn fusion_may_panic(expr: &Expr) -> bool {
+    use crate::lexer::Kind;
+    let integer = expr.ty.float_kind().is_none();
+    match &expr.kind {
+        ExprKind::Binary(
+            Kind::Plus
+            | Kind::Minus
+            | Kind::Star
+            | Kind::Slash
+            | Kind::Percent
+            | Kind::Shl
+            | Kind::Shr,
+            _,
+            _,
+        ) => integer,
+        ExprKind::Unary(Kind::Minus, _) => integer,
+        ExprKind::Call(target, _) => !matches!(target, Target::Function(_)),
+        ExprKind::Slice { .. }
+        | ExprKind::BoxNew(_)
+        | ExprKind::ArenaAlloc { .. }
+        | ExprKind::DynArrayPush { .. }
+        | ExprKind::DynArraySet { .. }
+        | ExprKind::DynArrayPop { .. }
+        | ExprKind::DynArrayFill { .. }
+        | ExprKind::DynamicPerform { .. } => true,
+        _ => false,
+    }
+}
+
 fn fusion_block_safe(
     block: &Block,
     signatures: &[Signature],
@@ -3048,6 +3090,9 @@ fn fusion_expr_safe(
                 visiting: &mut Vec<bool>| {
         fusion_expr_safe(value, signatures, bodies, memo, visiting)
     };
+    if fusion_may_panic(expr) {
+        return false;
+    }
     match &expr.kind {
         ExprKind::Constant(_)
         | ExprKind::Erased(_)
@@ -5285,9 +5330,9 @@ pub fn logical_module(source: &str) -> Result<crate::check::CheckedModule> {
 /// effect row.
 const ALLOCATOR_PROTOCOL_SOURCE: &str = r#"
 trait AllocatorProtocol {
-    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic};
+    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc};
     fn free(self: &mut Self, block: Bytes) -> Unit ! {};
-    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic};
+    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc};
 }
 "#;
 /// Synthetic spans sit far above any admitted source file (the loader rejects
@@ -5468,7 +5513,7 @@ fn checked_exports(
         }
         if sig.effects & !PANIC != 0 || !sig.effect_arguments.is_empty() {
             return fail(format!(
-                "exported function '{}' may only have the effect row {{}} or {{panic}}; a panic aborts the process",
+                "exported function '{}' must have the empty effect row {{}}; a panic aborts the process",
                 f.name
             ));
         }
@@ -18414,15 +18459,10 @@ impl Checker<'_, '_> {
         if missing == 0 {
             return Ok(());
         }
-        let mut names = [
-            (IO, "io"),
-            (ALLOC, "alloc"),
-            (PANIC, "panic"),
-            (SUSPEND, "suspend"),
-        ]
-        .into_iter()
-        .filter_map(|(bit, name)| (missing & bit != 0).then_some(name.to_owned()))
-        .collect::<Vec<_>>();
+        let mut names = [(IO, "io"), (ALLOC, "alloc"), (SUSPEND, "suspend")]
+            .into_iter()
+            .filter_map(|(bit, name)| (missing & bit != 0).then_some(name.to_owned()))
+            .collect::<Vec<_>>();
         names.extend(crate::runtime_types::user_effect_names(
             self.resolution,
             missing,
@@ -20575,7 +20615,7 @@ impl Checker<'_, '_> {
         if block_allocates(body) && signature.effects & (ALLOC | PANIC) != ALLOC | PANIC {
             return Err(Diagnostic::new(
                 span,
-                "this function-value conversion needs a capturing adapter; add 'alloc' and 'panic' to the target arrow effect row",
+                "this function-value conversion needs a capturing adapter; add 'alloc' to the target arrow effect row",
             ));
         }
         Ok(())
@@ -28851,7 +28891,7 @@ impl Checker<'_, '_> {
         if signature.effects != 0 {
             return Err(Diagnostic::new(
                 span,
-                "Arena.with_strategy requires a pure strategy with the empty effect row; a strategy that allocates, performs I/O, suspends, or panics cannot run inside allocator bookkeeping",
+                "Arena.with_strategy requires a strategy with the empty effect row; a strategy that allocates, performs I/O, or suspends cannot run inside allocator bookkeeping (a panic in it aborts the process)",
             ));
         }
         Ok(Expr {
@@ -29117,9 +29157,9 @@ impl Checker<'_, '_> {
             return Err(Diagnostic::new(
                 span,
                 if allocation {
-                    "Allocator.new allocation callbacks may only declare the 'alloc' and 'panic' effects"
+                    "Allocator.new allocation callbacks may only declare the 'alloc' effect"
                 } else {
-                    "Allocator.new release callbacks must have the empty effect row; release also runs during implicit drop, so it cannot allocate, perform I/O, suspend, or panic"
+                    "Allocator.new release callbacks must have the empty effect row; release also runs during implicit drop, so it cannot allocate, perform I/O, or suspend (a panic in it aborts the process)"
                 },
             ));
         }
@@ -29154,7 +29194,7 @@ impl Checker<'_, '_> {
         if signature.effects & !(ALLOC | PANIC) != 0 {
             return Err(Diagnostic::new(
                 span,
-                "Allocator.with_realloc growth callbacks may only declare the 'alloc' and 'panic' effects",
+                "Allocator.with_realloc growth callbacks may only declare the 'alloc' effect",
             ));
         }
         Ok(checked)
@@ -32948,7 +32988,7 @@ impl Checker<'_, '_> {
                     if !self.subtype(ty, wanted) {
                         return Err(Diagnostic::new(
                             value.span,
-                            "this capability's handler is capturing, so a second perform through it panics: pass it to a 'cap Op ! {panic}' parameter (whose row also holds the handler's own effects)",
+                            "this capability's handler is capturing and reaches callees through its frame: pass it to a 'cap Op ! {..}' parameter whose row holds the handler's own effects",
                         ));
                     }
                     constraints.push((declared, wanted));
@@ -34146,7 +34186,7 @@ impl Checker<'_, '_> {
             if signature.effects & !(IO | ALLOC | PANIC | SUSPEND) != 0 {
                 return Err(Diagnostic::new(
                     value.span,
-                    "a thread body may only have the effects {io, alloc, panic, suspend}: a declared operation must be handled inside the thread",
+                    "a thread body may only have the effects {io, alloc, suspend}: a declared operation must be handled inside the thread",
                 ));
             }
             if let Some(types) = self.closure_capture_types(&value)
@@ -36402,11 +36442,22 @@ impl Checker<'_, '_> {
             && !multishot
             && !noncapturing)
             || multi_framed;
+        // Only when the capability is passed to a call: in its own body the
+        // handler is performed through its local.
+        let passes_capability = capability.as_ref().is_some_and(|(_, binder)| {
+            self.resolution
+                .binder(*binder)
+                .is_some_and(|id| block_passes_binding(self.resolution, body, id))
+        });
+        // A framed handler on the dynamic stack resumes callees through
+        // resumable entries only when its capability is passed to them; a
+        // tail-resumptive one performed only in its own body is served from
+        // its frame like a perform by name.
         let region = ((!tail_resumptive_handler(self.resolution, handler)
             || shadows_handler_effects)
             && (lexical || declared.is_some() || capability_awaits))
             || (declared.is_some() && multishot)
-            || (framed && capability_awaits);
+            || (framed && capability_awaits && (declared.is_none() || passes_capability));
         if capability.is_some() && passable && !region {
             self.capability_passable.insert(slot);
         }
@@ -36420,13 +36471,6 @@ impl Checker<'_, '_> {
         if capability_resumable {
             self.capability_resumable.insert(slot);
         }
-        // Only when the capability is passed to a call: in its own body the
-        // handler is performed through its local.
-        let passes_capability = capability.as_ref().is_some_and(|(_, binder)| {
-            self.resolution
-                .binder(*binder)
-                .is_some_and(|id| block_passes_binding(self.resolution, body, id))
-        });
         // A multishot handler is never found by name: its frame is private.
         let private_operation =
             (framed && region && passes_capability && (declared.is_none() || multi)).then(|| {
@@ -36557,7 +36601,7 @@ impl Checker<'_, '_> {
         })
     }
     /// EFF-CAP-RESUME-CAPTURING: a noncapturing function
-    /// `fn(P, token) -> R ! {panic}` that performs the declared operation
+    /// `fn(P, token) -> R ! {}` that performs the declared operation
     /// through the dynamic stack. Passed in place of a capturing capability,
     /// it reaches the capability's own frame: callees perform through it only
     /// in resumable entries, which never run under a nested handler for the
@@ -38160,6 +38204,25 @@ impl Checker<'_, '_> {
     ) -> Result<Expr> {
         if let Some(index) = self.handlers.iter().rposition(|scope| scope.slot == slot) {
             let operation = self.handlers[index].operation.clone();
+            // A reusable handler was moved into its dynamic frame, which
+            // serves every perform from a copy of its environment; perform
+            // through the frame, as a perform by name does. A nested handle
+            // for the same operation would intercept that perform.
+            if self.handlers[index].reusable {
+                if let Some(inner) = self.handlers[index + 1..]
+                    .iter()
+                    .find(|inner| inner.operation == operation)
+                {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "this capability's capturing handler lives in its dynamic frame, which the nested 'handle {}' hides; perform it outside the nested handle",
+                            inner.operation
+                        ),
+                    ));
+                }
+                return self.dynamic_perform(&operation, value, expected, span);
+            }
             let operation_effect = self.operation_effect(&operation);
             return self.lexical_perform(
                 index,
@@ -38449,6 +38512,18 @@ impl Checker<'_, '_> {
         {
             return self.lexical_perform(index, operation, operation_effect, value, expected, span);
         }
+        self.dynamic_perform(operation, value, expected, span)
+    }
+    /// A perform of `operation` served by the innermost handler on the
+    /// dynamic stack.
+    fn dynamic_perform(
+        &mut self,
+        operation: &str,
+        value: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        let operation_effect = self.operation_effect(operation);
         let Some(declared) = self.effect_operations.get(operation).copied() else {
             return Err(Diagnostic::new(
                 span,

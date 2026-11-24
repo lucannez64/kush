@@ -8,16 +8,16 @@ module examples.reuse;
 // `` contract is checked from the source operation, not from an
 // optimization pass.
 
-fn bump(owner: Box<i64>) -> Box<i64> ! {panic} {
+fn bump(owner: Box<i64>) -> Box<i64> ! {} {
     let current = Box.read(&owner);
     Box.reuse(owner, current + 1)
 }
 
-fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+fn inc(x: i64) -> i64 ! {} { x + 1 }
 
 fn unwrap(owner: Box<i64>) -> i64 ! {} { Box.take(owner) }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let mut owner = Box.new(0);
     let mut i = 0;
     while i < 100 {

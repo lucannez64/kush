@@ -10,11 +10,11 @@ prop AuthorizedKey<key: i64> {
 
 // Audit metadata has grade zero: its argument is evaluated but no ABI slot or
 // runtime value is materialized. The returned owning value is exactly-once.
-pub fn issue(key: i64, erased approved: AuthorizedKey<key>, audit: i64 @[0]) -> Box<i64> @[1] ! {alloc, panic} {
+pub fn issue(key: i64, erased approved: AuthorizedKey<key>, audit: i64 @[0]) -> Box<i64> @[1] ! {alloc} {
     Box.new(key)
 }
 
-pub fn standard_ticket(audit: i64) -> Box<i64> @[1] ! {alloc, panic} {
+pub fn standard_ticket(audit: i64) -> Box<i64> @[1] ! {alloc} {
     issue(23130, AuthorizedKey.Standard::<23130>, audit)
 }
 
@@ -35,7 +35,7 @@ pub fn staged(values: Vec<i64>) -> Vec<i64> ! {} {
     Vec.map_in_place(intermediate, tag)
 }
 
-pub fn checksum(values: &[i64]) -> i64 ! {panic} {
+pub fn checksum(values: &[i64]) -> i64 ! {} {
     let mut sum = 0;
     let mut i = 0;
     while i < Slice.len(values) {
@@ -46,11 +46,11 @@ pub fn checksum(values: &[i64]) -> i64 ! {panic} {
 }
 
 // The ticket must reach this consuming boundary, not an implicit destructor.
-pub fn finish(ticket: Box<i64> @[1], sum: i64) -> i64 ! {panic} {
+pub fn finish(ticket: Box<i64> @[1], sum: i64) -> i64 ! {} {
     sum + Box.take(ticket)
 }
 
-pub fn batch(n: i64, fused_mode: Bool) -> i64 ! {alloc, panic} {
+pub fn batch(n: i64, fused_mode: Bool) -> i64 ! {alloc} {
     let ticket = standard_ticket(n);
     let mut values: Vec<i64> = Vec.with_capacity(n);
     let mut i = 0;

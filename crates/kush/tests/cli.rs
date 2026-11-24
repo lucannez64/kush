@@ -199,7 +199,7 @@ fn eval_and_native_run_receive_program_arguments_and_environment() {
     let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
     let source = scratch.path().join("host inputs.kush");
     std::fs::write(&source, r#"use std.result.Result;
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             match ENV.arg_count() { Result.Ok(n) => print_i64(n), Result.Err(_) => print_i64(-1) };
             let arg = match ENV.arg(1, Bytes.with_capacity(64)) { Result.Ok(b) => b, Result.Err(_) => Bytes.from("") };
             print_i64(Bytes.len(&arg));
@@ -231,7 +231,7 @@ fn lint_scratch(label: &str) -> PathBuf {
     path
 }
 
-const LINT_SAMPLE: &str = "module lint_sample;\n\nuse std.result.Result;\n\nfn make() -> Bytes ! {alloc, panic} {\n    Bytes.with_capacity(8)\n}\n\nfn tail() -> Result<Unit, i64> ! {alloc, panic} {\n    let value = make();\n    drop(value);\n    Result.Ok(())\n}\n\nfn early() -> Result<Unit, i64> ! {alloc, panic} {\n    let value = make();\n    drop(value);\n    let after = make();\n    drop(after);\n    Result.Ok(())\n}\n\nfn one_line() -> Result<Unit, i64> ! {alloc, panic} {\n    let value = make();\n    match Bytes.len(&value) {\n        0 => { drop(value); return Result.Err(1); },\n        _ => Result.Ok(()),\n    }\n}\n";
+const LINT_SAMPLE: &str = "module lint_sample;\n\nuse std.result.Result;\n\nfn make() -> Bytes ! {alloc} {\n    Bytes.with_capacity(8)\n}\n\nfn tail() -> Result<Unit, i64> ! {alloc} {\n    let value = make();\n    drop(value);\n    Result.Ok(())\n}\n\nfn early() -> Result<Unit, i64> ! {alloc} {\n    let value = make();\n    drop(value);\n    let after = make();\n    drop(after);\n    Result.Ok(())\n}\n\nfn one_line() -> Result<Unit, i64> ! {alloc} {\n    let value = make();\n    match Bytes.len(&value) {\n        0 => { drop(value); return Result.Err(1); },\n        _ => Result.Ok(()),\n    }\n}\n";
 
 #[test]
 fn lint_reports_and_fixes_redundant_drops() {
@@ -278,7 +278,7 @@ fn lint_reports_and_fixes_redundant_drops() {
 fn lint_keeps_commented_and_linear_drops() {
     let scratch = lint_scratch("keep");
     let file = scratch.join("sample.kush");
-    let source = "module keep;\n\nfn main() -> Unit ! {alloc, panic} {\n    let value = Bytes.with_capacity(4);\n    drop(value); // documented early release\n}\n";
+    let source = "module keep;\n\nfn main() -> Unit ! {alloc} {\n    let value = Bytes.with_capacity(4);\n    drop(value); // documented early release\n}\n";
     std::fs::write(&file, source).unwrap();
     let output = command()
         .args(["lint", file.to_str().unwrap()])
@@ -303,7 +303,7 @@ fn eval_fuel_flag_sets_the_budget() {
     let file = dir.join("count.kush");
     std::fs::write(
         &file,
-        "fn main() -> i64 ! {panic} { let mut i = 0; while i < 5000 { i = i + 1; } i % 256 }",
+        "fn main() -> i64 ! {} { let mut i = 0; while i < 5000 { i = i + 1; } i % 256 }",
     )
     .unwrap();
     let run = |extra: &[&str]| {

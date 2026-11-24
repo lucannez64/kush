@@ -4,14 +4,14 @@
 use kush::executable;
 
 const HELPERS: &str = "
-fn f<'a, 'b>(source: &'a [i64], target: &'b mut [i64]) -> Unit ! {panic} {
+fn f<'a, 'b>(source: &'a [i64], target: &'b mut [i64]) -> Unit ! {} {
     let mut i = 0;
     while i < Slice.len(source) {
         Slice.set(target, i, Slice.get(source, i) * 3);
         i = i + 1;
     }
 }
-fn g<'a, 'b>(one: &'a mut [i64], two: &'b mut [i64]) -> Unit ! {panic} {
+fn g<'a, 'b>(one: &'a mut [i64], two: &'b mut [i64]) -> Unit ! {} {
     Slice.set(one, 0, Slice.get(two, 0));
 }
 fn id<'a>(x: &'a mut [i64]) -> &'a mut [i64] ! {} { x }
@@ -20,7 +20,7 @@ fn id<'a>(x: &'a mut [i64]) -> &'a mut [i64] ! {} { x }
 fn rejected(body: &str) {
     let source = format!(
         "{HELPERS}
-        fn main() -> Unit ! {{io, panic}} {{
+        fn main() -> Unit ! {{io}} {{
             let mut v: [i64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
             {body}
             print_i64(v[0]);
@@ -56,7 +56,7 @@ fn slice_views_do_not_cross_the_foreign_boundary() {
     for parameter in ["&mut [i64]", "&[i64]"] {
         let source = format!(
             "foreign \"ext\" fn ext(x: {parameter}) -> i64 ! {{io}};
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let mut v: [i64; 2] = [1, 2];
                 print_i64(ext(&mut v[..]));
             }}"

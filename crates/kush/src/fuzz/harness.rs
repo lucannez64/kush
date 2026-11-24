@@ -188,7 +188,7 @@ pub struct Target {
     /// The file the function is in and its byte range there.
     pub file: String,
     pub range: (usize, usize),
-    /// The declared effect row's text, as in `io, alloc, panic` (plus what
+    /// The declared effect row's text, as in `io, alloc` (plus what
     /// the makers of its parameters need).
     pub effects: String,
     /// Generated functions its harness calls, appended to their modules.
@@ -313,7 +313,7 @@ fn slice(text: (&str, usize), span: Span) -> &str {
     text.get(span.start - base..span.end - base).unwrap_or("")
 }
 
-const ALLOWED_EFFECTS: [&str; 3] = ["io", "alloc", "panic"];
+const ALLOWED_EFFECTS: [&str; 2] = ["io", "alloc"];
 
 fn layout<'t, 'p>(
     function: &ast::Function,
@@ -742,7 +742,7 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
         .max()
         .unwrap_or(0)
         + 1;
-    root.push_str(&format!("\nfn main() -> i64 ! {{io, alloc, panic}} {{\n    let which = __fz_which();\n    let tape = match io.read_all(io.stdin(), Bytes.with_capacity({capacity})) {{\n        Result.Ok(bytes) => bytes,\n        Result.Err(_) => return 2,\n    }};\n"));
+    root.push_str(&format!("\nfn main() -> i64 ! {{io, alloc}} {{\n    let which = __fz_which();\n    let tape = match io.read_all(io.stdin(), Bytes.with_capacity({capacity})) {{\n        Result.Ok(bytes) => bytes,\n        Result.Err(_) => return 2,\n    }};\n"));
     root.push_str(&dispatch);
     root.push_str("    1\n}\n");
     // `#[stack_size(N)]` belongs to the program's `main`: it moves from the
@@ -783,7 +783,7 @@ pub fn sources(program: &Program, targets: &[Target]) -> Sources {
 /// Appended once to each module with harnesses: little-endian `width` bytes
 /// of the tape at `at`; bytes past its end read as zero.
 const WORD_HELPER: &str = "
-pub fn __kush_fuzz_word(tape: &Bytes, at: i64, width: i64) -> i64 ! {panic} {
+pub fn __kush_fuzz_word(tape: &Bytes, at: i64, width: i64) -> i64 ! {} {
     let mut value = 0;
     let mut k = width - 1;
     while k >= 0 {
@@ -798,7 +798,7 @@ pub fn __kush_fuzz_word(tape: &Bytes, at: i64, width: i64) -> i64 ! {panic} {
 
 const ROOT_HELPERS: &str = "
 /// The harness number in the first program argument.
-fn __fz_which() -> i64 ! {io, alloc, panic} {
+fn __fz_which() -> i64 ! {io, alloc} {
     let digits = match env.arg(1, Bytes.with_capacity(16)) {
         Result.Ok(bytes) => bytes,
         Result.Err(_) => return 0 - 1,
@@ -846,8 +846,8 @@ fn expression(build: &Build, slot_name: &dyn Fn(usize) -> String) -> String {
     }
 }
 
-/// The harness's effect row: the target's effects plus `panic` (the guards
-/// and decoding) and, when it decodes a collection, `alloc`.
+/// The harness's effect row: the target's effects plus, when it decodes a
+/// collection, `alloc`.
 fn harness_effects(row: &str, collections: bool) -> String {
     let mut effects: Vec<String> = row
         .split(',')
@@ -856,9 +856,6 @@ fn harness_effects(row: &str, collections: bool) -> String {
         .collect();
     if collections && !effects.iter().any(|e| e == "alloc") {
         effects.push("alloc".into());
-    }
-    if !effects.iter().any(|e| e == "panic") {
-        effects.push("panic".into());
     }
     effects.join(", ")
 }

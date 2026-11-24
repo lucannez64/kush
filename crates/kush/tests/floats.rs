@@ -106,7 +106,7 @@ fn float_lexing_keeps_projection_and_ranges_intact() {
 #[test]
 fn float_literals_are_contextual_and_print_their_shortest_form() {
     agrees(
-        "fn main() -> i64 ! {io, panic} {
+        "fn main() -> i64 ! {io} {
             print_float(1.5);
             print_float(0.1);
             print_float(-0.0);
@@ -133,7 +133,7 @@ fn float_literals_are_contextual_and_print_their_shortest_form() {
         "type mismatch",
     );
     rejects(
-        "fn main() -> i64 ! {io, panic} { print_float(1); 0 }",
+        "fn main() -> i64 ! {io} { print_float(1); 0 }",
         "expects a floating-point value",
     );
     rejects(
@@ -146,7 +146,7 @@ fn float_literals_are_contextual_and_print_their_shortest_form() {
     );
     // Underflow is ordinary IEEE rounding, not an error.
     agrees(
-        "fn main() -> i64 ! {io, panic} { let x: f64 = 1e-400; print_float(x); 0 }",
+        "fn main() -> i64 ! {io} { let x: f64 = 1e-400; print_float(x); 0 }",
         0,
         "0\n",
     );
@@ -155,7 +155,7 @@ fn float_literals_are_contextual_and_print_their_shortest_form() {
 #[test]
 fn ieee_arithmetic_comparisons_and_special_values_are_consistent() {
     agrees(
-        "fn main() -> i64 ! {io, panic} {
+        "fn main() -> i64 ! {io} {
             let x = 1.5;
             let y = 2.0;
             print_float(x + y);
@@ -201,10 +201,10 @@ fn ieee_arithmetic_comparisons_and_special_values_are_consistent() {
 #[test]
 fn integer_to_float_conversions_are_explicit_and_exactness_is_checked() {
     agrees(
-        "fn show(v: Option<f64>) -> Unit ! {io, panic} {
+        "fn show(v: Option<f64>) -> Unit ! {io} {
             match v { Option.Some(x) => print_float(x), Option.None => print_float(-1.0) }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let n: i32 = 42;
             let m: u16 = 300;
             let a: f64 = Float.from_int(n);
@@ -242,31 +242,31 @@ fn integer_to_float_conversions_are_explicit_and_exactness_is_checked() {
 #[test]
 fn float_to_integer_conversions_truncate_and_reject_out_of_range_values() {
     agrees(
-        "fn show_i64(v: Option<i64>) -> Unit ! {io, panic} {
+        "fn show_i64(v: Option<i64>) -> Unit ! {io} {
             match v { Option.Some(x) => print_int(x), Option.None => print_int(-1) }
         }
-        fn show_u64(v: Option<u64>) -> Unit ! {io, panic} {
+        fn show_u64(v: Option<u64>) -> Unit ! {io} {
             match v { Option.Some(x) => print_int(x), Option.None => print_int(-1) }
         }
-        fn show_i8(v: Option<i8>) -> Unit ! {io, panic} {
+        fn show_i8(v: Option<i8>) -> Unit ! {io} {
             match v { Option.Some(x) => print_int(x), Option.None => print_int(-1) }
         }
-        fn show_u8(v: Option<u8>) -> Unit ! {io, panic} {
+        fn show_u8(v: Option<u8>) -> Unit ! {io} {
             match v { Option.Some(x) => print_int(x), Option.None => print_int(-1) }
         }
-        fn show_i16(v: Option<i16>) -> Unit ! {io, panic} {
+        fn show_i16(v: Option<i16>) -> Unit ! {io} {
             match v { Option.Some(x) => print_int(x), Option.None => print_int(-1) }
         }
-        fn show_u16(v: Option<u16>) -> Unit ! {io, panic} {
+        fn show_u16(v: Option<u16>) -> Unit ! {io} {
             match v { Option.Some(x) => print_int(x), Option.None => print_int(-1) }
         }
-        fn show_i32(v: Option<i32>) -> Unit ! {io, panic} {
+        fn show_i32(v: Option<i32>) -> Unit ! {io} {
             match v { Option.Some(x) => print_int(x), Option.None => print_int(-1) }
         }
-        fn show_u32(v: Option<u32>) -> Unit ! {io, panic} {
+        fn show_u32(v: Option<u32>) -> Unit ! {io} {
             match v { Option.Some(x) => print_int(x), Option.None => print_int(-1) }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             show_i64(Float.try_to_int::<i64>(3.9));
             show_i64(Float.try_to_int::<i64>(-3.9));
             show_i64(3.9.try_to_int::<i64>());
@@ -312,10 +312,10 @@ fn float_to_integer_conversions_truncate_and_reject_out_of_range_values() {
 #[test]
 fn float_width_conversions_and_float_methods_are_explicit() {
     agrees(
-        "fn show(v: Option<f32>) -> Unit ! {io, panic} {
+        "fn show(v: Option<f32>) -> Unit ! {io} {
             match v { Option.Some(x) => print_float(x), Option.None => print_float(-1.0) }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let small: f32 = 3.25;
             print_float(Float.to_f64(small));
             print_float(Float.to_f64(2.5));
@@ -351,7 +351,7 @@ fn floats_flow_through_tuples_records_enums_vectors_generics_and_callables() {
         "struct Holder { value: f64 }
         fn identity<T: Type>(x: T) -> T ! {} { x }
         fn apply(f: fn(f64) -> f64 ! {}, x: f64) -> f64 ! {} { f(x) }
-        fn main() -> i64 ! {io, panic, alloc} {
+        fn main() -> i64 ! {io, alloc} {
             let pair = (1.5, 2.5);
             print_float(pair.0);
             print_float(pair.1);
@@ -387,7 +387,7 @@ fn floats_flow_through_tuples_records_enums_vectors_generics_and_callables() {
 #[test]
 fn native_printing_matches_reference_for_tricky_values() {
     differential(
-        "fn main() -> i64 ! {io, panic} {
+        "fn main() -> i64 ! {io} {
             print_float(5e-324);
             print_float(1.7976931348623157e308);
             print_float(2.2250738585072014e-308);
@@ -414,7 +414,7 @@ fn native_printing_matches_reference_for_tricky_values() {
 fn floats_are_rejected_as_erased_machine_indices() {
     rejects(
         "fn keep(x: f64, erased same: Eq<f64, x, x>) -> i64 ! {} { 1 }
-        fn main() -> i64 ! {panic} { keep(1.5, refl::<f64>(1.5)) }",
+        fn main() -> i64 ! {} { keep(1.5, refl::<f64>(1.5)) }",
         "f64",
     );
 }

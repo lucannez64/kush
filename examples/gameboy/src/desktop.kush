@@ -78,7 +78,7 @@ fn button_bit(button: Button) -> i64 ! {} {
     }
 }
 
-fn held(c: &Controls) -> i64 ! {panic} {
+fn held(c: &Controls) -> i64 ! {} {
     let mut stick = 0;
     if c.stick_x < 0 - DEADZONE { stick = stick | LEFT; }
     if c.stick_x > DEADZONE { stick = stick | RIGHT; }
@@ -88,7 +88,7 @@ fn held(c: &Controls) -> i64 ! {panic} {
 }
 
 /// Apply every pending window event to the controls.
-fn handle_events(win: &Window, c: &mut Controls) -> Unit ! {io, panic} {
+fn handle_events(win: &Window, c: &mut Controls) -> Unit ! {io} {
     let mut more = true;
     while more {
         match window.next_event(win) {
@@ -122,7 +122,7 @@ fn controls() -> Controls ! {} {
 }
 
 /// A frame's shades as RGB bytes for the window.
-fn pixels(screen: &Vec<u8> where len >= 23040) -> Bytes ! {alloc, panic} {
+fn pixels(screen: &Vec<u8> where len >= 23040) -> Bytes ! {alloc} {
     let size = machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT;
     let mut out = Bytes.with_capacity(size * 3);
     let mut i = 0;
@@ -135,7 +135,7 @@ fn pixels(screen: &Vec<u8> where len >= 23040) -> Bytes ! {alloc, panic} {
 }
 
 /// Samples encoded for the audio queue.
-fn encode(samples: &Vec<i64>) -> Bytes ! {alloc, panic} {
+fn encode(samples: &Vec<i64>) -> Bytes ! {alloc} {
     let mut out = Bytes.with_capacity(samples.len() * 2);
     let mut i = 0;
     while i < samples.len() {
@@ -145,7 +145,7 @@ fn encode(samples: &Vec<i64>) -> Bytes ! {alloc, panic} {
     out
 }
 
-fn show_rate(win: &Window, title: &Bytes, rate: i64) -> Unit ! {io, alloc, panic} {
+fn show_rate(win: &Window, title: &Bytes, rate: i64) -> Unit ! {io, alloc} {
     let mut name = emulator.append(Bytes.from("Kush Game Boy - "), title);
     name = emulator.append(name, &Bytes.from(" - "));
     name = text.format_i64_into(name, rate);
@@ -160,7 +160,7 @@ fn show_rate(win: &Window, title: &Bytes, rate: i64) -> Unit ! {io, alloc, panic
 /// the window's events, `Present` draws the frame and keeps the frame rate
 /// in the title, `Play` queues the sound and paces the game. They share the
 /// window and the controls through references the handlers capture.
-pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64, fullscreen: Bool) -> Result<Unit, i64> ! {io, alloc, panic} {
+pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64, fullscreen: Bool) -> Result<Unit, i64> ! {io, alloc} {
     let win = window.open(&emulator.append(Bytes.from("Kush Game Boy - "), title), machine.SCREEN_WIDTH, machine.SCREEN_HEIGHT, scale)?;
     if fullscreen { let _ = window.set_fullscreen(&win, true); }
     // Sound is handled out here, so `session` works the same with or
@@ -172,7 +172,7 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64, fullscreen
             let result = handle Play: Vec<i64> -> Vec<i64> with fn(
                 samples: Vec<i64>,
                 resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
-            ) -> Vec<i64> ! {io, alloc, panic} {
+            ) -> Vec<i64> ! {io, alloc} {
                 let _ = audio.queue(speaker, &encode(&samples));
                 // The audio clock paces the game: wait while more than
                 // the target is queued, so sound and picture stay together.
@@ -192,7 +192,7 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64, fullscreen
             handle Play: Vec<i64> -> Vec<i64> with fn(
                 samples: Vec<i64>,
                 resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
-            ) -> Vec<i64> ! {io, panic} {
+            ) -> Vec<i64> ! {io} {
                 next = next + FRAME_NS;
                 let now = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => next };
                 if next > now {
@@ -215,7 +215,7 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64, fullscreen
 /// `Present` draws each frame and keeps the frame rate in the title. The
 /// handlers share the window and the controls through references they
 /// capture; `Play` is left to the caller.
-fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes, fullscreen: Bool) -> Result<Unit, i64> ! {Play, io, alloc, panic} {
+fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes, fullscreen: Bool) -> Result<Unit, i64> ! {Play, io, alloc} {
     let mut full = fullscreen;
     let mut c = controls();
     let pad = &mut c;
@@ -225,7 +225,7 @@ fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes, fullscr
     handle Buttons: Unit -> i64 with fn(
         nothing: Unit,
         resume: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {io, panic} {
+    ) -> i64 ! {io} {
         handle_events(shown, pad);
         if pad.toggle_fullscreen {
             pad.toggle_fullscreen = false;
@@ -239,7 +239,7 @@ fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes, fullscr
         handle Present: Vec<u8> -> (Vec<u8>, Bool) with fn(
             screen: Vec<u8>,
             resume: linear once fn((Vec<u8>, Bool)) -> (Vec<u8>, Bool) ! {},
-        ) -> (Vec<u8>, Bool) ! {io, alloc, panic} {
+        ) -> (Vec<u8>, Bool) ! {io, alloc} {
             match window.present(shown, &pixels(&screen)) {
                 Result.Ok(_) => {},
                 Result.Err(code) => { failure = code; },

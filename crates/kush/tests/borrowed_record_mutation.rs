@@ -61,8 +61,8 @@ fn whole_records_are_replaced_through_exclusive_references() {
             fn reset<'a>(h: &mut Holder<'a>, p: &'a Point) -> Unit ! {} {
                 *h = Holder { point: p, note: 7 };
             }
-            fn bump<'a>(h: &mut Holder<'a>) -> Unit ! {panic} { h.note = h.note + 1; }
-            fn main() -> i64 ! {panic} {
+            fn bump<'a>(h: &mut Holder<'a>) -> Unit ! {} { h.note = h.note + 1; }
+            fn main() -> i64 ! {} {
                 let a = Point { x: 1, y: 2 };
                 let b = Point { x: 30, y: 40 };
                 let mut h = Holder { point: &a, note: 1 };
@@ -78,7 +78,7 @@ fn whole_records_are_replaced_through_exclusive_references() {
     agrees(
         &with_records(
             r#"
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let p0 = Point { x: 1, y: 2 };
                 let p1 = Point { x: 10, y: 20 };
                 let mut h = Holder { point: &p0, note: 0 };
@@ -103,10 +103,10 @@ fn whole_records_are_replaced_through_exclusive_references() {
             fn swap_in<'a>(h: &mut Window<'a>, v: &'a mut [i64]) -> Unit ! {} {
                 *h = Window { view: v, note: 2 };
             }
-            fn rename<'a>(h: &mut Named<'a>, p: &'a Point) -> Unit ! {alloc, panic} {
+            fn rename<'a>(h: &mut Named<'a>, p: &'a Point) -> Unit ! {alloc} {
                 *h = Named { point: p, name: String.from("second") };
             }
-            fn main() -> i64 ! {alloc, panic} {
+            fn main() -> i64 ! {alloc} {
                 let mut a: [i64; 2] = [1, 2];
                 let mut b: [i64; 2] = [3, 4];
                 {
@@ -163,7 +163,7 @@ fn a_shorter_lived_reference_cannot_be_written_through_a_longer_record() {
             fn reset<'a>(h: &mut Holder<'a>, p: &'a Point) -> Unit ! {} {
                 *h = Holder { point: p, note: 7 };
             }
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let a = Point { x: 1, y: 2 };
                 let mut h = Holder { point: &a, note: 1 };
                 {
@@ -178,7 +178,7 @@ fn a_shorter_lived_reference_cannot_be_written_through_a_longer_record() {
     rejects(
         &with_records(
             r#"
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let a = Point { x: 1, y: 2 };
                 let mut h = Holder { point: &a, note: 1 };
                 {
@@ -202,7 +202,7 @@ fn written_sources_stay_borrowed_by_the_record() {
             fn reset<'a>(h: &mut Holder<'a>, p: &'a Point) -> Unit ! {} {
                 *h = Holder { point: p, note: 7 };
             }
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let a = Point { x: 1, y: 2 };
                 let mut b = Point { x: 30, y: 40 };
                 let mut h = Holder { point: &a, note: 1 };
@@ -216,7 +216,7 @@ fn written_sources_stay_borrowed_by_the_record() {
     rejects(
         &with_records(
             r#"
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let a = Point { x: 1, y: 2 };
                 let mut b = Point { x: 30, y: 40 };
                 let mut h = Holder { point: &a, note: 1 };
@@ -233,7 +233,7 @@ fn written_sources_stay_borrowed_by_the_record() {
     rejects(
         &with_records(
             r#"
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let a = Point { x: 1, y: 2 };
                 let mut b = Point { x: 30, y: 40 };
                 let mut h1 = Holder { point: &a, note: 1 };
@@ -257,7 +257,7 @@ fn written_sources_stay_borrowed_by_the_record() {
             fn swap_in<'a>(h: &mut Window<'a>, v: &'a mut [i64]) -> Unit ! {} {
                 *h = Window { view: v, note: 2 };
             }
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let mut a: [i64; 2] = [1, 2];
                 let mut b: [i64; 2] = [3, 4];
                 let mut h = Window { view: &mut a[..], note: 1 };
@@ -276,7 +276,7 @@ fn exclusive_record_references_exclude_aliases() {
     rejects(
         &with_records(
             r#"
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let a = Point { x: 1, y: 2 };
                 let b = Point { x: 30, y: 40 };
                 let mut h = Holder { point: &a, note: 1 };
@@ -292,7 +292,7 @@ fn exclusive_record_references_exclude_aliases() {
     rejects(
         &with_records(
             r#"
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let mut a: [i64; 2] = [1, 2];
                 let b: [i64; 2] = [3, 4];
                 let mut h = Window { view: &mut a[..], note: 1 };
@@ -306,7 +306,7 @@ fn exclusive_record_references_exclude_aliases() {
     rejects(
         &with_records(
             r#"
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let a = Point { x: 1, y: 2 };
                 let h = Holder { point: &a, note: 1 };
                 let r = &mut h;
@@ -320,7 +320,7 @@ fn exclusive_record_references_exclude_aliases() {
     agrees(
         &with_records(
             r#"
-            fn main() -> i64 ! {panic} {
+            fn main() -> i64 ! {} {
                 let a = Point { x: 1, y: 2 };
                 let b = Point { x: 30, y: 40 };
                 let mut h = Holder { point: &a, note: 1 };
@@ -345,7 +345,7 @@ fn review_partial_writes_keep_the_other_leaves_loaned() {
         r#"struct Point { x: i64, y: i64 }
 struct Holder<'a> { point: &'a Point, note: i64 }
 struct Outer<'a> { h: Holder<'a>, other: &'a [i64] }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let mut c: Vec<i64> = [5, 6, 7, 8];
     let mut o = Outer { h: Holder { point: &a, note: 0 }, other: &c[..] };
@@ -363,7 +363,7 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Point { x: i64, y: i64 }
 struct Holder<'a> { point: &'a Point, note: i64 }
 struct Pair<'a> { l: Holder<'a>, r: Holder<'a> }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a = Point { x: 1, y: 2 };
     let mut b = Point { x: 77, y: 0 };
     let mut p = Pair { l: Holder { point: &a, note: 0 }, r: Holder { point: &b, note: 0 } };
@@ -380,7 +380,7 @@ fn main() -> i64 ! {panic} {
     rejects(
         r#"struct Point { x: i64, y: i64 }
 struct Holder<'a> { point: &'a Point, note: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let mut b = Point { x: 77, y: 0 };
     let c = Point { x: 8, y: 0 };
@@ -398,7 +398,7 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct Outer<'a> { h: Win<'a>, other: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: [i64; 4] = [1, 2, 3, 4];
     let mut o = Outer { h: Win { view: &a[..], note: 0 }, other: 0 };
     {
@@ -412,7 +412,7 @@ fn main() -> i64 ! {alloc, panic} {
     );
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: [i64; 4] = [1, 2, 3, 4];
     let mut v = [Win { view: &a[..], note: 0 }];
     {
@@ -430,7 +430,7 @@ fn main() -> i64 ! {alloc, panic} {
 fn steal<'a>(h: &mut Win<'a>, g: &Win<'a>) -> Unit ! {} {
     *h = Win { view: g.view, note: 1 };
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: [i64; 4] = [1, 2, 3, 4];
     let mut h1 = Win { view: &a[..], note: 0 };
     let mut b: Vec<i64> = [70, 71, 72, 73];
@@ -450,7 +450,7 @@ struct Holder<'a> { point: &'a Point, note: i64 }
 fn steal<'a>(h: &mut Holder<'a>, g: &Holder<'a>) -> Unit ! {} {
     *h = Holder { point: g.point, note: 1 };
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a = Point { x: 1, y: 2 };
     let mut h1 = Holder { point: &a, note: 0 };
     let mut b = Point { x: 77, y: 0 };
@@ -469,7 +469,7 @@ struct Holder<'a> { point: &'a Point, note: i64 }
 fn steal<'a>(h: &mut Holder<'a>, g: &mut Holder<'a>) -> Unit ! {} {
     *h = Holder { point: g.point, note: 1 };
 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a = Point { x: 1, y: 2 };
     let mut h1 = Holder { point: &a, note: 0 };
     {
@@ -487,7 +487,7 @@ fn main() -> i64 ! {panic} {
     rejects(
         r#"struct Point { x: i64, y: i64 }
 struct Holder<'a> { point: &'a Point, note: i64 }
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a = Point { x: 1, y: 2 };
     let mut b = Point { x: 30, y: 40 };
     let mut h = Holder { point: &a, note: 1 };
@@ -508,7 +508,7 @@ fn set_inner<'a>(o: &mut Outer<'a>, p: &'a Point) -> Unit ! {} {
     *(&mut o.h) = Holder { point: p, note: 9 };
 }
 fn steal<'a>(h: &mut Holder<'a>, g: &Holder<'a>) -> Unit ! {} { *h = Holder { point: g.point, note: 1 }; }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let b = Point { x: 30, y: 40 };
     let mut o = Outer { h: Holder { point: &a, note: 0 }, other: &a };
@@ -525,7 +525,7 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Point { x: i64, y: i64 }
 struct Holder<'a> { point: &'a Point, note: i64 }
 struct Outer<'a> { h: Holder<'a>, other: &'a Point }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let b = Point { x: 30, y: 40 };
     let mut o = Outer { h: Holder { point: &a, note: 0 }, other: &a };
@@ -541,7 +541,7 @@ fn main() -> i64 ! {alloc, panic} {
     agrees(
         r#"struct Point { x: i64, y: i64 }
 struct Holder<'a> { point: &'a Point, note: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let b = Point { x: 30, y: 40 };
     let mut v = [Holder { point: &a, note: 1 }, Holder { point: &a, note: 2 }];
@@ -565,10 +565,10 @@ fn review_container_arguments_are_write_sources() {
     rejects(
         r#"
         struct Point { x: i64, y: i64 }
-        fn copy_first<'a>(dst: &mut Vec<&'a Point>, src: &Vec<&'a Point>) -> Unit ! {alloc, panic} {
+        fn copy_first<'a>(dst: &mut Vec<&'a Point>, src: &Vec<&'a Point>) -> Unit ! {alloc} {
             Vec.push(dst, Vec.get(src, 0));
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a = Point { x: 1, y: 2 };
             let mut dst: Vec<&Point> = [&a];
             {
@@ -583,7 +583,7 @@ fn review_container_arguments_are_write_sources() {
     // A reference produced by a `break` value is rejected with a real
     // diagnostic, not an internal error.
     rejects(
-        r#"fn main() -> i64 ! {panic} {
+        r#"fn main() -> i64 ! {} {
     let mut xs: [i64; 4] = [1, 2, 3, 4];
     let mut i = 0;
     let p = loop {
@@ -606,7 +606,7 @@ fn review_recheck_call_site_writes_resolve_the_written_field() {
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct Outer<'a> { other: &'a [i64], h: Win<'a> }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut o = Outer { other: &a[..], h: Win { view: &a[..], note: 0 } };
     {
@@ -624,7 +624,7 @@ fn main() -> i64 ! {alloc, panic} {
 struct Outer<'a> { other: &'a [i64], h: Win<'a> }
 struct Pair<'a> { l: Win<'a>, r: Win<'a> }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut v = [Win { view: &a[..], note: 0 }];
     {
@@ -643,7 +643,7 @@ struct Holder<'a> { point: &'a Point, note: i64 }
 struct Win<'a> { view: &'a [i64], note: i64 }
 struct Outer<'a> { other: &'a [i64], h: Win<'a> }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut v = [Outer { other: &a[..], h: Win { view: &a[..], note: 0 } }];
@@ -664,12 +664,12 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct Outer<'a> { other: &'a [i64], h: Win<'a> }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
-fn inner<'a>(o: &mut Outer<'a>) -> i64 ! {alloc, panic} {
+fn inner<'a>(o: &mut Outer<'a>) -> i64 ! {alloc} {
     let b: Vec<i64> = [70, 71, 72, 73];
     set(&mut o.h, &b[..]);
     0
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut o = Outer { other: &a[..], h: Win { view: &a[..], note: 0 } };
     inner(&mut o);
@@ -685,7 +685,7 @@ struct Holder<'a> { point: &'a Point, note: i64 }
 struct Win<'a> { view: &'a [i64], note: i64 }
 struct Outer<'a> { other: &'a [i64], h: Win<'a> }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut o = Outer { other: &a[..], h: Win { view: &a[..], note: 0 } };
@@ -706,12 +706,12 @@ struct Holder<'a> { point: &'a Point, note: i64 }
 struct Win<'a> { view: &'a [i64], note: i64 }
 struct Outer<'a> { other: &'a [i64], h: Win<'a> }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
-fn f<'a>(o: &mut Outer<'a>) -> Unit ! {alloc, panic} {
+fn f<'a>(o: &mut Outer<'a>) -> Unit ! {alloc} {
     let b: Vec<i64> = [70, 71, 72, 73];
     let r = &mut o.h;
     set(r, &b[..]);
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut o = Outer { other: &a[..], h: Win { view: &a[..], note: 0 } };
     f(&mut o);
@@ -727,7 +727,7 @@ struct Win<'a> { view: &'a [i64], note: i64 }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
 struct Wrap<'a, T> { view: &'a [i64], inner: T }
 fn inner<'a, 'b>(w: &'b mut Wrap<'a, Wrap<'a, i64>>) -> &'b mut Wrap<'a, i64> ! {} { &mut w.inner }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let mut a: Vec<i64> = [1, 2, 3, 4];
     let b: Vec<i64> = [70, 71, 72, 73];
     let mut w = Wrap { view: &a[..], inner: Wrap { view: &a[..], inner: 0 } };
@@ -748,7 +748,7 @@ struct Win<'a> { view: &'a [i64], note: i64 }
 struct Outer<'a> { other: &'a [i64], h: Win<'a> }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
 fn via<'a>(o: &mut Outer<'a>, v: &'a [i64]) -> Unit ! {} { set(&mut o.h, v); }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let b: Vec<i64> = [70, 71, 72, 73];
     let mut o = Outer { other: &a[..], h: Win { view: &a[..], note: 0 } };
@@ -766,7 +766,7 @@ fn review_recheck_indirect_calls_and_container_field_places_merge_writes() {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut w = Win { view: &a[..], note: 0 };
     let f = set;
@@ -783,7 +783,7 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut w = Win { view: &a[..], note: 0 };
     let f: fn<'a>(&mut Win<'a>, &'a [i64]) -> Unit ! {} = set;
@@ -801,8 +801,8 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
 struct Point { x: i64, y: i64 }
-fn addw<'a>(v: &mut Vec<Win<'a>>, s: &'a [i64]) -> Unit ! {alloc, panic} { Vec.push(v, Win { view: s, note: 0 }); }
-fn main() -> i64 ! {alloc, panic} {
+fn addw<'a>(v: &mut Vec<Win<'a>>, s: &'a [i64]) -> Unit ! {alloc} { Vec.push(v, Win { view: s, note: 0 }); }
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut v = [Win { view: &a[..], note: 0 }];
     let f = addw;
@@ -818,8 +818,8 @@ fn main() -> i64 ! {alloc, panic} {
     // Pre-existing: a reference container written through a function value.
     rejects(
         r#"struct Point { x: i64, y: i64 }
-fn addv<'a>(v: &mut Vec<&'a Point>, s: &'a Point) -> Unit ! {alloc, panic} { Vec.push(v, s); }
-fn main() -> i64 ! {alloc, panic} {
+fn addv<'a>(v: &mut Vec<&'a Point>, s: &'a Point) -> Unit ! {alloc} { Vec.push(v, s); }
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let mut v: Vec<&Point> = [&a];
     let f = addv;
@@ -836,11 +836,11 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
 struct Point { x: i64, y: i64 }
-fn apply<'x>(f: fn<'a>(&mut Win<'a>, &'a [i64]) -> Unit ! {}, w: &mut Win<'x>) -> Unit ! {alloc, panic} {
+fn apply<'x>(f: fn<'a>(&mut Win<'a>, &'a [i64]) -> Unit ! {}, w: &mut Win<'x>) -> Unit ! {alloc} {
     let b: Vec<i64> = [70, 71, 72, 73];
     f(w, &b[..]);
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut w = Win { view: &a[..], note: 0 };
     apply(set, &mut w);
@@ -854,7 +854,7 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
 fn apply<'x>(f: fn<'a>(&mut Win<'a>, &'a [i64]) -> Unit ! {}, w: &mut Win<'x>, v: &'x [i64]) -> Unit ! {} { f(w, v); }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut w = Win { view: &a[..], note: 0 };
@@ -869,7 +869,7 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct O<'a> { b: Box<Win<'a>>, n: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut o = O { b: Box.new(Win { view: &a[..], note: 0 }), n: 0 };
@@ -884,7 +884,7 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct Point { x: i64, y: i64 }
 struct O<'a> { b: Box<Win<'a>>, n: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut o = O { b: Box.new(Win { view: &a[..], note: 0 }), n: 0 };
     {
@@ -901,9 +901,9 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
-fn setb<'a>(h: &mut Box<Win<'a>>, v: &'a [i64]) -> Unit ! {alloc, panic} { Box.set(h, Win { view: v, note: 7 }); }
+fn setb<'a>(h: &mut Box<Win<'a>>, v: &'a [i64]) -> Unit ! {alloc} { Box.set(h, Win { view: v, note: 7 }); }
 struct Outer<'a> { b: Box<Win<'a>>, n: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut o = Outer { b: Box.new(Win { view: &a[..], note: 0 }), n: 0 };
@@ -919,7 +919,7 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct O<'a> { v: Vec<Win<'a>>, n: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut o = O { v: [Win { view: &a[..], note: 0 }], n: 0 };
     {
@@ -935,8 +935,8 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct O<'a> { v: Vec<Win<'a>>, n: i64 }
-fn addw<'a>(v: &mut Vec<Win<'a>>, s: &'a [i64]) -> Unit ! {alloc, panic} { Vec.push(v, Win { view: s, note: 0 }); }
-fn main() -> i64 ! {alloc, panic} {
+fn addw<'a>(v: &mut Vec<Win<'a>>, s: &'a [i64]) -> Unit ! {alloc} { Vec.push(v, Win { view: s, note: 0 }); }
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut o = O { v: [Win { view: &a[..], note: 0 }], n: 0 };
@@ -954,7 +954,7 @@ fn main() -> i64 ! {alloc, panic} {
         struct Win<'a> { view: &'a [i64], note: i64 }
         struct O<'a> { b: Box<Win<'a>>, n: i64 }
         fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let a: Vec<i64> = [1, 2, 3, 4];
             let b: Vec<i64> = [70, 71, 72, 73];
             let mut w = Win { view: &a[..], note: 0 };
@@ -981,8 +981,8 @@ fn review_a_mutable_record_argument_shares_its_shared_leaf_sources() {
 struct Holder<'a> { point: &'a Point, note: i64 }
 struct Win<'a> { view: &'a [i64], note: i64 }
 struct Outer<'a> { other: &'a [i64], h: Win<'a> }
-fn steal<'a>(h: &mut Win<'a>, g: &Win<'a>) -> Unit ! {panic} { *h = Win { view: g.view, note: 1 }; }
-fn main() -> i64 ! {alloc, panic} {
+fn steal<'a>(h: &mut Win<'a>, g: &Win<'a>) -> Unit ! {} { *h = Win { view: g.view, note: 1 }; }
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut h1 = Win { view: &a[..], note: 0 };
     let g = Win { view: &a[..], note: 5 };
@@ -997,8 +997,8 @@ fn main() -> i64 ! {alloc, panic} {
 struct Holder<'a> { point: &'a Point, note: i64 }
 struct Win<'a> { view: &'a [i64], note: i64 }
 struct Outer<'a> { other: &'a [i64], h: Win<'a> }
-fn steal<'a>(h: &mut Holder<'a>, g: &Holder<'a>) -> Unit ! {panic} { *h = Holder { point: g.point, note: 1 }; }
-fn main() -> i64 ! {alloc, panic} {
+fn steal<'a>(h: &mut Holder<'a>, g: &Holder<'a>) -> Unit ! {} { *h = Holder { point: g.point, note: 1 }; }
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let mut h1 = Holder { point: &a, note: 0 };
     let g = Holder { point: &a, note: 5 };
@@ -1014,7 +1014,7 @@ fn main() -> i64 ! {alloc, panic} {
         r#"
         struct Window<'a> { view: &'a mut [i64], note: i64 }
         fn peek<'a>(h: &mut Window<'a>, other: &[i64]) -> Unit ! {} { }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut b: Vec<i64> = [1, 2];
             let mut h = Window { view: &mut b[..], note: 0 };
             peek(&mut h, &b[..]);
@@ -1026,7 +1026,7 @@ fn main() -> i64 ! {alloc, panic} {
         r#"
         struct Win<'a> { view: &'a [i64], note: i64 }
         fn poke<'a>(h: &mut Win<'a>, other: &mut [i64]) -> Unit ! {} { }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut b: Vec<i64> = [1, 2];
             let mut h = Win { view: &b[..], note: 0 };
             poke(&mut h, &mut b[..]);
@@ -1041,8 +1041,8 @@ fn review_third_recheck_container_writes_and_reference_arguments() {
     // An elided element lifetime of a parameter container is not a write destination.
     rejects(
         r#"struct Point { x: i64, y: i64 }
-fn addv(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc, panic} { Vec.push(v, s); }
-fn main() -> i64 ! {alloc, panic} {
+fn addv(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc} { Vec.push(v, s); }
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let mut v: Vec<&Point> = [&a];
     {
@@ -1056,8 +1056,8 @@ fn main() -> i64 ! {alloc, panic} {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-fn addv(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc, panic} { Vec.push(v, s); }
-fn main() -> i64 ! {alloc, panic} {
+fn addv(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc} { Vec.push(v, s); }
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let mut v: Vec<&Point> = [&a];
     let f = addv;
@@ -1072,10 +1072,10 @@ fn main() -> i64 ! {alloc, panic} {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let mut v: Vec<&Point> = [&a];
-    let g = fn(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc, panic} { Vec.push(v, s); };
+    let g = fn(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc} { Vec.push(v, s); };
     {
         let p2 = Point { x: 70, y: 71 };
         g(&mut v, &p2);
@@ -1087,10 +1087,10 @@ fn main() -> i64 ! {alloc, panic} {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let mut v: Vec<&Point> = [&a];
-    let g = fn(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc, panic} { Vec.push(v, s); };
+    let g = fn(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc} { Vec.push(v, s); };
     let mut b = Point { x: 3, y: 4 };
     g(&mut v, &b);
     b = Point { x: 50, y: 50 };
@@ -1102,7 +1102,7 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct O<'a> { n: i64, b: Box<Win<'a>> }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut o = O { n: 0, b: Box.new(Win { view: &a[..], note: 0 }) };
@@ -1118,7 +1118,7 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct O<'a> { n: i64, b: Box<Win<'a>> }
 fn pick<'a, 'b>(o: &'b mut O<'a>) -> &'b mut Box<Win<'a>> ! {} { &mut o.b }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut o = O { n: 0, b: Box.new(Win { view: &a[..], note: 0 }) };
@@ -1133,7 +1133,7 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct O<'a> { n: i64, v: Vec<Win<'a>> }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut o = O { n: 0, v: [Win { view: &a[..], note: 0 }] };
@@ -1148,8 +1148,8 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct O<'a> { n: i64, b: Box<Win<'a>> }
-fn setb<'a>(h: &mut Box<Win<'a>>, v: &'a [i64]) -> Unit ! {alloc, panic} { Box.set(h, Win { view: v, note: 7 }); }
-fn main() -> i64 ! {alloc, panic} {
+fn setb<'a>(h: &mut Box<Win<'a>>, v: &'a [i64]) -> Unit ! {alloc} { Box.set(h, Win { view: v, note: 7 }); }
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut o = O { n: 0, b: Box.new(Win { view: &a[..], note: 0 }) };
@@ -1163,7 +1163,7 @@ fn main() -> i64 ! {alloc, panic} {
     );
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut v = [Win { view: &a[..], note: 0 }];
@@ -1177,7 +1177,7 @@ fn main() -> i64 ! {alloc, panic} {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let mut v: Vec<&Point> = [&a];
     {
@@ -1192,7 +1192,7 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Point { x: i64, y: i64 }
 fn id<'b, 'a>(v: &'b mut Vec<&'a Point>) -> &'b mut Vec<&'a Point> ! {} { v }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a = Point { x: 1, y: 2 };
     let mut v: Vec<&Point> = [&a];
     {
@@ -1206,7 +1206,7 @@ fn main() -> i64 ! {alloc, panic} {
     );
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut b: Vec<i64> = [70, 71, 72, 73];
     let mut bx = Box.new(Win { view: &a[..], note: 0 });
@@ -1220,8 +1220,8 @@ fn main() -> i64 ! {alloc, panic} {
     // A stored `&mut` record reference lends its leaves for the call.
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
-fn f<'a>(h: &mut Win<'a>, s: &mut [i64]) -> i64 ! {panic} { Slice.set(s, 0, 99); Slice.get(h.view, 0) }
-fn main() -> i64 ! {alloc, panic} {
+fn f<'a>(h: &mut Win<'a>, s: &mut [i64]) -> i64 ! {} { Slice.set(s, 0, 99); Slice.get(h.view, 0) }
+fn main() -> i64 ! {alloc} {
     let mut b: Vec<i64> = [1, 2, 3, 4];
     let mut h = Win { view: &b[..], note: 0 };
     let r = &mut h;
@@ -1231,8 +1231,8 @@ fn main() -> i64 ! {alloc, panic} {
     );
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
-fn f<'a>(h: &mut Win<'a>, s: &mut Vec<i64>) -> i64 ! {alloc, panic} { Vec.push(s, 5); Vec.push(s, 6); Vec.push(s, 7); Vec.push(s, 8); Vec.push(s, 9); let junk: Vec<i64> = [100, 100, 100, 100, 100, 100, 100, 100]; Slice.get(h.view, 0) + Vec.get(&junk, 0) * 0 }
-fn main() -> i64 ! {alloc, panic} {
+fn f<'a>(h: &mut Win<'a>, s: &mut Vec<i64>) -> i64 ! {alloc} { Vec.push(s, 5); Vec.push(s, 6); Vec.push(s, 7); Vec.push(s, 8); Vec.push(s, 9); let junk: Vec<i64> = [100, 100, 100, 100, 100, 100, 100, 100]; Slice.get(h.view, 0) + Vec.get(&junk, 0) * 0 }
+fn main() -> i64 ! {alloc} {
     let mut b: Vec<i64> = [1, 2, 3, 4];
     let mut h = Win { view: &b[..], note: 0 };
     let r = &mut h;
@@ -1242,8 +1242,8 @@ fn main() -> i64 ! {alloc, panic} {
     );
     rejects(
         r#"struct Window<'a> { view: &'a mut [i64], note: i64 }
-fn f<'a>(h: &mut Window<'a>, s: &mut [i64]) -> i64 ! {panic} { Slice.get(s, 0) }
-fn main() -> i64 ! {alloc, panic} {
+fn f<'a>(h: &mut Window<'a>, s: &mut [i64]) -> i64 ! {} { Slice.get(s, 0) }
+fn main() -> i64 ! {alloc} {
     let mut b: Vec<i64> = [1, 2, 3, 4];
     let mut h = Window { view: &mut b[..], note: 0 };
     let r = &mut h;
@@ -1253,8 +1253,8 @@ fn main() -> i64 ! {alloc, panic} {
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
-fn f<'a>(v: &mut Vec<&'a Point>, s: &mut Point) -> i64 ! {panic} { s.x = 99; Vec.get(v, 0).x }
-fn main() -> i64 ! {alloc, panic} {
+fn f<'a>(v: &mut Vec<&'a Point>, s: &mut Point) -> i64 ! {} { s.x = 99; Vec.get(v, 0).x }
+fn main() -> i64 ! {alloc} {
     let mut p = Point { x: 1, y: 2 };
     let mut v: Vec<&Point> = [&p];
     let r = &mut v;
@@ -1266,7 +1266,7 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct O<'a> { other: &'a [i64], b: Box<Win<'a>> }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut c: Vec<i64> = [5, 6, 7, 8];
     let mut o = O { other: &c[..], b: Box.new(Win { view: &a[..], note: 0 }) };
@@ -1281,7 +1281,7 @@ fn main() -> i64 ! {alloc, panic} {
     rejects(
         r#"struct Win<'a> { view: &'a [i64], note: i64 }
 struct O<'a> { other: &'a [i64], b: Box<Win<'a>> }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let a: Vec<i64> = [1, 2, 3, 4];
     let mut c: Vec<i64> = [5, 6, 7, 8];
     let mut o = O { other: &c[..], b: Box.new(Win { view: &a[..], note: 0 }) };
@@ -1299,8 +1299,8 @@ fn main() -> i64 ! {alloc, panic} {
     agrees(
         r#"
         struct Point { x: i64, y: i64 }
-        fn addv<'a>(v: &mut Vec<&'a Point>, s: &'a Point) -> Unit ! {alloc, panic} { Vec.push(v, s); }
-        fn main() -> i64 ! {alloc, panic} {
+        fn addv<'a>(v: &mut Vec<&'a Point>, s: &'a Point) -> Unit ! {alloc} { Vec.push(v, s); }
+        fn main() -> i64 ! {alloc} {
             let a = Point { x: 1, y: 2 };
             let b = Point { x: 70, y: 71 };
             let mut v: Vec<&Point> = [&a];
@@ -1323,13 +1323,13 @@ fn each_branch_lends_the_owner_independently() {
     let common = "
 struct Kernel { n: i64 }
 enum Item { A(i64), B(i64, i64) }
-fn f(k: &mut Kernel, x: i64) -> i64 ! {panic} { k.n = k.n + x; k.n }
-fn both(a: i64, b: &Kernel) -> i64 ! {panic} { a + b.n }
+fn f(k: &mut Kernel, x: i64) -> i64 ! {} { k.n = k.n + x; k.n }
+fn both(a: i64, b: &Kernel) -> i64 ! {} { a + b.n }
 ";
     agrees(
         &format!(
             "{common}
-fn main() -> i64 ! {{alloc, panic}} {{
+fn main() -> i64 ! {{alloc}} {{
     let mut k = Kernel {{ n: 0 }};
     let x = 3;
     if x > 1 {{ let _ = f(&mut k, x); }} else {{ let _ = f(&mut k, 1); }}
@@ -1354,7 +1354,7 @@ fn main() -> i64 ! {{alloc, panic}} {{
     rejects(
         &format!(
             "{common}
-fn main() -> i64 ! {{panic}} {{
+fn main() -> i64 ! {{}} {{
     let mut k = Kernel {{ n: 0 }};
     both(if k.n > 0 {{ f(&mut k, 1) }} else {{ 0 }}, &k)
 }}"

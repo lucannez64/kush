@@ -21,11 +21,11 @@ const QUIT: i64 = 256;
 const FRAME_NS: i64 = 16742706;
 const ROWS: i64 = 72;
 
-fn escape(out: Bytes) -> Bytes ! {alloc, panic} {
+fn escape(out: Bytes) -> Bytes ! {alloc} {
     out.push(27).push(91)
 }
 
-fn colour(out: Bytes, ground: i64, shade: u8) -> Bytes ! {alloc, panic} {
+fn colour(out: Bytes, ground: i64, shade: u8) -> Bytes ! {alloc} {
     let (r, g, b) = emulator.rgb(shade);
     let mut o = escape(out);
     o = text.format_i64_into(o, ground);
@@ -39,7 +39,7 @@ fn colour(out: Bytes, ground: i64, shade: u8) -> Bytes ! {alloc, panic} {
 }
 
 /// Append the cells that differ from `shown`, and record them there.
-fn draw(screen: &Vec<u8> where len >= 23040, shown: &mut Vec<u8> where len >= 23040, out: Bytes) -> Bytes ! {alloc, panic} {
+fn draw(screen: &Vec<u8> where len >= 23040, shown: &mut Vec<u8> where len >= 23040, out: Bytes) -> Bytes ! {alloc} {
     let mut o = out;
     let width = machine.SCREEN_WIDTH;
     let mut foreground: u8 = 255;
@@ -86,7 +86,7 @@ fn draw(screen: &Vec<u8> where len >= 23040, shown: &mut Vec<u8> where len >= 23
     o
 }
 
-fn status(title: &Bytes, frames_per_second: i64) -> Bytes ! {alloc, panic} {
+fn status(title: &Bytes, frames_per_second: i64) -> Bytes ! {alloc} {
     let mut o = escape(Bytes.with_capacity(128));
     o = text.format_i64_into(o, ROWS + 1);
     o = emulator.append(o, &Bytes.from(";1H"));
@@ -103,7 +103,7 @@ fn status(title: &Bytes, frames_per_second: i64) -> Bytes ! {alloc, panic} {
 
 /// Play in the terminal until the player quits: three handlers around
 /// `emulator.run`, like the window's, drawing with escape codes instead.
-pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
+pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes) -> Result<Unit, i64> ! {io, alloc} {
     enter()?;
     let mut cells: Vec<u8> = Vec.with_capacity(machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT);
     let mut i = 0;
@@ -119,14 +119,14 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes) -> Result<Unit, i64> !
     handle Buttons: Unit -> i64 with fn(
         nothing: Unit,
         resume: linear once fn(i64) -> i64 ! {},
-    ) -> i64 ! {io, panic} {
+    ) -> i64 ! {io} {
         let held = buttons();
         if (held & QUIT) != 0 { resume(-1) } else { resume(held & 0xFF) }
     } {
         handle Present: Vec<u8> -> (Vec<u8>, Bool) with fn(
             screen: Vec<u8>,
             resume: linear once fn((Vec<u8>, Bool)) -> (Vec<u8>, Bool) ! {},
-        ) -> (Vec<u8>, Bool) ! {io, alloc, panic} {
+        ) -> (Vec<u8>, Bool) ! {io, alloc} {
             let mut out = draw(&screen, shown, Bytes.with_capacity(65536));
             frames = frames + 1;
             let now = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => second };
@@ -142,7 +142,7 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes) -> Result<Unit, i64> !
             handle Play: Vec<i64> -> Vec<i64> with fn(
                 samples: Vec<i64>,
                 resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
-            ) -> Vec<i64> ! {io, panic} {
+            ) -> Vec<i64> ! {io} {
                 next = next + FRAME_NS;
                 let now = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => next };
                 if next > now {

@@ -35,7 +35,7 @@ pub fn classify(token: &Token) -> i64 ! {} {
     }
 }
 
-fn precedence(x: i64, y: i64) -> i64 ! {panic} {
+fn precedence(x: i64, y: i64) -> i64 ! {} {
     let mut result: i64 = x + y * 2;
     result = result - 1;
     if result > 0 { result } else { 0 }
@@ -45,7 +45,7 @@ fn checked_get<T: Type, n: Nat>(xs: &Array<T, n>, i: usize)
     -> Option<&T> ! {};
 
 fn parse(tokens: &[Token], arena: &mut Arena<AstNode>)
-    -> Result<NodeId, ParseError> ! {alloc, panic};
+    -> Result<NodeId, ParseError> ! {alloc};
 
 fn load(path: &Path) -> Result<Bytes, LoadError> ! {io, alloc, suspend} {
     let bytes = fs.read(path)?;

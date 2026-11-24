@@ -217,6 +217,15 @@ void kush_unwind_rethrow(void);
    is a boundary of its own; the Task.catch depth of such a thread. */
 static KUSH_TLS int kush_in_thread = 0;
 static KUSH_TLS int kush_thread_catch_depth = 0;
+/* FND-ROWS-PANIC: allocator release callbacks and arena strategies run
+   inside runtime bookkeeping that never tests the panic word, so a panic in
+   them aborts instead of unwinding. The depth is per task (and per thread
+   for a thread body), next to the catch depth. */
+#ifdef KUSH_UNWIND
+static KUSH_TLS int kush_thread_nounwind_depth = 0;
+#endif
+static void kush_nounwind_enter(void);
+static void kush_nounwind_leave(void);
 #define KUSH_FAIL(value) do { if (kush_panic_unwinds()) { kush_raise_panic(); return value; } kush_panic(); } while (0)
 #define KUSH_FAIL_VOID() do { if (kush_panic_unwinds()) { kush_raise_panic(); return; } kush_panic(); } while (0)
 _Noreturn void kush_panic(void) {
@@ -928,7 +937,9 @@ static int kush_arena_try_round(uint64_t bytes, uint64_t *need) {
 static uint64_t kush_arena_chunk_capacity(KushArena *arena, uint64_t need) {
     uint64_t current = arena->chunks == NULL ? 0 : arena->chunks->capacity;
     if (arena->strategy != NULL) {
+        kush_nounwind_enter();
         uint64_t chosen = arena->strategy(need, current);
+        kush_nounwind_leave();
         if ((int64_t)chosen < 0) return need;
         return chosen > need ? chosen : need;
     }
@@ -1140,7 +1151,9 @@ static uint64_t kush_allocator_context_alloc(uint64_t context, uint64_t bytes) {
 static void kush_allocator_context_free(uint64_t context, uint64_t block) {
     if (block == 0) return;
     KushAllocContext *state = (KushAllocContext *)(uintptr_t)context;
+    kush_nounwind_enter();
     ((KushContextFreeFn)(uintptr_t)state->release)(state->state, block);
+    kush_nounwind_leave();
 }
 static uint64_t kush_allocator_context_grow(uint64_t context, uint64_t block,
                                             uint64_t old_bytes, uint64_t bytes) {
@@ -1158,7 +1171,9 @@ static void kush_alloc_block_release(uint64_t release, uint64_t context, uint64_
         return;
     }
     if (release == 0) kush_panic();
+    kush_nounwind_enter();
     ((KushFreeBlockFn)(uintptr_t)release)(block);
+    kush_nounwind_leave();
 }
 uint64_t kush_alloc_block_try(uint64_t allocator, uint64_t release, uint64_t context,
                               uint64_t bytes) {
@@ -3348,6 +3363,8 @@ struct KushTask {
     /* PANIC-UNWIND-USE: active Task.catch bodies in this task, and whether a
        panic unwound the whole task (its join raises it again). */
     int catch_depth, panicked;
+    /* FND-ROWS-PANIC: runtime callbacks in progress where a panic aborts. */
+    int nounwind_depth;
     int64_t wait_deadline, wait_result;
     KushTask *wait_previous, *wait_next;
 };
@@ -4105,11 +4122,28 @@ int64_t kush_sys_wait_ready(int64_t fd, int64_t events, int64_t timeout_ms, int6
    A panic nothing catches still aborts the process, at the root. */
 static int kush_panic_unwinds(void) {
 #ifdef KUSH_UNWIND
-    if (kush_in_thread) return 1;
+    if (kush_in_thread) return kush_thread_nounwind_depth == 0;
     if (!kush_initialized || kush_current == NULL || kush_current->state != KUSH_RUNNING) return 0;
+    if (kush_current->nounwind_depth > 0) return 0;
     return kush_current->id != 0 || kush_current->catch_depth > 0;
 #else
     return 0;
+#endif
+}
+static void kush_nounwind_enter(void) {
+#ifdef KUSH_UNWIND
+    if (kush_in_thread) { kush_thread_nounwind_depth += 1; return; }
+    if (kush_initialized && kush_current != NULL) kush_current->nounwind_depth += 1;
+#endif
+}
+static void kush_nounwind_leave(void) {
+#ifdef KUSH_UNWIND
+    if (kush_in_thread) {
+        if (kush_thread_nounwind_depth > 0) kush_thread_nounwind_depth -= 1;
+        return;
+    }
+    if (kush_initialized && kush_current != NULL && kush_current->nounwind_depth > 0)
+        kush_current->nounwind_depth -= 1;
 #endif
 }
 /* Task.catch: count the bodies running in this task, or in this thread. */
@@ -9491,9 +9525,8 @@ impl Generator<'_, '_> {
             .builder
             .ins()
             .call_indirect(ir_signature, code, &values);
-        if signature.effects & crate::executable::PANIC != 0 {
-            self.test_panic();
-        }
+        // FND-ROWS-PANIC: any callee may panic; rows no longer say otherwise.
+        self.test_panic();
         if result_erased {
             return vec![self.constant(0)];
         }
@@ -15821,11 +15854,11 @@ mod scalar_inline_codegen_tests {
         }
         let program=ex::check(r#"
             effect Op:i64->i64;
-            fn leaf(n:i64)->i64 ! {panic} {let mut i=0;while i<n {i=i+1;if i==2 {continue;}if i==4 {break;}}loop {break i;}}
-            fn install()->i64 ! {panic} {
+            fn leaf(n:i64)->i64 ! {} {let mut i=0;while i<n {i=i+1;if i==2 {continue;}if i==4 {break;}}loop {break i;}}
+            fn install()->i64 ! {} {
                 handle Op:i64->i64 with fn(x:i64,r:linear once fn(i64)->i64 ! {})->i64 ! {} {r(x)} {leaf(8)}
             }
-            fn main()->i64 ! {panic} {install()}
+            fn main()->i64 ! {} {install()}
         "#).unwrap();
         let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
         for options in [CodegenOptions::default(), CodegenOptions::release()] {
@@ -15868,7 +15901,7 @@ mod scalar_inline_codegen_tests {
             eprintln!("objdump unavailable; machine-code inspection skipped");
             return;
         }
-        let program = ex::check("fn first(x:i64)->i64 ! {} {x & 255} fn second(x:i64)->i64 ! {} {x ^ 7} fn mapped(v:Vec<i64>)->Vec<i64> ! {} {Vec.map_in_place(Vec.map_in_place(v,first),second)} fn main()->i64 ! {alloc,panic} {let v:Vec<i64> = [1];Vec.get(&mapped(v),0)}").unwrap();
+        let program = ex::check("fn first(x:i64)->i64 ! {} {x & 255} fn second(x:i64)->i64 ! {} {x ^ 7} fn mapped(v:Vec<i64>)->Vec<i64> ! {} {Vec.map_in_place(Vec.map_in_place(v,first),second)} fn main()->i64 ! {alloc} {let v:Vec<i64> = [1];Vec.get(&mapped(v),0)}").unwrap();
         let index = program
             .functions
             .iter()

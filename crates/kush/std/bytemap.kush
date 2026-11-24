@@ -43,7 +43,7 @@ pub struct Map<V> {
 }
 
 /// FNV-1a over all of `key`.
-pub fn hash(key: &Bytes) -> u64 ! {panic} {
+pub fn hash(key: &Bytes) -> u64 ! {} {
     let mut h: u64 = 14695981039346656037;
     let n = Bytes.len(key);
     let mut i = 0;
@@ -55,7 +55,7 @@ pub fn hash(key: &Bytes) -> u64 ! {panic} {
     h
 }
 
-fn table<V>(count: i64, filler: V, arena_capacity: i64) -> Map<V> ! {alloc, panic} {
+fn table<V>(count: i64, filler: V, arena_capacity: i64) -> Map<V> ! {alloc} {
     let mut slots: Vec<Slot<V>> = Vec.with_capacity(count);
     let mut i = 0;
     while i < count {
@@ -73,7 +73,7 @@ fn table<V>(count: i64, filler: V, arena_capacity: i64) -> Map<V> ! {alloc, pani
 }
 
 /// An empty map. `filler` is stored in unused slots and never returned.
-pub fn new<V>(filler: V) -> Map<V> ! {alloc, panic} {
+pub fn new<V>(filler: V) -> Map<V> ! {alloc} {
     table(16, filler, 256)
 }
 
@@ -89,7 +89,7 @@ pub fn slots<V>(map: &Map<V>) -> i64 ! {} {
 
 /// Whether `arena[start .. start + len(key)]` equals `key`. One range check,
 /// then reads proved in bounds.
-fn same_bytes(arena: &Bytes, start: i64, key: &Bytes) -> Bool ! {panic} {
+fn same_bytes(arena: &Bytes, start: i64, key: &Bytes) -> Bool ! {} {
     let n = Bytes.len(key);
     if start < 0 || start > Bytes.len(arena) - n {
         return false;
@@ -106,7 +106,7 @@ fn same_bytes(arena: &Bytes, start: i64, key: &Bytes) -> Bool ! {panic} {
 
 /// Append `source[start .. start + n]` to `out`, or nothing if the range is
 /// outside `source`.
-fn append_range(out: Bytes, source: &Bytes, start: i64, n: i64) -> Bytes ! {alloc, panic} {
+fn append_range(out: Bytes, source: &Bytes, start: i64, n: i64) -> Bytes ! {alloc} {
     let mut out = out;
     if start < 0 || n < 0 || start > Bytes.len(source) - n {
         return out;
@@ -121,13 +121,13 @@ fn append_range(out: Bytes, source: &Bytes, start: i64, n: i64) -> Bytes ! {allo
 
 /// The first slot of `h`'s probe chain in a table of `count` slots (a power
 /// of two).
-fn home(h: u64, count: i64) -> i64 ! {panic} {
+fn home(h: u64, count: i64) -> i64 ! {} {
     let mask: u64 = Int.truncate(count - 1);
     Int.truncate(h & mask)
 }
 
 /// The slot holding `key`, or -1.
-fn find<V>(map: &Map<V>, key: &Bytes, h: u64) -> i64 ! {panic} {
+fn find<V>(map: &Map<V>, key: &Bytes, h: u64) -> i64 ! {} {
     let slots = &map.slots;
     let count = Vec.len(slots);
     let n = Bytes.len(key);
@@ -156,22 +156,22 @@ fn find<V>(map: &Map<V>, key: &Bytes, h: u64) -> i64 ! {panic} {
 }
 
 /// The slot `find` returned, read once more (its index is in range).
-fn entry_at<V>(map: &Map<V>, slot: i64) -> Slot<V> ! {panic} {
+fn entry_at<V>(map: &Map<V>, slot: i64) -> Slot<V> ! {} {
     Vec.get(&map.slots, slot)
 }
 
-pub fn get<V>(map: &Map<V>, key: &Bytes) -> Option<V> ! {panic} {
+pub fn get<V>(map: &Map<V>, key: &Bytes) -> Option<V> ! {} {
     let slot = find(map, key, hash(key));
     if slot < 0 { Option.None } else { Option.Some(entry_at(map, slot).value) }
 }
 
-pub fn contains<V>(map: &Map<V>, key: &Bytes) -> Bool ! {panic} {
+pub fn contains<V>(map: &Map<V>, key: &Bytes) -> Bool ! {} {
     find(map, key, hash(key)) >= 0
 }
 
 /// The first free (empty or removed) slot on `h`'s probe chain. The table
 /// always has an empty slot, so this terminates.
-fn free_slot<V>(map: &Map<V>, h: u64) -> i64 ! {panic} {
+fn free_slot<V>(map: &Map<V>, h: u64) -> i64 ! {} {
     let slots = &map.slots;
     let count = Vec.len(slots);
     let mut slot = home(h, count);
@@ -185,7 +185,7 @@ fn free_slot<V>(map: &Map<V>, h: u64) -> i64 ! {panic} {
 }
 
 /// Store a new key, known to be absent, from `source[start .. start + n]`.
-fn place<V>(map: Map<V>, source: &Bytes, start: i64, n: i64, h: u64, value: V) -> Map<V> ! {alloc, panic} {
+fn place<V>(map: Map<V>, source: &Bytes, start: i64, n: i64, h: u64, value: V) -> Map<V> ! {alloc} {
     let slot = free_slot(&map, h);
     let Map { slots, arena, count, removed, garbage, filler } = map;
     let was_removed = Vec.get(&slots, slot).state == 2;
@@ -202,7 +202,7 @@ fn place<V>(map: Map<V>, source: &Bytes, start: i64, n: i64, h: u64, value: V) -
 }
 
 /// Rebuild into `count` slots, dropping tombstones and arena garbage.
-fn rebuild<V>(map: Map<V>, count: i64) -> Map<V> ! {alloc, panic} {
+fn rebuild<V>(map: Map<V>, count: i64) -> Map<V> ! {alloc} {
     let mut fresh = table(count, map.filler, Bytes.len(&map.arena) - map.garbage + 16);
     let old = &map.slots;
     let old_count = Vec.len(old);
@@ -219,14 +219,14 @@ fn rebuild<V>(map: Map<V>, count: i64) -> Map<V> ! {alloc, panic} {
 }
 
 /// Insert or replace the value for `key`.
-pub fn insert<V>(map: Map<V>, key: &Bytes, value: V) -> Map<V> ! {alloc, panic} {
+pub fn insert<V>(map: Map<V>, key: &Bytes, value: V) -> Map<V> ! {alloc} {
     let (map, previous) = replace(map, key, value);
     map
 }
 
 /// Insert or replace the value for `key`, returning the value it replaced:
 /// one lookup where `get` followed by `insert` needs two.
-pub fn replace<V>(map: Map<V>, key: &Bytes, value: V) -> (Map<V>, Option<V>) ! {alloc, panic} {
+pub fn replace<V>(map: Map<V>, key: &Bytes, value: V) -> (Map<V>, Option<V>) ! {alloc} {
     let h = hash(key);
     let existing = find(&map, key, h);
     if existing >= 0 {
@@ -261,7 +261,7 @@ pub fn replace<V>(map: Map<V>, key: &Bytes, value: V) -> (Map<V>, Option<V>) ! {
 }
 
 /// Remove `key` if present.
-pub fn remove<V>(map: Map<V>, key: &Bytes) -> Map<V> ! {alloc, panic} {
+pub fn remove<V>(map: Map<V>, key: &Bytes) -> Map<V> ! {alloc} {
     let slot = find(&map, key, hash(key));
     if slot < 0 {
         return map;
@@ -291,7 +291,7 @@ pub fn remove<V>(map: Map<V>, key: &Bytes) -> Map<V> ! {alloc, panic} {
 }
 
 /// The first full slot at or after `from`, or -1 when there is none.
-pub fn next_slot<V>(map: &Map<V>, from: i64) -> i64 ! {panic} {
+pub fn next_slot<V>(map: &Map<V>, from: i64) -> i64 ! {} {
     let slots = &map.slots;
     let count = Vec.len(slots);
     let mut slot = if from < 0 { 0 } else { from };
@@ -305,12 +305,12 @@ pub fn next_slot<V>(map: &Map<V>, from: i64) -> i64 ! {panic} {
 }
 
 /// Append the key stored in full slot `slot` to `out`.
-pub fn key_into<V>(map: &Map<V>, slot: i64, out: Bytes) -> Bytes ! {alloc, panic} {
+pub fn key_into<V>(map: &Map<V>, slot: i64, out: Bytes) -> Bytes ! {alloc} {
     let entry = entry_at(map, slot);
     append_range(out, &map.arena, entry.key_start, entry.key_len)
 }
 
 /// The value stored in full slot `slot`.
-pub fn value_at<V>(map: &Map<V>, slot: i64) -> V ! {panic} {
+pub fn value_at<V>(map: &Map<V>, slot: i64) -> V ! {} {
     entry_at(map, slot).value
 }

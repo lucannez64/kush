@@ -22,7 +22,7 @@
 - `'a` (no closing quote) is a lifetime.
 
 ```kush eval
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(0xff + 0b1010 + 0o17 + 1_000);
     let c = '\n';
     print_int(c.code());
@@ -72,7 +72,7 @@ expression, which is the block's value. `let` binds immutably; `let mut`
 allows assignment. Names may be shadowed.
 
 ```kush eval
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let x = 1;
     let x = x + 1;          // shadows
     let mut total = x;
@@ -108,7 +108,7 @@ fn classify(n: i64) -> i64 ! {} {
     }
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(classify(2) + classify(-5) + classify(9));
     print_i64(if classify(0) == 0 { 10 } else { 20 });
 }
@@ -136,7 +136,7 @@ may carry a value out of a `loop`; `continue` starts the next iteration.
 There is no `for` loop; iterate with an index.
 
 ```kush eval
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let mut i = 0;
     let mut sum = 0;
     while i < 10 {
@@ -192,7 +192,7 @@ Patterns appear in `match`, `let` and parameters of destructuring lets:
 ```kush eval
 struct Point { x: i64, y: i64 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let p = Point { x: 3, y: 4 };
     let Point { x, y } = p;
     let (a, b) = (x * 10, y);

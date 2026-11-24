@@ -15,7 +15,7 @@ use std.ct;
 /// The key padded to one 64-byte block and xored with `fill` (0x36 for the
 /// inner hash, 0x5c for the outer one). Keys longer than a block are hashed
 /// first, as the standard requires.
-fn padded(key: &Bytes, fill: i64) -> Bytes ! {alloc, panic} {
+fn padded(key: &Bytes, fill: i64) -> Bytes ! {alloc} {
     let hashed = if Bytes.len(key) > 64 { sha256.digest(key) } else { Bytes.copy(key) };
     let mut out = Bytes.with_capacity(64);
     let mut i = 0;
@@ -29,7 +29,7 @@ fn padded(key: &Bytes, fill: i64) -> Bytes ! {alloc, panic} {
 }
 
 /// The 32-byte HMAC-SHA256 of `message` under `key`.
-pub fn sign(key: &Bytes, message: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn sign(key: &Bytes, message: &Bytes) -> Bytes ! {alloc} {
     let inner_key = padded(key, 54);
     let outer_key = padded(key, 92);
     let mut inner = sha256.new();
@@ -47,7 +47,7 @@ pub fn sign(key: &Bytes, message: &Bytes) -> Bytes ! {alloc, panic} {
 
 /// Whether `tag` is the HMAC-SHA256 of `message` under `key`, compared in
 /// constant time.
-pub fn verify(key: &Bytes, message: &Bytes, tag: &Bytes) -> Bool ! {alloc, panic} {
+pub fn verify(key: &Bytes, message: &Bytes, tag: &Bytes) -> Bool ! {alloc} {
     let expected = sign(key, message);
     let same = ct.equal(&expected, tag);
     drop(expected);

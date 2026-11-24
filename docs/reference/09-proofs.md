@@ -25,7 +25,7 @@ conditions, guards, loop conditions, early exits, earlier preconditions and
 ```kush eval
 fn digit(n: i64, erased q: { 0 <= n && n < 10 }) -> i64 ! {} { n + 48 - 48 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let x = 7;
     if x >= 0 && x < 10 {
         print_i64(digit(x, _));
@@ -45,11 +45,11 @@ fn main() -> i64 ! {} { let x = 12; digit(x, _) }
 
 ```kush reject
 fn nonneg(x: i64, erased q: { x >= 0 }) -> i64 ! {} { x }
-fn square(a: i64, erased q: { 0 <= a && a <= 100 }) -> i64 ! {panic} {
+fn square(a: i64, erased q: { 0 <= a && a <= 100 }) -> i64 ! {} {
     let s = a * a;
     nonneg(s, _)
 }
-fn main() -> i64 ! {panic} { square(3, _) }
+fn main() -> i64 ! {} { square(3, _) }
 // error: cannot prove 'x >= 0'
 ```
 
@@ -71,7 +71,7 @@ fn third(v: &[i64]) -> i64 ! {} {
     if v.len() > 2 { Slice.at(v, 2, _) } else { 0 }
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let a: [i64; 3] = [1, 2, 3];
     print_i64(third(&a[..]));
 }
@@ -96,7 +96,7 @@ fn clamp(x: i64) -> i64 ! {} ensures { 0 <= result && result <= 255 } {
 
 fn byte(n: i64, erased q: { 0 <= n && n <= 255 }) -> i64 ! {} { n }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(byte(clamp(300), _));
 }
 ```
@@ -158,7 +158,7 @@ total fn zero_is_zero() -> Eq<i64, 0, 0> ! {} { refl::<i64>(0) }
 
 fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let five: i64 = 5;
     print_i64(keep(five, refl::<i64>(five)) + keep(0, zero_is_zero()));
 }

@@ -107,10 +107,10 @@ obligation for the returned owning value and must consume it exactly once.
 it transfers an obligation outward instead of retaining it in the callee.
 
 ```rust
-fn make(n: i64) -> Box<i64> @[1] ! {alloc, panic} { Box.new(n) }
+fn make(n: i64) -> Box<i64> @[1] ! {alloc} { Box.new(n) }
 fn identity(b: Box<i64> @[1]) -> Box<i64> @[1] ! {} { b }
 
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let b = identity(make(41));   // b is linear
     Box.take(b)                    // exactly one consumption
 }
@@ -202,9 +202,9 @@ argument is evaluated under the callee parameter's grade:
 Demands compose multiplicatively through nested calls. For example:
 
 ```rust
-fn twice(x: i64 @[2]) -> i64 ! {panic} { x + x }
-fn four(x: i64 @[4]) -> i64 ! {panic} { twice(x) + twice(x) }
-fn six(x: i64 @[6]) -> i64 ! {panic} { twice(x) + four(x) }
+fn twice(x: i64 @[2]) -> i64 ! {} { x + x }
+fn four(x: i64 @[4]) -> i64 ! {} { twice(x) + twice(x) }
+fn six(x: i64 @[6]) -> i64 ! {} { twice(x) + four(x) }
 ```
 
 `twice(x)` uses `x` twice, `four(x)` four times, and `six(x)` six times even
@@ -240,7 +240,7 @@ after the `?` cannot be left unconsumed on the early error return.
 
 ```rust
 // accepted: used before the early error path
-fn f(x: i64 @[1], r: Result<i64, i64>) -> Result<i64, i64> ! {panic} {
+fn f(x: i64 @[1], r: Result<i64, i64>) -> Result<i64, i64> ! {} {
     let y = x;
     let z = r?;
     Ok(y)
@@ -281,7 +281,7 @@ x
 A `loop` break may consume an outer `@[1]` value exactly once:
 
 ```rust
-fn take_once(x: i64 @[1]) -> i64 ! {panic} { loop { break x; } }
+fn take_once(x: i64 @[1]) -> i64 ! {} { loop { break x; } }
 ```
 
 ## Abstract grades and specialization
@@ -289,11 +289,11 @@ fn take_once(x: i64 @[1]) -> i64 ! {panic} { loop { break x; } }
 A function may declare a grade parameter:
 
 ```rust
-fn four<G: Grade>(x: i64 @[G * 2]) -> i64 ! {panic} {
+fn four<G: Grade>(x: i64 @[G * 2]) -> i64 ! {} {
     x + x + x + x
 }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     four::<2>(10)      // G = 2, parameter grade @[4]
     // four::<1 + 1>(10) is the same specialization
 }
@@ -338,7 +338,7 @@ through construction, return, moves, coercions, matching, and calls:
 
 ```rust
 let x: i64 @[1] = 41;
-let f: linear once fn() -> i64 ! {panic} = fn() -> i64 ! {panic} { x + 1 };
+let f: linear once fn() -> i64 ! {} = fn() -> i64 ! {} { x + 1 };
 f()                                           // exactly one observation
 ```
 

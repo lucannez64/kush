@@ -21,9 +21,9 @@ fn const_lengths_are_inferred_and_explicitly_specialized() {
     let source = r#"
         fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
 
-        fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {panic} { xs[N - 1] }
+        fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {} { xs[N - 1] }
 
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 3] = [10, 20, 12];
             let b = identity(a);
             let c = identity::<i64, 3>(b);
@@ -33,14 +33,14 @@ fn const_lengths_are_inferred_and_explicitly_specialized() {
     assert_eq!(evaluate(source), 12);
     // `*` and `/` share a precedence level and associate left to right.
     assert_eq!(
-        evaluate("fn main() -> i64 ! {panic} { let a: [i64; 2 * 3 / 2] = [1, 2, 3]; a[2] }"),
+        evaluate("fn main() -> i64 ! {} { let a: [i64; 2 * 3 / 2] = [1, 2, 3]; a[2] }"),
         3
     );
 
     // A literal array argument infers both the element type and the length.
     let literal = r#"
         fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a = identity([10, 20, 12]);
             a[0] + a[1] + a[2]
         }
@@ -48,11 +48,11 @@ fn const_lengths_are_inferred_and_explicitly_specialized() {
     assert_eq!(evaluate(literal), 42);
     // Constant slice bounds may also use the checked natural fragment.
     let bounded = r#"
-        fn second<T: Type, N: Nat>(a: [T; N]) -> T ! {panic} {
+        fn second<T: Type, N: Nat>(a: [T; N]) -> T ! {} {
             let view: &[T] = &a[0..N - 1];
             view[0]
         }
-        fn main() -> i64 ! {panic} { second([42, 1, 2]) }
+        fn main() -> i64 ! {} { second([42, 1, 2]) }
     "#;
     assert_eq!(evaluate(bounded), 42);
 }
@@ -64,9 +64,9 @@ fn kernel_normalized_arithmetic_folds_array_lengths_and_indices() {
         total fn step(n: Nat, acc: Nat) -> Nat ! {} { Nat.succ(acc) }
         total fn add(n: Nat, m: Nat) -> Nat ! {} { Nat.induct(Constant, m, step, n) }
 
-        fn middle(xs: [i64; add<1, 1>]) -> i64 ! {panic} { xs[add(0, 1)] }
+        fn middle(xs: [i64; add<1, 1>]) -> i64 ! {} { xs[add(0, 1)] }
 
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; (1 + 1) * 2 - 2] = [20, 22];
             middle(a) + 20
         }
@@ -78,7 +78,7 @@ fn kernel_normalized_arithmetic_folds_array_lengths_and_indices() {
         type Constant<n: Nat> = Nat;
         total fn step(n: Nat, acc: Nat) -> Nat ! {} { Nat.succ(acc) }
         total fn add(n: Nat, m: Nat) -> Nat ! {} { Nat.induct(Constant, m, step, n) }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 3] = [1, 2, 3];
             a[add(2, 1)]
         }
@@ -93,9 +93,9 @@ fn nested_and_generic_records_keep_symbolic_lengths() {
         struct Buffer<N: Nat> { data: [i64; N] }
         struct Pair { left: i64, right: i64 }
 
-        fn first<N: Nat>(b: Buffer<N>) -> i64 ! {panic} { b.data[0] }
+        fn first<N: Nat>(b: Buffer<N>) -> i64 ! {} { b.data[0] }
 
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let b: Buffer<3> = Buffer { data: [0, 20, 22] };
             let nested: [[i64; 2]; 2] = [[1, 2], [20, 22]];
             let row = nested[1];
@@ -109,8 +109,8 @@ fn nested_and_generic_records_keep_symbolic_lengths() {
 fn different_and_runtime_dependent_lengths_are_rejected() {
     rejects(
         r#"
-        fn same<T: Type, N: Nat>(a: [T; N], b: [T; N]) -> T ! {panic} { a[0] }
-        fn main() -> i64 ! {panic} { same([1, 2], [3, 4, 5]) }
+        fn same<T: Type, N: Nat>(a: [T; N], b: [T; N]) -> T ! {} { a[0] }
+        fn main() -> i64 ! {} { same([1, 2], [3, 4, 5]) }
         "#,
         "array length mismatch",
     );
@@ -135,19 +135,19 @@ fn different_and_runtime_dependent_lengths_are_rejected() {
         "must be a compile-time natural",
     );
     rejects(
-        "fn main() -> i64 ! {panic} { let a: [i64; 2] = [1, 2]; a[-1] }",
+        "fn main() -> i64 ! {} { let a: [i64; 2] = [1, 2]; a[-1] }",
         "nonnegative",
     );
     rejects(
-        "fn main() -> i64 ! {panic} { let a: [i64; 1 - 2] = []; 0 }",
+        "fn main() -> i64 ! {} { let a: [i64; 1 - 2] = []; 0 }",
         "nonnegative",
     );
     rejects(
-        "fn main() -> i64 ! {panic} { let a: [i64; 1 / 0] = []; 0 }",
+        "fn main() -> i64 ! {} { let a: [i64; 1 / 0] = []; 0 }",
         "constant nonnegative",
     );
     rejects(
-        "fn main() -> i64 ! {panic} { let a: [i64; 1 + nope] = []; 0 }",
+        "fn main() -> i64 ! {} { let a: [i64; 1 + nope] = []; 0 }",
         "constant expression",
     );
 }
@@ -155,8 +155,8 @@ fn different_and_runtime_dependent_lengths_are_rejected() {
 #[test]
 fn grades_types_and_natural_parameters_stay_separate() {
     let source = r#"
-        fn mixed<G: Grade, N: Nat, T: Type>(x: T @[G], xs: [T; N]) -> T ! {panic} { x; xs[0] }
-        fn main() -> i64 ! {panic} {
+        fn mixed<G: Grade, N: Nat, T: Type>(x: T @[G], xs: [T; N]) -> T ! {} { x; xs[0] }
+        fn main() -> i64 ! {} {
             let xs: [i64; 2] = [42, 0];
             mixed::<1, 2, i64>(0, xs)
         }
@@ -186,14 +186,14 @@ fn executable_aliases_are_transparent_across_arrays_unions_and_generics() {
         type Value = Number | Bool;
         type ReadOnly = Pair<i64>;
 
-        fn pick(v: Value) -> i64 ! {panic} {
+        fn pick(v: Value) -> i64 ! {} {
             match v {
                 i64 @ n => n,
                 Bool @ b => if b { 1 } else { 0 },
             }
         }
 
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p: ReadOnly = [20, 20];
             let n: Number = p[0] + p[1];
             let f: Fixed<2> = [0, 0];
@@ -211,9 +211,9 @@ fn executable_aliases_are_transparent_across_arrays_unions_and_generics() {
 fn generic_aliases_participate_in_length_inference() {
     let source = r#"
         type Arr<T, N: Nat> = [T; N];
-        fn first<T, N: Nat>(xs: Arr<T, N>) -> T ! {panic} { xs[0] }
+        fn first<T, N: Nat>(xs: Arr<T, N>) -> T ! {} { xs[0] }
         fn identity<T, N: Nat>(xs: Arr<T, N>) -> Arr<T, N> ! {} { xs }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: Arr<i64, 3> = [20, 21, 1];
             identity(a)[2] + first(a)
         }
@@ -243,7 +243,7 @@ fn aliases_cross_modules_and_enforce_visibility() {
     ]);
     let source = "module app.main;
         use app.types;
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let xs: types.Numbers = [20, 22];
             let v: types.Either<i64> = xs[0];
             match v { i64 @ n => n, Bool @ b => 0 }
@@ -275,7 +275,7 @@ fn alias_cycles_and_logical_alias_boundaries_stay_checked() {
     // A runtime alias cannot be cited by an erased proof definition.
     rejects(
         "type Numbers = [i64; 2];
-         fn main() -> i64 ! {panic} { let xs: Numbers = [1, 2]; xs[0] }
+         fn main() -> i64 ! {} { let xs: Numbers = [1, 2]; xs[0] }
          total fn bad(x: Numbers) -> Nat ! {} { 0 }",
         "unchecked alias",
     );
@@ -296,7 +296,7 @@ fn dependent_erased_parameters_use_open_contexts_and_call_site_substitution() {
         total fn truth() -> Eq<Nat, 0, 0> ! {} { refl::<Nat>(0) }
         fn consume(erased n: Nat, erased p: Eq<Nat, n, n>) -> i64 ! {} { 7 }
         fn outer(erased n: Nat, erased p: Eq<Nat, n, n>) -> i64 ! {} { consume(n, p) }
-        fn main() -> i64 ! {panic} { consume(0, truth()) + outer(0, truth()) }
+        fn main() -> i64 ! {} { consume(0, truth()) + outer(0, truth()) }
     "#;
     assert_eq!(evaluate(source), 14);
     // An erased natural *value* parameter is still a kernel term, not a runtime
@@ -353,8 +353,8 @@ fn dependent_arrays_agree_between_reference_and_native_and_do_not_allocate() {
     use std::process::Command;
     let source = r#"
         fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
-        fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {panic} { xs[N - 1] }
-        fn main() -> i64 ! {panic} {
+        fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {} { xs[N - 1] }
+        fn main() -> i64 ! {} {
             let a: [i64; 4] = [1, 2, 3, 42];
             let b = identity(a);
             last(b)
@@ -377,12 +377,12 @@ fn dependent_arrays_agree_between_reference_and_native_and_do_not_allocate() {
 #[test]
 fn dependent_array_layout_and_specialization_budgets_are_explicit() {
     rejects(
-        "fn main() -> i64 ! {panic} { let a: [i64; 32] = []; 0 }",
+        "fn main() -> i64 ! {} { let a: [i64; 32] = []; 0 }",
         "32-word",
     );
     // Each distinct natural argument is a distinct checked instance.
     let mut body = String::from(
-        "fn count<N: Nat>(x: i64) -> i64 ! {} { x } fn main() -> i64 ! {panic} { let mut s = 0;",
+        "fn count<N: Nat>(x: i64) -> i64 ! {} { x } fn main() -> i64 ! {} { let mut s = 0;",
     );
     for n in 0..260 {
         body.push_str(&format!(" s = count::<{n}>(s);"));
@@ -396,13 +396,11 @@ fn dependent_array_layout_and_specialization_budgets_are_explicit() {
 fn a_program_may_hold_more_than_256_functions() {
     let mut source = String::new();
     for n in 0..300 {
-        source.push_str(&format!(
-            "fn step{n}(x: i64) -> i64 ! {{panic}} {{ x + {n} }}\n"
-        ));
+        source.push_str(&format!("fn step{n}(x: i64) -> i64 ! {{}} {{ x + {n} }}\n"));
     }
     // And one generic declaration with 200 instances beside them.
     source.push_str("fn count<N: Nat>(x: i64) -> i64 ! {} { x }\n");
-    source.push_str("fn main() -> i64 ! {panic} { let mut s = 0;");
+    source.push_str("fn main() -> i64 ! {} { let mut s = 0;");
     for n in 0..300 {
         source.push_str(&format!(" s = step{n}(s);"));
     }
@@ -422,11 +420,11 @@ fn mutual_polymorphic_recursion_is_rejected_promptly() {
     let mut source = String::new();
     for k in 0..declarations {
         source.push_str(&format!(
-            "fn f{k}<T>(x: i64) -> i64 ! {{panic}} {{ if x > 1000000 {{ x }} else {{ f{}::<Vec<T>>(x + 1) }} }}\n",
+            "fn f{k}<T>(x: i64) -> i64 ! {{}} {{ if x > 1000000 {{ x }} else {{ f{}::<Vec<T>>(x + 1) }} }}\n",
             (k + 1) % declarations
         ));
     }
-    source.push_str("fn main() -> i64 ! {panic} { f0::<i64>(0) }");
+    source.push_str("fn main() -> i64 ! {} { f0::<i64>(0) }");
     let started = std::time::Instant::now();
     rejects(&source, "1024 instances of generic functions");
     assert!(started.elapsed() < std::time::Duration::from_secs(20));

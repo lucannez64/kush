@@ -55,12 +55,12 @@ fn native(source: &str) -> Option<std::process::Output> {
 
 const CONVERT: &str = r#"
 struct Point { x: i64, y: i64 }
-trait Convert<T> { fn render(self: Self) -> T ! {panic}; }
+trait Convert<T> { fn render(self: Self) -> T ! {}; }
 impl Convert<i64> for Point {
-    fn render(self: Self) -> i64 ! {panic} { self.x * 10 + self.y }
+    fn render(self: Self) -> i64 ! {} { self.x * 10 + self.y }
 }
 impl Convert<Bool> for Point {
-    fn render(self: Self) -> Bool ! {panic} { self.x == 0 }
+    fn render(self: Self) -> Bool ! {} { self.x == 0 }
 }
 "#;
 
@@ -69,7 +69,7 @@ fn concrete_generic_trait_specializations_are_distinct() {
     agrees(
         &format!(
             "{CONVERT}
-            fn main() -> i64 ! {{io, panic}} {{
+            fn main() -> i64 ! {{io}} {{
                 let point = Point {{ x: 4, y: 2 }};
                 print_i64(point.Convert::<i64>.render());
                 if point.Convert::<Bool>.render() {{ print_i64(1) }} else {{ print_i64(0) }}
@@ -89,16 +89,16 @@ fn generic_trait_duplicates_and_unqualified_ambiguity_are_explicit() {
         &format!(
             "{CONVERT}
             impl Convert<i64> for Point {{
-                fn render(self: Self) -> i64 ! {{panic}} {{ 0 }}
+                fn render(self: Self) -> i64 ! {{}} {{ 0 }}
             }}
-            fn main() -> i64 ! {{panic}} {{ 0 }}"
+            fn main() -> i64 ! {{}} {{ 0 }}"
         ),
         "duplicate implementation of trait 'Convert<i64>'",
     );
     rejects(
         &format!(
             "{CONVERT}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let point = Point {{ x: 1, y: 2 }};
                 point.render()
             }}"
@@ -112,10 +112,10 @@ fn generic_trait_bounds_are_discharged_at_specialization() {
     agrees(
         &format!(
             "{CONVERT}
-            fn convert_point<T: Convert<i64>>(value: T) -> i64 ! {{panic}} {{
+            fn convert_point<T: Convert<i64>>(value: T) -> i64 ! {{}} {{
                 value.Convert::<i64>.render()
             }}
-            fn main() -> i64 ! {{io, panic}} {{
+            fn main() -> i64 ! {{io}} {{
                 print_i64(convert_point(Point {{ x: 2, y: 3 }}));
                 0
             }}"
@@ -128,7 +128,7 @@ fn generic_trait_bounds_are_discharged_at_specialization() {
             "{CONVERT}
             struct Plain {{ n: i64 }}
             fn helper<T: Convert<i64>>(value: T) -> i64 ! {{}} {{ 7 }}
-            fn main() -> i64 ! {{panic}} {{ helper(Plain {{ n: 1 }}) }}"
+            fn main() -> i64 ! {{}} {{ helper(Plain {{ n: 1 }}) }}"
         ),
         "does not implement trait 'Convert<i64>'",
     );
@@ -174,14 +174,14 @@ fn self_and_trait_arguments_substitute_into_impl_contracts() {
     agrees(
         "struct Point { x: i64, y: i64 }
         trait Merge<T> {
-            fn merge(self: Self, other: Self, extra: T) -> Self ! {panic};
+            fn merge(self: Self, other: Self, extra: T) -> Self ! {};
         }
         impl Merge<i64> for Point {
-            fn merge(self: Point, other: Point, extra: i64) -> Point ! {panic} {
+            fn merge(self: Point, other: Point, extra: i64) -> Point ! {} {
                 Point { x: self.x + other.x + extra, y: self.y + other.y }
             }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let left = Point { x: 1, y: 2 };
             let right = Point { x: 3, y: 4 };
             let merged = left.Merge::<i64>.merge(right, 10);
@@ -204,7 +204,7 @@ fn trait_methods_may_be_generic_and_alpha_equivalent() {
         impl Pairing<i64> for Point {
             fn pair<V>(self: Self, value: V) -> (i64, V) ! {} { (self.x, value) }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 5 };
             let inferred = point.Pairing::<i64>.pair(true);
             if inferred.1 { print_i64(inferred.0); }
@@ -224,7 +224,7 @@ fn trait_methods_may_be_generic_and_alpha_equivalent() {
                 value
             }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             print_i64((5).Pick.pick(_, 7));
             0
         }",
@@ -245,7 +245,7 @@ fn generic_method_contracts_require_matching_parameters_effects_grades_and_evide
     rejects(
         "struct P { x: i64 }
         trait Convert<T> { fn render(self: Self) -> T ! {}; }
-        impl Convert<i64> for P { fn render(self: Self) -> i64 ! {panic} { self.x } }
+        impl Convert<i64> for P { fn render(self: Self) -> i64 ! {io} { self.x } }
         fn main() -> i64 ! {} { 0 }",
         "does not match the trait signature exactly",
     );
@@ -283,7 +283,7 @@ fn generic_inherent_method_identity_cleans_up_owning_types() {
         struct Token { text: String }
         struct Point { x: i64 }
         impl Token {
-            fn unwrap_with<T>(self: Token, note: T) -> String ! {alloc, panic} {
+            fn unwrap_with<T>(self: Token, note: T) -> String ! {alloc} {
                 let Token { text } = self;
                 text
             }
@@ -291,7 +291,7 @@ fn generic_inherent_method_identity_cleans_up_owning_types() {
         impl Point {
             fn echo<T>(self: Point, value: T) -> T ! {} { value }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let first = Token { text: String.from("abcd") };
             let second = Token { text: String.from("xy") };
             let first_text = first.unwrap_with(1);
@@ -333,7 +333,7 @@ fn generic_methods_infer_or_accept_explicit_arguments_and_keep_static_dispatch()
         impl Point {
             fn echo<T>(self: Point, value: T) -> T ! {} { value }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             print_i64(Point { x: 1 }.echo::<i64>(7));
             0
         }",
@@ -353,7 +353,7 @@ fn generic_methods_infer_or_accept_explicit_arguments_and_keep_static_dispatch()
         impl Point {
             fn echo<T>(self: Point, value: T) -> T ! {} { value }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let point = Point { x: 1 };
             Point { x: 0 }.echo::<&Point>(&point)
         }",
@@ -366,20 +366,20 @@ fn generic_method_receivers_are_evaluated_once_before_later_arguments() {
     agrees(
         "struct Point { x: i64 }
         impl Point {
-            fn mix<T>(self: Point, value: T) -> T ! {io, panic} {
+            fn mix<T>(self: Point, value: T) -> T ! {io} {
                 print_i64(self.x);
                 value
             }
         }
-        fn make(value: i64) -> Point ! {io, panic} {
+        fn make(value: i64) -> Point ! {io} {
             print_i64(value);
             Point { x: value }
         }
-        fn argument(value: i64) -> i64 ! {io, panic} {
+        fn argument(value: i64) -> i64 ! {io} {
             print_i64(value);
             value
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             print_i64(make(1).mix(argument(3)));
             0
         }",
@@ -398,7 +398,7 @@ fn generic_method_bounds_are_not_dropped_when_the_body_ignores_them() {
         impl Point {
             fn ignore_bound<U: Convert<i64>>(self: Point, value: U) -> i64 ! {} { 7 }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let point = Point { x: 1 };
             point.ignore_bound(Plain { n: 2 })
         }",
@@ -412,9 +412,9 @@ fn borrowed_record_receivers_compose_with_generic_methods() {
         "struct Counter { value: i64 }
         impl Counter {
             fn pick<T>(self: &Self, fallback: T) -> T ! {} { fallback }
-            fn value_plus<T>(&self, extra: T) -> i64 ! {panic} { self.value + 1 }
+            fn value_plus<T>(&self, extra: T) -> i64 ! {} { self.value + 1 }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let counter = Counter { value: 41 };
             print_i64(counter.pick(7));
             print_i64(counter.value_plus::<i64>(9));
@@ -434,12 +434,12 @@ fn exclusive_loans_survive_into_later_generic_method_arguments() {
     {
         let source = "struct P { x: i64 }
         impl P {
-            fn consume<T>(self: &mut Self, value: T) -> Unit ! {panic} {
+            fn consume<T>(self: &mut Self, value: T) -> Unit ! {} {
                 self.x = self.x + 1;
             }
-            fn peek(&self) -> i64 ! {panic} { self.x }
+            fn peek(&self) -> i64 ! {} { self.x }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = P { x: 1 };
             p.consume(p.peek());
             p.consume(p.x);
@@ -452,11 +452,11 @@ fn exclusive_loans_survive_into_later_generic_method_arguments() {
     rejects(
         "struct P { x: i64 }
         impl P {
-            fn mix<T>(self: &mut Self, value: T, other: &P) -> Unit ! {panic} {
+            fn mix<T>(self: &mut Self, value: T, other: &P) -> Unit ! {} {
                 self.x = self.x + other.x;
             }
         }
-        fn main() -> Unit ! {panic} {
+        fn main() -> Unit ! {} {
             let mut p = P { x: 1 };
             p.mix(1, &p)
         }",
@@ -475,7 +475,7 @@ fn generic_nat_and_grade_trait_parameters_are_compile_time_identity() {
         fn use_chunk<T: Chunked<3>>(value: T) -> i64 ! {} {
             value.Chunked::<3>.width()
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let chunk = Chunk { bytes: 9 };
             print_i64(chunk.Chunked::<3>.width());
             print_i64(use_chunk(Chunk { bytes: 1 }));
@@ -489,18 +489,18 @@ fn generic_nat_and_grade_trait_parameters_are_compile_time_identity() {
         trait Chunked<N: Nat> { fn width(self: Self) -> i64 ! {}; }
         impl Chunked<3> for Chunk { fn width(self: Self) -> i64 ! {} { 3 } }
         fn helper<T: Chunked<4>>(value: T) -> i64 ! {} { 0 }
-        fn main() -> i64 ! {panic} { helper(Chunk { bytes: 1 }) }",
+        fn main() -> i64 ! {} { helper(Chunk { bytes: 1 }) }",
         "does not implement trait 'Chunked<4>'",
     );
     agrees(
         "struct Counter { n: i64 }
         trait Cost<g: Grade> {
-            fn charge(self: Self, value: i64 @[g]) -> i64 ! {panic};
+            fn charge(self: Self, value: i64 @[g]) -> i64 ! {};
         }
         impl Cost<1> for Counter {
-            fn charge(self: Self, value: i64 @[1]) -> i64 ! {panic} { self.n + value }
+            fn charge(self: Self, value: i64 @[1]) -> i64 ! {} { self.n + value }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let counter = Counter { n: 4 };
             print_i64(counter.Cost::<1>.charge(2));
             0
@@ -518,7 +518,7 @@ fn generic_nominal_impl_targets_and_generic_impl_headers_work() {
         impl First<i64> for Pair<i64> {
             fn first_value(self: Self) -> i64 ! {} { self.first }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let pair = Pair { first: 3, second: 4 };
             print_i64(pair.First::<i64>.first_value());
             0
@@ -534,7 +534,7 @@ fn generic_nominal_impl_targets_and_generic_impl_headers_work() {
         impl<U> First<U> for Pair<U> {
             fn first_value(self: Self) -> U ! {} { self.first }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let pair = Pair { first: 7, second: 8 };
             print_i64(pair.First::<i64>.first_value());
             0
@@ -561,14 +561,14 @@ fn generic_trait_method_lifetimes_are_alpha_equivalent() {
     agrees(
         "struct Reader { bias: i64 }
         trait FirstView<T> {
-            fn first<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn first<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {};
         }
         impl FirstView<i64> for Reader {
-            fn first<'b>(self: Self, values: &'b [i64]) -> &'b [i64] ! {panic} {
+            fn first<'b>(self: Self, values: &'b [i64]) -> &'b [i64] ! {} {
                 &values[..1]
             }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let values: [i64; 2] = [10, 20];
             let reader = Reader { bias: 0 };
             let view = reader.FirstView::<i64>.first(&values[..]);
@@ -593,9 +593,9 @@ fn cross_module_generic_traits_and_methods_require_visibility() {
         root.join("demo").join("generic.kush"),
         r#"module demo.generic;
         pub struct Point { pub x: i64 }
-        pub trait Convert<T> { fn render(self: Self) -> T ! {panic}; }
+        pub trait Convert<T> { fn render(self: Self) -> T ! {}; }
         impl Convert<i64> for Point {
-            pub fn render(self: Self) -> i64 ! {panic} { self.x }
+            pub fn render(self: Self) -> i64 ! {} { self.x }
         }
         impl Point {
             pub fn echo<T>(self: Point, value: T) -> T ! {} { value }
@@ -608,10 +608,10 @@ fn cross_module_generic_traits_and_methods_require_visibility() {
         root.join("main.kush"),
         r#"use demo.generic.Point;
         use demo.generic.Convert;
-        fn run<T: Convert<i64>>(value: T) -> i64 ! {panic} {
+        fn run<T: Convert<i64>>(value: T) -> i64 ! {} {
             value.Convert::<i64>.render()
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 4 };
             print_i64(point.echo(9));
             print_i64(run(Point { x: 3 }));

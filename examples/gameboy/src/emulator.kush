@@ -16,7 +16,7 @@ pub const CYCLES_PER_FRAME: i64 = 70224;
 
 /// Run until the display finishes a frame (or a frame's worth of cycles has
 /// passed with the display off).
-pub fn run_frame<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc, panic} {
+pub fn run_frame<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc} {
     m.frame_done = false;
     let mut budget = CYCLES_PER_FRAME;
     while !m.frame_done && budget > 0 {
@@ -45,7 +45,7 @@ pub fn run_frame<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc, panic} {
 
 /// The four-cycle steps, within the frame budget, until the first one in
 /// which something besides counting happens.
-fn quiet<M: Mapper>(m: &Machine<M>, budget: i64) -> i64 ! {panic} {
+fn quiet<M: Mapper>(m: &Machine<M>, budget: i64) -> i64 ! {} {
     let mut steps = (budget + 3) / 4;
     let timer = machine.timer_quiet(m);
     if timer < steps { steps = timer; }
@@ -58,7 +58,7 @@ fn quiet<M: Mapper>(m: &Machine<M>, budget: i64) -> i64 ! {panic} {
 
 /// `run_frame` one instruction (or halted step) at a time, without
 /// skipping: the reference the faster loop is tested against.
-pub fn run_frame_reference<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc, panic} {
+pub fn run_frame_reference<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc} {
     m.frame_done = false;
     let mut budget = CYCLES_PER_FRAME;
     while !m.frame_done && budget > 0 {
@@ -77,18 +77,18 @@ pub fn run_frame_reference<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc, pani
 
 /// The buttons held for the next frame (bits as `machine.press` takes them),
 /// or -1 to stop.
-pub effect Buttons: Unit -> i64 ! {io, alloc, panic};
+pub effect Buttons: Unit -> i64 ! {io, alloc};
 /// A finished frame, one shade (0-3) per pixel, row-major. The handler gives
 /// the buffer back, with false to stop.
-pub effect Present: Vec<u8> -> (Vec<u8>, Bool) ! {io, alloc, panic};
+pub effect Present: Vec<u8> -> (Vec<u8>, Bool) ! {io, alloc};
 /// The frame's sound: interleaved left/right samples at `apu.SAMPLE_RATE`.
 /// The handler gives the buffer back.
-pub effect Play: Vec<i64> -> Vec<i64> ! {io, alloc, panic};
+pub effect Play: Vec<i64> -> Vec<i64> ! {io, alloc};
 
 /// Run frames until the front end says stop. Nothing is copied: the core
 /// keeps a second screen and sample buffer, swaps the finished ones out with
 /// `replace`, lends them to the front end and swaps them back.
-pub fn run<M: Mapper>(m: &mut Machine<M>) -> Unit ! {Buttons, Present, Play, io, alloc, panic} {
+pub fn run<M: Mapper>(m: &mut Machine<M>) -> Unit ! {Buttons, Present, Play, io, alloc} {
     let mut spare = cartridge.zeroed(machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT);
     let mut sound: Vec<i64> = Vec.with_capacity(2048);
     let mut held = perform Buttons(());
@@ -113,7 +113,7 @@ pub fn rgb(shade: u8) -> (i64, i64, i64) ! {} {
 }
 
 /// The screen as a binary PPM image, scaled up by `scale`.
-pub fn screenshot<M>(m: &Machine<M>, scale: i64) -> Bytes ! {alloc, panic} {
+pub fn screenshot<M>(m: &Machine<M>, scale: i64) -> Bytes ! {alloc} {
     let width = machine.SCREEN_WIDTH * scale;
     let height = machine.SCREEN_HEIGHT * scale;
     let mut out = Bytes.with_capacity(32 + width * height * 3);
@@ -145,7 +145,7 @@ pub fn screenshot<M>(m: &Machine<M>, scale: i64) -> Bytes ! {alloc, panic} {
 }
 
 /// What the program has sent to the serial port so far.
-pub fn serial_text<M>(m: &Machine<M>) -> Bytes ! {alloc, panic} {
+pub fn serial_text<M>(m: &Machine<M>) -> Bytes ! {alloc} {
     let mut out = Bytes.with_capacity(m.serial.len());
     let mut i = 0;
     while i < m.serial.len() {
@@ -155,7 +155,7 @@ pub fn serial_text<M>(m: &Machine<M>) -> Bytes ! {alloc, panic} {
     out
 }
 
-pub fn append(out: Bytes, more: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn append(out: Bytes, more: &Bytes) -> Bytes ! {alloc} {
     let mut result = out;
     let mut i = 0;
     while i < more.len() {

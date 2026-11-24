@@ -61,7 +61,7 @@ native backend both evaluate the arguments before dropping the old payload.
 ## Allocation-preserving vector transforms
 
 ```rust
-fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+fn inc(x: i64) -> i64 ! {} { x + 1 }
 
 let values: Vec<i64> = /* owning vector */;
 let values = Vec.map_in_place(values, inc);

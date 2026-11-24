@@ -7,7 +7,7 @@ fn copy(input: Stdin, output: Stdout, buffer: Bytes) -> Result<Unit, i64> ! {io}
     IO.write(output, &bytes)
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     match copy(IO.stdin(), IO.stdout(), Bytes.with_capacity(4096)) {
         Ok(_) => 0,
         Err(_) => 1,

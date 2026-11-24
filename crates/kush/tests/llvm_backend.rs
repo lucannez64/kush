@@ -233,11 +233,11 @@ fn ownership_facts_are_stated_in_the_module() {
         return;
     }
     let source = "
-        fn fill(view: &mut [i64], value: i64) -> Unit ! {panic} {
+        fn fill(view: &mut [i64], value: i64) -> Unit ! {} {
             let mut i = 0;
             while i < Slice.len(view) { Slice.set(view, i, value); i = i + 1; }
         }
-        fn sum_all(values: Vec<i64>) -> i64 ! {panic} {
+        fn sum_all(values: Vec<i64>) -> i64 ! {} {
             let mut acc = 0;
             let mut i = 0;
             while i < Vec.len(&values) { acc = acc + Vec.get(&values, i); i = i + 1; }
@@ -245,7 +245,7 @@ fn ownership_facts_are_stated_in_the_module() {
         }
         fn open(ticket: Box<i64>) -> i64 ! {} { Box.take(ticket) }
         fn apply(f: fn(Box<i64>) -> i64 ! {}, ticket: Box<i64>) -> i64 ! {} { f(ticket) }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut numbers: [i64; 4] = [0, 0, 0, 0];
             fill(&mut numbers[..], 3);
             let mut values: Vec<i64> = Vec.with_capacity(2);
@@ -371,7 +371,7 @@ foreign \"ext_i8\" fn ext_i8(x: i8) -> i64 ! {io};
 foreign \"ext_u16\" fn ext_u16(x: u16) -> i64 ! {io};
 foreign \"ext_i16\" fn ext_i16(x: i16) -> i64 ! {io};
 foreign \"ext_idx\" fn ext_idx(x: u8) -> i64 ! {io};
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let line = match IO.read_line(IO.stdin(), Bytes.with_capacity(64)) {
         Ok(b) => b,
         Err(_) => Bytes.with_capacity(1),
@@ -450,67 +450,67 @@ fn the_planner_defers_loops_that_vectorize() {
     let root = scratch.path();
     fs::write(
         root.join("main.kush"),
-        "fn plain(n: i64, k: i64) -> i64 ! {panic} {
+        "fn plain(n: i64, k: i64) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < n { acc = acc + i * k; i = i + 1; }
     acc
 }
-fn down(n: i64, k: i64) -> i64 ! {panic} {
+fn down(n: i64, k: i64) -> i64 ! {} {
     let mut acc = 0;
     let mut i = n;
     while i > 0 { acc = acc + i * k; i = i - 1; }
     acc
 }
-fn stencil(values: &[i64]) -> i64 ! {panic} {
+fn stencil(values: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 1;
     while i < Slice.len(values) { acc = acc + Slice.get(values, i) - Slice.get(values, i - 1); i = i + 1; }
     acc
 }
-fn listed(values: &Vec<i64>, n: i64) -> i64 ! {panic} {
+fn listed(values: &Vec<i64>, n: i64) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < n { acc = acc + Vec.get(values, i) * 3; i = i + 1; }
     acc
 }
-fn later(values: &[i64]) -> i64 ! {panic} {
+fn later(values: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(values) { i = i + 1; acc = acc + Slice.get(values, i - 1); }
     acc
 }
-fn gather(values: &[i64]) -> i64 ! {panic} {
+fn gather(values: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(values) { acc = acc + Slice.get(values, i & 7); i = i + 1; }
     acc
 }
-fn early(values: &[i64]) -> i64 ! {panic} {
+fn early(values: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(values) { if Slice.get(values, i) == 99 { break; } acc = acc + Slice.get(values, i); i = i + 1; }
     acc
 }
-fn halves(values: &[i64]) -> i64 ! {panic} {
+fn halves(values: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(values) { acc = acc + Slice.get(values, i) / 2; i = i + 1; }
     acc
 }
-fn some(values: &[i64]) -> i64 ! {panic} {
+fn some(values: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(values) { if Slice.get(values, i) > 3 { acc = acc + Slice.get(values, i); } i = i + 1; }
     acc
 }
-fn bytes(values: &Bytes) -> i64 ! {panic} {
+fn bytes(values: &Bytes) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Bytes.len(values) { acc = acc + Bytes.get(values, i); i = i + 1; }
     acc
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let mut values: Vec<i64> = Vec.with_capacity(8);
     let mut text = Bytes.with_capacity(8);
     let mut i = 0;
@@ -596,27 +596,27 @@ fn a_program_split_into_partitions_behaves_as_the_whole() {
     let root = scratch.path();
     fs::write(
         root.join("main.kush"),
-        "fn small(x: i64) -> i64 ! {panic} { x * 3 + 1 }
-fn grow(values: Vec<i64>, n: i64) -> Vec<i64> ! {alloc, panic} {
+        "fn small(x: i64) -> i64 ! {} { x * 3 + 1 }
+fn grow(values: Vec<i64>, n: i64) -> Vec<i64> ! {alloc} {
     let mut out = values;
     let mut i = 0;
     while i < n { out = Vec.push(out, small(i)); i = i + 1; }
     out
 }
-fn summed(values: &[i64]) -> i64 ! {panic} {
+fn summed(values: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(values) { acc = acc + Slice.get(values, i); i = i + 1; }
     acc
 }
-fn twice(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(f(x)) }
-fn first(n: i64) -> i64 ! {alloc, panic} {
+fn twice(f: fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} { f(f(x)) }
+fn first(n: i64) -> i64 ! {alloc} {
     let values = grow(Vec.with_capacity(4), n);
     summed(&values[..]) + small(n)
 }
-fn second(n: i64) -> i64 ! {alloc, panic} { twice(small, n) + first(n + 1) }
+fn second(n: i64) -> i64 ! {alloc} { twice(small, n) + first(n + 1) }
 enum Result<T, E> { Ok(T), Err(E) }
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     print_i64(first(10));
     print_i64(second(20));
     let text = Bytes.from(\"partitioned\\n\");

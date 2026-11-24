@@ -20,9 +20,9 @@ are compile-time only.
 | `@[many]` | unrestricted | rejected |
 
 ```kush eval
-fn twice(x: i64 @[2]) -> i64 ! {panic} { x + x }
+fn twice(x: i64 @[2]) -> i64 ! {} { x + x }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(twice(21));
 }
 ```
@@ -40,8 +40,8 @@ fn main() -> i64 ! {} { f(1) }
 ```
 
 ```kush reject
-fn f(c: Bool, x: i64 @[2]) -> i64 ! {panic} { if c { x + x } else { x } }
-fn main() -> i64 ! {panic} { f(true, 1) }
+fn f(c: Bool, x: i64 @[2]) -> i64 ! {} { if c { x + x } else { x } }
+fn main() -> i64 ! {} { f(true, 1) }
 // error: exact grade @[2] must match on every normally surviving path
 ```
 
@@ -60,9 +60,9 @@ the caller a linear obligation; on a copyable result it makes the result
 must-use.
 
 ```kush eval
-fn make(n: i64) -> Box<i64> @[1] ! {alloc, panic} { Box.new(n) }
+fn make(n: i64) -> Box<i64> @[1] ! {alloc} { Box.new(n) }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let b = make(41);
     print_i64(Box.take(b) + 1);
 }

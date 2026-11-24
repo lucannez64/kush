@@ -48,11 +48,11 @@ These checks remain enabled in native builds.
 
 ```rust
 #[noalloc]
-fn append(buffer: Bytes, byte: i64) -> Bytes ! {panic} {
+fn append(buffer: Bytes, byte: i64) -> Bytes ! {} {
     Bytes.push_reserved(buffer, byte)
 }
 
-fn main() -> Unit ! {alloc, panic, io} {
+fn main() -> Unit ! {alloc, io} {
     let mut buffer = Bytes.with_capacity(2);
     buffer = append(buffer, 52);
     buffer = append(buffer, 50);

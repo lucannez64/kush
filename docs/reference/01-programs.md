@@ -3,11 +3,11 @@
 ## A first program
 
 ```kush eval
-fn square(x: i64) -> i64 ! {panic} {
+fn square(x: i64) -> i64 ! {} {
     x * x
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(square(7));
 }
 ```
@@ -17,9 +17,9 @@ fn main() -> Unit ! {io, panic} {
 ```
 
 Every function states its parameter types, its result type and its effect
-row `! { ... }`. Here `square` may panic (checked multiplication can
-overflow) and `main` may also do I/O. Effects are described in
-[chapter 7](07-effects.md).
+row `! { ... }`. Here `square` has no effects and `main` does I/O. Any
+function may panic (checked multiplication can overflow); panicking is not
+an effect. Effects are described in [chapter 7](07-effects.md).
 
 ## `main`
 
@@ -41,7 +41,7 @@ fn main() -> Bool ! {} { true }
 ## Printing
 
 The bootstrap printing builtins write one value and a newline. They need
-`io` and `panic` (a failed write aborts).
+`io` (a failed write panics).
 
 | Builtin | Prints |
 | --- | --- |
@@ -50,7 +50,7 @@ The bootstrap printing builtins write one value and a newline. They need
 | `print_float(x)` | an `f32` or `f64`, shortest round-trip decimal |
 
 ```kush eval
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let small: u8 = 200;
     print_int(small);
     print_float(1.5);
@@ -69,7 +69,7 @@ Text and bytes go through `std.io`:
 ```kush eval
 use std.io;
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let line = Bytes.from("hello\n");
     let written = io.write(io.stdout(), &line);
 }
@@ -110,7 +110,7 @@ private unless marked `pub`.
 use std.option;
 use std.option.Option;
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let missing: Option<i64> = Option.None;
     print_i64(option.unwrap_or(missing, 7));
 }

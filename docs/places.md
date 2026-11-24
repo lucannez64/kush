@@ -120,7 +120,7 @@ A `Vec` field may promise a minimum length:
 const SIZE: i64 = 0x2000;
 struct Machine { vram: Vec<u8> where len >= SIZE, log: Vec<u8> }
 
-fn read(m: &Machine, address: u16) -> u8 ! {panic} {
+fn read(m: &Machine, address: u16) -> u8 ! {} {
     let at: i64 = Int.convert(address);
     if address < 0x8000 { return 0xFF; }
     if address < 0xA000 { return m.vram[at - 0x8000]; }   // no run-time check
@@ -165,7 +165,7 @@ proof:
 A `&Vec<T>` or `&mut Vec<T>` parameter may promise a minimum length too:
 
 ```kush
-fn sequence(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {panic} {
+fn sequence(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {} {
     io[0x26] = io[0x26] | 0x80;   // proved
 }
 ```

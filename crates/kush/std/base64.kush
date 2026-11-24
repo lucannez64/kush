@@ -54,7 +54,7 @@ fn value(c: i64, url: Bool) -> i64 ! {} {
     }
 }
 
-fn encode_with(data: &Bytes, url: Bool) -> Bytes ! {alloc, panic} {
+fn encode_with(data: &Bytes, url: Bool) -> Bytes ! {alloc} {
     let n = Bytes.len(data);
     // 4/3 of the input rounded up fits in 2n + 4; an absurdly large input
     // starts smaller and the buffer grows.
@@ -91,12 +91,12 @@ fn encode_with(data: &Bytes, url: Bool) -> Bytes ! {alloc, panic} {
 }
 
 /// Standard Base64 with '=' padding.
-pub fn encode(data: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn encode(data: &Bytes) -> Bytes ! {alloc} {
     encode_with(data, false)
 }
 
 /// Base64url without padding, for URLs, cookies and tokens.
-pub fn encode_url(data: &Bytes) -> Bytes ! {alloc, panic} {
+pub fn encode_url(data: &Bytes) -> Bytes ! {alloc} {
     encode_with(data, true)
 }
 
@@ -108,7 +108,7 @@ fn decode_with(
     count: i64,
     url: Bool,
     erased q: { 0 <= count && count <= Bytes.len(text) },
-) -> Option<Bytes> ! {alloc, panic} {
+) -> Option<Bytes> ! {alloc} {
     // 3/4 of the characters fit in `count` bytes.
     let mut out = Bytes.with_capacity(count);
     let mut i = 0;
@@ -161,7 +161,7 @@ fn decode_with(
 
 /// Decode standard Base64. The length must be a multiple of 4, with one or
 /// two '=' only at the very end.
-pub fn decode(text: &Bytes) -> Option<Bytes> ! {alloc, panic} {
+pub fn decode(text: &Bytes) -> Option<Bytes> ! {alloc} {
     let n = Bytes.len(text);
     if (n & 3) != 0 {
         return Option.None;
@@ -180,6 +180,6 @@ pub fn decode(text: &Bytes) -> Option<Bytes> ! {alloc, panic} {
 }
 
 /// Decode Base64url without padding.
-pub fn decode_url(text: &Bytes) -> Option<Bytes> ! {alloc, panic} {
+pub fn decode_url(text: &Bytes) -> Option<Bytes> ! {alloc} {
     decode_with(text, Bytes.len(text), true, _)
 }

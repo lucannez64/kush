@@ -34,7 +34,7 @@ Errors in std are mostly `Result<T, i64>` with an errno-style code.
 use std.text;
 use std.result.Result;
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let input = Bytes.from("  42 ");
     let trimmed = text.trim(&input);
     match text.parse_i64(&trimmed) {

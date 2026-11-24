@@ -10,7 +10,7 @@ use kernel.reader.Item;
 use kernel.store.Store;
 use kernel.term;
 
-fn word(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
+fn word(out: Bytes, value: &Bytes) -> Bytes ! {alloc} {
     let mut out = out;
     let mut i = 0;
     while i < value.len() {
@@ -20,18 +20,18 @@ fn word(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
     out
 }
 
-fn open(out: Bytes, tag: &Bytes) -> Bytes ! {alloc, panic} {
+fn open(out: Bytes, tag: &Bytes) -> Bytes ! {alloc} {
     word(out.push(40), tag)
 }
 
-fn space(out: Bytes) -> Bytes ! {alloc, panic} { out.push(32) }
+fn space(out: Bytes) -> Bytes ! {alloc} { out.push(32) }
 
-fn close(out: Bytes) -> Bytes ! {alloc, panic} { out.push(41) }
+fn close(out: Bytes) -> Bytes ! {alloc} { out.push(41) }
 
-fn number(out: Bytes, value: i64) -> Bytes ! {alloc, panic} { text.format_i64_into(out, value) }
+fn number(out: Bytes, value: i64) -> Bytes ! {alloc} { text.format_i64_into(out, value) }
 
 /// `(u i)` wrapped in `offset` successors.
-fn level_param_into(out: Bytes, index: i64, offset: i64) -> Bytes ! {alloc, panic} {
+fn level_param_into(out: Bytes, index: i64, offset: i64) -> Bytes ! {alloc} {
     let mut out = out;
     let mut k = 0;
     while k < offset {
@@ -47,7 +47,7 @@ fn level_param_into(out: Bytes, index: i64, offset: i64) -> Bytes ! {alloc, pani
     out
 }
 
-pub fn level_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
+pub fn level_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc} {
     let pairs = term.level_pairs(s, id);
     let constant = term.level_constant(s, id);
     let with_constant = constant > 0 || pairs == 0;
@@ -72,7 +72,7 @@ pub fn level_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
 }
 
 /// `(a b ...)` for a list of terms.
-fn terms_into(s: &Store, out: Bytes, list: i64) -> Bytes ! {alloc, panic} {
+fn terms_into(s: &Store, out: Bytes, list: i64) -> Bytes ! {alloc} {
     let mut out = out.push(40);
     let n = term.list_len(s, list);
     let mut i = 0;
@@ -85,7 +85,7 @@ fn terms_into(s: &Store, out: Bytes, list: i64) -> Bytes ! {alloc, panic} {
 }
 
 /// `(tag f0 f1 ...)` printing the first `arity` fields as terms.
-fn form_into(s: &Store, out: Bytes, tag: &Bytes, id: i64, arity: i64) -> Bytes ! {alloc, panic} {
+fn form_into(s: &Store, out: Bytes, tag: &Bytes, id: i64, arity: i64) -> Bytes ! {alloc} {
     let mut out = open(out, tag);
     let mut k = 0;
     while k < arity {
@@ -95,7 +95,7 @@ fn form_into(s: &Store, out: Bytes, tag: &Bytes, id: i64, arity: i64) -> Bytes !
     close(out)
 }
 
-pub fn term_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
+pub fn term_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc} {
     let tag = term.tag(s, id);
     if tag == term.VAR {
         return close(number(space(open(out, &Bytes.from("var"))), term.field(s, id, 0)));
@@ -157,7 +157,7 @@ pub fn term_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
     close(word(space(open(out, &Bytes.from("bool"))), &value))
 }
 
-fn ctor_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
+fn ctor_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc} {
     let mut out = term.name_into(s, space(open(out, &Bytes.from("ctor"))), term.field(s, id, 0));
     out = terms_into(s, space(out), term.field(s, id, 1));
     out = terms_into(s, space(out), term.field(s, id, 2));
@@ -166,13 +166,13 @@ fn ctor_into(s: &Store, out: Bytes, id: i64) -> Bytes ! {alloc, panic} {
 }
 
 /// ` (steps N)` when a declaration has its own step budget.
-fn steps_into(out: Bytes, steps: i64) -> Bytes ! {alloc, panic} {
+fn steps_into(out: Bytes, steps: i64) -> Bytes ! {alloc} {
     if steps < 0 { return out; }
     close(number(space(open(space(out), &Bytes.from("steps"))), steps))
 }
 
 /// One item on one line, as the Rust printer writes it.
-pub fn item_into(s: &Store, out: Bytes, item: Item) -> Bytes ! {alloc, panic} {
+pub fn item_into(s: &Store, out: Bytes, item: Item) -> Bytes ! {alloc} {
     let out = match item {
         Item.Def(name, levels, ty, value, steps) => {
             let mut out = term.name_into(s, space(open(out, &Bytes.from("def"))), name);

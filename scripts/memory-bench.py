@@ -82,7 +82,7 @@ class Workload:
 
 def workload_source(name: str, n: int) -> str:
     if name == "box-reuse":
-        return f"""fn main() -> i64 ! {{alloc, panic}} {{
+        return f"""fn main() -> i64 ! {{alloc}} {{
     let mut owner = Box.new(0);
     let mut i = 0;
     while i < {n} {{
@@ -94,7 +94,7 @@ def workload_source(name: str, n: int) -> str:
     0
 }}"""
     if name == "box-new":
-        return f"""fn main() -> i64 ! {{alloc, panic}} {{
+        return f"""fn main() -> i64 ! {{alloc}} {{
     let mut owner = Box.new(0);
     let mut i = 0;
     while i < {n} {{
@@ -106,8 +106,8 @@ def workload_source(name: str, n: int) -> str:
     0
 }}"""
     if name == "vec-map-in-place":
-        return f"""fn inc(x: i64) -> i64 ! {{panic}} {{ x + 1 }}
-fn main() -> i64 ! {{alloc, panic}} {{
+        return f"""fn inc(x: i64) -> i64 ! {{}} {{ x + 1 }}
+fn main() -> i64 ! {{alloc}} {{
     let mut values: Vec<i64> = Vec.new();
     let mut i = 0;
     while i < {n} {{
@@ -119,7 +119,7 @@ fn main() -> i64 ! {{alloc, panic}} {{
     0
 }}"""
     if name == "bytes-push":
-        return f"""fn main() -> i64 ! {{alloc, panic}} {{
+        return f"""fn main() -> i64 ! {{alloc}} {{
     let mut buffer = Bytes.with_capacity({n});
     let mut i = 0;
     while i < {n} {{
@@ -130,7 +130,7 @@ fn main() -> i64 ! {{alloc, panic}} {{
     0
 }}"""
     if name == "arena-alloc":
-        return f"""fn main() -> i64 ! {{alloc, panic}} {{
+        return f"""fn main() -> i64 ! {{alloc}} {{
     let arena = Arena.new();
     let mut i = 0;
     while i < {n} {{

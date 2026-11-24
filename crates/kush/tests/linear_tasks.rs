@@ -43,9 +43,9 @@ fn agrees(source: &str, expected_status: i64) {
 }
 
 const JOIN: &str = r#"use std.task.TaskExit;
-fn make() -> Box<i64> @[1] ! {alloc, panic} { Box.new(42) }
-fn main() -> i64 ! {alloc, panic, suspend} {
-    Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+fn make() -> Box<i64> @[1] ! {alloc} { Box.new(42) }
+fn main() -> i64 ! {alloc, suspend} {
+    Task.scope(fn() -> i64 ! {alloc, suspend} {
         let task: Task<Box<i64>> = Task.spawn(make);
         match Task.join(task) {
             TaskExit.Completed(b) => Box.take(b),
@@ -63,12 +63,12 @@ fn an_owning_task_result_transfers_through_join() {
 fn cancellation_transfers_a_completed_linear_payload_instead_of_dropping_it() {
     agrees(
         r#"use std.task.TaskExit;
-        fn make() -> Box<i64> @[1] ! {alloc, panic, suspend} {
+        fn make() -> Box<i64> @[1] ! {alloc, suspend} {
             let cancelled = Task.yield();
             Box.new(if cancelled { 7 } else { 9 })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let task: Task<Box<i64>> = Task.spawn(make);
                 Task.cancel(&task);
                 match Task.join(task) {
@@ -85,11 +85,11 @@ fn cancellation_transfers_a_completed_linear_payload_instead_of_dropping_it() {
 fn a_linear_capture_is_transferred_to_the_joined_result() {
     agrees(
         r#"use std.task.TaskExit;
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let b = Box.new(11);
                 let task: Task<Box<i64>> = Task.spawn(
-                    fn() -> Box<i64> @[1] ! {alloc, panic, suspend} {
+                    fn() -> Box<i64> @[1] ! {alloc, suspend} {
                         let cancelled = Task.yield();
                         b
                     },
@@ -108,9 +108,9 @@ fn a_linear_capture_is_transferred_to_the_joined_result() {
 #[test]
 fn a_linear_task_handle_must_be_joined() {
     rejects(
-        r#"fn make() -> Box<i64> @[1] ! {alloc, panic} { Box.new(42) }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+        r#"fn make() -> Box<i64> @[1] ! {alloc} { Box.new(42) }
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 Task.spawn(make);
             });
             0
@@ -118,9 +118,9 @@ fn a_linear_task_handle_must_be_joined() {
         "linear value is discarded",
     );
     rejects(
-        r#"fn make() -> Box<i64> @[1] ! {alloc, panic} { Box.new(42) }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+        r#"fn make() -> Box<i64> @[1] ! {alloc} { Box.new(42) }
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let task: Task<Box<i64>> = Task.spawn(make);
             });
             0
@@ -132,9 +132,9 @@ fn a_linear_task_handle_must_be_joined() {
 #[test]
 fn a_scope_result_may_carry_a_linear_obligation() {
     agrees(
-        r#"fn make() -> Box<i64> @[1] ! {alloc, panic} { Box.new(5) }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Box.take(Task.scope(fn() -> Box<i64> @[1] ! {alloc, panic, suspend} { make() }))
+        r#"fn make() -> Box<i64> @[1] ! {alloc} { Box.new(5) }
+        fn main() -> i64 ! {alloc, suspend} {
+            Box.take(Task.scope(fn() -> Box<i64> @[1] ! {alloc, suspend} { make() }))
         }"#,
         5,
     );
@@ -145,8 +145,8 @@ fn copyable_task_results_carry_a_must_join_and_must_use_obligation() {
     agrees(
         r#"use std.task.TaskExit;
         fn make() -> i64 @[1] ! {} { 42 }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let task: Task<i64> = Task.spawn(make);
                 match Task.join(task) {
                     TaskExit.Completed(value) => value,
@@ -164,8 +164,8 @@ fn copyable_task_results_carry_a_must_join_and_must_use_obligation() {
             let cancelled = Task.yield();
             if cancelled { 7 } else { 9 }
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
                 let task: Task<i64> = Task.spawn(make);
                 Task.cancel(&task);
                 match Task.join(task) {
@@ -179,8 +179,8 @@ fn copyable_task_results_carry_a_must_join_and_must_use_obligation() {
     // The handle is linear, so it must be joined.
     rejects(
         r#"fn make() -> i64 @[1] ! {} { 42 }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let task: Task<i64> = Task.spawn(make);
             });
             0
@@ -191,8 +191,8 @@ fn copyable_task_results_carry_a_must_join_and_must_use_obligation() {
     rejects(
         r#"use std.task.TaskExit;
         fn make() -> i64 @[1] ! {} { 42 }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> Unit ! {alloc, suspend} {
                 let task: Task<i64> = Task.spawn(make);
                 Task.join(task);
             });
@@ -205,15 +205,15 @@ fn copyable_task_results_carry_a_must_join_and_must_use_obligation() {
 #[test]
 fn a_copyable_scope_result_is_must_use() {
     agrees(
-        r#"fn main() -> i64 ! {alloc, panic, suspend} {
-            let value: i64 @[1] = Task.scope(fn() -> i64 @[1] ! {alloc, panic, suspend} { 42 });
+        r#"fn main() -> i64 ! {alloc, suspend} {
+            let value: i64 @[1] = Task.scope(fn() -> i64 @[1] ! {alloc, suspend} { 42 });
             value + 0
         }"#,
         42,
     );
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 @[1] ! {alloc, panic, suspend} { 42 });
+        r#"fn main() -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 @[1] ! {alloc, suspend} { 42 });
             0
         }"#,
         "must-use `@[1]` contract",

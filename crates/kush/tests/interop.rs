@@ -29,7 +29,7 @@ fn logical_definitions_coexist_with_executable_code_and_are_erased() {
         type Same<T: Type, x: T> = Eq<T, x, x>;
         fn consume(erased p: Eq<Nat, 0, 0>) -> i64 ! {{}} {{ 7 }}
         fn pass(erased p: Eq<Nat, 0, 0>) -> i64 ! {{}} {{ consume(p) }}
-        fn main() -> i64 ! {{panic}} {{ pass(use_proof(truth)) + 3 }}"
+        fn main() -> i64 ! {{}} {{ pass(use_proof(truth)) + 3 }}"
     );
     let program = checked(&source);
     assert_eq!(program.function_count(), 3); // consume, pass, main
@@ -48,7 +48,7 @@ fn kernel_propositions_and_arithmetic_facts_coexist_in_one_signature() {
             n: i64,
             erased positive: {{ 0 < n }},
         ) -> i64 ! {{}} {{ n }}
-        fn main() -> i64 ! {{panic}} {{ bounded(truth, 3, _) }}"
+        fn main() -> i64 ! {{}} {{ bounded(truth, 3, _) }}"
     );
     assert_eq!(evaluate(&source), 3);
 }
@@ -153,7 +153,7 @@ fn module_qualified_logical_proofs_are_checked_and_erased() {
         use app.other;
         fn consume_zero(erased p: Eq<Nat, 0, 0>) -> i64 ! {} { 11 }
         fn consume_one(erased p: Eq<Nat, 1, 1>) -> i64 ! {} { 1 }
-        fn main() -> i64 ! {panic} { consume_zero(lemmas.truth) + consume_one(other.truth) }";
+        fn main() -> i64 ! {} { consume_zero(lemmas.truth) + consume_one(other.truth) }";
     let program = load("main.kush", source, &modules).unwrap();
     let checked = kush::executable::check_program(&program).unwrap();
     assert_eq!(checked.evaluate(&mut Vec::new()).unwrap(), 12);
@@ -168,7 +168,7 @@ fn reference_evaluator_and_native_backend_agree_on_erased_proofs() {
     let source = format!(
         "{PROOFS}
         fn consume(erased p: Eq<Nat, 0, 0>) -> i64 ! {{}} {{ 4 }}
-        fn main() -> i64 ! {{panic}} {{ consume(use_proof(truth)) + 1 }}"
+        fn main() -> i64 ! {{}} {{ consume(use_proof(truth)) + 1 }}"
     );
     let program = checked(&source);
     let (value, stats) = program.evaluate_with_stats(&mut Vec::new()).unwrap();
@@ -214,7 +214,7 @@ fn cross_module_finite_and_prop_evidence_is_checked_and_erased() {
         use app.finite;
         fn consume_fin(erased f: finite.Fin<3>) -> i64 ! {} { 40 }
         fn consume_zero(erased n: Nat, erased p: finite.Bootstrapped<n>) -> i64 ! {} { 2 }
-        fn main() -> i64 ! {panic}
+        fn main() -> i64 ! {}
             { consume_fin(finite.three()) + consume_zero(0, finite.boot_zero()) }";
     let program = load("main.kush", source, &modules).unwrap();
     let checked = kush::executable::check_program(&program).unwrap();
@@ -272,7 +272,7 @@ fn props_are_erased_evidence_not_runtime_values_or_control_flow() {
     let source = "prop True { Trivial: True }
         type P = True;
         fn consume(erased p: P) -> i64 ! {} { 5 }
-        fn main() -> i64 ! {panic} { consume(Trivial) }";
+        fn main() -> i64 ! {} { consume(Trivial) }";
     assert_eq!(evaluate(source), 5);
     rejects(
         "prop True { Trivial: True }
@@ -316,7 +316,7 @@ fn native_and_reference_agree_on_prop_and_finite_evidence() {
         }
         total fn zero_proof() -> IsZero<0> ! {} { IsZero.ZeroIsZero::<0> }
         fn consume(erased f: Fin<3>, erased p: IsZero<0>) -> i64 ! {} { 42 }
-        fn main() -> i64 ! {panic} { consume(three(), zero_proof()) }
+        fn main() -> i64 ! {} { consume(three(), zero_proof()) }
     "#;
     let program = checked(source);
     assert_eq!(program.evaluate(&mut Vec::new()).unwrap(), 42);
@@ -333,7 +333,7 @@ fn erased_prop_parameters_are_first_class_logical_evidence() {
         prop True { Trivial: True }
         prop False {}
         fn consume(erased P: Prop, erased p: P) -> i64 ! {} { 42 }
-        fn main() -> i64 ! {panic} { consume(True, Trivial) }
+        fn main() -> i64 ! {} { consume(True, Trivial) }
     "#;
     assert_eq!(evaluate(source), 42);
     rejects(
@@ -341,7 +341,7 @@ fn erased_prop_parameters_are_first_class_logical_evidence() {
         prop True { Trivial: True }
         prop False {}
         fn consume(erased P: Prop, erased p: P) -> i64 ! {} { 42 }
-        fn main() -> i64 ! {panic} { consume(False, Trivial) }
+        fn main() -> i64 ! {} { consume(False, Trivial) }
         "#,
         "proof does not establish",
     );
@@ -359,7 +359,7 @@ fn cross_module_prop_constructors_are_visible_when_exported() {
     let source = "module app.main;
         use app.finite;
         fn consume(erased p: finite.IsZero<0>) -> i64 ! {} { 42 }
-        fn main() -> i64 ! {panic} { consume(finite.IsZero.ZeroIsZero::<0>) }";
+        fn main() -> i64 ! {} { consume(finite.IsZero.ZeroIsZero::<0>) }";
     let program = load("main.kush", source, &modules).unwrap();
     let checked = kush::executable::check_program(&program).unwrap();
     assert_eq!(checked.evaluate(&mut Vec::new()).unwrap(), 42);
@@ -371,7 +371,7 @@ fn proof_irrelevance_is_applied_to_erased_call_site_evidence() {
         prop Two { First: Two, Second: Two }
         total enum Indexed<p: Two> { Mk: Indexed<p> }
         fn consume(erased x: Indexed<Second>) -> i64 ! {} { 42 }
-        fn main() -> i64 ! {panic} { consume(Indexed.Mk::<First>) }
+        fn main() -> i64 ! {} { consume(Indexed.Mk::<First>) }
     "#;
     assert_eq!(evaluate(source), 42);
     // The boundary still distinguishes different propositions.
@@ -381,7 +381,7 @@ fn proof_irrelevance_is_applied_to_erased_call_site_evidence() {
         prop True { Trivial: True }
         total enum Indexed<p: Two> { Mk: Indexed<p> }
         fn consume(erased x: Indexed<Second>) -> i64 ! {} { 42 }
-        fn main() -> i64 ! {panic} { consume(Indexed.Mk::<True>) }
+        fn main() -> i64 ! {} { consume(Indexed.Mk::<True>) }
         "#,
         "proof does not establish",
     );
@@ -408,7 +408,7 @@ fn native_and_reference_agree_on_cross_module_prop_evidence() {
     let source = "module app.main;
         use app.logic;
         fn consume(erased f: logic.Fin<3>, erased p: logic.True) -> i64 ! {} { 21 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             consume(logic.three(), logic.True.Trivial) + consume(logic.three(), logic.True.Trivial)
         }";
     let program = load("main.kush", source, &modules).unwrap();

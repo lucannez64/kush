@@ -10,7 +10,7 @@ fn rejects(source: &str) {
 #[test]
 fn ending_one_shared_borrow_does_not_release_another_views_owner() {
     rejects(
-        r#"fn main()->i64 ! {panic} {
+        r#"fn main()->i64 ! {} {
         let mut data:[i64;2]=[40,2];let first=&data[..];let second=&data[..];
         drop(first);data=[9,9];Slice.get(second,0)
     }"#,
@@ -20,7 +20,7 @@ fn ending_one_shared_borrow_does_not_release_another_views_owner() {
 fn reordered_structural_leaf_keeps_its_source_owner() {
     rejects(
         r#"struct Window<'a>{start:i64,view:&'a [i64]}
-    fn main()->i64 ! {panic} {
+    fn main()->i64 ! {} {
         let mut data:[i64;2]=[40,2];let w=Window{start:0,view:&data[..]};
         let narrowed:struct{view:&[i64]}=w;
         match narrowed {struct{view}=>{data=[9,9];Slice.get(view,0)}}
@@ -33,7 +33,7 @@ fn inferred_intersection_result_keeps_every_possible_owner() {
         rejects(&format!(
             r#"
         fn choose<'a,'b>(a:&'a [i64],b:&'b [i64],pick:Bool)->&[i64] ! {{}} {{if pick {{a}} else {{b}}}}
-        fn main()->i64 ! {{panic}} {{
+        fn main()->i64 ! {{}} {{
             let mut left:[i64;2]=[40,2];let mut right:[i64;2]=[3,4];
             let result=choose(&left[..],&right[..],true);
             {owner}=[9,9];Slice.get(result,0)
@@ -44,7 +44,7 @@ fn inferred_intersection_result_keeps_every_possible_owner() {
 #[test]
 fn shared_copy_loan_ends_after_the_last_surviving_view_use() {
     let program = check(
-        r#"fn main()->i64 ! {panic} {
+        r#"fn main()->i64 ! {} {
         let mut data:[i64;2]=[40,2];let first=&data[..];let second=first;
         let answer=Slice.get(second,0);drop(first);data=[2,3];answer+data[0]
     }"#,
@@ -75,7 +75,7 @@ fn shared_copy_loan_ends_after_the_last_surviving_view_use() {
 #[test]
 fn shared_derived_view_keeps_its_parent_binding_live() {
     let error = check(
-        r#"fn main()->i64 ! {panic} {
+        r#"fn main()->i64 ! {} {
         let data:[i64;2]=[40,2];let parent=&data[..];let child=parent;
         drop(parent);Slice.get(child,0)
     }"#,

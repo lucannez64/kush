@@ -48,7 +48,7 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 
 /// Both backends must stop with a panic.
 fn panics(body: &str) {
-    let source = format!("use std.option.Option;\nfn main() -> i64 ! {{io, panic}} {{ {body} }}");
+    let source = format!("use std.option.Option;\nfn main() -> i64 ! {{io}} {{ {body} }}");
     let program = check(&source).unwrap();
     let error = program.evaluate(&mut Vec::new()).unwrap_err();
     assert!(error.message.contains("panic"), "{source}: {error:?}");
@@ -60,8 +60,8 @@ fn panics(body: &str) {
 #[test]
 fn literals_take_the_contextual_integer_type() {
     agrees(
-        "fn add(a: u8, b: u8) -> u8 ! {panic} { a + b }
-        fn main() -> i64 ! {io, panic} {
+        "fn add(a: u8, b: u8) -> u8 ! {} { a + b }
+        fn main() -> i64 ! {io} {
             let small: u8 = 200;
             let wide: u64 = 18446744073709551615;
             let negative: i8 = -128;
@@ -84,11 +84,11 @@ fn literals_take_the_contextual_integer_type() {
         "outside the u8 range",
     );
     rejects(
-        "fn main() -> i64 ! {panic} { let a: u8 = 1; let b: i32 = 2; Int.convert(a + b) }",
+        "fn main() -> i64 ! {} { let a: u8 = 1; let b: i32 = 2; Int.convert(a + b) }",
         "expected u8, found i32",
     );
     rejects(
-        "fn main() -> i64 ! {panic} { let a: u8 = 1; let b = -a; 0 }",
+        "fn main() -> i64 ! {} { let a: u8 = 1; let b = -a; 0 }",
         "cannot negate an unsigned",
     );
 }
@@ -104,7 +104,7 @@ fn arithmetic_is_checked_for_each_width() {
     panics("let x: u16 = 7; let y: u16 = 0; let z = x % y; 0");
     panics("let x: u8 = 1; let y = x << 8; 0");
     agrees(
-        "fn main() -> i64 ! {io, panic} {
+        "fn main() -> i64 ! {io} {
             let big: u64 = 18446744073709551614;
             let half: u64 = 9223372036854775808;
             print_int(big / 3);
@@ -123,7 +123,7 @@ fn arithmetic_is_checked_for_each_width() {
 #[test]
 fn bitwise_operators_and_shifts() {
     agrees(
-        "fn main() -> i64 ! {io, panic} {
+        "fn main() -> i64 ! {io} {
             let flags: u8 = 0b1010;
             print_int(flags & 6);
             print_int(flags | 1);
@@ -147,10 +147,10 @@ fn bitwise_operators_and_shifts() {
 #[test]
 fn explicit_conversions_and_arithmetic_forms() {
     agrees(
-        "fn show(o: Option<u8>) -> Unit ! {io, panic} {
+        "fn show(o: Option<u8>) -> Unit ! {io} {
             match o { Option.Some(v) => print_int(v), Option.None => print_int(-1) }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let small: u8 = 250;
             let wide: u32 = Int.convert(small);
             print_int(wide);
@@ -193,7 +193,7 @@ fn chars_compare_match_and_convert() {
         "fn classify(c: Char) -> i64 ! {} {
             match c { 'a' => 1, 'é' => 2, _ => if c >= '0' && c <= '9' { 3 } else { 0 } }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             print_int(classify('a'));
             print_int(classify('é'));
             print_int(classify('7'));
@@ -211,10 +211,10 @@ fn chars_compare_match_and_convert() {
 #[test]
 fn integer_widths_work_in_generics_patterns_and_collections() {
     agrees(
-        "fn first<T>(values: &[T], fallback: T) -> T ! {panic} {
+        "fn first<T>(values: &[T], fallback: T) -> T ! {} {
             if Slice.len(values) > 0 { Slice.get(values, 0) } else { fallback }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let bytes: [u8; 3] = [7, 8, 9];
             print_int(first(&bytes[..], 0));
             let mut v: Vec<u16> = Vec.new();

@@ -168,7 +168,7 @@ interned name to one of `Definition { ty, value }`, `Data { info, ty }` or
 ### Errors and budgets
 
 Kernel functions return `Result<T, KernelError>`, propagated with `?`, and are
-pure apart from the store: effect rows are `{alloc, panic}`. `KernelError` is
+pure apart from the store: effect rows are `{alloc}`. `KernelError` is
 an enum, not a string: `TypeMismatch(expected, actual)`, `NotAFunction(tm)`,
 `UnboundVariable(i)`, `UnknownGlobal(name)`, `BudgetExhausted`,
 `DepthExhausted`, `Positivity(name)`, and so on, carrying handles so that a

@@ -15,12 +15,12 @@ struct MutableView<'a> {
     items: Vec<i64>
 }
 
-fn make<'a>(view: &'a [i64]) -> BufferView<'a> ! {alloc, panic} {
+fn make<'a>(view: &'a [i64]) -> BufferView<'a> ! {alloc} {
     // Source order differs from the declared layout.
     BufferView { token: Box.new(5), start: 3, view: view }
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let values: [i64; 3] = [10, 20, 30];
     let record = make(&values[..]);
     let BufferView { view, token, start } = record;

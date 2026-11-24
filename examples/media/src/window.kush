@@ -59,7 +59,7 @@ pub fn set_title(window: &Window, title: &Bytes) -> Result<Unit, i64> ! {io} {
 
 /// The next pending event, if any. Call it until it returns `None` once
 /// per frame; key auto-repeat is not reported.
-pub fn next_event(window: &Window) -> Option<Event> ! {io, panic} {
+pub fn next_event(window: &Window) -> Option<Event> ! {io} {
     let mut packed = next_packed(&window.raw);
     while packed != 0 {
         match input.decode(packed) {

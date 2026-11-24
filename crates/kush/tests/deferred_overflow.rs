@@ -135,7 +135,7 @@ fn agrees(source: &str, expected: Option<&[i128]>) {
 }
 
 const SUM: &str = "
-fn sum(view: &[i64]) -> i64 ! {panic} {
+fn sum(view: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(view) {
@@ -150,7 +150,7 @@ fn reductions_agree_without_overflow() {
     agrees(
         &format!(
             "{SUM}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let values: [i64; 9] = [1, -2, 3, -4, 5, -6, 7, -8, 1000000];
                 print_i64(sum(&values[..]));
                 print_i64(sum(&values[2..2]));
@@ -167,7 +167,7 @@ fn large_cancelling_operands_take_the_exact_replay() {
     agrees(
         &format!(
             "{SUM}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let values: [i64; 6] = [
                     9223372036854775807, -9223372036854775807,
                     -9223372036854775807, 9223372036854775807,
@@ -187,7 +187,7 @@ fn a_prefix_overflow_panics_even_when_the_acc_fits() {
     agrees(
         &format!(
             "{SUM}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let values: [i64; 3] = [9223372036854775807, 1, -5];
                 print_i64(7);
                 print_i64(sum(&values[..]));
@@ -199,7 +199,7 @@ fn a_prefix_overflow_panics_even_when_the_acc_fits() {
     agrees(
         &format!(
             "{SUM}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let values: [i64; 3] = [-9223372036854775807, -1, -1];
                 print_i64(sum(&values[..]));
             }}"
@@ -212,7 +212,7 @@ fn a_prefix_overflow_panics_even_when_the_acc_fits() {
 fn subtraction_right_hand_and_conditional_reductions() {
     let program = |values: &str| {
         format!(
-            "fn fold(view: &[i64]) -> i64 ! {{panic}} {{
+            "fn fold(view: &[i64]) -> i64 ! {{}} {{
                 let mut down = 0;
                 let mut up = 10;
                 let mut odd = 0;
@@ -225,7 +225,7 @@ fn subtraction_right_hand_and_conditional_reductions() {
                 }}
                 down + up + odd
             }}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let values: [i64; 4] = {values};
                 print_i64(fold(&values[..]));
             }}"
@@ -243,7 +243,7 @@ fn subtraction_right_hand_and_conditional_reductions() {
 #[test]
 fn a_zero_trip_loop_keeps_an_extreme_initial_value() {
     agrees(
-        "fn keep(view: &[i64], start: i64) -> i64 ! {panic} {
+        "fn keep(view: &[i64], start: i64) -> i64 ! {} {
             let mut acc = start;
             let mut i = 0;
             while i < Slice.len(view) {
@@ -252,7 +252,7 @@ fn a_zero_trip_loop_keeps_an_extreme_initial_value() {
             }
             acc
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let values: [i64; 2] = [1, 2];
             let least = 0 - 9223372036854775807 - 1;
             print_i64(keep(&values[1..1], least));
@@ -266,14 +266,14 @@ fn a_zero_trip_loop_keeps_an_extreme_initial_value() {
 fn element_wise_arithmetic_defers_exactly() {
     let program = |values: &str| {
         format!(
-            "fn scale(view: &mut [i64]) -> Unit ! {{panic}} {{
+            "fn scale(view: &mut [i64]) -> Unit ! {{}} {{
                 let mut i = 0;
                 while i < Slice.len(view) {{
                     Slice.set(view, i, Slice.get(view, i) * 3 - 1);
                     i = i + 1;
                 }}
             }}
-            fn dot(a: &[i64], b: &[i64]) -> i64 ! {{panic}} {{
+            fn dot(a: &[i64], b: &[i64]) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = 0;
                 while i < Slice.len(a) {{
@@ -282,7 +282,7 @@ fn element_wise_arithmetic_defers_exactly() {
                 }}
                 acc
             }}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let mut values: [i64; 5] = {values};
                 scale(&mut values[..]);
                 print_i64(values[0]);
@@ -305,7 +305,7 @@ fn element_wise_arithmetic_defers_exactly() {
 fn narrow_and_unsigned_kinds_defer_their_range_checks() {
     let program = |a: &str, b: &str| {
         format!(
-            "fn main() -> Unit ! {{io, panic}} {{
+            "fn main() -> Unit ! {{io}} {{
                 let bytes: [u8; 4] = {a};
                 let words: [u64; 3] = {b};
                 let view: &[u8] = &bytes[..];
@@ -331,7 +331,7 @@ fn narrow_and_unsigned_kinds_defer_their_range_checks() {
     };
     agrees(&program("[1, 2, 3, 4]", "[1, 0, 1]"), None);
     agrees(
-        "fn main() -> Unit ! {io, panic} {
+        "fn main() -> Unit ! {io} {
             let bytes: [u8; 4] = [100, 50, 60, 45];
             let words: [u64; 3] = [9223372036854775807, 0, 0];
             let view: &[u8] = &bytes[..];
@@ -359,7 +359,7 @@ fn narrow_and_unsigned_kinds_defer_their_range_checks() {
 fn values_that_steer_the_loop_keep_immediate_checks() {
     // `step` feeds the index, so its overflow must panic before the read.
     agrees(
-        "fn walk(view: &[i64]) -> i64 ! {panic} {
+        "fn walk(view: &[i64]) -> i64 ! {} {
             let mut acc = 0;
             let mut step = 4611686018427387904;
             let mut i = 0;
@@ -370,7 +370,7 @@ fn values_that_steer_the_loop_keep_immediate_checks() {
             }
             acc
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let values: [i64; 3] = [1, 2, 3];
             print_i64(walk(&values[..]));
         }",
@@ -378,7 +378,7 @@ fn values_that_steer_the_loop_keep_immediate_checks() {
     );
     // Output inside the loop is an effect: every line before the panic shows.
     let program = executable::check(
-        "fn main() -> Unit ! {io, panic} {
+        "fn main() -> Unit ! {io} {
             let mut x = 1;
             let mut i = 0;
             while i < 70 {
@@ -408,7 +408,7 @@ fn values_that_steer_the_loop_keep_immediate_checks() {
 fn deferred_loops_terminate_and_panic_without_a_counter_dependency() {
     // A counted loop whose only overflow is in a value nothing else reads.
     agrees(
-        "fn main() -> Unit ! {io, panic} {
+        "fn main() -> Unit ! {io} {
             let mut x = 1;
             let mut i = 0;
             while i < 70 {
@@ -420,7 +420,7 @@ fn deferred_loops_terminate_and_panic_without_a_counter_dependency() {
         None,
     );
     agrees(
-        "fn main() -> Unit ! {io, panic} {
+        "fn main() -> Unit ! {io} {
             let mut x = 1;
             let mut y = 0;
             let mut i = 0;
@@ -437,7 +437,7 @@ fn deferred_loops_terminate_and_panic_without_a_counter_dependency() {
     );
     // Not counted: the loop relies on the overflow panic to stop.
     agrees(
-        "fn main() -> Unit ! {io, panic} {
+        "fn main() -> Unit ! {io} {
             let mut x = 1;
             let mut running = true;
             while running {
@@ -451,7 +451,7 @@ fn deferred_loops_terminate_and_panic_without_a_counter_dependency() {
 }
 
 const SCALE: &str = "
-fn scale<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> Unit ! {panic} {
+fn scale<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> Unit ! {} {
     let mut i = 0;
     while i < Slice.len(source) {
         Slice.set(target, i, 0 - (Slice.get(source, i) * factor - 7));
@@ -464,7 +464,7 @@ fn certified_stores_replay_or_panic_like_checked_ones() {
     let program = |values: &str, factor: &str| {
         format!(
             "{SCALE}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let source: [i64; 4] = {values};
                 let mut target: [i64; 4] = [1, 1, 1, 1];
                 scale(&source[..], &mut target[..], {factor});
@@ -504,14 +504,14 @@ fn certified_stores_replay_or_panic_like_checked_ones() {
 fn in_place_updates_use_exact_tests() {
     let program = |values: &str| {
         format!(
-            "fn grow(view: &mut [i64]) -> Unit ! {{panic}} {{
+            "fn grow(view: &mut [i64]) -> Unit ! {{}} {{
                 let mut i = 0;
                 while i < Slice.len(view) {{
                     Slice.set(view, i, Slice.get(view, i) * Slice.get(view, i) + i);
                     i = i + 1;
                 }}
             }}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let mut values: [i64; 3] = {values};
                 grow(&mut values[..]);
                 grow(&mut values[..]);
@@ -532,7 +532,7 @@ fn in_place_updates_use_exact_tests() {
 fn products_locals_and_mixed_kinds_in_one_loop() {
     let program = |values: &str, weights: &str, small: &str| {
         format!(
-            "fn blend(a: &[i64], b: &[i64], bytes: &[u8], bias: i64) -> i64 ! {{panic}} {{
+            "fn blend(a: &[i64], b: &[i64], bytes: &[u8], bias: i64) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut low = 0;
                 let mut tally: u8 = 0;
@@ -548,7 +548,7 @@ fn products_locals_and_mixed_kinds_in_one_loop() {
                 }}
                 acc + low + Int.convert(tally)
             }}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let a: [i64; 4] = {values};
                 let b: [i64; 4] = {weights};
                 let bytes: [u8; 4] = {small};
@@ -609,14 +609,14 @@ fn planned_loops_carry_a_certificate_and_rejected_ones_do_not() {
     };
     assert!(certified(&format!(
         "{SUM}
-        fn main() -> Unit ! {{io, panic}} {{
+        fn main() -> Unit ! {{io}} {{
             let values: [i64; 2] = [1, 2];
             print_i64(sum(&values[..]));
         }}"
     )));
     assert!(certified(&format!(
         "{SCALE}
-        fn main() -> Unit ! {{io, panic}} {{
+        fn main() -> Unit ! {{io}} {{
             let source: [i64; 2] = [1, 2];
             let mut target: [i64; 2] = [0, 0];
             scale(&source[..], &mut target[..], 3);
@@ -625,7 +625,7 @@ fn planned_loops_carry_a_certificate_and_rejected_ones_do_not() {
     )));
     // Output inside the loop, and a loop that is not counted.
     assert!(!certified(
-        "fn main() -> Unit ! {io, panic} {
+        "fn main() -> Unit ! {io} {
             let mut x = 1;
             let mut i = 0;
             while i < 10 { x = x * 2; print_i64(x); i = i + 1; }
@@ -644,7 +644,7 @@ fn planned_loops_carry_a_certificate_and_rejected_ones_do_not() {
 fn review_oob() {
     native_modes_agree(
         r#"
-fn f(view: &[i64], n: i64) -> i64 ! {panic} {
+fn f(view: &[i64], n: i64) -> i64 ! {} {
     let mut acc = 0;
     let mut j: i32 = 0;
     let mut i = 0;
@@ -658,7 +658,7 @@ fn f(view: &[i64], n: i64) -> i64 ! {panic} {
     }
     acc
 }
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let xs: [i64; 4] = [1, 2, 3, 4];
     print_i64(1);
     print_i64(f(&xs[..], 100000000));
@@ -672,7 +672,7 @@ fn main() -> Unit ! {io, panic} {
 fn review_memidx() {
     native_modes_agree(
         r#"
-fn f<'a,'b>(table: &'a Vec<i64>, src: &'b [u16], out: &'b mut [u16]) -> i64 ! {panic} {
+fn f<'a,'b>(table: &'a Vec<i64>, src: &'b [u16], out: &'b mut [u16]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(src) {
@@ -685,7 +685,7 @@ fn f<'a,'b>(table: &'a Vec<i64>, src: &'b [u16], out: &'b mut [u16]) -> i64 ! {p
     }
     acc
 }
-fn main() -> Unit ! {io, panic, alloc} {
+fn main() -> Unit ! {io, alloc} {
     let mut table: Vec<i64> = Vec.new();
     let mut k = 0;
     while k < 65536 { table = Vec.push(table, k); k = k + 1; }
@@ -703,7 +703,7 @@ fn main() -> Unit ! {io, panic, alloc} {
 fn review_fpe() {
     native_modes_agree(
         r#"
-fn f(view: &[i32], d: i32) -> i32 ! {panic} {
+fn f(view: &[i32], d: i32) -> i32 ! {} {
     let mut last: i32 = 0;
     let mut i = 0;
     while i < Slice.len(view) {
@@ -713,7 +713,7 @@ fn f(view: &[i32], d: i32) -> i32 ! {panic} {
     }
     last
 }
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let values: [i32; 2] = [1, -2147483648];
     print_i64(1);
     print_int(f(&values[..], -1));
@@ -727,7 +727,7 @@ fn main() -> Unit ! {io, panic} {
 fn review_rem() {
     native_modes_agree(
         r#"
-fn f(view: &[i32], d: i32) -> i32 ! {panic} {
+fn f(view: &[i32], d: i32) -> i32 ! {} {
     let mut last: i32 = 0;
     let mut i = 0;
     while i < Slice.len(view) {
@@ -737,7 +737,7 @@ fn f(view: &[i32], d: i32) -> i32 ! {panic} {
     }
     last
 }
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let values: [i32; 2] = [1, -2147483648];
     print_i64(1);
     print_int(f(&values[..], -1));
@@ -751,7 +751,7 @@ fn main() -> Unit ! {io, panic} {
 fn review_hang3() {
     native_modes_agree(
         r#"
-fn spin(view: &[i64], out: &mut [i64], n: i64, start: i64) -> i64 ! {panic} {
+fn spin(view: &[i64], out: &mut [i64], n: i64, start: i64) -> i64 ! {} {
     let mut acc = start;
     let mut i = 0;
     while i <= n {
@@ -761,7 +761,7 @@ fn spin(view: &[i64], out: &mut [i64], n: i64, start: i64) -> i64 ! {panic} {
     }
     acc
 }
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let values: [i64; 4] = [1, 2, 3, 4];
     let mut out: [i64; 4] = [1, 2, 3, 4];
     print_i64(1);
@@ -776,7 +776,7 @@ fn main() -> Unit ! {io, panic} {
 fn review_float() {
     native_modes_agree(
         r#"
-fn f(view: &[i64], start: i64) -> i64 ! {panic} {
+fn f(view: &[i64], start: i64) -> i64 ! {} {
     let mut acc = start;
     let mut x = 1.0;
     while x < 2.0 {
@@ -785,7 +785,7 @@ fn f(view: &[i64], start: i64) -> i64 ! {panic} {
     }
     acc
 }
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let values: [i64; 2] = [1, 2];
     print_i64(1);
     print_i64(f(&values[..], 9223372036854775800));
@@ -799,7 +799,7 @@ fn main() -> Unit ! {io, panic} {
 fn review_membound() {
     native_modes_agree(
         r#"
-fn f<'a,'b>(a: &'a [i64], out: &'b mut [i64]) -> i64 ! {panic} {
+fn f<'a,'b>(a: &'a [i64], out: &'b mut [i64]) -> i64 ! {} {
     let mut i = 0;
     while i < Slice.get(out, 0) {
         Slice.set(out, 0, Slice.get(a, i % 2) * 4611686018427387904);
@@ -807,7 +807,7 @@ fn f<'a,'b>(a: &'a [i64], out: &'b mut [i64]) -> i64 ! {panic} {
     }
     i
 }
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let a: [i64; 2] = [5, 5];
     let mut o: [i64; 1] = [3];
     print_i64(1);
@@ -826,7 +826,7 @@ fn a_failed_certificate_or_negative_counter_runs_the_rest_checked() {
         format!(
             "{SUM}
             {SCALE}
-            fn fill(n: i64, first: i64, late: i64) -> Vec<i64> ! {{alloc, panic}} {{
+            fn fill(n: i64, first: i64, late: i64) -> Vec<i64> ! {{alloc}} {{
                 let mut values: Vec<i64> = Vec.with_capacity(n);
                 let mut i = 0;
                 while i < n {{
@@ -835,7 +835,7 @@ fn a_failed_certificate_or_negative_counter_runs_the_rest_checked() {
                 }}
                 values
             }}
-            fn ramp(start: i64, n: i64, factor: i64) -> i64 ! {{panic}} {{
+            fn ramp(start: i64, n: i64, factor: i64) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = start;
                 while i < n {{
@@ -844,7 +844,7 @@ fn a_failed_certificate_or_negative_counter_runs_the_rest_checked() {
                 }}
                 acc
             }}
-            fn main() -> Unit ! {{io, alloc, panic}} {{
+            fn main() -> Unit ! {{io, alloc}} {{
                 let source = fill(200000, {first}, {late});
                 let mut target = fill(200000, 0, 0);
                 print_i64(ramp({start}, 200000, {factor}));
@@ -880,7 +880,7 @@ fn a_failed_certificate_or_negative_counter_runs_the_rest_checked() {
 fn a_long_loop_reports_its_overflow_at_once() {
     let program = |body: &str, start: &str| {
         format!(
-            "fn spin(n: i64, start: i64, k: i64) -> i64 ! {{panic}} {{
+            "fn spin(n: i64, start: i64, k: i64) -> i64 ! {{}} {{
                 let mut acc = start;
                 let mut i = 0;
                 while i < n {{
@@ -889,7 +889,7 @@ fn a_long_loop_reports_its_overflow_at_once() {
                 }}
                 acc
             }}
-            fn main() -> Unit ! {{io, alloc, panic}} {{
+            fn main() -> Unit ! {{io, alloc}} {{
                 let n = match ENV.arg(1, Bytes.with_capacity(8)) {{ Ok(_) => 7, Err(_) => 9000000000000000000 }};
                 print_i64(1);
                 print_i64(spin(n, {start}, 3));
@@ -916,7 +916,7 @@ fn a_byte_view_takes_the_ordinary_loop() {
     let program = |count: &str, big: &str| {
         format!(
             "{SUM}
-            fn main() -> Unit ! {{io, alloc, panic}} {{
+            fn main() -> Unit ! {{io, alloc}} {{
                 let mut plain: Vec<i64> = Vec.with_capacity(4);
                 let mut bytes = Bytes.with_capacity(4);
                 let mut i = 0;
@@ -944,13 +944,13 @@ fn hoisted_bounds_checks_panic_where_the_checked_loop_does() {
     // A bound held in a local, which may exceed the slice.
     let local = |n: &str| {
         format!(
-            "fn f(view: &[i64], n: i64) -> i64 ! {{panic}} {{
+            "fn f(view: &[i64], n: i64) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = 0;
                 while i < n {{ acc = acc + Slice.get(view, i) * 3; i = i + 1; }}
                 acc
             }}
-            fn main() -> Unit ! {{io, panic}} {{ {VALUES} print_i64(f(&values[..], {n})); }}"
+            fn main() -> Unit ! {{io}} {{ {VALUES} print_i64(f(&values[..], {n})); }}"
         )
     };
     agrees(&local("5"), Some(&[45]));
@@ -960,7 +960,7 @@ fn hoisted_bounds_checks_panic_where_the_checked_loop_does() {
     // A second slice, shorter than the one the loop walks.
     let two = |other: &str| {
         format!(
-            "fn f<'a, 'b>(view: &'a [i64], other: &'b [i64]) -> i64 ! {{panic}} {{
+            "fn f<'a, 'b>(view: &'a [i64], other: &'b [i64]) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = 0;
                 while i < Slice.len(view) {{
@@ -969,7 +969,7 @@ fn hoisted_bounds_checks_panic_where_the_checked_loop_does() {
                 }}
                 acc
             }}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 {VALUES}
                 let other: {other};
                 print_i64(f(&values[..], &other[..]));
@@ -981,13 +981,13 @@ fn hoisted_bounds_checks_panic_where_the_checked_loop_does() {
     // Offsets below and above the counter.
     let offset = |start: &str, bound: &str, index: &str| {
         format!(
-            "fn f(view: &[i64]) -> i64 ! {{panic}} {{
+            "fn f(view: &[i64]) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = {start};
                 while i < {bound} {{ acc = acc + Slice.get(view, {index}); i = i + 1; }}
                 acc
             }}
-            fn main() -> Unit ! {{io, panic}} {{ {VALUES} print_i64(f(&values[..])); }}"
+            fn main() -> Unit ! {{io}} {{ {VALUES} print_i64(f(&values[..])); }}"
         )
     };
     agrees(&offset("0", "Slice.len(view)", "i - 1"), None);
@@ -997,13 +997,13 @@ fn hoisted_bounds_checks_panic_where_the_checked_loop_does() {
     // Counting down.
     let down = |start: &str, comparison: &str, index: &str| {
         format!(
-            "fn f(view: &[i64]) -> i64 ! {{panic}} {{
+            "fn f(view: &[i64]) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = {start};
                 while i {comparison} {{ acc = acc + Slice.get(view, {index}) * 2; i = i - 1; }}
                 acc
             }}
-            fn main() -> Unit ! {{io, panic}} {{ {VALUES} print_i64(f(&values[..])); }}"
+            fn main() -> Unit ! {{io}} {{ {VALUES} print_i64(f(&values[..])); }}"
         )
     };
     agrees(&down("4", ">= 0", "i"), Some(&[30]));
@@ -1013,19 +1013,19 @@ fn hoisted_bounds_checks_panic_where_the_checked_loop_does() {
     // Vectors and byte buffers, read by `Vec.get` and `Bytes.get`.
     let containers = |n: &str| {
         format!(
-            "fn v(values: &Vec<i64>, n: i64) -> i64 ! {{panic}} {{
+            "fn v(values: &Vec<i64>, n: i64) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = 0;
                 while i < n {{ acc = acc + Vec.get(values, i) * 3; i = i + 1; }}
                 acc
             }}
-            fn b(values: &Bytes, n: i64) -> i64 ! {{panic}} {{
+            fn b(values: &Bytes, n: i64) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = 0;
                 while i < n {{ acc = acc + Bytes.get(values, i) * 3; i = i + 1; }}
                 acc
             }}
-            fn main() -> Unit ! {{io, alloc, panic}} {{
+            fn main() -> Unit ! {{io, alloc}} {{
                 let mut list: Vec<i64> = Vec.with_capacity(4);
                 let mut bytes = Bytes.with_capacity(4);
                 let mut i = 0;
@@ -1044,13 +1044,13 @@ fn hoisted_bounds_checks_panic_where_the_checked_loop_does() {
     // A step larger than one, with `<=`.
     let stride = |bound: &str| {
         format!(
-            "fn f(view: &[i64], n: i64) -> i64 ! {{panic}} {{
+            "fn f(view: &[i64], n: i64) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = 0;
                 while i <= n {{ acc = acc + Slice.get(view, i); i = i + 2; }}
                 acc
             }}
-            fn main() -> Unit ! {{io, panic}} {{ {VALUES} print_i64(f(&values[..], {bound})); }}"
+            fn main() -> Unit ! {{io}} {{ {VALUES} print_i64(f(&values[..], {bound})); }}"
         )
     };
     agrees(&stride("4"), Some(&[9]));
@@ -1064,19 +1064,19 @@ fn hoisted_bounds_checks_panic_where_the_checked_loop_does() {
 fn hoisted_bounds_checks_across_chunks() {
     let program = |n: &str, other: &str| {
         format!(
-            "fn fill(n: i64) -> Vec<i64> ! {{alloc, panic}} {{
+            "fn fill(n: i64) -> Vec<i64> ! {{alloc}} {{
                 let mut values: Vec<i64> = Vec.with_capacity(n);
                 let mut i = 0;
                 while i < n {{ values = Vec.push(values, (i * 7919) & 1023); i = i + 1; }}
                 values
             }}
-            fn f<'a, 'b>(view: &'a [i64], other: &'b [i64], n: i64) -> i64 ! {{panic}} {{
+            fn f<'a, 'b>(view: &'a [i64], other: &'b [i64], n: i64) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = 0;
                 while i < n {{ acc = acc + Slice.get(view, i) - Slice.get(other, i) * 2; i = i + 1; }}
                 acc
             }}
-            fn main() -> Unit ! {{io, alloc, panic}} {{
+            fn main() -> Unit ! {{io, alloc}} {{
                 let view = fill(200000);
                 let other = fill({other});
                 print_i64(1);
@@ -1098,13 +1098,13 @@ fn hoisted_bounds_checks_across_chunks() {
 fn reduction_chains_panic_on_an_intermediate_overflow() {
     let program = |body: &str, start: &str| {
         format!(
-            "fn f<'a, 'b>(left: &'a [i64], right: &'b [i64], start: i64) -> i64 ! {{panic}} {{
+            "fn f<'a, 'b>(left: &'a [i64], right: &'b [i64], start: i64) -> i64 ! {{}} {{
                 let mut acc = start;
                 let mut i = 0;
                 while i < Slice.len(left) {{ {body} i = i + 1; }}
                 acc
             }}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let left: [i64; 3] = [5, 6, 7];
                 let right: [i64; 3] = [10, 20, 30];
                 print_i64(f(&left[..], &right[..], {start}));
@@ -1129,13 +1129,13 @@ fn reduction_chains_panic_on_an_intermediate_overflow() {
 fn values_bounded_by_their_type_still_overflow() {
     let bytes = |start: &str| {
         format!(
-            "fn f(values: &Bytes, start: i64) -> i64 ! {{panic}} {{
+            "fn f(values: &Bytes, start: i64) -> i64 ! {{}} {{
                 let mut acc = start;
                 let mut i = 0;
                 while i < Bytes.len(values) {{ acc = acc + Bytes.get(values, i); i = i + 1; }}
                 acc
             }}
-            fn main() -> Unit ! {{io, alloc, panic}} {{
+            fn main() -> Unit ! {{io, alloc}} {{
                 let mut bytes = Bytes.with_capacity(2);
                 bytes = Bytes.push(bytes, 255);
                 bytes = Bytes.push(bytes, 255);
@@ -1147,7 +1147,7 @@ fn values_bounded_by_their_type_still_overflow() {
     agrees(&bytes("9223372036854775298"), None);
     let narrow = |start: &str| {
         format!(
-            "fn f(values: &[i32], start: i64) -> i64 ! {{panic}} {{
+            "fn f(values: &[i32], start: i64) -> i64 ! {{}} {{
                 let mut acc = start;
                 let mut i = 0;
                 while i < Slice.len(values) {{
@@ -1156,7 +1156,7 @@ fn values_bounded_by_their_type_still_overflow() {
                 }}
                 acc
             }}
-            fn main() -> Unit ! {{io, panic}} {{
+            fn main() -> Unit ! {{io}} {{
                 let values: [i32; 2] = [2147483647, 2147483647];
                 print_i64(f(&values[..], {start}));
             }}"
@@ -1174,7 +1174,7 @@ fn values_bounded_by_their_type_still_overflow() {
 /// instead of wrapping.
 #[test]
 fn chunk_limits_saturate_at_the_ends_of_the_range() {
-    let up = "fn f(view: &[i64], start: i64) -> i64 ! {panic} {
+    let up = "fn f(view: &[i64], start: i64) -> i64 ! {} {
         let mut acc = 0;
         let mut i = start;
         while i <= 9223372036854775806 { acc = acc + Slice.get(view, i & 3); i = i + 1; }
@@ -1182,12 +1182,12 @@ fn chunk_limits_saturate_at_the_ends_of_the_range() {
     }";
     native_modes_agree(&format!(
         "{up}
-        fn main() -> Unit ! {{io, panic}} {{
+        fn main() -> Unit ! {{io}} {{
             let values: [i64; 4] = [1, 2, 3, 4];
             print_i64(f(&values[..], 9223372036854775800));
         }}"
     ));
-    let unsigned = "fn g(start: u64) -> u64 ! {panic} {
+    let unsigned = "fn g(start: u64) -> u64 ! {} {
         let mut acc: u64 = 0;
         let mut i: u64 = start;
         while i < 18446744073709551615 { acc = acc + (i & 7) * 3; i = i + 1; }
@@ -1195,9 +1195,9 @@ fn chunk_limits_saturate_at_the_ends_of_the_range() {
     }";
     native_modes_agree(&format!(
         "{unsigned}
-        fn main() -> Unit ! {{io, panic}} {{ print_int(g(18446744073709551000)); }}"
+        fn main() -> Unit ! {{io}} {{ print_int(g(18446744073709551000)); }}"
     ));
-    let down = "fn h(start: i64) -> i64 ! {panic} {
+    let down = "fn h(start: i64) -> i64 ! {} {
         let mut acc = 0;
         let mut i = start;
         while i > 0 - 9223372036854775807 { acc = acc + (i & 7) * 3; i = i - 3; }
@@ -1205,7 +1205,7 @@ fn chunk_limits_saturate_at_the_ends_of_the_range() {
     }";
     native_modes_agree(&format!(
         "{down}
-        fn main() -> Unit ! {{io, panic}} {{ print_i64(h(0 - 9223372036854775000)); }}"
+        fn main() -> Unit ! {{io}} {{ print_i64(h(0 - 9223372036854775000)); }}"
     ));
 }
 
@@ -1218,13 +1218,13 @@ fn accesses_after_the_counter_update_see_it_moved() {
     const VALUES: &str = "let values: [i64; 5] = [1, 2, 3, 4, 5];";
     let read = |start: &str, condition: &str, update: &str, index: &str| {
         format!(
-            "fn f(view: &[i64], n: i64) -> i64 ! {{panic}} {{
+            "fn f(view: &[i64], n: i64) -> i64 ! {{}} {{
                 let mut acc = 0;
                 let mut i = {start};
                 while {condition} {{ {update} acc = acc + Slice.get(view, {index}) * 3; }}
                 acc
             }}
-            fn main() -> Unit ! {{io, panic}} {{ {VALUES} print_i64(f(&values[..], 4)); }}"
+            fn main() -> Unit ! {{io}} {{ {VALUES} print_i64(f(&values[..], 4)); }}"
         )
     };
     // Reads view[1..=4]; one more iteration would read view[5].
@@ -1240,11 +1240,11 @@ fn accesses_after_the_counter_update_see_it_moved() {
     // A store after the update must not land in a neighbouring vector.
     let write = |n: &str| {
         format!(
-            "fn g(t: &mut [i64], n: i64, x: i64) -> Unit ! {{panic}} {{
+            "fn g(t: &mut [i64], n: i64, x: i64) -> Unit ! {{}} {{
                 let mut i = 0;
                 while i < n {{ i = i + 1; Slice.set(t, i, x + i); }}
             }}
-            fn main() -> Unit ! {{io, alloc, panic}} {{
+            fn main() -> Unit ! {{io, alloc}} {{
                 let mut t: Vec<i64> = Vec.with_capacity(4);
                 let mut victim: Vec<i64> = Vec.with_capacity(4);
                 let mut i = 0;

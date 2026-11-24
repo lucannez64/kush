@@ -300,10 +300,10 @@ fn check_kind(kind: Kind, seed: u64) {
     );
     let source = format!(
         "use std.simd.{t};
-         fn show(v: {t}) -> Unit ! {{io, panic}} {{
+         fn show(v: {t}) -> Unit ! {{io}} {{
              {}
          }}
-         fn main() -> i64 ! {{io, alloc, panic}} {{
+         fn main() -> i64 ! {{io, alloc}} {{
              let a = {t}.new({});
              let b = {t}.new({});
              let c = {t}.new({});
@@ -541,7 +541,7 @@ fn wide_operations_match_the_lane_model() {
 fn wide_vectors_split_into_halves() {
     let output = run("use std.simd.u32x8;
          use std.simd.u32x4;
-         fn main() -> i64 ! {io, panic} {
+         fn main() -> i64 ! {io} {
              let v = u32x8.new(1, 2, 3, 4, 5, 6, 7, 8);
              print_int(u32x4.lane(u32x8.low(v), 3, _));
              print_int(u32x4.lane(u32x8.high(v), 0, _));

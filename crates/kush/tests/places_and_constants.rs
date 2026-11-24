@@ -49,7 +49,7 @@ fn constants_are_their_values_at_each_use() {
         pub const WIDTH: i64 = 160;
         const AREA: i64 = WIDTH * 144;
         fn flag(on: Bool) -> u8 ! {} { if on { ZERO } else { 0 } }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             print_i64(Int.convert(flag(true)));
             print_i64(Int.convert(BOTH));
             print_i64(AREA);
@@ -62,7 +62,7 @@ fn constants_are_their_values_at_each_use() {
         "128\n144\n23040\n0\n",
     );
     rejects(
-        "const LOOP: i64 = LOOP + 1; fn main() -> i64 ! {panic} { LOOP }",
+        "const LOOP: i64 = LOOP + 1; fn main() -> i64 ! {} { LOOP }",
         "refers to itself",
     );
     rejects(
@@ -76,16 +76,16 @@ fn elements_of_fields_are_read_and_written_in_place() {
     agrees(
         r#"
         struct M { a: u8, memory: Vec<u8>, text: Bytes }
-        fn read(m: &M, i: i64) -> u8 ! {panic} { m.memory[i] }
-        fn read_byte(m: &M, i: i64) -> i64 ! {panic} { m.text[i] }
-        fn write(m: &mut M, i: i64) -> Unit ! {panic} {
+        fn read(m: &M, i: i64) -> u8 ! {} { m.memory[i] }
+        fn read_byte(m: &M, i: i64) -> i64 ! {} { m.text[i] }
+        fn write(m: &mut M, i: i64) -> Unit ! {} {
             // The value reads the owner whose field is written.
             m.memory[i] = m.a;
             m.a = m.memory[i - 1];
         }
-        fn through(v: &mut Vec<u8>) -> Unit ! {panic} { v[0] = v[1]; }
-        fn view(s: &mut [i64]) -> Unit ! {panic} { s[2] = s[0] + s[1]; s[0] = 5; }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn through(v: &mut Vec<u8>) -> Unit ! {} { v[0] = v[1]; }
+        fn view(s: &mut [i64]) -> Unit ! {} { s[2] = s[0] + s[1]; s[0] = 5; }
+        fn main() -> i64 ! {io, alloc} {
             let mut v: Vec<u8> = Vec.new();
             v = v.push(1);
             v = v.push(2);
@@ -116,7 +116,7 @@ fn elements_of_fields_are_read_and_written_in_place() {
     rejects(
         r#"
         struct M { text: Bytes }
-        fn write(m: &mut M) -> Unit ! {panic} { m.text[0] = 1; }
+        fn write(m: &mut M) -> Unit ! {} { m.text[0] = 1; }
         fn main() -> i64 ! {} { 0 }
         "#,
         "Vec<u8>",
@@ -124,14 +124,14 @@ fn elements_of_fields_are_read_and_written_in_place() {
     rejects(
         r#"
         struct M { memory: Vec<u8> }
-        fn write(m: &M) -> Unit ! {panic} { m.memory[0] = 1; }
+        fn write(m: &M) -> Unit ! {} { m.memory[0] = 1; }
         fn main() -> i64 ! {} { 0 }
         "#,
         "shared",
     );
     rejects(
         r#"
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut boxes: Vec<Box<i64>> = Vec.new();
             boxes = boxes.push(Box.new(1));
             boxes[0] = Box.new(2);
@@ -147,11 +147,11 @@ fn vector_fields_grow_in_place_through_method_syntax() {
     agrees(
         r#"
         struct Log { count: i64, items: Vec<u8> }
-        fn record(log: &mut Log, value: u8) -> Unit ! {alloc, panic} {
+        fn record(log: &mut Log, value: u8) -> Unit ! {alloc} {
             log.items.push(value);
             log.count = log.count + 1;
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut log = Log { count: 0, items: Vec.new() };
             record(&mut log, 4);
             record(&mut log, 2);
@@ -172,27 +172,27 @@ fn methods_are_called_on_fields_and_through_references() {
         r#"
         trait Counter {
             fn current(self: &Self) -> i64 ! {};
-            fn bump(self: &mut Self) -> Unit ! {panic};
+            fn bump(self: &mut Self) -> Unit ! {};
         }
         struct Plain { n: i64 }
         struct Owning { n: i64, history: Vec<i64> }
         impl Counter for Plain {
             fn current(self: &Self) -> i64 ! {} { self.n }
-            fn bump(self: &mut Self) -> Unit ! {panic} { self.n = self.n + 1; }
+            fn bump(self: &mut Self) -> Unit ! {} { self.n = self.n + 1; }
         }
         impl Counter for Owning {
             fn current(self: &Self) -> i64 ! {} { self.n }
-            fn bump(self: &mut Self) -> Unit ! {panic} { self.n = self.n + self.history.len(); }
+            fn bump(self: &mut Self) -> Unit ! {} { self.n = self.n + self.history.len(); }
         }
         struct Machine<C> { cycles: i64, counter: C }
-        fn tick<C: Counter>(m: &mut Machine<C>) -> i64 ! {panic} {
+        fn tick<C: Counter>(m: &mut Machine<C>) -> i64 ! {} {
             m.counter.bump();
             m.counter.bump();
             m.cycles = m.cycles + m.counter.current();
             m.cycles
         }
-        fn twice<C: Counter>(c: &mut C) -> Unit ! {panic} { c.bump(); c.bump(); }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn twice<C: Counter>(c: &mut C) -> Unit ! {} { c.bump(); c.bump(); }
+        fn main() -> i64 ! {io, alloc} {
             let mut plain = Machine { cycles: 0, counter: Plain { n: 0 } };
             print_i64(tick(&mut plain));
             twice(&mut plain.counter);
@@ -212,11 +212,11 @@ fn methods_are_called_on_fields_and_through_references() {
         r#"
         struct P { x: i64 }
         impl P {
-            fn bump(&mut self) -> Unit ! {panic} { self.x = self.x + 1; }
+            fn bump(&mut self) -> Unit ! {} { self.x = self.x + 1; }
         }
         struct Q { p: P }
-        fn call(q: &Q) -> Unit ! {panic} { q.p.bump(); }
-        fn main() -> Unit ! {panic} {}
+        fn call(q: &Q) -> Unit ! {} { q.p.bump(); }
+        fn main() -> Unit ! {} {}
         "#,
         "shared",
     );
@@ -226,7 +226,7 @@ fn methods_are_called_on_fields_and_through_references() {
         impl P { fn consume(self: Self) -> i64 ! {} { 0 } }
         struct Q { p: P }
         fn call(q: &mut Q) -> i64 ! {} { q.p.consume() }
-        fn main() -> Unit ! {panic} {}
+        fn main() -> Unit ! {} {}
         "#,
         "cannot move an owned field",
     );
@@ -237,10 +237,10 @@ fn an_exclusive_argument_is_taken_after_the_reads_of_its_owner() {
     agrees(
         r#"
         struct M { pc: u16, sp: u16, log: Vec<u8> }
-        fn push(m: &mut M, value: u16) -> Unit ! {panic} { m.sp = value; }
-        fn note(m: &mut M, a: i64, b: i64) -> Unit ! {io, panic} { print_i64(a * 10 + b); }
-        fn shown(x: i64) -> i64 ! {io, panic} { print_i64(x); x }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn push(m: &mut M, value: u16) -> Unit ! {} { m.sp = value; }
+        fn note(m: &mut M, a: i64, b: i64) -> Unit ! {io} { print_i64(a * 10 + b); }
+        fn shown(x: i64) -> i64 ! {io} { print_i64(x); x }
+        fn main() -> i64 ! {io, alloc} {
             let mut m = M { pc: 7, sp: 0, log: Vec.new() };
             push(&mut m, m.pc);
             print_i64(Int.convert(m.sp));
@@ -271,16 +271,16 @@ fn records_have_no_size_or_field_limit() {
             "struct Wide {{ {} }}
              struct Part {{ {} }}
              struct Huge {{ a: Part, b: Part, c: Part, d: Part }}
-             fn make(seed: i64) -> Part ! {{panic}} {{ Part {{ {} }} }}
-             fn bump(w: Wide) -> Wide ! {{panic}} {{
+             fn make(seed: i64) -> Part ! {{}} {{ Part {{ {} }} }}
+             fn bump(w: Wide) -> Wide ! {{}} {{
                  let mut v = w;
                  v.f0 = v.f0 + 1000;
                  v.f299 = v.f299 + 1;
                  v
              }}
-             fn sum_parts(h: Huge) -> i64 ! {{panic}} {{ h.a.p0 + h.b.p150 + h.c.p299 + h.d.p1 }}
-             fn grow(h: &mut Huge) -> Unit ! {{panic}} {{ h.d.p1 = h.d.p1 * 2; }}
-             fn main() -> i64 ! {{io, panic}} {{
+             fn sum_parts(h: Huge) -> i64 ! {{}} {{ h.a.p0 + h.b.p150 + h.c.p299 + h.d.p1 }}
+             fn grow(h: &mut Huge) -> Unit ! {{}} {{ h.d.p1 = h.d.p1 * 2; }}
+             fn main() -> i64 ! {{io}} {{
                  let v = bump(Wide {{ {} }});
                  print_i64(v.f0);
                  print_i64(v.f150);
@@ -311,7 +311,7 @@ fn fields_of_mutable_record_locals_are_assigned_in_place() {
         r#"
         struct Inner { v: i64 }
         struct Cpu { a: i64, halted: Bool, inner: Inner }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut cpu = Cpu { a: 1, halted: true, inner: Inner { v: 2 } };
             cpu.a = cpu.a + 40;
             cpu.halted = false;
@@ -327,14 +327,14 @@ fn fields_of_mutable_record_locals_are_assigned_in_place() {
     rejects(
         r#"
         struct Cpu { a: i64 }
-        fn main() -> i64 ! {panic} { let cpu = Cpu { a: 1 }; cpu.a = 2; cpu.a }
+        fn main() -> i64 ! {} { let cpu = Cpu { a: 1 }; cpu.a = 2; cpu.a }
         "#,
         "let mut",
     );
     rejects(
         r#"
         struct Holder { items: Vec<i64> }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut h = Holder { items: Vec.new() };
             h.items = Vec.new();
             0
@@ -351,7 +351,7 @@ fn a_field_write_is_seen_by_later_overflow_checks() {
     let program = check(
         r#"
         struct P { x: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let mut p = P { x: 1 };
             p.x = 9223372036854775807;
             p.x + 1
@@ -378,12 +378,12 @@ fn fields_inside_owning_fields_are_reached_through_references() {
         r#"
         struct Inner { on: Bool, n: i64, log: Vec<i64> }
         struct Outer { a: i64, inner: Inner }
-        fn peek(o: &Outer) -> i64 ! {panic} { if o.inner.on { o.inner.n } else { 0 } }
-        fn poke(o: &mut Outer) -> Unit ! {alloc, panic} {
+        fn peek(o: &Outer) -> i64 ! {} { if o.inner.on { o.inner.n } else { 0 } }
+        fn poke(o: &mut Outer) -> Unit ! {alloc} {
             o.inner.n = o.inner.n + 1;
             o.inner.log.push(o.inner.n);
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut o = Outer { a: 1, inner: Inner { on: true, n: 41, log: Vec.new() } };
             poke(&mut o);
             print_i64(o.inner.log.len());
@@ -410,16 +410,16 @@ fn disjoint_owning_fields_are_borrowed_together() {
         r#"
         struct Inner { n: i64, v: Vec<i64> }
         struct O { x: Inner, y: Vec<i64> }
-        fn both(a: &mut Inner, b: &mut Vec<i64>) -> Unit ! {alloc, panic} {
+        fn both(a: &mut Inner, b: &mut Vec<i64>) -> Unit ! {alloc} {
             a.n = a.n + 1;
             b.push(a.n);
             a.v.push(7);
         }
-        fn via(o: &mut O) -> Unit ! {alloc, panic} {
+        fn via(o: &mut O) -> Unit ! {alloc} {
             both(&mut o.x, &mut o.y);
             both(&mut o.x, &mut o.y);
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut o = O { x: Inner { n: 40, v: Vec.new() }, y: Vec.new() };
             via(&mut o);
             both(&mut o.x, &mut o.y);
@@ -435,7 +435,7 @@ fn disjoint_owning_fields_are_borrowed_together() {
         r#"
         struct O { y: Vec<i64> }
         fn same(a: &mut Vec<i64>, b: &mut Vec<i64>) -> Unit ! {} {}
-        fn main() -> i64 ! {alloc, panic} { let mut o = O { y: Vec.new() }; same(&mut o.y, &mut o.y); 0 }
+        fn main() -> i64 ! {alloc} { let mut o = O { y: Vec.new() }; same(&mut o.y, &mut o.y); 0 }
         "#,
         "overlapping",
     );

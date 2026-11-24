@@ -16,27 +16,27 @@ struct Point {
 }
 
 trait Convert<T> {
-    fn render(self: Self) -> T ! {panic};
+    fn render(self: Self) -> T ! {};
 }
 
 trait Merge<T> {
-    fn merge(self: Self, other: Self, extra: T) -> Self ! {panic};
+    fn merge(self: Self, other: Self, extra: T) -> Self ! {};
 }
 
 impl Convert<i64> for Point {
-    fn render(self: Self) -> i64 ! {panic} {
+    fn render(self: Self) -> i64 ! {} {
         self.x * 10 + self.y
     }
 }
 
 impl Convert<Bool> for Point {
-    fn render(self: Self) -> Bool ! {panic} {
+    fn render(self: Self) -> Bool ! {} {
         self.x == 0
     }
 }
 
 impl Merge<i64> for Point {
-    fn merge(self: Point, other: Point, extra: i64) -> Point ! {panic} {
+    fn merge(self: Point, other: Point, extra: i64) -> Point ! {} {
         Point { x: self.x + other.x + extra, y: self.y + other.y }
     }
 }
@@ -44,7 +44,7 @@ impl Merge<i64> for Point {
 impl Point {
     /// A generic inherent method: `U` is inferred from the argument, or can be
     /// written explicitly as `point.pair::<Bool>(true)`.
-    fn pair<U>(self: Point, value: U) -> (i64, U) ! {panic} {
+    fn pair<U>(self: Point, value: U) -> (i64, U) ! {} {
         (self.x, value)
     }
 }
@@ -52,11 +52,11 @@ impl Point {
 /// The bounded helper discharges `Convert<i64>` when specialized. The explicit
 /// `Convert::<i64>` selector is needed because Point also implements
 /// `Convert<Bool>`.
-fn convert_point<T: Convert<i64>>(value: T) -> i64 ! {panic} {
+fn convert_point<T: Convert<i64>>(value: T) -> i64 ! {} {
     value.Convert::<i64>.render()
 }
 
-fn main() -> i64 ! {io, panic} {
+fn main() -> i64 ! {io} {
     let point = Point { x: 4, y: 2 };
     print_i64(point.Convert::<i64>.render());
 

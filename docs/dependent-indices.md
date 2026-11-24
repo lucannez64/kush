@@ -21,7 +21,7 @@ runtime type and not a usage grade:
 fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
 
 #[noalloc]
-fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {panic} { xs[N - 1] }
+fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {} { xs[N - 1] }
 ```
 
 The three generic kinds are separate:
@@ -91,7 +91,7 @@ type Constant<n: Nat> = Nat;
 total fn step(n: Nat, acc: Nat) -> Nat ! {} { Nat.succ(acc) }
 total fn add(n: Nat, m: Nat) -> Nat ! {} { Nat.induct(Constant, m, step, n) }
 
-fn second(xs: [i64; add<1, 1>]) -> i64 ! {panic} { xs[add(0, 1)] }
+fn second(xs: [i64; add<1, 1>]) -> i64 ! {} { xs[add(0, 1)] }
 ```
 
 The length folds to `2` and the index folds to `1` through kernel
@@ -124,7 +124,7 @@ Natural parameters may appear in generic record and enum fields:
 struct Buffer<N: Nat> { data: [i64; N] }
 
 #[noalloc]
-fn head<N: Nat>(b: Buffer<N>) -> i64 ! {panic} { b.data[0] }
+fn head<N: Nat>(b: Buffer<N>) -> i64 ! {} { b.data[0] }
 
 let buffer: Buffer<3> = Buffer { data: [20, 22, 0] };
 ```
@@ -200,7 +200,7 @@ fn consume(erased n: Nat, erased p: Eq<Nat, n, n>) -> i64 ! {} { 7 }
 
 fn outer(erased n: Nat, erased p: Eq<Nat, n, n>) -> i64 ! {} { consume(n, p) }
 
-fn main() -> i64 ! {panic} { consume(0, truth()) + outer(0, truth()) }
+fn main() -> i64 ! {} { consume(0, truth()) + outer(0, truth()) }
 ```
 
 `consume(1, truth())` is rejected because substituting `1` for `n` requires

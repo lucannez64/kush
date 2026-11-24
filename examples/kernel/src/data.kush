@@ -20,12 +20,12 @@ use kernel.term;
 /// Whether the global `name` occurs anywhere in `t` (the conservative
 /// positivity test). Shared subterms are visited once.
 
-pub fn mentions(s: &mut Store, t: i64, name: i64) -> Bool ! {alloc, panic} {
+pub fn mentions(s: &mut Store, t: i64, name: i64) -> Bool ! {alloc} {
     let generation = store.fresh_generation(s);
     visit(s, t, name, generation)
 }
 
-fn visit(s: &mut Store, t: i64, name: i64, generation: i64) -> Bool ! {alloc, panic} {
+fn visit(s: &mut Store, t: i64, name: i64, generation: i64) -> Bool ! {alloc} {
     let hit = store.cached(s, generation, t, -4);
     if hit >= 0 { return hit == 1; }
     let tag = term.tag(s, t);
@@ -58,7 +58,7 @@ fn visit(s: &mut Store, t: i64, name: i64, generation: i64) -> Bool ! {alloc, pa
 
 /// Whether a field is a direct recursive occurrence: the family itself
 /// applied to exactly one argument per parameter.
-pub fn direct(s: &Store, field: i64, name: i64, params: i64) -> Bool ! {panic} {
+pub fn direct(s: &Store, field: i64, name: i64, params: i64) -> Bool ! {} {
     let head = subst.head(s, field);
     term.tag(s, head) == term.GLOBAL && term.field(s, head, 0) == name
         && subst.argument_count(s, field) == params
@@ -67,7 +67,7 @@ pub fn direct(s: &Store, field: i64, name: i64, params: i64) -> Bool ! {panic} {
 /// A family's parameters and constructors at universe levels `levels`.
 pub struct Info { pub params: i64, pub constructors: i64 }
 
-fn instantiate_list(s: &mut Store, list: i64, levels: i64) -> Result<i64, i64> ! {alloc, panic} {
+fn instantiate_list(s: &mut Store, list: i64, levels: i64) -> Result<i64, i64> ! {alloc} {
     let n = term.list_len(s, list);
     let mut items: Vec<i64> = Vec.with_capacity(n);
     let mut i = 0;
@@ -80,7 +80,7 @@ fn instantiate_list(s: &mut Store, list: i64, levels: i64) -> Result<i64, i64> !
     Result.Ok(term.list(s, &items))
 }
 
-pub fn at_levels(s: &mut Store, params: i64, constructors: i64, levels: i64) -> Result<Info, i64> ! {alloc, panic} {
+pub fn at_levels(s: &mut Store, params: i64, constructors: i64, levels: i64) -> Result<Info, i64> ! {alloc} {
     if term.list_len(s, levels) == 0 {
         return Result.Ok(Info { params: params, constructors: constructors });
     }
@@ -102,12 +102,12 @@ pub fn at_levels(s: &mut Store, params: i64, constructors: i64, levels: i64) -> 
 
 /// `Var` for the binder at `position` (outermost 0) in a telescope of
 /// `length` binders.
-fn variable(s: &mut Store, length: i64, position: i64) -> i64 ! {alloc, panic} {
+fn variable(s: &mut Store, length: i64, position: i64) -> i64 ! {alloc} {
     term.var(s, length - 1 - position)
 }
 
 /// The variables for the given telescope positions, as a list.
-fn variables(s: &mut Store, length: i64, positions: &Vec<i64>) -> i64 ! {alloc, panic} {
+fn variables(s: &mut Store, length: i64, positions: &Vec<i64>) -> i64 ! {alloc} {
     let mut items: Vec<i64> = Vec.with_capacity(positions.len());
     let mut i = 0;
     while i < positions.len() {
@@ -130,7 +130,7 @@ pub fn branch_type(
     levels: i64,
     c: i64,
     motive: i64,
-) -> Result<i64, i64> ! {alloc, panic} {
+) -> Result<i64, i64> ! {alloc} {
     let k = term.list_len(s, params);
     let locals = term.field(s, c, 1);
     let fields = term.field(s, c, 2);
@@ -216,7 +216,7 @@ pub fn branch_type(
 
 /// The constructor type `(params) -> (locals) -> (fields) -> D results`, for
 /// family `name` at its own levels.
-pub fn constructor_type(s: &mut Store, name: i64, params: i64, own_levels: i64, c: i64) -> i64 ! {alloc, panic} {
+pub fn constructor_type(s: &mut Store, name: i64, params: i64, own_levels: i64, c: i64) -> i64 ! {alloc} {
     let mut ty = application(s, name, own_levels, term.field(s, c, 3));
     let mut telescope: Vec<i64> = Vec.new();
     let mut i = 0;
@@ -245,7 +245,7 @@ pub fn constructor_type(s: &mut Store, name: i64, params: i64, own_levels: i64, 
 }
 
 /// `D a0 a1 ...` for the family at `levels` and the argument list `list`.
-pub fn application(s: &mut Store, name: i64, levels: i64, list: i64) -> i64 ! {alloc, panic} {
+pub fn application(s: &mut Store, name: i64, levels: i64, list: i64) -> i64 ! {alloc} {
     let mut t = term.global(s, name, levels);
     let mut i = 0;
     while i < term.list_len(s, list) {
@@ -256,7 +256,7 @@ pub fn application(s: &mut Store, name: i64, levels: i64, list: i64) -> i64 ! {a
 }
 
 /// The list of a family's own universe parameters, `(u 0) ... (u n-1)`.
-pub fn own_levels(s: &mut Store, count: i64) -> i64 ! {alloc, panic} {
+pub fn own_levels(s: &mut Store, count: i64) -> i64 ! {alloc} {
     let mut items: Vec<i64> = Vec.with_capacity(count);
     let mut i = 0;
     while i < count {
@@ -267,7 +267,7 @@ pub fn own_levels(s: &mut Store, count: i64) -> i64 ! {alloc, panic} {
 }
 
 /// `(p1 : P1) -> ... -> (pk : Pk) -> sort`.
-pub fn family_type(s: &mut Store, params: i64, sort: i64) -> i64 ! {alloc, panic} {
+pub fn family_type(s: &mut Store, params: i64, sort: i64) -> i64 ! {alloc} {
     let mut ty = sort;
     let mut j = term.list_len(s, params) - 1;
     while j >= 0 {

@@ -33,7 +33,7 @@ Each width has `MIN` and `MAX` constants (`u8.MAX`, `i64.MIN`). Integer
 methods have receiver spellings (`x.convert()`, `x.wrapping_add(y)`).
 
 ```kush eval
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let byte: u8 = 250;
     let wide: i64 = Int.convert(byte);
     let wrapped: u8 = Int.wrapping_add(byte, 10);
@@ -53,7 +53,7 @@ fn main() -> Unit ! {io, panic} {
 ```
 
 ```kush reject
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let a: u8 = 1;
     let b: i64 = 2;
     a + b
@@ -72,7 +72,7 @@ fn main() -> i64 ! {} {
 
 ### Floats
 
-IEEE arithmetic with no `panic` effect: `1.0 / 0.0` is `inf`, `0.0 / 0.0` is
+IEEE arithmetic that never panics: `1.0 / 0.0` is `inf`, `0.0 / 0.0` is
 `NaN`. Comparisons follow IEEE. Floats have no bitwise operators and cannot
 be matched by literal. Conversions: `Float.from_int` (only when exact for
 every value of the source type), `Float.from_int_rounded`,
@@ -81,7 +81,7 @@ every value of the source type), `Float.from_int_rounded`,
 `is_finite`.
 
 ```kush eval
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let x = -3.5;
     print_float(x.abs());
     print_float(9.0.sqrt());
@@ -111,7 +111,7 @@ Tuples have 2 to 16 elements, are stored inline, and are projected with
 ```kush eval
 fn swap<T, U>(p: (T, U)) -> (U, T) ! {} { (p.1, p.0) }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let pair = swap((1, 20));
     let (a, b) = pair;
     print_i64(a + b);
@@ -128,7 +128,7 @@ A tuple cannot hold a reference, a slice or text view, a borrowed record or
 a task handle:
 
 ```kush reject
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let text = "hi";
     let pair = (text.as_str(), 1);
     0
@@ -145,7 +145,7 @@ unless marked `pub`. A record value is built with all fields, or with
 ```kush eval
 struct Point { x: i64, y: i64 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let mut p = Point { x: 1, y: 2 };
     p.x = 10;
     let q = Point { y: 5, ..p };
@@ -171,7 +171,7 @@ when unique, by the short variant name.
 ```kush eval
 enum Shape { Circle(i64), Rect(i64, i64), Empty }
 
-fn area(s: Shape) -> i64 ! {panic} {
+fn area(s: Shape) -> i64 ! {} {
     match s {
         Shape.Circle(r) => 3 * r * r,
         Shape.Rect(w, h) => w * h,
@@ -179,7 +179,7 @@ fn area(s: Shape) -> i64 ! {panic} {
     }
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(area(Shape.Circle(2)) + area(Shape.Rect(3, 4)) + area(Shape.Empty));
 }
 ```
@@ -234,16 +234,16 @@ identical (no conversions).
 ```kush eval
 use std.result.Result;
 
-fn half(x: i64) -> Result<i64, i64> ! {panic} {
+fn half(x: i64) -> Result<i64, i64> ! {} {
     if x % 2 == 0 { Result.Ok(x / 2) } else { Result.Err(x) }
 }
 
-fn quarter(x: i64) -> Result<i64, i64> ! {panic} {
+fn quarter(x: i64) -> Result<i64, i64> ! {} {
     let h = half(x)?;
     half(h)
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     match quarter(12) { Result.Ok(v) => print_i64(v), Result.Err(e) => print_i64(-e) }
     match quarter(6) { Result.Ok(v) => print_i64(v), Result.Err(e) => print_i64(-e) }
 }
@@ -261,9 +261,9 @@ Nat` parameter, or arithmetic on them). Indexing is bounds-checked unless the
 prover shows the index is in range ([chapter 9](09-proofs.md)).
 
 ```kush eval
-fn last<T, N: Nat>(a: [T; N]) -> T ! {panic} { a[N - 1] }
+fn last<T, N: Nat>(a: [T; N]) -> T ! {} { a[N - 1] }
 
-fn total(view: &[i64]) -> i64 ! {panic} {
+fn total(view: &[i64]) -> i64 ! {} {
     let mut sum = 0;
     let mut i = 0;
     while i < view.len() {
@@ -273,7 +273,7 @@ fn total(view: &[i64]) -> i64 ! {panic} {
     sum
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let a: [i64; 3] = [1, 2, 3];
     print_i64(last(a));
     print_i64(total(&a[..]));
@@ -298,7 +298,7 @@ fn main() -> i64 ! {} { let a: [i64; 2] = [1, 2]; count(a) }
 supports rest patterns:
 
 ```kush eval
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let mut a: DynArray<i64, 4> = DynArray.new::<i64, 4>();
     a = DynArray.push(a, 1);
     a = DynArray.push(a, 7);
@@ -324,7 +324,7 @@ validates and returns `Result<String, Bytes>`; there is no unchecked
 conversion. Lengths are in bytes unless the name says `scalar`.
 
 ```kush eval
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let text = "héllo";
     print_i64(text.len());
     print_i64(text.scalar_len());
@@ -349,7 +349,7 @@ FND-STD-MUT). `String` has no `==`; text helpers in `std.text` work on
 `Bytes`:
 
 ```kush reject
-fn same() -> Bool ! {alloc, panic} { "a" == "a" }
+fn same() -> Bool ! {alloc} { "a" == "a" }
 fn main() -> i64 ! {} { 0 }
 // error: Equality requires integers, floats, Char, Bool, or Unit
 ```
@@ -359,7 +359,7 @@ fn main() -> i64 ! {} { 0 }
 `Vec<T>` is an owned growable vector; `Box<T>` owns one heap value.
 
 ```kush eval
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let mut v: Vec<i64> = Vec.new();
     v = v.push(10);
     v = v.push(32);
@@ -378,7 +378,7 @@ Element types are not inferred from later uses; annotate the binding or
 write `Vec.new::<T>()`:
 
 ```kush reject
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let v = Vec.new();
     0
 }
@@ -404,7 +404,7 @@ fn describe(x: i64 | Bool) -> i64 ! {} {
     }
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(describe(41) + describe(true));
 }
 ```
@@ -425,7 +425,7 @@ const DOUBLE: i64 = LIMIT + 2;
 
 fn first<T>(p: Pair<T>) -> T ! {} { p.0 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(first((DOUBLE, 0)));
 }
 ```

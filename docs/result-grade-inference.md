@@ -26,15 +26,15 @@ expected arrow by exact result-grade subtyping. Nothing about the runtime
 representation or ABI changes.
 
 ```kush
-fn make<G: Grade>(n: i64) -> Box<i64> @[G] ! {alloc, panic} {
+fn make<G: Grade>(n: i64) -> Box<i64> @[G] ! {alloc} {
     Box.new(n)
 }
 
-fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc}) -> i64 ! {alloc} {
     Box.take(f(42))
 }
 
-fn main() -> i64 ! {alloc, panic} { apply(make) }   // G inferred as 1
+fn main() -> i64 ! {alloc} { apply(make) }   // G inferred as 1
 ```
 
 Explicit specialization remains available and unchanged:
@@ -54,8 +54,8 @@ type Handle<G: Grade, T> = Box<T> @[G];
 type Forward<G: Grade, T> = Handle<G, T>;
 type Nested<G: Grade, T> = Forward<G, T>;
 
-fn make<G: Grade>(n: i64) -> Nested<G, i64> ! {alloc, panic} { Box.new(n) }
-fn apply(f: fn(i64) -> Handle<1, i64> ! {alloc, panic}) -> i64 ! {alloc, panic} {
+fn make<G: Grade>(n: i64) -> Nested<G, i64> ! {alloc} { Box.new(n) }
+fn apply(f: fn(i64) -> Handle<1, i64> ! {alloc}) -> i64 ! {alloc} {
     Box.take(f(42))
 }
 ```

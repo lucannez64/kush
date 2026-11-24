@@ -16,24 +16,24 @@ use tactics.state.Goal;
 use tactics.state.Query;
 
 /// Ask the engine (the `Goal` handler owns the kernel).
-pub fn ask(q: Query) -> i64 ! {Goal, alloc, panic} {
+pub fn ask(q: Query) -> i64 ! {Goal, alloc} {
     perform Goal(q)
 }
 
 /// One of `0..n`, chosen by the search.
-pub fn choose(op: cap multi Choose ! {panic}, n: i64) -> i64 ! {Goal, alloc, panic} {
+pub fn choose(op: cap multi Choose ! {}, n: i64) -> i64 ! {Goal, alloc} {
     let i = perform op(n);
     ask(Query.Chosen(i));
     i
 }
 
 /// Give up on this branch: a choice among no alternatives.
-pub fn fail(op: cap multi Choose ! {panic}) -> i64 ! {Goal, alloc, panic} {
+pub fn fail(op: cap multi Choose ! {}) -> i64 ! {Goal, alloc} {
     perform op(0)
 }
 
 /// Close the goal with hypothesis `i`, whose type must be the goal.
-pub fn assumption(op: cap multi Choose ! {panic}, context: i64, goal: i64, i: i64) -> i64 ! {Goal, alloc, panic} {
+pub fn assumption(op: cap multi Choose ! {}, context: i64, goal: i64, i: i64) -> i64 ! {Goal, alloc} {
     let ty = ask(Query.Hypothesis(context, i));
     if ask(Query.Defeq(context, ty, goal)) == 1 {
         ask(Query.Var(i))
@@ -44,7 +44,7 @@ pub fn assumption(op: cap multi Choose ! {panic}, context: i64, goal: i64, i: i6
 
 /// Apply hypothesis `i : A1 -> .. -> An -> B` whose conclusion `B` is the
 /// goal, proving each premise `Ai` with `auto`.
-pub fn apply(op: cap multi Choose ! {panic}, context: i64, goal: i64, i: i64, depth: i64) -> i64 ! {Goal, alloc, panic} {
+pub fn apply(op: cap multi Choose ! {}, context: i64, goal: i64, i: i64, depth: i64) -> i64 ! {Goal, alloc} {
     let mut proof = ask(Query.Var(i));
     let mut ty = ask(Query.Hypothesis(context, i));
     loop {
@@ -65,7 +65,7 @@ pub fn apply(op: cap multi Choose ! {panic}, context: i64, goal: i64, i: i64, de
 
 /// Use hypothesis `i : P & Q`, `P | Q` or `False`: prove the goal from its
 /// parts with `auto`, then eliminate the hypothesis into it.
-pub fn cases(op: cap multi Choose ! {panic}, context: i64, goal: i64, i: i64, depth: i64) -> i64 ! {Goal, alloc, panic} {
+pub fn cases(op: cap multi Choose ! {}, context: i64, goal: i64, i: i64, depth: i64) -> i64 ! {Goal, alloc} {
     let head = ask(Query.Whnf(context, ask(Query.Hypothesis(context, i))));
     if head < 0 {
         return fail(op);
@@ -95,7 +95,7 @@ pub fn cases(op: cap multi Choose ! {panic}, context: i64, goal: i64, i: i64, de
 }
 
 /// Prove the left (`side` 0) or right side of a disjunction.
-pub fn either(op: cap multi Choose ! {panic}, context: i64, goal: i64, side: i64, depth: i64) -> i64 ! {Goal, alloc, panic} {
+pub fn either(op: cap multi Choose ! {}, context: i64, goal: i64, side: i64, depth: i64) -> i64 ! {Goal, alloc} {
     let p = ask(Query.Part(goal, 0));
     let q = ask(Query.Part(goal, 1));
     if side == 0 {
@@ -113,7 +113,7 @@ pub fn either(op: cap multi Choose ! {panic}, context: i64, goal: i64, side: i64
 /// or a side of a disjunction. The engine lists them, so the search only
 /// chooses where several candidates compete. `depth` bounds the rules
 /// applied along a branch; the driver deepens it until a proof is found.
-pub fn auto(op: cap multi Choose ! {panic}, context: i64, goal: i64, depth: i64) -> i64 ! {Goal, alloc, panic} {
+pub fn auto(op: cap multi Choose ! {}, context: i64, goal: i64, depth: i64) -> i64 ! {Goal, alloc} {
     let head = ask(Query.Whnf(context, goal));
     if head < 0 {
         return fail(op);

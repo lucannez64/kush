@@ -16,11 +16,11 @@ fn first<'a>(window: Window<'a, i64>) -> &'a [i64] ! {} {
     window.view
 }
 
-fn at<'a>(window: Window<'a, i64>, index: i64) -> i64 ! {panic} {
+fn at<'a>(window: Window<'a, i64>, index: i64) -> i64 ! {} {
     Slice.get(window.view, index) + window.start
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let values: [i64; 3] = [10, 20, 30];
     let window = window(&values[..]);
     print_i64(Slice.get(first(window), 0));

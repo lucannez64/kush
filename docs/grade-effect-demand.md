@@ -21,7 +21,7 @@ where `demand` is `1` for an unannotated or `@[0]` parameter and `r`
 otherwise (grade-model.md section 3: `max(1, r)` for effects, `r` for
 observations). *Every* use of a copyable binding anywhere in `e` is scaled,
 even a use whose value never reaches the argument's result. Checked on
-2026-11-05 with `fn twice(v: i64 @[2]) -> i64 ! {panic} { v + v }`:
+2026-11-05 with `fn twice(v: i64 @[2]) -> i64 ! {} { v + v }`:
 
 | Program | `x` | Today |
 | --- | --- | --- |

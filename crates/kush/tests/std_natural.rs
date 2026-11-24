@@ -39,7 +39,7 @@ use std.natural.Natural;
 use std.option.Option;
 use std.result.Result;
 
-fn line(text: &Bytes) -> Unit ! {io, alloc, panic} {
+fn line(text: &Bytes) -> Unit ! {io, alloc} {
     let mut out = Bytes.with_capacity(Bytes.len(text) + 1);
     let mut i = 0;
     while i < Bytes.len(text) {
@@ -53,11 +53,11 @@ fn line(text: &Bytes) -> Unit ! {io, alloc, panic} {
     }
 }
 
-fn show(n: &Natural) -> Unit ! {io, alloc, panic} {
+fn show(n: &Natural) -> Unit ! {io, alloc} {
     line(&natural.format(n));
 }
 
-fn report(text: &Bytes, next: &Bytes) -> Unit ! {io, alloc, panic} {
+fn report(text: &Bytes, next: &Bytes) -> Unit ! {io, alloc} {
     match natural.parse(text) {
         Result.Err(code) => { print_i64(code); },
         Result.Ok(n) => {
@@ -179,7 +179,6 @@ fn std_natural_agrees_with_the_kernel_naturals() {
     print_i64(natural.work(&z));
 "#;
     want += "1\n4000000000\n2\n34\n1\n1\n";
-    let source =
-        format!("{PRELUDE}\nfn main() -> i64 ! {{io, alloc, panic}} {{\n{body}    0\n}}\n");
+    let source = format!("{PRELUDE}\nfn main() -> i64 ! {{io, alloc}} {{\n{body}    0\n}}\n");
     assert_eq!(agrees(&source), want);
 }

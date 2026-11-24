@@ -58,20 +58,20 @@ fn inherent_methods_evaluate_the_receiver_once_before_arguments() {
         &format!(
             "{POINT}
             impl Point {{
-                fn mix(self: Point, factor: i64) -> i64 ! {{io, panic}} {{
+                fn mix(self: Point, factor: i64) -> i64 ! {{io}} {{
                     print_i64(self.x + self.y);
                     self.x * factor
                 }}
             }}
-            fn make(x: i64, y: i64) -> Point ! {{io, panic}} {{
+            fn make(x: i64, y: i64) -> Point ! {{io}} {{
                 print_i64(x);
                 Point {{ x: x, y: y }}
             }}
-            fn argument(value: i64) -> i64 ! {{io, panic}} {{
+            fn argument(value: i64) -> i64 ! {{io}} {{
                 print_i64(value);
                 value
             }}
-            fn main() -> i64 ! {{io, panic}} {{
+            fn main() -> i64 ! {{io}} {{
                 print_i64(make(1, 2).mix(argument(3)));
                 0
             }}"
@@ -86,14 +86,14 @@ fn inherent_methods_work_on_enums_and_owned_temporaries() {
     agrees(
         "enum Shape { Circle(i64), Square(i64) }
         impl Shape {
-            fn area(self: Shape) -> i64 ! {panic} {
+            fn area(self: Shape) -> i64 ! {} {
                 match self {
                     Shape.Circle(radius) => 3 * radius * radius,
                     Shape.Square(side) => side * side,
                 }
             }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             Shape.Circle(2).area() + Shape.Square(3).area()
         }",
         21,
@@ -107,15 +107,15 @@ fn trait_methods_dispatch_statically_through_bounded_generics() {
         &format!(
             "{POINT}
             trait Describe {{
-                fn describe(self: Self) -> i64 ! {{panic}};
+                fn describe(self: Self) -> i64 ! {{}};
             }}
             impl Describe for Point {{
-                fn describe(self: Self) -> i64 ! {{panic}} {{ self.x * 10 + self.y }}
+                fn describe(self: Self) -> i64 ! {{}} {{ self.x * 10 + self.y }}
             }}
-            fn describe_via<T: Describe>(value: T) -> i64 ! {{panic}} {{
+            fn describe_via<T: Describe>(value: T) -> i64 ! {{}} {{
                 value.describe()
             }}
-            fn main() -> i64 ! {{io, panic}} {{
+            fn main() -> i64 ! {{io}} {{
                 let point = Point {{ x: 4, y: 2 }};
                 print_i64(describe_via(point));
                 print_i64(describe_via(Point {{ x: 1, y: 9 }}));
@@ -136,7 +136,7 @@ fn traits_can_be_implemented_for_builtin_owned_buffers() {
         impl ByteCount for Bytes {
             fn byte_count(self: Self) -> i64 ! {} { self.len() }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let bytes = Bytes.from(\"hé\");
             print_i64(bytes.byte_count());
             0
@@ -150,19 +150,19 @@ fn traits_can_be_implemented_for_builtin_owned_buffers() {
 fn ambiguous_trait_methods_require_explicit_trait_qualification() {
     let common = r#"
         struct Point { x: i64 }
-        trait First { fn value(self: Self) -> i64 ! {panic}; }
-        trait Second { fn value(self: Self) -> i64 ! {panic}; }
+        trait First { fn value(self: Self) -> i64 ! {}; }
+        trait Second { fn value(self: Self) -> i64 ! {}; }
         impl First for Point {
-            fn value(self: Self) -> i64 ! {panic} { self.x + 10 }
+            fn value(self: Self) -> i64 ! {} { self.x + 10 }
         }
         impl Second for Point {
-            fn value(self: Self) -> i64 ! {panic} { self.x + 20 }
+            fn value(self: Self) -> i64 ! {} { self.x + 20 }
         }
     "#;
     agrees(
         &format!(
             "{common}
-            fn main() -> i64 ! {{io, panic}} {{
+            fn main() -> i64 ! {{io}} {{
                 let point = Point {{ x: 1 }};
                 print_i64(point.First.value());
                 print_i64(point.Second.value());
@@ -175,7 +175,7 @@ fn ambiguous_trait_methods_require_explicit_trait_qualification() {
     rejects(
         &format!(
             "{common}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let point = Point {{ x: 1 }};
                 point.value()
             }}"
@@ -190,7 +190,7 @@ fn missing_impls_are_rejected_even_when_the_body_never_calls_the_method() {
         "trait Describe { fn describe(self: Self) -> i64 ! {}; }
         struct Point { x: i64 }
         fn helper<T: Describe>(value: T) -> i64 ! {} { 7 }
-        fn main() -> i64 ! {panic} { helper(Point { x: 1 }) }",
+        fn main() -> i64 ! {} { helper(Point { x: 1 }) }",
         "does not implement trait",
     );
 }
@@ -213,7 +213,7 @@ fn trait_contracts_require_exact_parameters_grades_effects_and_returns() {
         &format!(
             "{base}
             impl Describe for Point {{
-                fn describe(self: Self) -> i64 ! {{panic}} {{ self.x }}
+                fn describe(self: Self) -> i64 ! {{io}} {{ self.x }}
             }}
             fn main() -> i64 ! {{}} {{ 0 }}"
         ),
@@ -364,15 +364,15 @@ fn owned_receivers_move_exactly_once_and_clean_up() {
     let source = r#"
         struct Token { text: String }
         impl Token {
-            fn take_text(self: Token) -> String ! {alloc, panic} {
+            fn take_text(self: Token) -> String ! {alloc} {
                 let Token { text } = self;
                 text
             }
         }
-        fn make() -> Token ! {alloc, panic} {
+        fn make() -> Token ! {alloc} {
             Token { text: String.from("abc") }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let first = make().take_text();
             print_i64(first.len());
             let token = make();
@@ -394,7 +394,7 @@ fn owned_receivers_move_exactly_once_and_clean_up() {
     rejects(
         &format!(
             "{source}
-            fn extra() -> Unit ! {{alloc, panic}} {{
+            fn extra() -> Unit ! {{alloc}} {{
                 let token = make();
                 let text = token.take_text();
                 token.take_text();
@@ -417,13 +417,13 @@ fn cross_module_methods_require_public_visibility() {
         root.join("demo").join("point.kush"),
         r#"module demo.point;
         pub struct Point { pub x: i64, pub y: i64 }
-        pub trait Describe { fn describe(self: Self) -> i64 ! {panic}; }
+        pub trait Describe { fn describe(self: Self) -> i64 ! {}; }
         impl Point {
-            pub fn sum(self: Point) -> i64 ! {panic} { self.x + self.y }
+            pub fn sum(self: Point) -> i64 ! {} { self.x + self.y }
             fn hidden(self: Point) -> i64 ! {} { self.x }
         }
         impl Describe for Point {
-            pub fn describe(self: Self) -> i64 ! {panic} { self.x * 10 + self.y }
+            pub fn describe(self: Self) -> i64 ! {} { self.x * 10 + self.y }
         }
         "#,
     )
@@ -432,8 +432,8 @@ fn cross_module_methods_require_public_visibility() {
         root.join("main.kush"),
         r#"use demo.point.Point;
         use demo.point.Describe;
-        fn describe_via<T: Describe>(value: T) -> i64 ! {panic} { value.describe() }
-        fn main() -> i64 ! {io, panic} {
+        fn describe_via<T: Describe>(value: T) -> i64 ! {} { value.describe() }
+        fn main() -> i64 ! {io} {
             let point = Point { x: 4, y: 2 };
             print_i64(point.sum());
             let other = Point { x: 4, y: 2 };
@@ -492,7 +492,7 @@ fn static_dispatch_does_not_allocate_and_linear_receivers_are_consumed_once() {
                 match self { Token.Live => 7 }
             }
         }
-        fn main() -> i64 ! {panic} { Token.Live.spend() }",
+        fn main() -> i64 ! {} { Token.Live.spend() }",
         7,
         "",
     );
@@ -503,7 +503,7 @@ fn static_dispatch_does_not_allocate_and_linear_receivers_are_consumed_once() {
                 match self { Token.Live => 7 }
             }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let token = Token.Live;
             token.spend();
             token.spend();
@@ -543,11 +543,11 @@ fn method_lifetime_returns_follow_the_normal_borrow_checks() {
     agrees(
         "struct Reader { bias: i64 }
         impl Reader {
-            fn first<'a>(self: Reader, values: &'a [i64]) -> &'a [i64] ! {panic} {
+            fn first<'a>(self: Reader, values: &'a [i64]) -> &'a [i64] ! {} {
                 &values[..1]
             }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let values: [i64; 2] = [10, 20];
             let reader = Reader { bias: 0 };
             let view = reader.first(&values[..]);
@@ -560,11 +560,11 @@ fn method_lifetime_returns_follow_the_normal_borrow_checks() {
     rejects(
         "struct Reader { bias: i64 }
         impl Reader {
-            fn first<'a>(self: Reader) -> &'a [i64] ! {panic} {
+            fn first<'a>(self: Reader) -> &'a [i64] ! {} {
                 &[1][..1]
             }
         }
-        fn main() -> i64 ! {panic} { 0 }",
+        fn main() -> i64 ! {} { 0 }",
         "does not appear on any parameter that outlives it",
     );
 }

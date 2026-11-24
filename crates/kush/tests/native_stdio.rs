@@ -153,7 +153,7 @@ fn parser_consumes_piped_input_in_native_code() {
 fn read_success_and_errors_use_declared_tags_even_when_result_variants_are_reversed() {
     let source = r#"
         enum Result<T,E>{Err(E),Ok(T)}
-        fn main()->i64 ! {io,alloc,panic} {
+        fn main()->i64 ! {io, alloc} {
             let mut b=Bytes.with_capacity(3);b=Bytes.push_reserved(b,65);
             match IO.read_all(IO.stdin(),b) {
                 Ok(bytes)=>match IO.write(IO.stdout(),&bytes){Ok(_)=>0,Err(code)=>code},
@@ -172,12 +172,12 @@ fn zero_capacity_checks_eof_and_cleans_buffers_on_error_propagation() {
         fn read(input:Stdin,buffer:Bytes)->Result<Bytes,i64> ! {io} {
             let keep=buffer;IO.read_all(input,keep)
         }
-        fn work()->Result<Unit,i64> ! {io,alloc,panic} {
+        fn work()->Result<Unit,i64> ! {io, alloc} {
             let unused=Bytes.from("local");
             let input=read(IO.stdin(),Bytes.with_capacity(0))?;
             IO.write(IO.stdout(),&input)
         }
-        fn main()->i64 ! {io,alloc,panic} {match work(){Ok(_)=>0,Err(code)=>code}}
+        fn main()->i64 ! {io, alloc} {match work(){Ok(_)=>0,Err(code)=>code}}
     "#;
     compare(source, b"");
     compare(source, b"x");
@@ -187,13 +187,13 @@ fn zero_capacity_checks_eof_and_cleans_buffers_on_error_propagation() {
 fn invalid_standard_descriptors_return_errors_and_release_owned_buffers() {
     let read = r#"
         enum Result<T,E>{Ok(T),Err(E)}
-        fn main()->i64 ! {io,alloc,panic} {
+        fn main()->i64 ! {io, alloc} {
             match IO.read_all(IO.stdin(),Bytes.with_capacity(4)) {Ok(_)=>0,Err(code)=>code}
         }
     "#;
     let write = r#"
         enum Result<T,E>{Err(E),Ok(T)}
-        fn main()->i64 ! {io,alloc,panic} {
+        fn main()->i64 ! {io, alloc} {
             let bytes=Bytes.from("text");
             match IO.write(IO.stdout(),&bytes) {Ok(_)=>0,Err(code)=>code}
         }
@@ -228,7 +228,7 @@ fn invalid_descriptors(read: &str, write: &str) {
 fn broken_stdout_pipe_returns_epipe_instead_of_terminating_the_process() {
     let source = r#"
         enum Result<T,E>{Ok(T),Err(E)}
-        fn main()->i64 ! {io,alloc,panic} {
+        fn main()->i64 ! {io, alloc} {
             // Reading until EOF is a barrier: the parent closes stdout before releasing stdin.
             let empty=IO.read_all(IO.stdin(),Bytes.with_capacity(0));
             let bytes=Bytes.from("text");

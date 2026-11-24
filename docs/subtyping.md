@@ -21,8 +21,8 @@ binds more tightly than union, and `@[grade]` binds more tightly than either, so
 a grade on all of a union needs parentheses:
 
 ```rust
-fn f(value: i64 | Bool) -> i64 ! {panic} { ... }
-fn g(value: (Box<i64> | Bytes) @[1]) -> i64 ! {panic} { ... }
+fn f(value: i64 | Bool) -> i64 ! {} { ... }
+fn g(value: (Box<i64> | Bytes) @[1]) -> i64 ! {} { ... }
 fn h(value: (i64 | Bool) & i64) -> i64 ! {} { value }
 ```
 
@@ -103,7 +103,7 @@ is a real runtime conversion, not a pointer reinterpretation:
   through a generated checked adapter. The source callable is moved into the
   adapter environment exactly once, so a `once` or `linear once` field keeps
   its single consumption and cleanup obligation. Creating that environment
-  allocates, so the enclosing conversion requires `{alloc, panic}`. A
+  allocates, so the enclosing conversion requires `{alloc}`. A
   pure-to-pure conversion that changes a parameter or result representation
   stays rejected: a pure arrow has no environment in which to carry the
   adapter. Convert such a field explicitly first;
@@ -121,11 +121,11 @@ allocates nothing.
 ```rust
 struct Wide { b: i64, a: i64, extra: Box<i64> }
 
-fn sum(v: struct { a: i64, b: i64 }) -> i64 ! {panic} {
+fn sum(v: struct { a: i64, b: i64 }) -> i64 ! {} {
     v.a + v.b
 }
 
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     sum(Wide { b: 20, a: 22, extra: Box.new(1) }) // 42, extra dropped
 }
 ```
@@ -163,7 +163,7 @@ parameter with no inspected fields.
 A named tail `..r` is a **true row variable**, not an erased annotation:
 
 ```rust
-fn keep<r>(v: struct { x: i64, ..r }) -> struct { x: i64, ..r } ! {panic} { v }
+fn keep<r>(v: struct { x: i64, ..r }) -> struct { x: i64, ..r } ! {} { v }
 ```
 
 `r` is an ordinary type parameter used in row position. At each call the
@@ -203,10 +203,10 @@ A row variable may also appear in an impl header:
 
 ```rust
 impl<r> Tag for struct { x: i64, ..r } {
-    fn tag(self: Self) -> i64 ! {panic} { self.x }
+    fn tag(self: Self) -> i64 ! {} { self.x }
 }
 impl<r> struct { n: i64, ..r } {
-    fn double(self: Self) -> i64 ! {panic} { self.n * 2 }
+    fn double(self: Self) -> i64 ! {} { self.n * 2 }
 }
 ```
 
@@ -269,12 +269,12 @@ A structural row may also be an inherent or trait impl receiver:
 
 ```rust
 impl struct { x: i64, y: i64 } {
-    fn sum(self: Self) -> i64 ! {panic} { self.x + self.y }
+    fn sum(self: Self) -> i64 ! {} { self.x + self.y }
 }
 
-trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+trait Tag { fn tag(self: Self) -> i64 ! {}; }
 impl<T> Tag for struct { value: T } {
-    fn tag(self: Self) -> i64 ! {panic} { 42 }
+    fn tag(self: Self) -> i64 ! {} { 42 }
 }
 ```
 
@@ -512,7 +512,7 @@ decisions. It now pads them.
 A heterogeneous union is narrowed with a type pattern:
 
 ```rust
-fn describe(value: i64 | Bool | Box<i64>) -> i64 ! {panic} {
+fn describe(value: i64 | Bool | Box<i64>) -> i64 ! {} {
     match value {
         i64 @ n => n,
         Bool @ flag => if flag { 1 } else { 0 },
@@ -524,7 +524,7 @@ fn describe(value: i64 | Bool | Box<i64>) -> i64 ! {panic} {
 `Type @ pattern` tests the union discriminator and applies `pattern` to the
 narrowed payload. The binder has the member type, so it can be used, moved, or
 matched further. This includes callable alternatives:
-`once fn(i64) -> i64 ! {panic} @ f => f(41)` calls through the narrowed
+`once fn(i64) -> i64 ! {} @ f => f(41)` calls through the narrowed
 per-signature ABI. A record or enum pattern can narrow directly when exactly one
 union alternative has that shape:
 

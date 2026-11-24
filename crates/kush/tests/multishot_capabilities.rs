@@ -54,12 +54,12 @@ fn rejects(source: &str, fragment: &str) {
 fn handler_body(helpers: &str, body: &str) -> String {
     format!(
         "{helpers}
-         fn main() -> i64 ! {{alloc, panic}} {{
+         fn main() -> i64 ! {{alloc}} {{
              let base = 10;
              handle Choose: i64 -> i64 with fn(
                  n: i64,
                  resume: multi fn(i64) -> i64 ! {{}},
-             ) -> i64 ! {{alloc, panic}} {{ {body} }} {{
+             ) -> i64 ! {{alloc}} {{ {body} }} {{
                  let c = perform Choose(2);
                  c + base
              }}
@@ -139,11 +139,11 @@ fn a_token_is_not_a_function_pointer() {
 #[test]
 fn a_handler_names_the_token_forms() {
     rejects(
-        "fn main() -> i64 ! {panic} {
+        "fn main() -> i64 ! {} {
              handle Op: i64 -> i64 with fn(
                  x: i64,
                  resume: multi fn(i64) -> Bool ! {},
-             ) -> i64 ! {panic} { 0 } { perform Op(1) }
+             ) -> i64 ! {} { 0 } { perform Op(1) }
          }",
         "'multi fn(i64) -> i64'",
     );
@@ -153,8 +153,8 @@ fn a_handler_names_the_token_forms() {
 fn multi_stays_an_ordinary_name() {
     // `multi` is contextual: only `multi fn` and `cap multi Op` are special.
     let program = check(
-        "fn multi(x: i64) -> i64 ! {panic} { x + 1 }
-         fn main() -> i64 ! {panic} {
+        "fn multi(x: i64) -> i64 ! {} { x + 1 }
+         fn main() -> i64 ! {} {
              let m = multi(1);
              let multi = 2;
              multi + m
@@ -179,7 +179,7 @@ fn each_resumption_starts_from_the_same_live_values() {
     // A token is copied into a local and passed to a helper.
     agrees(
         &handler_body(
-            "fn twice(r: multi fn(i64) -> i64 ! {}, x: i64) -> i64 ! {panic} { r(x) + r(x + 1) }",
+            "fn twice(r: multi fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} { r(x) + r(x + 1) }",
             "let again = resume; again(5) + twice(resume, 1)",
         ),
         15 + 11 + 12,
@@ -208,11 +208,11 @@ fn every_combination_of_choices_through_a_loop() {
     // ones weighted by position: sum = 2^(n-1) * (1 + 2 + ... + n).
     let source = |n: i64| {
         format!(
-            "fn main() -> i64 ! {{alloc, panic}} {{
+            "fn main() -> i64 ! {{alloc}} {{
                  handle Choose: i64 -> i64 with fn(
                      x: i64,
                      resume: multi fn(i64) -> i64 ! {{}},
-                 ) -> i64 ! {{panic}} {{ resume(0) + resume(1) }} {{
+                 ) -> i64 ! {{}} {{ resume(0) + resume(1) }} {{
                      let mut s = 0;
                      let mut i = 0;
                      while i < {n} {{
@@ -232,11 +232,11 @@ fn every_combination_of_choices_through_a_loop() {
 #[test]
 fn printing_resumptions_run_in_order() {
     agrees(
-        "fn main() -> i64 ! {alloc, io, panic} {
+        "fn main() -> i64 ! {alloc, io} {
              handle Choose: i64 -> i64 with fn(
                  x: i64,
                  resume: multi fn(i64) -> i64 ! {},
-             ) -> i64 ! {panic} { let a = resume(1); let b = resume(2); a + b } {
+             ) -> i64 ! {} { let a = resume(1); let b = resume(2); a + b } {
                  let label = 7;
                  let c = perform Choose(0);
                  print_i64(label * 10 + c);
@@ -251,11 +251,11 @@ fn printing_resumptions_run_in_order() {
 #[test]
 fn multishot_live_values_must_be_copyable() {
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
              handle Choose: i64 -> i64 with fn(
                  x: i64,
                  resume: multi fn(i64) -> i64 ! {},
-             ) -> i64 ! {panic} { resume(0) + resume(1) } {
+             ) -> i64 ! {} { resume(0) + resume(1) } {
                  let b = Box.new(5);
                  let c = perform Choose(0);
                  c + Box.take(b)
@@ -268,15 +268,15 @@ fn multishot_live_values_must_be_copyable() {
 #[test]
 fn a_token_cannot_stay_live_across_a_perform() {
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
              handle Choose: i64 -> i64 with fn(
                  x: i64,
                  resume: multi fn(i64) -> i64 ! {},
-             ) -> i64 ! {alloc, panic} {
+             ) -> i64 ! {alloc} {
                  handle Inner: i64 -> i64 with fn(
                      y: i64,
                      k: linear once fn(i64) -> i64 ! {},
-                 ) -> i64 ! {panic} { let r = k(y); r + 1 } {
+                 ) -> i64 ! {} { let r = k(y); r + 1 } {
                      let a = perform Inner(1);
                      resume(a)
                  }
@@ -299,16 +299,16 @@ fn across(helpers: &str, handler: &str, body: &str) -> String {
     format!(
         "effect Choose: i64 -> i64;
          {helpers}
-         fn main() -> i64 ! {{alloc, panic}} {{
+         fn main() -> i64 ! {{alloc}} {{
              handle Choose: i64 -> i64 as op with fn(
                  n: i64,
                  resume: multi fn(i64) -> i64 ! {{}},
-             ) -> i64 ! {{panic}} {{ {handler} }} {{ {body} }}
+             ) -> i64 ! {{}} {{ {handler} }} {{ {body} }}
          }}"
     )
 }
 
-const CAP: &str = "op: cap multi Choose ! {panic}";
+const CAP: &str = "op: cap multi Choose ! {}";
 
 #[test]
 fn a_callee_performs_twice_through_a_multishot_capability() {
@@ -316,7 +316,7 @@ fn a_callee_performs_twice_through_a_multishot_capability() {
     agrees(
         &across(
             &format!(
-                "fn two({CAP}, base: i64) -> i64 ! {{panic}} {{
+                "fn two({CAP}, base: i64) -> i64 ! {{}} {{
                      let a = perform op(1);
                      let b = perform op(2);
                      base + a * 10 + b
@@ -333,13 +333,13 @@ fn a_callee_performs_twice_through_a_multishot_capability() {
 #[test]
 fn live_values_at_every_level_of_a_chain_are_kept() {
     let helpers = format!(
-        "fn leaf({CAP}, x: i64) -> i64 ! {{panic}} {{ let c = perform op(2); x * 10 + c }}
-         fn middle({CAP}, x: i64) -> i64 ! {{panic}} {{
+        "fn leaf({CAP}, x: i64) -> i64 ! {{}} {{ let c = perform op(2); x * 10 + c }}
+         fn middle({CAP}, x: i64) -> i64 ! {{}} {{
              let y = x + 1;
              let r = leaf(op, y);
              r + y * 1000
          }}
-         fn top({CAP}, x: i64) -> i64 ! {{panic}} {{
+         fn top({CAP}, x: i64) -> i64 ! {{}} {{
              let z = x * 2;
              let r = middle(op, z);
              r + z * 100000
@@ -366,7 +366,7 @@ fn live_values_at_every_level_of_a_chain_are_kept() {
 fn leaves(depth: i64) -> String {
     across(
         &format!(
-            "fn count({CAP}, depth: i64) -> i64 ! {{panic}} {{
+            "fn count({CAP}, depth: i64) -> i64 ! {{}} {{
                  if depth == 0 {{
                      1
                  }} else {{
@@ -390,7 +390,7 @@ fn recursive_search_resumes_through_every_level() {
 fn queens(n: i64) -> String {
     across(
         &format!(
-            "fn safe(placed: i64, row: i64, column: i64) -> Bool ! {{panic}} {{
+            "fn safe(placed: i64, row: i64, column: i64) -> Bool ! {{}} {{
                  let mut ok = true;
                  let mut k = 1;
                  let mut rest = placed;
@@ -404,7 +404,7 @@ fn queens(n: i64) -> String {
                  }}
                  ok
              }}
-             fn place({CAP}, n: i64, row: i64, placed: i64) -> i64 ! {{panic}} {{
+             fn place({CAP}, n: i64, row: i64, placed: i64) -> i64 ! {{}} {{
                  if row == n {{
                      1
                  }} else {{
@@ -461,7 +461,7 @@ fn return_in_a_callee_continues_every_resumption() {
     agrees(
         &across(
             &format!(
-                "fn early({CAP}, x: i64) -> i64 ! {{panic}} {{
+                "fn early({CAP}, x: i64) -> i64 ! {{}} {{
                      let c = perform op(2);
                      if c == 1 {{
                          return x + 100;
@@ -482,7 +482,7 @@ fn a_handler_that_never_resumes_releases_the_chain() {
     let stats = agrees(
         &across(
             &format!(
-                "fn deep({CAP}, x: i64) -> i64 ! {{panic}} {{
+                "fn deep({CAP}, x: i64) -> i64 ! {{}} {{
                      let y = x + 1;
                      let c = perform op(1);
                      c + y
@@ -502,7 +502,7 @@ fn a_tail_resumptive_multishot_capability_runs_in_place() {
     let stats = agrees(
         &across(
             &format!(
-                "fn two({CAP}, x: i64) -> i64 ! {{panic}} {{
+                "fn two({CAP}, x: i64) -> i64 ! {{}} {{
                      let a = perform op(x);
                      let b = perform op(a);
                      a + b
@@ -522,7 +522,7 @@ fn one_shot_and_multishot_capabilities_do_not_mix() {
     // A multishot handler passed to a one-shot 'cap' parameter.
     rejects(
         &across(
-            "fn one(op: cap Choose ! {panic}) -> i64 ! {panic} { perform op(1) }",
+            "fn one(op: cap Choose ! {}) -> i64 ! {} { perform op(1) }",
             "resume(0) + resume(1)",
             "one(op)",
         ),
@@ -532,12 +532,12 @@ fn one_shot_and_multishot_capabilities_do_not_mix() {
     rejects(
         &format!(
             "effect Choose: i64 -> i64;
-             fn several({CAP}) -> i64 ! {{panic}} {{ perform op(1) }}
-             fn main() -> i64 ! {{alloc, panic}} {{
+             fn several({CAP}) -> i64 ! {{}} {{ perform op(1) }}
+             fn main() -> i64 ! {{alloc}} {{
                  handle Choose: i64 -> i64 as op with fn(
                      n: i64,
                      resume: linear once fn(i64) -> i64 ! {{}},
-                 ) -> i64 ! {{panic}} {{ let r = resume(n); r + 1 }} {{ several(op) }}
+                 ) -> i64 ! {{}} {{ let r = resume(n); r + 1 }} {{ several(op) }}
              }}"
         ),
         "type mismatch",
@@ -548,7 +548,7 @@ fn one_shot_and_multishot_capabilities_do_not_mix() {
 fn callee_live_values_must_be_copyable_too() {
     rejects(
         &across(
-            "fn owned(op: cap multi Choose ! {alloc, panic}) -> i64 ! {alloc, panic} {
+            "fn owned(op: cap multi Choose ! {alloc}) -> i64 ! {alloc} {
                  let b = Box.new(5);
                  let c = perform op(1);
                  c + Box.take(b)
@@ -568,12 +568,12 @@ fn a_multishot_handler_cannot_abort_past_its_tokens() {
     // (Natively, abortive scopes also restore the stack where they land.)
     rejects(
         "effect Fail: i64 -> Never;
-         fn main() -> i64 ! {alloc, panic} {
-             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {panic} { c + 10 } {
+         fn main() -> i64 ! {alloc} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c + 10 } {
                  handle Choose: i64 -> i64 with fn(
                      x: i64,
                      resume: multi fn(i64) -> i64 ! {},
-                 ) -> i64 ! {Fail, panic} {
+                 ) -> i64 ! {Fail} {
                      let a = resume(1);
                      if a > 0 { perform Fail(a) };
                      a
@@ -650,35 +650,41 @@ fn a_capturing_multishot_handler_serves_callees() {
                  let b = perform op(2);
                  base + a * 10 + b
              }}
-             fn main() -> i64 ! {{alloc, panic}} {{
+             fn main() -> i64 ! {{alloc}} {{
                  let scale = 3;
                  handle Choose: i64 -> i64 as op with fn(
                      n: i64,
                      resume: multi fn(i64) -> i64 ! {{}},
-                 ) -> i64 ! {{panic}} {{ resume(0) + resume(n * scale) * 0 + resume(n) }} {{
+                 ) -> i64 ! {{}} {{ resume(0) + resume(n * scale) * 0 + resume(n) }} {{
                      two(op, 100)
                  }}
              }}"
         )
     };
     // Each choice sums three runs (0, n * scale weighted 0, n).
-    agrees(&source("panic"), 424, "");
-    // The trampoline can panic (a missing frame), so the parameter must
-    // allow it, as for capturing one-shot capabilities.
-    rejects(&source(""), "this capability's handler is capturing");
+    agrees(&source(""), 424, "");
+    // The trampoline has the handler's effects, so the parameter's row
+    // must hold them, as for capturing one-shot capabilities.
+    rejects(
+        &source("").replace("! {alloc}", "! {io, alloc}").replace(
+            ") -> i64 ! {} { resume(0)",
+            ") -> i64 ! {io} { print_i64(n); resume(0)",
+        ),
+        "this capability's handler is capturing",
+    );
 }
 
 #[test]
 fn a_multishot_handler_owning_a_capture_stays_rejected() {
     rejects(
         "effect Choose: i64 -> i64;
-         fn one(op: cap multi Choose ! {panic}) -> i64 ! {panic} { perform op(1) }
-         fn main() -> i64 ! {alloc, panic} {
+         fn one(op: cap multi Choose ! {}) -> i64 ! {} { perform op(1) }
+         fn main() -> i64 ! {alloc} {
              let b = Box.new(3);
              handle Choose: i64 -> i64 as op with fn(
                  n: i64,
                  resume: multi fn(i64) -> i64 ! {},
-             ) -> i64 ! {panic} { resume(0) + Box.take(b) } { one(op) }
+             ) -> i64 ! {} { resume(0) + Box.take(b) } { one(op) }
          }",
         "capturing or multishot",
     );
@@ -695,7 +701,7 @@ fn a_multishot_handler_owning_a_capture_stays_rejected() {
 fn aborting(limit: &str) -> String {
     format!(
         "effect Fail: i64 -> Never;
-         fn main() -> i64 ! {{io, alloc, panic}} {{
+         fn main() -> i64 ! {{io, alloc}} {{
              let r = handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {{}} {{ c ^ 1024 }} {{
                  let keep = Box.new(3);
                  let v = handle Pick: i64 -> i64 with fn(
@@ -732,7 +738,7 @@ fn an_abort_leaves_through_a_token_that_names_it() {
                 .replace("fn main()", "fn once()")
                 .replace("effect Fail: i64 -> Never;", "")
                 + "effect Fail: i64 -> Never;
-                   fn main() -> i64 ! {io, alloc, panic} {
+                   fn main() -> i64 ! {io, alloc} {
                        let mut total = 0;
                        let mut i = 0;
                        while i < 50 { total = total + once(); i = i + 1; }
@@ -760,7 +766,7 @@ fn a_pure_tail_resumptive_multishot_capability_runs_in_place_in_a_loop() {
     let stats = agrees(
         "effect Tick: i64 -> i64;
          fn work(op: cap multi Tick ! {}, x: i64) -> i64 ! {} { perform op(x) }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              handle Tick: i64 -> i64 as tick with fn(
                  x: i64,
                  resume: multi fn(i64) -> i64 ! {},
@@ -780,7 +786,7 @@ fn a_pure_tail_resumptive_multishot_capability_runs_in_place_in_a_loop() {
     rejects(
         "effect Tick: i64 -> i64;
          fn named(x: i64) -> i64 ! {Tick} { perform Tick(x) }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              handle Tick: i64 -> i64 as tick with fn(
                  x: i64,
                  resume: multi fn(i64) -> i64 ! {},

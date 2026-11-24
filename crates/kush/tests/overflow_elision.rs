@@ -1,7 +1,7 @@
 //! OVERFLOW-ELIDE: `+`, `-` and `*` (by a constant) whose result the facts
-//! keep within the type's range need no runtime overflow check, so they need
-//! no `panic` effect. The proof is recorded as a checked certificate; the
-//! operation becomes a plain machine add/sub/mul in both backends.
+//! keep within the type's range need no runtime overflow check. The proof is
+//! recorded as a checked certificate; the operation becomes a plain machine
+//! add/sub/mul in both backends.
 use kush::executable::check;
 
 fn agrees(source: &str, expected: i64) {
@@ -23,18 +23,24 @@ fn agrees(source: &str, expected: i64) {
     }
 }
 
-fn rejects(source: &str, fragment: &str) {
-    match check(source) {
-        Ok(_) => panic!("accepted:\n{source}"),
-        Err(error) => assert!(
-            error.message.contains(fragment),
-            "expected {fragment:?}, got {error:?}\n{source}"
-        ),
-    }
+/// An operation the facts do not bound keeps its runtime check: the
+/// checker records no certificate for it.
+fn keeps_the_check(source: &str) {
+    let program = check(source).unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+    assert!(
+        program.certificates().is_empty(),
+        "an unproved operation was elided:\n{source}"
+    );
 }
 
 #[test]
-fn proved_arithmetic_needs_no_panic_effect() {
+fn proved_arithmetic_elides_its_check() {
+    assert!(
+        !check("fn f(x: u8) -> u8 ! {} { if x < 255 { x + 1 } else { x } }\nfn main() -> i64 ! {} { 0 }")
+            .unwrap()
+            .certificates()
+            .is_empty()
+    );
     agrees(
         "fn next(c: i64, erased q: { c <= 9223372036854775806 }) -> i64 ! {} { c + 1 }
          fn bump(x: u8) -> u8 ! {} { if x < 255 { x + 1 } else { x } }
@@ -50,7 +56,7 @@ fn proved_arithmetic_needs_no_panic_effect() {
          }
          fn top(x: u64, erased q: { x <= 18446744073709551614 }) -> u64 ! {} { x + 1 }
          fn down(x: u64) -> u64 ! {} { if x > 0 { x - 1 } else { 0 } }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              let big: u64 = 18446744073709551614;
              let wrapped: u64 = top(big, _);
              let back: u64 = down(wrapped);
@@ -71,15 +77,12 @@ fn unproved_arithmetic_still_needs_the_check() {
         "fn f(c: i64, erased q: { c <= 9223372036854775807 }) -> i64 ! {} { c + 1 }",
         "fn f() -> i64 ! {} { 9223372036854775807 + 1 }",
     ] {
-        rejects(
-            &format!("{source}\nfn main() -> i64 ! {{}} {{ 0 }}"),
-            "operation requires effects {panic}",
-        );
+        keeps_the_check(&format!("{source}\nfn main() -> i64 ! {{}} {{ 0 }}"));
     }
     // A checked operation still traps at run time.
     let program = check(
-        "fn f(c: i64) -> i64 ! {panic} { c + 1 }
-         fn main() -> i64 ! {panic} { f(9223372036854775807) }",
+        "fn f(c: i64) -> i64 ! {} { c + 1 }
+         fn main() -> i64 ! {} { f(9223372036854775807) }",
     )
     .unwrap();
     assert!(program.evaluate(&mut Vec::new()).is_err());
@@ -90,12 +93,12 @@ fn unproved_arithmetic_still_needs_the_check() {
 /// would lose its overflow check and wrap to 0.
 #[test]
 fn unsigned_locals_never_get_i64_bounds() {
-    let source = "fn g(x: u64) -> u64 ! {panic} {
+    let source = "fn g(x: u64) -> u64 ! {} {
             let y: u64 = x;
             let r: u64 = x + 9223372036854775808;
             if y == 0 { r } else { r }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let big: u64 = 9223372036854775808;
             let r = g(big);
             if r == 0 { 1 } else { 2 }

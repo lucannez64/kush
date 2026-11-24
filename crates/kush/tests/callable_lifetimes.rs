@@ -46,19 +46,19 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 fn higher_order_helpers_take_slice_callbacks() {
     // Named functions and lambdas with elided slice parameters.
     agrees(
-        r#"fn sum(v: &[i64]) -> i64 ! {panic} {
+        r#"fn sum(v: &[i64]) -> i64 ! {} {
             let mut i = 0;
             let mut acc = 0;
             while i < Slice.len(v) { acc = acc + Slice.get(v, i); i = i + 1; }
             acc
         }
-        fn measure(xs: &[i64], f: fn(&[i64]) -> i64 ! {panic}) -> i64 ! {panic} {
+        fn measure(xs: &[i64], f: fn(&[i64]) -> i64 ! {}) -> i64 ! {} {
             f(xs)
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let a: [i64; 3] = [10, 20, 12];
             print_i64(measure(&a[..], sum));
-            let length = fn(v: &[i64]) -> i64 ! {panic} { Slice.len(v) };
+            let length = fn(v: &[i64]) -> i64 ! {} { Slice.len(v) };
             measure(&a[..], length)
         }"#,
         3,
@@ -69,11 +69,11 @@ fn higher_order_helpers_take_slice_callbacks() {
 #[test]
 fn slice_returning_function_values_keep_their_sources_borrowed() {
     agrees(
-        r#"fn tail<'a>(v: &'a [i64]) -> &'a [i64] ! {panic} { &v[1..] }
-        fn apply<'x>(f: fn<'a>(&'a [i64]) -> &'a [i64] ! {panic}, v: &'x [i64]) -> &'x [i64] ! {panic} {
+        r#"fn tail<'a>(v: &'a [i64]) -> &'a [i64] ! {} { &v[1..] }
+        fn apply<'x>(f: fn<'a>(&'a [i64]) -> &'a [i64] ! {}, v: &'x [i64]) -> &'x [i64] ! {} {
             f(v)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 3] = [1, 40, 2];
             let rest = apply(tail, &a[..]);
             Slice.get(rest, 0) + Slice.get(rest, 1)
@@ -84,10 +84,10 @@ fn slice_returning_function_values_keep_their_sources_borrowed() {
     // A value with an outlives bound fits an arrow that instantiates both
     // lifetimes to the same one.
     agrees(
-        r#"fn second<'l: 's, 's>(long: &'l [i64], short: &'s [i64]) -> &'s [i64] ! {panic} { long }
-        fn main() -> i64 ! {panic} {
+        r#"fn second<'l: 's, 's>(long: &'l [i64], short: &'s [i64]) -> &'s [i64] ! {} { long }
+        fn main() -> i64 ! {} {
             let a: [i64; 2] = [40, 2];
-            let pick: fn<'a>(&'a [i64], &'a [i64]) -> &'a [i64] ! {panic} = second;
+            let pick: fn<'a>(&'a [i64], &'a [i64]) -> &'a [i64] ! {} = second;
             let view = pick(&a[..], &a[..]);
             Slice.get(view, 0) + Slice.get(view, 1)
         }"#,
@@ -96,10 +96,10 @@ fn slice_returning_function_values_keep_their_sources_borrowed() {
     );
     // Exclusive results through a value.
     agrees(
-        r#"fn head<'a>(v: &'a mut [i64]) -> &'a mut [i64] ! {panic} { v }
-        fn main() -> i64 ! {panic} {
+        r#"fn head<'a>(v: &'a mut [i64]) -> &'a mut [i64] ! {} { v }
+        fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [1, 2];
-            let f: fn<'a>(&'a mut [i64]) -> &'a mut [i64] ! {panic} = head;
+            let f: fn<'a>(&'a mut [i64]) -> &'a mut [i64] ! {} = head;
             let view = f(&mut a[..]);
             Slice.set(view, 0, 40);
             a[0] + a[1]
@@ -113,19 +113,19 @@ fn slice_returning_function_values_keep_their_sources_borrowed() {
 fn indirect_results_cannot_outlive_or_invalidate_their_sources() {
     // The result of a call through a value borrows the argument's owner.
     rejects(
-        r#"fn tail<'a>(v: &'a [i64]) -> &'a [i64] ! {panic} { &v[1..] }
-        fn leak<'p>(f: fn<'a>(&'a [i64]) -> &'a [i64] ! {panic}, p: &'p [i64]) -> &'p [i64] ! {panic} {
+        r#"fn tail<'a>(v: &'a [i64]) -> &'a [i64] ! {} { &v[1..] }
+        fn leak<'p>(f: fn<'a>(&'a [i64]) -> &'a [i64] ! {}, p: &'p [i64]) -> &'p [i64] ! {} {
             let local: [i64; 2] = [1, 2];
             f(&local[..])
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "outlive",
     );
     rejects(
-        r#"fn tail<'a>(v: &'a [i64]) -> &'a [i64] ! {panic} { v }
-        fn main() -> i64 ! {alloc, panic} {
+        r#"fn tail<'a>(v: &'a [i64]) -> &'a [i64] ! {} { v }
+        fn main() -> i64 ! {alloc} {
             let owner: Vec<i64> = [1, 2];
-            let f: fn<'a>(&'a [i64]) -> &'a [i64] ! {panic} = tail;
+            let f: fn<'a>(&'a [i64]) -> &'a [i64] ! {} = tail;
             let view = f(&owner[..]);
             drop(owner);
             Slice.get(view, 0)
@@ -134,11 +134,11 @@ fn indirect_results_cannot_outlive_or_invalidate_their_sources() {
     );
     // Call-site outlives constraints apply through values too.
     rejects(
-        r#"fn both<'l: 's, 's>(l: &'l [i64], s: &'s [i64]) -> i64 ! {panic} { Slice.len(l) + Slice.len(s) }
-        fn main() -> i64 ! {panic} {
+        r#"fn both<'l: 's, 's>(l: &'l [i64], s: &'s [i64]) -> i64 ! {} { Slice.len(l) + Slice.len(s) }
+        fn main() -> i64 ! {} {
             let first: [i64; 1] = [1];
             let second: [i64; 1] = [2];
-            let f: fn<'l: 's, 's>(&'l [i64], &'s [i64]) -> i64 ! {panic} = both;
+            let f: fn<'l: 's, 's>(&'l [i64], &'s [i64]) -> i64 ! {} = both;
             f(&first[..], &second[..])
         }"#,
         "cannot establish the callee's outlives constraint 'a: 'b",
@@ -149,18 +149,18 @@ fn indirect_results_cannot_outlive_or_invalidate_their_sources() {
 fn function_values_fit_arrows_only_when_their_contract_is_implied() {
     // The result comes from the second input, but the arrow promises the first.
     rejects(
-        r#"fn second<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> &'b [i64] ! {panic} { y }
-        fn main() -> i64 ! {panic} {
-            let f: fn<'a, 'b>(&'a [i64], &'b [i64]) -> &'a [i64] ! {panic} = second;
+        r#"fn second<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> &'b [i64] ! {} { y }
+        fn main() -> i64 ! {} {
+            let f: fn<'a, 'b>(&'a [i64], &'b [i64]) -> &'a [i64] ! {} = second;
             0
         }"#,
-        "expected fn<'a, 'b>(&'a [i64], &'b [i64]) -> &'a [i64] ! {panic}, found fn<'a, 'b>(&'a [i64], &'b [i64]) -> &'b [i64]",
+        "expected fn<'a, 'b>(&'a [i64], &'b [i64]) -> &'a [i64] ! {}, found fn<'a, 'b>(&'a [i64], &'b [i64]) -> &'b [i64]",
     );
     // The value requires 'l: 's, which the arrow does not promise.
     rejects(
-        r#"fn both<'l: 's, 's>(l: &'l [i64], s: &'s [i64]) -> i64 ! {panic} { 0 }
-        fn main() -> i64 ! {panic} {
-            let f: fn<'a, 'b>(&'a [i64], &'b [i64]) -> i64 ! {panic} = both;
+        r#"fn both<'l: 's, 's>(l: &'l [i64], s: &'s [i64]) -> i64 ! {} { 0 }
+        fn main() -> i64 ! {} {
+            let f: fn<'a, 'b>(&'a [i64], &'b [i64]) -> i64 ! {} = both;
             0
         }"#,
         "found fn<'a: 'b, 'b>(&'a [i64], &'b [i64]) -> i64",
@@ -190,8 +190,8 @@ fn arrow_lifetimes_are_bound_and_results_must_have_a_source() {
         "exclusive",
     );
     rejects(
-        r#"fn main() -> i64 ! {panic} {
-            let f = fn(v: &[i64], w: &[i64]) -> &[i64] ! {panic} { v };
+        r#"fn main() -> i64 ! {} {
+            let f = fn(v: &[i64], w: &[i64]) -> &[i64] ! {} { v };
             0
         }"#,
         "cannot infer this lambda result's lifetime",
@@ -215,12 +215,12 @@ fn borrowed_callables_example_agrees_natively() {
 #[test]
 fn slice_returning_lambdas_preserve_borrows_through_higher_order_calls() {
     agrees(
-        r#"fn apply<'x>(f: fn<'a>(&'a [i64]) -> &'a [i64] ! {panic}, v: &'x [i64]) -> &'x [i64] ! {panic} {
+        r#"fn apply<'x>(f: fn<'a>(&'a [i64]) -> &'a [i64] ! {}, v: &'x [i64]) -> &'x [i64] ! {} {
             f(v)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 3] = [1, 40, 2];
-            let tail = fn(v: &[i64]) -> &[i64] ! {panic} { &v[1..] };
+            let tail = fn(v: &[i64]) -> &[i64] ! {} { &v[1..] };
             let rest = apply(tail, &a[..]);
             Slice.get(rest, 0) + Slice.get(rest, 1)
         }"#,
@@ -228,10 +228,10 @@ fn slice_returning_lambdas_preserve_borrows_through_higher_order_calls() {
         "",
     );
     agrees(
-        r#"fn main() -> i64 ! {panic} {
+        r#"fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [1, 2];
-            let head: fn<'a>(&'a mut [i64]) -> &'a mut [i64] ! {panic} =
-                fn(v: &mut [i64]) -> &mut [i64] ! {panic} { v };
+            let head: fn<'a>(&'a mut [i64]) -> &'a mut [i64] ! {} =
+                fn(v: &mut [i64]) -> &mut [i64] ! {} { v };
             let view = head(&mut a[..]);
             Slice.set(view, 0, 40);
             a[0] + a[1]
@@ -244,8 +244,8 @@ fn slice_returning_lambdas_preserve_borrows_through_higher_order_calls() {
 #[test]
 fn slice_returning_lambdas_reject_dangling_and_invalidated_results() {
     rejects(
-        r#"fn main() -> i64 ! {panic} {
-            let leak = fn(v: &[i64]) -> &[i64] ! {panic} {
+        r#"fn main() -> i64 ! {} {
+            let leak = fn(v: &[i64]) -> &[i64] ! {} {
                 let local: [i64; 1] = [42];
                 &local[..]
             };
@@ -254,9 +254,9 @@ fn slice_returning_lambdas_reject_dangling_and_invalidated_results() {
         "outlive",
     );
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let owner: Vec<i64> = [40, 2];
-            let identity = fn(v: &[i64]) -> &[i64] ! {panic} { v };
+            let identity = fn(v: &[i64]) -> &[i64] ! {} { v };
             let view = identity(&owner[..]);
             drop(owner);
             Slice.get(view, 0)
@@ -264,16 +264,16 @@ fn slice_returning_lambdas_reject_dangling_and_invalidated_results() {
         "while a slice view derived from it is live",
     );
     rejects(
-        r#"fn main() -> i64 ! {panic} {
-            let invalid = fn(v: &[i64]) -> &mut [i64] ! {panic} { v };
+        r#"fn main() -> i64 ! {} {
+            let invalid = fn(v: &[i64]) -> &mut [i64] ! {} { v };
             0
         }"#,
         "exclusive slice parameter",
     );
     rejects(
-        r#"fn main() -> i64 ! {alloc, panic} {
+        r#"fn main() -> i64 ! {alloc} {
             let owner: Vec<i64> = [42];
-            let captured = fn(v: &[i64]) -> &[i64] ! {panic} { &owner[..] };
+            let captured = fn(v: &[i64]) -> &[i64] ! {} { &owner[..] };
             0
         }"#,
         "dangle",
@@ -283,7 +283,7 @@ fn slice_returning_lambdas_reject_dangling_and_invalidated_results() {
 #[test]
 fn indirect_slice_returns_preserve_split_siblings_and_reborrow_exclusivity() {
     agrees(
-        r#"fn main() -> i64 ! {panic} {
+        r#"fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [1, 2];
             let (left, right) = Slice.split_at_mut(&mut a[..], 1);
             let identity = fn(v: &mut [i64]) -> &mut [i64] ! {} { v };
@@ -296,7 +296,7 @@ fn indirect_slice_returns_preserve_split_siblings_and_reborrow_exclusivity() {
         "",
     );
     rejects(
-        r#"fn main() -> i64 ! {panic} {
+        r#"fn main() -> i64 ! {} {
             let mut a: [i64; 2] = [1, 2];
             let view = &mut a[..];
             let identity = fn(v: &mut [i64]) -> &mut [i64] ! {} { v };

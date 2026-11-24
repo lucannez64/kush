@@ -27,7 +27,7 @@ total fn truth() -> Eq<i64, 0, 0> ! {} { refl::<i64>(0) }
 
 fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let five: i64 = 5;
     keep(five, refl::<i64>(five))       // symbolic local
         + keep(10, refl::<i64>(10))     // literal frozen at the call site

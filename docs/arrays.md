@@ -7,7 +7,7 @@ array context must have exactly that many elements of the expected type.
 #[noalloc]
 fn pair() -> [i64; 2] ! {} { [20, 22] }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     let values = pair();
     values[0] + values[1]
 }

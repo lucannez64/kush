@@ -47,13 +47,13 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 fn a_declared_operation_names_its_handler_effects() {
     agrees(
         r#"
-        effect Show: i64 -> i64 ! {io, panic};
-        fn core() -> i64 ! {Show, io, panic} { perform Show(1) + perform Show(2) }
-        fn main() -> i64 ! {io, alloc, panic} {
+        effect Show: i64 -> i64 ! {io};
+        fn core() -> i64 ! {Show, io} { perform Show(1) + perform Show(2) }
+        fn main() -> i64 ! {io, alloc} {
             handle Show: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {io, panic} { print_i64(x); resume(x * 10) } {
+            ) -> i64 ! {io} { print_i64(x); resume(x * 10) } {
                 core()
             }
         }"#,
@@ -64,20 +64,20 @@ fn a_declared_operation_names_its_handler_effects() {
     rejects(
         r#"
         effect Show: i64 -> i64 ! {io};
-        fn core() -> i64 ! {Show, panic} { perform Show(1) }
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn core() -> i64 ! {Show} { perform Show(1) }
+        fn main() -> i64 ! {} { 0 }"#,
         "requires effects {io}",
     );
     // A handler may not have more than the declared effects.
     rejects(
         r#"
-        effect Show: i64 -> i64 ! {panic};
-        fn core() -> i64 ! {Show, panic} { perform Show(1) }
-        fn main() -> i64 ! {io, alloc, panic} {
+        effect Show: i64 -> i64 ! {alloc};
+        fn core() -> i64 ! {Show, alloc} { perform Show(1) }
+        fn main() -> i64 ! {io, alloc} {
             handle Show: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {io, panic} { print_i64(x); resume(x) } {
+            ) -> i64 ! {io} { print_i64(x); resume(x) } {
                 core()
             }
         }"#,
@@ -88,7 +88,7 @@ fn a_declared_operation_names_its_handler_effects() {
         r#"
         effect Other: i64 -> i64;
         effect Show: i64 -> i64 ! {Other};
-        fn main() -> i64 ! {panic} { 0 }"#,
+        fn main() -> i64 ! {} { 0 }"#,
         "built-in effects",
     );
 }
@@ -97,21 +97,21 @@ fn a_declared_operation_names_its_handler_effects() {
 fn a_capturing_handler_with_copyable_captures_serves_every_perform() {
     agrees(
         r#"
-        effect Tick: i64 -> i64 ! {io, panic};
+        effect Tick: i64 -> i64 ! {io};
         struct Pad { keys: i64, frames: i64 }
-        fn step(x: i64) -> i64 ! {Tick, io, panic} { perform Tick(x) }
-        fn core() -> i64 ! {Tick, io, panic} {
+        fn step(x: i64) -> i64 ! {Tick, io} { perform Tick(x) }
+        fn core() -> i64 ! {Tick, io} {
             let mut sum = 0;
             let mut i = 1;
             while i <= 3 { sum = sum + step(i); i = i + 1; }
             sum
         }
-        fn run(pad: &mut Pad, label: &Bytes) -> i64 ! {io, alloc, panic} {
+        fn run(pad: &mut Pad, label: &Bytes) -> i64 ! {io, alloc} {
             let mut seen = 0;
             let r = handle Tick: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {io, panic} {
+            ) -> i64 ! {io} {
                 pad.frames = pad.frames + 1;
                 seen = seen + x;
                 print_i64(Bytes.len(label) * 100 + pad.frames);
@@ -119,7 +119,7 @@ fn a_capturing_handler_with_copyable_captures_serves_every_perform() {
             } { core() };
             r + seen * 1000
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let mut pad = Pad { keys: 10, frames: 0 };
             let label = Bytes.from("ab");
             let r = run(&mut pad, &label);
@@ -137,13 +137,13 @@ fn handler_state_stays_borrowed_while_the_body_runs() {
     rejects(
         r#"
         effect Tick: i64 -> i64;
-        fn core() -> i64 ! {Tick, panic} { perform Tick(1) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn core() -> i64 ! {Tick} { perform Tick(1) }
+        fn main() -> i64 ! {alloc} {
             let mut count = 0;
             handle Tick: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { count = count + x; resume(x) } {
+            ) -> i64 ! {} { count = count + x; resume(x) } {
                 count = 5;
                 core()
             }
@@ -154,8 +154,8 @@ fn handler_state_stays_borrowed_while_the_body_runs() {
     let program = check(
         r#"
         effect Op: i64 -> i64;
-        fn a() -> i64 ! {Op, panic} { perform Op(1) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn a() -> i64 ! {Op} { perform Op(1) }
+        fn main() -> i64 ! {alloc} {
             let n = Box.new(10);
             handle Op: i64 -> i64 with fn(
                 x: i64,
@@ -175,8 +175,8 @@ fn captured_references_are_scoped_borrows() {
     rejects(
         r#"
         struct Pad { keys: i64 }
-        fn f(pad: &mut Pad) -> i64 ! {alloc, panic} {
-            let k = fn(x: i64) -> i64 ! {panic} { pad.keys = pad.keys + x; pad.keys };
+        fn f(pad: &mut Pad) -> i64 ! {alloc} {
+            let k = fn(x: i64) -> i64 ! {} { pad.keys = pad.keys + x; pad.keys };
             pad.keys = 7;
             k(1)
         }
@@ -186,8 +186,8 @@ fn captured_references_are_scoped_borrows() {
     rejects(
         r#"
         struct Pad { keys: i64 }
-        fn f(pad: &Pad) -> once fn(i64) -> i64 ! {panic} ! {alloc, panic} {
-            fn(x: i64) -> i64 ! {panic} { pad.keys + x }
+        fn f(pad: &Pad) -> once fn(i64) -> i64 ! {} ! {alloc} {
+            fn(x: i64) -> i64 ! {} { pad.keys + x }
         }
         fn main() -> i64 ! {} { 0 }"#,
         "must be called immediately or bound directly to a local",
@@ -195,10 +195,10 @@ fn captured_references_are_scoped_borrows() {
     rejects(
         r#"
         struct Pad { v: Vec<i64> }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let p = Pad { v: Vec.new() };
             let r = &p;
-            let k = fn(x: i64) -> i64 ! {panic} { Vec.len(&r.v) + x };
+            let k = fn(x: i64) -> i64 ! {} { Vec.len(&r.v) + x };
             let q = p;
             k(1)
         }"#,
@@ -207,7 +207,7 @@ fn captured_references_are_scoped_borrows() {
     agrees(
         r#"
         struct Pad { keys: i64 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut p = Pad { keys: 1 };
             let r = &mut p;
             let k = fn(x: i64) -> i64 ! {} { r.keys = x; x };
@@ -226,8 +226,8 @@ fn buffers_travel_through_an_operation_and_back() {
     // carried around a loop.
     agrees(
         r#"
-        effect Fill: Vec<i64> -> Vec<i64> ! {alloc, panic};
-        fn core() -> i64 ! {Fill, alloc, panic} {
+        effect Fill: Vec<i64> -> Vec<i64> ! {alloc};
+        fn core() -> i64 ! {Fill, alloc} {
             let mut buffer: Vec<i64> = Vec.with_capacity(4);
             let mut turn = 0;
             let mut sum = 0;
@@ -239,12 +239,12 @@ fn buffers_travel_through_an_operation_and_back() {
             }
             sum
         }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut calls = 0;
             handle Fill: Vec<i64> -> Vec<i64> with fn(
                 v: Vec<i64>,
                 resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
-            ) -> Vec<i64> ! {alloc, panic} {
+            ) -> Vec<i64> ! {alloc} {
                 calls = calls + 1;
                 resume(v.push(calls).push(calls))
             } { core() }

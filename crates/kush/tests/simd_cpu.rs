@@ -6,10 +6,10 @@ const PROBE: &str = "use std.cpu;
      fn bit<T>(token: Option<T>) -> i64 ! {} {
          match token { Option.Some(_) => 1, Option.None => 0 }
      }
-     fn features() -> i64 ! {panic} {
+     fn features() -> i64 ! {} {
          bit(cpu.ssse3()) + 2 * bit(cpu.sse41()) + 4 * bit(cpu.avx2()) + 8 * bit(cpu.sha())
      }
-     fn main() -> i64 ! {io, panic} { print_i64(features()); 0 }";
+     fn main() -> i64 ! {io} { print_i64(features()); 0 }";
 
 fn reference(source: &str) -> String {
     let program = check(source).unwrap_or_else(|error| panic!("{error:?}"));
@@ -101,7 +101,7 @@ fn tokens_are_copyable_and_cannot_be_forged() {
         "use std.cpu;
          use std.option.Option;
          fn needs(token: &cpu.Sha) -> i64 ! {} { 1 }
-         fn main() -> i64 ! {panic} {
+         fn main() -> i64 ! {} {
              match cpu.sha() {
                  Option.Some(sha) => { let copy = sha; needs(&sha) + needs(&copy) - 2 },
                  Option.None => 0,
@@ -153,8 +153,8 @@ fn a_root_module_cannot_stand_in_for_std() {
     );
     rejects(
         "module std.x86;
-         pub fn sha256msg1(a: i64, b: i64) -> i64 ! {panic} { a + b }
-         fn main() -> i64 ! {panic} { sha256msg1(1, 2) }",
+         pub fn sha256msg1(a: i64, b: i64) -> i64 ! {} { a + b }
+         fn main() -> i64 ! {} { sha256msg1(1, 2) }",
     );
     rejects("module std; fn main() -> i64 ! {} { 0 }");
 }

@@ -60,7 +60,7 @@ use std.web.Request;
 use std.web.Responder;
 use std.web.Response;
 
-fn hello(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+fn hello(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
     if req.path_is(&Bytes.from("/hello")) {
         res.text(200, &Bytes.from("hi"))
     } else {
@@ -68,15 +68,15 @@ fn hello(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
     }
 }
 
-fn data(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+fn data(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
     res.json(201, &Bytes.from("{\"ok\":true}"))
 }
 
-fn empty(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+fn empty(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
     res.status(204)
 }
 
-fn streamed(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+fn streamed(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
     let mut stream = res.stream(200, &Bytes.from("text/csv"));
     stream = stream.send(&Bytes.from("a,b\n"));
     stream = stream.send(&Bytes.from(""));
@@ -84,7 +84,7 @@ fn streamed(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend}
     stream.finish()
 }
 
-fn injected(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+fn injected(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
     res.reply(Response {
         status: 200,
         content_type: Bytes.from("text/html\r\nSet-Cookie: stolen=1"),
@@ -92,7 +92,7 @@ fn injected(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend}
     })
 }
 
-fn echo(req: &Request) -> Response ! {io, alloc, panic, suspend} {
+fn echo(req: &Request) -> Response ! {io, alloc, suspend} {
     let mut body = req.path();
     body = Bytes.push(body, 124);
     let query = req.query();
@@ -109,11 +109,11 @@ fn echo(req: &Request) -> Response ! {io, alloc, panic, suspend} {
     Response { status: 200, content_type: Bytes.from("text/plain"), body: body }
 }
 
-fn wrapped(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+fn wrapped(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
     web.answer(req, res, echo)
 }
 
-fn run(req: &Request, handler: fn(&Request, Responder) -> Unit ! {io, alloc, panic, suspend}) -> Unit ! {io, alloc, panic, suspend} {
+fn run(req: &Request, handler: fn(&Request, Responder) -> Unit ! {io, alloc, suspend}) -> Unit ! {io, alloc, suspend} {
     match web.capture(req, handler) {
         Result.Ok(out) => { let _ = io.write(io.stdout(), &out); },
         Result.Err(code) => print_i64(-code),
@@ -121,7 +121,7 @@ fn run(req: &Request, handler: fn(&Request, Responder) -> Unit ! {io, alloc, pan
     let _ = io.write(io.stdout(), &Bytes.from("|\n"));
 }
 
-fn main() -> i64 ! {io, alloc, panic, suspend} {
+fn main() -> i64 ! {io, alloc, suspend} {
     let none = Bytes.with_capacity(0);
     run(&web.request_for(Method.Get, &Bytes.from("/hello?x=1"), Bytes.copy(&none)), hello);
     run(&web.request_for(Method.Get, &Bytes.from("/nope"), Bytes.copy(&none)), hello);
@@ -168,27 +168,27 @@ HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 15\r\nConnection:
 fn a_responder_is_answered_exactly_once() {
     let prelude = "use std.web;\nuse std.web.Request;\nuse std.web.Responder;\n";
     for (body, message) in [
-        ("fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} { }", "linear value is not consumed"),
+        ("fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} { }", "linear value is not consumed"),
         (
-            "fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+            "fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
                  if req.path_is(&Bytes.from(\"/\")) { res.status(200) }
              }",
             "linear",
         ),
         (
-            "fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+            "fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
                  res.status(200); res.status(500)
              }",
             "moved",
         ),
         (
-            "fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+            "fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
                  let s = res.stream(200, &Bytes.from(\"text/plain\"));
              }",
             "linear value is not consumed",
         ),
         (
-            "fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, panic, suspend} {
+            "fn h(req: &Request, res: Responder) -> Unit ! {io, alloc, suspend} {
                  let forged = web.Responder { fd: 1, head_only: false, keep_alive: true, chunked: true, timeout_ms: 0 };
                  forged.status(200); res.status(200)
              }",

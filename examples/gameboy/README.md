@@ -115,9 +115,9 @@ Some choices that show the language:
   `emulator.run(m)`, that performs three declared operations per frame:
 
   ```kush
-  pub effect Buttons: Unit -> i64 ! {io, alloc, panic};                // held buttons, -1 stops
-  pub effect Present: Vec<u8> -> (Vec<u8>, Bool) ! {io, alloc, panic}; // a frame, lent and given back
-  pub effect Play: Vec<i64> -> Vec<i64> ! {io, alloc, panic};          // the frame's sound, lent and given back
+  pub effect Buttons: Unit -> i64 ! {io, alloc};                // held buttons, -1 stops
+  pub effect Present: Vec<u8> -> (Vec<u8>, Bool) ! {io, alloc}; // a frame, lent and given back
+  pub effect Play: Vec<i64> -> Vec<i64> ! {io, alloc};          // the frame's sound, lent and given back
   ```
 
   The window, the terminal, the headless runner and a test are each a few

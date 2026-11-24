@@ -16,27 +16,27 @@ const LIB: &str = "module app.lib;
 
 pub struct Pair { pub a: i64, pub b: i64 }
 
-pub fn at(v: &Vec<i64>, i: i64) -> i64 ! {panic} { v[i] }
-fn add8(a: u8, b: u8) -> u8 ! {panic} { a + b }
-pub fn pick(v: &Vec<i64>, i: i64, erased ok: { 0 <= i && i < 4 }) -> i64 ! {panic} { v[i] }
-pub fn refined(v: &mut Vec<u8> where len >= 8, i: i64) -> u8 ! {panic} { v[i] }
-pub fn flag(b: Bool, x: i8) -> i8 ! {panic} { if b { x - 1 } else { x } }
-pub fn first(s: &[i64], i: i64) -> i64 ! {panic} { s[i] }
-pub fn bytes(b: &Bytes, i: i64) -> i64 ! {panic} { Bytes.len(b) * 0x10 + i * 3 }
-pub fn sum(p: Pair) -> i64 ! {panic} { p.a + p.b }
+pub fn at(v: &Vec<i64>, i: i64) -> i64 ! {} { v[i] }
+fn add8(a: u8, b: u8) -> u8 ! {} { a + b }
+pub fn pick(v: &Vec<i64>, i: i64, erased ok: { 0 <= i && i < 4 }) -> i64 ! {} { v[i] }
+pub fn refined(v: &mut Vec<u8> where len >= 8, i: i64) -> u8 ! {} { v[i] }
+pub fn flag(b: Bool, x: i8) -> i8 ! {} { if b { x - 1 } else { x } }
+pub fn first(s: &[i64], i: i64) -> i64 ! {} { s[i] }
+pub fn bytes(b: &Bytes, i: i64) -> i64 ! {} { Bytes.len(b) * 0x10 + i * 3 }
+pub fn sum(p: Pair) -> i64 ! {} { p.a + p.b }
 pub struct Secret { n: i64 }
-pub fn reveal(s: Secret) -> i64 ! {panic} { s.n + 1 }
-pub fn twice<T>(x: i64, t: T) -> i64 ! {panic} { x + x }
-pub fn calls(x: i64) -> i64 ! {panic} { add8(1, 2); x * 7 }
+pub fn reveal(s: Secret) -> i64 ! {} { s.n + 1 }
+pub fn twice<T>(x: i64, t: T) -> i64 ! {} { x + x }
+pub fn calls(x: i64) -> i64 ! {} { add8(1, 2); x * 7 }
 #[linear]
 pub struct Token { pub n: i64 }
-pub fn mint(x: i64) -> Token ! {panic} { Token { n: x + 1 } }
+pub fn mint(x: i64) -> Token ! {} { Token { n: x + 1 } }
 pub fn spend(t: Token) -> i64 ! {} { let Token { n } = t; n }
 ";
 
 const MAIN: &str = "module app;
 use app.lib;
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let mut v: Vec<i64> = Vec.new();
     v = v.push(1);
     lib.at(&v, 0) + lib.sum(lib.Pair { a: 1, b: 2 }) + lib.twice(1, true) + lib.calls(1)

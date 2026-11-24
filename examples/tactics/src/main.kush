@@ -30,7 +30,7 @@ fn say(message: &Bytes) -> Unit ! {io} {
     }
 }
 
-fn line(label: &Bytes, value: Bytes) -> Unit ! {io, alloc, panic} {
+fn line(label: &Bytes, value: Bytes) -> Unit ! {io, alloc} {
     let mut out = Bytes.with_capacity(label.len() + value.len() + 1);
     let mut i = 0;
     while i < label.len() {
@@ -45,18 +45,18 @@ fn line(label: &Bytes, value: Bytes) -> Unit ! {io, alloc, panic} {
     say(&out.push(10));
 }
 
-fn usage() -> i64 ! {io, alloc, panic} {
+fn usage() -> i64 ! {io, alloc} {
     say(&Bytes.from("usage: tactics [--kcore] FORMULA\n  e.g. tactics \"(A -> B) -> (B -> C) -> A -> C\"\n"));
     2
 }
 
-fn argument(i: i64) -> Result<Bytes, i64> ! {io, alloc, panic} {
+fn argument(i: i64) -> Result<Bytes, i64> ! {io, alloc} {
     env.arg(i, Bytes.with_capacity(4096))
 }
 
 // The kernel and the search recurse; give them room.
 #[stack_size(256)]
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let count = match env.arg_count() {
         Result.Ok(count) => count,
         Result.Err(_) => 0,
@@ -123,7 +123,7 @@ fn main() -> i64 ! {io, alloc, panic} {
     }
 }
 
-fn put(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
+fn put(out: Bytes, value: &Bytes) -> Bytes ! {alloc} {
     let mut out = out;
     let mut i = 0;
     while i < value.len() {

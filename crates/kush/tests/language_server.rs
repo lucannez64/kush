@@ -53,11 +53,11 @@ fn project() -> (Scratch, PathBuf, PathBuf, PathBuf) {
     );
     let main = scratch.write(
         "src/main.kush",
-        "module demo;\n\nuse demo.util;\n\nfn main() -> i64 ! {panic} {\n    util.answer()\n}\n",
+        "module demo;\n\nuse demo.util;\n\nfn main() -> i64 ! {} {\n    util.answer()\n}\n",
     );
     let util = scratch.write(
         "src/util.kush",
-        "module demo.util;\n\npub fn answer() -> i64 ! {panic} {\n    42\n}\n",
+        "module demo.util;\n\npub fn answer() -> i64 ! {} {\n    42\n}\n",
     );
     let root = scratch.path.clone();
     (scratch, root, main, util)
@@ -261,7 +261,7 @@ fn read_message<R: BufRead>(reader: &mut R) -> Option<Value> {
 fn editor_symbols_semantic_tokens_and_hover_are_offered_for_unsaved_text() {
     let (_scratch, root, main, _util) = project();
     let main_uri = path_to_uri(&main);
-    let text = "module demo;\n\n// explains\nfn main() -> i64 ! {panic} {\n    let answer = 42;\n    answer\n}\n";
+    let text = "module demo;\n\n// explains\nfn main() -> i64 ! {io} {\n    let answer = 42;\n    answer\n}\n";
     let mut client = Client::spawn(&root);
     client.initialize(&root);
     client.open(&main_uri, 1, text);
@@ -301,7 +301,7 @@ fn editor_symbols_semantic_tokens_and_hover_are_offered_for_unsaved_text() {
         (20, [0, 3, 4]),
         (25, [0, 10, 3]),
         (30, [0, 4, 1]),
-        (35, [0, 3, 5]),
+        (35, [0, 3, 2]),
         (40, [1, 4, 3]),
         (45, [0, 4, 6]),
         (50, [0, 9, 2]),
@@ -311,7 +311,7 @@ fn editor_symbols_semantic_tokens_and_hover_are_offered_for_unsaved_text() {
     }
     // Token types per block: keyword, namespace, comment, keyword, function,
     // type, operator (the `!` that opens the effect row), type (the row's
-    // `panic` operation), keyword, variable, number.
+    // `io` effect), keyword, variable, number.
     let types: Vec<u64> = data
         .chunks(5)
         .map(|block| block[3].as_u64().unwrap())
@@ -334,7 +334,7 @@ fn project_diagnostics_definition_unicode_and_clean_shutdown() {
     // Unsaved broken text must be diagnosed against the open document and its
     // version, without writing it to disk.
     let broken =
-        "module demo;\n\nuse demo.util;\n\nfn main() -> i64 ! {panic} {\n    util.missing()\n}\n";
+        "module demo;\n\nuse demo.util;\n\nfn main() -> i64 ! {} {\n    util.missing()\n}\n";
     client.open(&main_uri, 1, broken);
     let published = client.receive();
     assert_eq!(published["method"], "textDocument/publishDiagnostics");
@@ -393,8 +393,7 @@ fn project_diagnostics_definition_unicode_and_clean_shutdown() {
     assert_eq!(response["result"]["uri"], util_uri);
 
     // Definition for a local binding in the same file.
-    let local =
-        "module demo;\n\nfn main() -> i64 ! {panic} {\n    let answer = 42;\n    answer\n}\n";
+    let local = "module demo;\n\nfn main() -> i64 ! {} {\n    let answer = 42;\n    answer\n}\n";
     client.change(&main_uri, 3, local);
     assert!(
         client.receive()["params"]["diagnostics"]
@@ -455,7 +454,7 @@ fn project_diagnostics_definition_unicode_and_clean_shutdown() {
     // Unicode before an identifier: the published UTF-16 column must count the
     // surrogate pair in the preceding string literal.
     let unicode_bad =
-        "module demo;\nfn main() -> i64 ! {panic} {\n    let text = \"😀\"; missing()\n}\n";
+        "module demo;\nfn main() -> i64 ! {} {\n    let text = \"😀\"; missing()\n}\n";
     client.change(&main_uri, 4, unicode_bad);
     let published = client.receive();
     assert_eq!(published["params"]["version"], 4);
@@ -527,7 +526,7 @@ fn unsaved_imported_module_diagnostics_are_published_and_cleared() {
 
     // The imported module is open with invalid unsaved text. The entry is not
     // rewritten; its project analysis reports the error on the utility module.
-    let broken = "module demo.util;\n\npub fn answer() -> i64 ! {panic} {\n    missing()\n}\n";
+    let broken = "module demo.util;\n\npub fn answer() -> i64 ! {} {\n    missing()\n}\n";
     client.open(&util_uri, 1, broken);
     let published = client.receive_diagnostics_for(&util_uri);
     assert_eq!(published["params"]["version"], 1);
@@ -580,8 +579,8 @@ fn unsaved_imported_module_resolves_without_touching_disk() {
     let extra = root.join("src/extra.kush");
     let extra_uri = path_to_uri(&extra);
     let main_text =
-        "module demo;\n\nuse demo.extra;\n\nfn main() -> i64 ! {panic} {\n    extra.value()\n}\n";
-    let extra_text = "module demo.extra;\n\npub fn value() -> i64 ! {panic} {\n    7\n}\n";
+        "module demo;\n\nuse demo.extra;\n\nfn main() -> i64 ! {} {\n    extra.value()\n}\n";
+    let extra_text = "module demo.extra;\n\npub fn value() -> i64 ! {} {\n    7\n}\n";
 
     let mut client = Client::spawn(&root);
     client.initialize(&root);
@@ -639,7 +638,7 @@ fn local_dependencies_supply_definitions_and_unsaved_diagnostics() {
     );
     let main = scratch.write(
         "src/main.kush",
-        "module demo;\n\nuse words;\n\nfn main() -> i64 ! {panic} {\n    words.answer()\n}\n",
+        "module demo;\n\nuse words;\n\nfn main() -> i64 ! {} {\n    words.answer()\n}\n",
     );
     scratch.write(
         "deps/words/Kush.toml",
@@ -647,7 +646,7 @@ fn local_dependencies_supply_definitions_and_unsaved_diagnostics() {
     );
     let words = scratch.write(
         "deps/words/src/lib.kush",
-        "module words;\n\npub fn answer() -> i64 ! {panic} {\n    42\n}\n",
+        "module words;\n\npub fn answer() -> i64 ! {} {\n    42\n}\n",
     );
     let root = scratch.path.clone();
     let main_text = fs::read_to_string(&main).unwrap();
@@ -695,7 +694,7 @@ fn local_dependencies_supply_definitions_and_unsaved_diagnostics() {
     client.open(
         &words_uri,
         1,
-        "module words;\n\npub fn answer() -> i64 ! {panic} {\n    missing()\n}\n",
+        "module words;\n\npub fn answer() -> i64 ! {} {\n    missing()\n}\n",
     );
     let published = client.receive_diagnostics_for(&words_uri);
     assert_eq!(published["params"]["version"], 1);
@@ -721,7 +720,7 @@ fn formatting_is_the_documented_whitespace_only_edit() {
     let (scratch, root, main, _util) = project();
     let original = fs::read_to_string(&main).unwrap();
     let main_uri = path_to_uri(&main);
-    let unformatted = "module demo;\n\nfn main() -> i64 ! {panic} {\n    42   \n}";
+    let unformatted = "module demo;\n\nfn main() -> i64 ! {} {\n    42   \n}";
     let mut client = Client::spawn(&root);
     client.initialize(&root);
     client.open(&main_uri, 1, unformatted);
@@ -746,7 +745,7 @@ fn formatting_is_the_documented_whitespace_only_edit() {
     assert_eq!(edits.len(), 1);
     assert_eq!(
         edits[0]["newText"],
-        "module demo;\n\nfn main() -> i64 ! {panic} {\n    42\n}\n"
+        "module demo;\n\nfn main() -> i64 ! {} {\n    42\n}\n"
     );
     assert_eq!(fs::read_to_string(&main).unwrap(), original);
 
@@ -803,7 +802,7 @@ fn unsaved_entry_headers_and_named_import_name_ranges_match_project_checks() {
     client.change(
         &main_uri,
         3,
-        "module demo;\nuse demo.util.answer;\nfn main() -> i64 ! {panic} { answer() }\n",
+        "module demo;\nuse demo.util.answer;\nfn main() -> i64 ! {} { answer() }\n",
     );
     assert_eq!(
         client.receive_diagnostics_for(&main_uri)["params"]["diagnostics"],
@@ -857,14 +856,14 @@ fn symlink_aliases_clear_old_diagnostics_and_keep_unsaved_document_identity() {
 
     let new_path = alias.join("src/new.kush");
     let new_uri = path_to_uri(&new_path);
-    let new_text = "module demo.new;\npub fn value() -> i64 ! {panic} { 42 }\n";
+    let new_text = "module demo.new;\npub fn value() -> i64 ! {} { 42 }\n";
     client.open(&new_uri, 1, new_text);
     client.receive_diagnostics_for(&new_uri);
     fs::write(&new_path, new_text).unwrap();
     client.change(
         &new_uri,
         2,
-        "module demo.new;\npub fn value() -> i64 ! {panic} { missing() }\n",
+        "module demo.new;\npub fn value() -> i64 ! {} { missing() }\n",
     );
     let diagnostic = client.receive_diagnostics_for(&new_uri);
     assert_eq!(diagnostic["params"]["version"], 2);
@@ -898,15 +897,15 @@ fn nested_projects_resolve_imports_from_the_files_manifest() {
     );
     let main = scratch.write(
         "app/src/main.kush",
-        "module demo;\n\nuse demo.util;\n\nfn main() -> i64 ! {panic} {\n    util.answer()\n}\n",
+        "module demo;\n\nuse demo.util;\n\nfn main() -> i64 ! {} {\n    util.answer()\n}\n",
     );
     let util = scratch.write(
         "app/src/util.kush",
-        "module demo.util;\n\npub fn answer() -> i64 ! {panic} {\n    42\n}\n",
+        "module demo.util;\n\npub fn answer() -> i64 ! {} {\n    42\n}\n",
     );
     let tests = scratch.write(
         "app/tests/main.kush",
-        "module demo.tests.main;\n\nuse demo.util;\n\nfn helper() -> i64 ! {panic} {\n    util.answer()\n}\n",
+        "module demo.tests.main;\n\nuse demo.util;\n\nfn helper() -> i64 ! {} {\n    util.answer()\n}\n",
     );
     let other = scratch.write(
         "lib/Kush.toml",
@@ -915,11 +914,11 @@ fn nested_projects_resolve_imports_from_the_files_manifest() {
     let _ = other;
     let lib = scratch.write(
         "lib/src/lib.kush",
-        "module other;\n\nuse other.part;\n\npub fn value() -> i64 ! {panic} {\n    part.seven()\n}\n",
+        "module other;\n\nuse other.part;\n\npub fn value() -> i64 ! {} {\n    part.seven()\n}\n",
     );
     scratch.write(
         "lib/src/part.kush",
-        "module other.part;\n\npub fn seven() -> i64 ! {panic} {\n    7\n}\n",
+        "module other.part;\n\npub fn seven() -> i64 ! {} {\n    7\n}\n",
     );
 
     let mut client = Client::spawn(&scratch.path);

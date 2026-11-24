@@ -58,7 +58,7 @@ fn agrees(source: &str, expected: i64) -> MemoryStats {
 
 #[test]
 fn checked_box_reuse_preserves_the_allocation_and_returns_a_new_payload() {
-    let source = "fn main() -> i64 ! {alloc, panic} {
+    let source = "fn main() -> i64 ! {alloc} {
         let mut owner = Box.new(0);
         let mut i = 0;
         while i < 100 {
@@ -77,7 +77,7 @@ fn checked_box_reuse_preserves_the_allocation_and_returns_a_new_payload() {
     // Measured before/after: replacing each reuse with Box.new allocates the
     // initial box plus 100 replacements in the same workload.
     let replaced = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut owner = Box.new(0);
             let mut i = 0;
             while i < 100 {
@@ -98,7 +98,7 @@ fn box_reuse_drops_the_old_affine_payload_exactly_once_and_allows_narrowing() {
     // The old payload is an owned Box<i64>; it must be released, not leaked or
     // double-freed, while the outer allocation is kept.
     let stats = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let inner = Box.new(1);
             let owner = Box.new(inner);
             let owner = Box.reuse(owner, 42);
@@ -112,7 +112,7 @@ fn box_reuse_drops_the_old_affine_payload_exactly_once_and_allows_narrowing() {
 
     // A wider old layout can safely store a narrower new payload.
     let stats = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let owner: Box<[i64; 2]> = Box.new([20, 22]);
             let owner: Box<i64> = Box.reuse(owner, 42);
             Box.take(owner)
@@ -126,7 +126,7 @@ fn box_reuse_drops_the_old_affine_payload_exactly_once_and_allows_narrowing() {
 fn box_reuse_rejects_linear_payloads_and_wider_layouts() {
     rejects(
         "#[linear] enum Ticket { Live }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let owner = Box.new(Ticket.Live);
             let owner = Box.reuse(owner, Ticket.Live);
             match Box.take(owner) { Ticket.Live => 42 }
@@ -134,7 +134,7 @@ fn box_reuse_rejects_linear_payloads_and_wider_layouts() {
         "cannot implicitly drop the linear payload",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let owner: Box<i64> = Box.new(1);
             let owner: Box<[i64; 2]> = Box.reuse(owner, [1, 2]);
             42
@@ -144,7 +144,7 @@ fn box_reuse_rejects_linear_payloads_and_wider_layouts() {
     // A linear new payload keeps its obligation on the returned owner.
     rejects(
         "#[linear] enum Ticket { Live }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let owner = Box.reuse(Box.new(0), Ticket.Live);
             42
          }",
@@ -155,7 +155,7 @@ fn box_reuse_rejects_linear_payloads_and_wider_layouts() {
 #[test]
 fn box_reuse_propagates_binding_obligations_and_rejects_borrow_conflicts() {
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let value: Box<i64> @[1] = Box.new(1);
             let owner = Box.reuse(value, 2);
             42
@@ -163,7 +163,7 @@ fn box_reuse_propagates_binding_obligations_and_rejects_borrow_conflicts() {
         "linear value is not consumed",
     );
     agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let value: Box<i64> @[1] = Box.new(1);
             let owner = Box.reuse(value, 2);
             Box.take(owner)
@@ -171,10 +171,10 @@ fn box_reuse_propagates_binding_obligations_and_rejects_borrow_conflicts() {
         2,
     );
     rejects(
-        "fn both(r: &Box<i64>, o: Box<i64>) -> i64 ! {panic} {
+        "fn both(r: &Box<i64>, o: Box<i64>) -> i64 ! {} {
             Box.read(r) + Box.take(o)
          }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let owner = Box.new(1);
             both(&owner, Box.reuse(owner, 2))
          }",
@@ -183,7 +183,7 @@ fn box_reuse_propagates_binding_obligations_and_rejects_borrow_conflicts() {
     // A slice view keeps the vector owner unavailable for an in-place map.
     rejects(
         "fn id(x: i64) -> i64 ! {} { x }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let view: &[i64] = &values[..];
@@ -199,12 +199,12 @@ fn pending_reuse_owner_is_cleaned_once_on_later_question_mark_or_return() {
     let stats = agrees(
         "enum Result<T, E> { Ok(T), Err(E) }
          fn bad() -> Result<i64, i64> ! {} { Err(7) }
-         fn work(r: Result<i64, i64>) -> Result<i64, i64> ! {alloc, panic} {
+         fn work(r: Result<i64, i64>) -> Result<i64, i64> ! {alloc} {
             let owner = Box.new(1);
             let owner = Box.reuse(owner, r?);
             Ok(Box.take(owner))
          }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             match work(bad()) { Ok(v) => v, Err(e) => e + 35 }
          }",
         42,
@@ -213,20 +213,20 @@ fn pending_reuse_owner_is_cleaned_once_on_later_question_mark_or_return() {
     assert_eq!(stats.deallocations, 1);
     assert_eq!(stats.reuses, 0);
     agrees(
-        "fn work(flag: Bool) -> i64 ! {alloc, panic} {
+        "fn work(flag: Bool) -> i64 ! {alloc} {
             let owner = Box.new(1);
             if flag { return 41; }
             Box.take(Box.reuse(owner, 42))
          }
-         fn main() -> i64 ! {alloc, panic} { work(false) }",
+         fn main() -> i64 ! {alloc} { work(false) }",
         42,
     );
 }
 
 #[test]
 fn map_in_place_preserves_storage_and_applies_first_class_functions() {
-    let source = "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
-        fn main() -> i64 ! {alloc, panic} {
+    let source = "fn inc(x: i64) -> i64 ! {} { x + 1 }
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             values = Vec.push(values, 2);
@@ -243,8 +243,8 @@ fn map_in_place_preserves_storage_and_applies_first_class_functions() {
 #[test]
 fn map_in_place_narrows_layouts_and_rejects_widening() {
     let stats = agrees(
-        "fn first(x: [i64; 2]) -> i64 ! {panic} { let [a, b] = x; a + b }
-         fn main() -> i64 ! {alloc, panic} {
+        "fn first(x: [i64; 2]) -> i64 ! {} { let [a, b] = x; a + b }
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<[i64; 2]> = Vec.new();
             values = Vec.push(values, [1, 2]);
             values = Vec.push(values, [3, 4]);
@@ -256,7 +256,7 @@ fn map_in_place_narrows_layouts_and_rejects_widening() {
     assert_eq!(stats.allocations, 1);
     rejects(
         "fn pair(x: i64) -> [i64; 2] ! {} { [x, x] }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let mapped: Vec<[i64; 2]> = Vec.map_in_place(values, pair);
@@ -269,7 +269,7 @@ fn map_in_place_narrows_layouts_and_rejects_widening() {
 #[test]
 fn reuse_and_map_respect_union_and_aggregate_widths() {
     let stats = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let owner: Box<i64 | Bool> = Box.new(41);
             let owner: Box<i64> = Box.reuse(owner, 42);
             Box.take(owner)
@@ -278,7 +278,7 @@ fn reuse_and_map_respect_union_and_aggregate_widths() {
     );
     assert_eq!(stats.reuses, 1);
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let owner: Box<i64> = Box.new(1);
             let owner: Box<i64 | Bool> = Box.reuse(owner, true);
             42
@@ -289,7 +289,7 @@ fn reuse_and_map_respect_union_and_aggregate_widths() {
         "fn narrow(value: i64 | Bool) -> i64 ! {} {
             match value { i64 @ n => n, Bool @ b => if b { 1 } else { 0 } }
          }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64 | Bool> = Vec.new();
             values = Vec.push(values, 41);
             values = Vec.push(values, true);
@@ -303,36 +303,36 @@ fn reuse_and_map_respect_union_and_aggregate_widths() {
 #[test]
 fn map_in_place_rejects_once_callbacks_and_linear_elements() {
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
-            let f: once fn(i64) -> i64 ! {panic} = fn(x: i64) -> i64 ! {panic} { x + 1 };
+            let f: once fn(i64) -> i64 ! {} = fn(x: i64) -> i64 ! {} { x + 1 };
             Vec.map_in_place(values, f)
          }",
         "once or linear-once callback cannot be duplicated",
     );
     rejects(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
-            let f: linear once fn(i64) -> i64 ! {panic} = fn(x: i64) -> i64 ! {panic} { x + 1 };
+            let f: linear once fn(i64) -> i64 ! {} = fn(x: i64) -> i64 ! {} { x + 1 };
             Vec.map_in_place(values, f)
          }",
         "once or linear-once callback cannot be duplicated",
     );
     rejects(
         "#[linear] enum Ticket { Live }
-         fn bad() -> i64 ! {alloc, panic} {
+         fn bad() -> i64 ! {alloc} {
             let values: Vec<Ticket> = Vec.new();
             42
          }
-         fn main() -> i64 ! {alloc, panic} { bad() }",
+         fn main() -> i64 ! {alloc} { bad() }",
         "linear",
     );
     // Grade contracts of copyable callback parameters are preserved.
     agrees(
-        "fn twice(x: i64 @[2]) -> i64 ! {panic} { x + x }
-         fn main() -> i64 ! {alloc, panic} {
+        "fn twice(x: i64 @[2]) -> i64 ! {} { x + x }
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 21);
             values = Vec.map_in_place(values, twice);
@@ -346,7 +346,7 @@ fn map_in_place_rejects_once_callbacks_and_linear_elements() {
 fn map_in_place_moves_owning_elements_into_callbacks() {
     let stats = agrees(
         "fn unwrap(owner: Box<i64>) -> i64 ! {} { Box.take(owner) }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<Box<i64>> = Vec.new();
             values = Vec.push(values, Box.new(1));
             values = Vec.push(values, Box.new(2));
@@ -362,12 +362,12 @@ fn map_in_place_moves_owning_elements_into_callbacks() {
 #[test]
 fn map_in_place_replaces_owned_elements_without_copying_owners() {
     let stats = agrees(
-        "fn bump(owner: Box<i64>) -> Box<i64> ! {panic} {
+        "fn bump(owner: Box<i64>) -> Box<i64> ! {} {
             let n = Box.read(&owner);
             Box.reuse(owner, n + 1)
          }
          fn unwrap(owner: Box<i64>) -> i64 ! {} { Box.take(owner) }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let mut values: Vec<Box<i64>> = Vec.new();
             values = Vec.push(values, Box.new(1));
             values = Vec.push(values, Box.new(2));
@@ -386,7 +386,7 @@ fn map_in_place_replaces_owned_elements_without_copying_owners() {
 fn map_in_place_zero_length_and_early_exit_clean_pending_owners() {
     let stats = agrees(
         "fn id(x: i64) -> i64 ! {} { x }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             let values: Vec<i64> = Vec.new();
             let values = Vec.map_in_place(values, id);
             Vec.len(&values) + 42
@@ -398,13 +398,13 @@ fn map_in_place_zero_length_and_early_exit_clean_pending_owners() {
     let stats = agrees(
         "enum Result<T, E> { Ok(T), Err(E) }
          fn bad() -> Result<fn(i64) -> i64 ! {}, i64> ! {} { Err(7) }
-         fn work(r: Result<fn(i64) -> i64 ! {}, i64>) -> Result<i64, i64> ! {alloc, panic} {
+         fn work(r: Result<fn(i64) -> i64 ! {}, i64>) -> Result<i64, i64> ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let mapped = Vec.map_in_place(values, r?);
             Ok(Vec.get(&mapped, 0))
          }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
             match work(bad()) { Ok(v) => v, Err(e) => e + 35 }
          }",
         42,
@@ -417,7 +417,7 @@ fn map_in_place_zero_length_and_early_exit_clean_pending_owners() {
 fn nested_pure_maps_fuse_and_effectful_maps_do_not() {
     let fused = "fn seven(x: i64) -> i64 ! {} { 7 }
         fn nine(x: i64) -> i64 ! {} { 9 }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             values = Vec.push(values, 2);
@@ -428,8 +428,8 @@ fn nested_pure_maps_fuse_and_effectful_maps_do_not() {
     assert_eq!(program.fusion_count(), 1);
     assert_eq!(agrees(fused, 99).fusions, 1);
 
-    let effectful = "fn noisy(x: i64) -> i64 ! {io, panic} { print_i64(x); x + 1 }
-        fn main() -> Unit ! {io, alloc, panic} {
+    let effectful = "fn noisy(x: i64) -> i64 ! {io} { print_i64(x); x + 1 }
+        fn main() -> Unit ! {io, alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             values = Vec.push(values, 2);
@@ -449,12 +449,12 @@ fn nested_pure_maps_fuse_and_effectful_maps_do_not() {
 #[test]
 fn noalloc_contracts_are_independent_of_reuse_and_fusion() {
     let source = "fn id(x: i64) -> i64 ! {} { x }
-        fn bump(owner: Box<i64>) -> Box<i64> ! {panic} {
+        fn bump(owner: Box<i64>) -> Box<i64> ! {} {
             let n = Box.read(&owner);
             Box.reuse(owner, n + 1)
         }
         fn same(values: Vec<i64>) -> Vec<i64> ! {} { Vec.map_in_place(values, id) }
-        fn main() -> i64 ! {alloc, panic} {
+        fn main() -> i64 ! {alloc} {
             let owner = bump(Box.new(41));
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
@@ -464,17 +464,17 @@ fn noalloc_contracts_are_independent_of_reuse_and_fusion() {
     let stats = agrees(source, 43);
     assert_eq!(stats.reuses, 1);
     rejects(
-        "fn make(x: i64) -> Box<i64> ! {alloc, panic} { Box.new(x) }
-         fn same(values: Vec<i64>) -> Vec<Box<i64>> ! {panic} {
+        "fn make(x: i64) -> Box<i64> ! {alloc} { Box.new(x) }
+         fn same(values: Vec<i64>) -> Vec<Box<i64>> ! {} {
             Vec.map_in_place(values, make)
          }
-         fn main() -> i64 ! {alloc, panic} { 42 }",
+         fn main() -> i64 ! {alloc} { 42 }",
         "requires effects {alloc}",
     );
     rejects(
         "#[noalloc]
-         fn bump(owner: Box<i64>) -> Box<i64> ! {alloc, panic} { Box.reuse(owner, 1) }
-         fn main() -> i64 ! {alloc, panic} { 42 }",
+         fn bump(owner: Box<i64>) -> Box<i64> ! {alloc} { Box.reuse(owner, 1) }
+         fn main() -> i64 ! {alloc} { 42 }",
         "#[noalloc] was removed",
     );
 }
@@ -498,7 +498,7 @@ fn allocation_report_is_stable_and_contains_all_observations() {
 #[test]
 fn reuse_cannot_discard_a_propagated_linear_owned_payload() {
     rejects(
-        "fn main()->i64 ! {alloc,panic} {let b:Box<i64> @[1]=Box.new(1);let wrapped=Box.new(b);let result=Box.reuse(wrapped,42);Box.take(result)}",
+        "fn main()->i64 ! {alloc} {let b:Box<i64> @[1]=Box.new(1);let wrapped=Box.new(b);let result=Box.reuse(wrapped,42);Box.take(result)}",
         "linear",
     );
 }
@@ -506,7 +506,7 @@ fn reuse_cannot_discard_a_propagated_linear_owned_payload() {
 #[test]
 fn in_place_callback_allocation_keeps_the_vector_in_peak_live_counts() {
     let stats = agrees(
-        "fn replace(x:Box<i64>)->Box<i64> ! {alloc,panic} {let next=Box.new(1);drop(x);next} fn main()->i64 ! {alloc,panic} {let v:Vec<Box<i64>> = [Box.new(0)];let mapped=Vec.map_in_place(v,replace);42}",
+        "fn replace(x:Box<i64>)->Box<i64> ! {alloc} {let next=Box.new(1);drop(x);next} fn main()->i64 ! {alloc} {let v:Vec<Box<i64>> = [Box.new(0)];let mapped=Vec.map_in_place(v,replace);42}",
         42,
     );
     assert_eq!(stats.peak_live, 3);
@@ -516,7 +516,7 @@ fn in_place_callback_allocation_keeps_the_vector_in_peak_live_counts() {
 #[test]
 fn in_place_maps_cannot_create_vectors_of_linear_elements() {
     rejects(
-        "#[linear] enum Token{Only} fn make(x:i64)->Token ! {} {Token.Only} fn main()->Unit ! {alloc,panic} {let v:Vec<i64> = [1];let mapped=Vec.map_in_place(v,make);}",
+        "#[linear] enum Token{Only} fn make(x:i64)->Token ! {} {Token.Only} fn main()->Unit ! {alloc} {let v:Vec<i64> = [1];let mapped=Vec.map_in_place(v,make);}",
         "linear result",
     );
 }

@@ -17,11 +17,11 @@ struct Counter { n: i64 }
 impl Counter {
     fn start(n: i64) -> Counter ! {} { Self { n: n } }
     fn value(&self) -> i64 ! {} { self.n }
-    fn bump(&mut self) -> Unit ! {panic} { self.n = self.n + 1; }
+    fn bump(&mut self) -> Unit ! {} { self.n = self.n + 1; }
     fn finish(self: Self) -> i64 ! {} { self.n }
 }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let mut c = Counter.start(40);
     c.bump();
     c.bump();
@@ -54,25 +54,25 @@ lifetimes).
 
 ```kush eval
 trait Shape {
-    fn area(self: Self) -> i64 ! {panic};
-    fn doubled(self: Self) -> i64 ! {panic} { self.area() * 2 }
+    fn area(self: Self) -> i64 ! {};
+    fn doubled(self: Self) -> i64 ! {} { self.area() * 2 }
 }
 
 struct Square { side: i64 }
 struct Rect { w: i64, h: i64 }
 
 impl Shape for Square {
-    fn area(self: Self) -> i64 ! {panic} { self.side * self.side }
+    fn area(self: Self) -> i64 ! {} { self.side * self.side }
 }
 
 impl Shape for Rect {
-    fn area(self: Self) -> i64 ! {panic} { self.w * self.h }
-    fn doubled(self: Self) -> i64 ! {panic} { self.w * self.h * 2 }
+    fn area(self: Self) -> i64 ! {} { self.w * self.h }
+    fn doubled(self: Self) -> i64 ! {} { self.w * self.h * 2 }
 }
 
-fn report<T: Shape>(shape: T) -> i64 ! {panic} { shape.doubled() }
+fn report<T: Shape>(shape: T) -> i64 ! {} { shape.doubled() }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(report(Square { side: 3 }) + report(Rect { w: 2, h: 3 }));
 }
 ```
@@ -86,11 +86,11 @@ two traits give a receiver the same method name, qualify the call:
 `value.Trait.method(...)`.
 
 ```kush reject
-trait Shape { fn area(self: Self) -> i64 ! {panic}; }
+trait Shape { fn area(self: Self) -> i64 ! {}; }
 struct Square { side: i64 }
-impl Shape for Square { fn area(self: Self) -> i64 ! {} { self.side } }
+impl Shape for Square { fn area(self: Self) -> i64 ! {io} { self.side } }
 fn main() -> i64 ! {} { 0 }
-// error: effect
+// error: does not match the trait signature exactly
 ```
 
 ## Generic traits, generic impls, associated items
@@ -108,7 +108,7 @@ and scalar associated constants (`const FACTOR: i64;`). They are written
 trait Scaled {
     type Out;
     const FACTOR: i64;
-    fn scaled(self: Self) -> Self.Out ! {panic};
+    fn scaled(self: Self) -> Self.Out ! {};
 }
 
 struct Point { x: i64 }
@@ -117,18 +117,18 @@ struct Wrapper<T> { value: T }
 impl Scaled for Point {
     type Out = i64;
     const FACTOR: i64 = 3;
-    fn scaled(self: Self) -> i64 ! {panic} { self.x * Self.FACTOR }
+    fn scaled(self: Self) -> i64 ! {} { self.x * Self.FACTOR }
 }
 
 impl<T> Scaled for Wrapper<T> {
     type Out = T;
     const FACTOR: i64 = 1;
-    fn scaled(self: Self) -> T ! {panic} { self.value }
+    fn scaled(self: Self) -> T ! {} { self.value }
 }
 
-fn reveal<T: Scaled>(value: T) -> T.Out ! {panic} { value.scaled() }
+fn reveal<T: Scaled>(value: T) -> T.Out ! {} { value.scaled() }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     print_i64(reveal(Point { x: 4 }) + reveal(Wrapper { value: 30 }));
 }
 ```
@@ -147,13 +147,13 @@ creation needs `alloc`. `&dyn Trait` and `&mut dyn Trait` borrow one. `dyn A
 + B` combines traits.
 
 ```kush eval
-trait Describe { fn describe(self: Self) -> i64 ! {panic}; }
+trait Describe { fn describe(self: Self) -> i64 ! {}; }
 struct A { x: i64 }
 struct B { y: i64 }
-impl Describe for A { fn describe(self: Self) -> i64 ! {panic} { self.x } }
-impl Describe for B { fn describe(self: Self) -> i64 ! {panic} { self.y * 10 } }
+impl Describe for A { fn describe(self: Self) -> i64 ! {} { self.x } }
+impl Describe for B { fn describe(self: Self) -> i64 ! {} { self.y * 10 } }
 
-fn main() -> Unit ! {io, panic} {
+fn main() -> Unit ! {io} {
     let first: dyn Describe = A { x: 2 };
     let second: dyn Describe = B { y: 4 };
     print_i64(first.describe() + second.describe());
@@ -176,7 +176,7 @@ reference through a generic type parameter (planned: FND-REF-POSITIONS):
 
 ```kush reject
 fn id<T>(x: T) -> T ! {} { x }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let s = "hi";
     let v = id::<&str>(s.as_str());
     0

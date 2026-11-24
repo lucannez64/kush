@@ -53,7 +53,7 @@ the same cost Kush already pays for `?`.
 
 ```text
 effect Fail: i64 -> Never;                 -- abortive operation
-fn parse(s: &Text) -> i64 ! {Fail, panic} { ... perform Fail(3) ... }
+fn parse(s: &Text) -> i64 ! {Fail} { ... perform Fail(3) ... }
 
 handle Fail: i64 -> Never with fn(code: i64) -> i64 ! {} { 0 - code } {
     parse(&input) + 1

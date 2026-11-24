@@ -63,7 +63,7 @@ fn owning_nested_and_generic_tuples_agree_natively() {
     agrees(
         "fn swap<T, U>(p: (T, U)) -> (U, T) ! {} { (p.1, p.0) }
         fn first<T>(p: (T, i64)) -> T ! {} { p.0 }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let pair = (1, 2);
             print_i64(pair.0);
             print_i64(pair.1);
@@ -88,7 +88,7 @@ fn owning_nested_and_generic_tuples_agree_natively() {
 #[test]
 fn tuple_unions_and_callable_elements_keep_representation_coercions() {
     agrees(
-        "fn classify(p: (i64 | Bool, i64)) -> i64 ! {panic} {
+        "fn classify(p: (i64 | Bool, i64)) -> i64 ! {} {
             match p.0 {
                 i64 @ n => n + p.1,
                 Bool @ b => if b { p.1 } else { -p.1 },
@@ -97,13 +97,13 @@ fn tuple_unions_and_callable_elements_keep_representation_coercions() {
         fn make(flag: Bool) -> (i64 | Bool, i64) ! {} {
             if flag { (1, 2) } else { (true, 3) }
         }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             print_i64(classify(make(true)));
             print_i64(classify(make(false)));
-            let f = fn(x: i64) -> i64 ! {panic} { x + 10 };
-            let callable: (fn(i64) -> i64 ! {panic}, i64) = (f, 32);
+            let f = fn(x: i64) -> i64 ! {} { x + 10 };
+            let callable: (fn(i64) -> i64 ! {}, i64) = (f, 32);
             print_i64(callable.0(callable.1));
-            let adapted: (once fn(i64) -> i64 ! {alloc, panic}, i64) = (f, 32);
+            let adapted: (once fn(i64) -> i64 ! {alloc}, i64) = (f, 32);
             let (once_f, n) = adapted;
             print_i64(once_f(n));
             print_i64(classify((5, 6)));
@@ -117,11 +117,11 @@ fn tuple_unions_and_callable_elements_keep_representation_coercions() {
 #[test]
 fn tuple_early_return_and_question_mark_stop_later_fields() {
     agrees(
-        "fn early() -> (i64, i64) ! {panic} { (return (4, 5), panic()) }
-        fn propagate(r: Result<i64, i64>) -> Result<(i64, i64), i64> ! {panic} {
+        "fn early() -> (i64, i64) ! {} { (return (4, 5), panic()) }
+        fn propagate(r: Result<i64, i64>) -> Result<(i64, i64), i64> ! {} {
             (r?, panic())
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let direct = early();
             print_i64(direct.0);
             print_i64(direct.1);
@@ -140,7 +140,7 @@ fn tuple_early_return_and_question_mark_stop_later_fields() {
 fn tuple_patterns_destructure_and_nested_projection() {
     agrees(
         "enum Shape { Pair(i64, i64), Empty }
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let nested = ((1, 2), (3, (4, 5)));
             let ((a, b), (c, (d, e))) = nested;
             print_i64(a + b + c + d + e);
@@ -201,7 +201,7 @@ fn tuple_arity_and_one_tuple_boundaries_are_explicit() {
 #[test]
 fn tuple_storage_of_borrows_and_tasks_stays_rejected() {
     rejects(
-        "fn main() -> Unit ! {panic} { let values: [i64; 2] = [1, 2]; let v = &values[..]; let p = (v, 1); }",
+        "fn main() -> Unit ! {} { let values: [i64; 2] = [1, 2]; let v = &values[..]; let p = (v, 1); }",
         "tuples cannot store references, slice views, or borrowed records",
     );
     rejects(
@@ -213,7 +213,7 @@ fn tuple_storage_of_borrows_and_tasks_stays_rejected() {
 #[test]
 fn owning_tuples_move_destructure_and_cleanup_exactly_once() {
     let source = format!(
-        "{PREFIX}fn main() -> Unit ! {{io, alloc, panic}} {{
+        "{PREFIX}fn main() -> Unit ! {{io, alloc}} {{
             let p: (String, (String, i64)) = (\"left\", (\"right\", 3));
             let (left, nested) = p;
             let (right, n) = nested;
@@ -241,7 +241,7 @@ fn tuple_linear_and_owned_field_laundering_is_rejected() {
         "linear value is not consumed before the function returns",
     );
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { let p = (\"owned\", 1); let s = p.0; }",
+        "fn main() -> Unit ! {alloc} { let p = (\"owned\", 1); let s = p.0; }",
         "cannot move owned field '0'",
     );
     rejects(

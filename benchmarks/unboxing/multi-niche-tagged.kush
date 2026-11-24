@@ -1,9 +1,9 @@
 enum E { A, B, Some(Bool) }
-fn make(i: i64) -> E ! {panic} {
+fn make(i: i64) -> E ! {} {
     let r = i % 4;
     if r == 0 { E.A } else { if r == 1 { E.B } else { E.Some(r == 2) } }
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let n = 4000000;
     let mut v: Vec<E> = Vec.with_capacity(n);
     let mut i = 0;

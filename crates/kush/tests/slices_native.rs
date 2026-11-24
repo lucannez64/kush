@@ -31,13 +31,13 @@ fn compare(source: &str) {
 fn array_views_sub_slices_and_dynamic_indexes_match_reference() {
     compare(
         r#"
-        fn sum(s: &[i64]) -> i64 ! {panic} {
+        fn sum(s: &[i64]) -> i64 ! {} {
             let mut acc = 0;
             let mut i = 0;
             while i < Slice.len(s) { acc = acc + Slice.get(s, i); i = i + 1; }
             acc
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let a: [i64; 5] = [10, 20, 30, 40, 50];
             let s: &[i64] = &a[1..4];
             print_i64(Slice.len(s)); print_i64(s[0]); print_i64(s[2]);
@@ -53,10 +53,10 @@ fn array_views_sub_slices_and_dynamic_indexes_match_reference() {
 fn vec_bytes_nested_and_non_i64_views_match_reference() {
     compare(
         r#"
-        fn head(s: &[i64], fallback: i64) -> i64 ! {panic} {
+        fn head(s: &[i64], fallback: i64) -> i64 ! {} {
             if Slice.len(s) > 0 { Slice.get(s, 0) } else { fallback }
         }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 10); v = Vec.push(v, 20); v = Vec.push(v, 30);
             let view: &[i64] = &v[1..];
@@ -83,7 +83,7 @@ fn proved_slice_access_matches_reference() {
         fn read(s: &[i64], i: i64, erased ok: { 0 <= i && i < Slice.len(s) }) -> i64 ! {} {
             Slice.at(s, i, _)
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let a: [i64; 3] = [7, 8, 9];
             let s: &[i64] = &a[..];
             if 0 <= 1 && 1 < Slice.len(s) { read(s, 1, _) } else { 0 }
@@ -96,7 +96,7 @@ fn proved_slice_access_matches_reference() {
 fn lexical_view_release_allows_later_owner_moves_natively() {
     compare(
         r#"
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let mut v: Vec<i64> = Vec.new();
             v = Vec.push(v, 1);
             { let s: &[i64] = &v[..]; print_i64(Slice.len(s)); }
@@ -119,8 +119,7 @@ fn out_of_bounds_slice_access_and_ranges_abort_natively() {
         r#"let a:[i64;2]=[1,2]; let i=2; let x=a[i];"#,
         r#"let a:[i64;3]=[1,2,3]; let start=2; let s=&a[start..start+2]; Slice.len(s);"#,
     ] {
-        let program =
-            executable::check(&format!("fn main() -> Unit ! {{io, panic}} {{{body}}}")).unwrap();
+        let program = executable::check(&format!("fn main() -> Unit ! {{io}} {{{body}}}")).unwrap();
         let binary = scratch.path().join("slices_failure");
         kush::native::build(&program, &binary).unwrap();
         let result = Command::new(binary)
@@ -144,7 +143,7 @@ fn try_get_matches_reference_for_arrays_vecs_and_bytes() {
         fn show(x: Option<i64>) -> i64 ! {io} {
             match x { Option.Some(value) => value, Option.None => -1 }
         }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             let a: [i64; 3] = [10, 20, 30];
             let s: &[i64] = &a[..];
             print_i64(show(Slice.try_get(s, 0)));
@@ -208,7 +207,7 @@ fn try_get_preserves_union_payload_layout_and_reversed_option_tags() {
                 Option.None => -1,
             }
         }
-        fn main() -> Unit ! {io, panic} {
+        fn main() -> Unit ! {io} {
             let values: [i64 | Bool; 2] = [42, true];
             let view = &values[..];
             print_i64(read(view, 0));

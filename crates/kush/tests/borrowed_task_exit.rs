@@ -46,17 +46,17 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 const NESTED: &str = r#"
 use std.task.TaskExit;
 struct Window<'a> { view: &'a [i64], start: i64 }
-fn make<'a>(window: Window<'a>) -> TaskExit<TaskExit<Window<'a>>> ! {alloc, panic, suspend} {
-    Task.scope(fn() -> TaskExit<TaskExit<Window<'a>>> ! {alloc, panic, suspend} {
-        let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                Task.join(Task.spawn(fn() -> Window<'a> ! {panic, suspend} { Task.yield(); window }))
+fn make<'a>(window: Window<'a>) -> TaskExit<TaskExit<Window<'a>>> ! {alloc, suspend} {
+    Task.scope(fn() -> TaskExit<TaskExit<Window<'a>>> ! {alloc, suspend} {
+        let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                Task.join(Task.spawn(fn() -> Window<'a> ! {suspend} { Task.yield(); window }))
             })
         });
         Task.join(t)
     })
 }
-fn read<'a>(e: TaskExit<TaskExit<Window<'a>>>) -> i64 ! {panic} {
+fn read<'a>(e: TaskExit<TaskExit<Window<'a>>>) -> i64 ! {} {
     match e {
         TaskExit.Completed(inner) => match inner {
             TaskExit.Completed(w) => Slice.get(w.view, w.start),
@@ -72,11 +72,11 @@ fn a_child_returns_a_joined_borrowed_exit() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                        Task.join(Task.spawn(fn() -> Window<'a> ! {panic, suspend} { Task.yield(); window }))
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                        Task.join(Task.spawn(fn() -> Window<'a> ! {suspend} { Task.yield(); window }))
                     })
                 });
                 match Task.join(t) {
@@ -88,7 +88,7 @@ fn a_child_returns_a_joined_borrowed_exit() {
                 }
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [5, 6, 7];
             run(Window { view: &data[..], start: 1 })
         }"#,
@@ -99,7 +99,7 @@ fn a_child_returns_a_joined_borrowed_exit() {
     agrees(
         &format!(
             "{NESTED}
-            fn main() -> i64 ! {{alloc, panic, suspend}} {{
+            fn main() -> i64 ! {{alloc, suspend}} {{
                 let mut data: [i64; 3] = [5, 6, 7];
                 let e = make(Window {{ view: &data[..], start: 2 }});
                 let r = read(e);
@@ -117,7 +117,7 @@ fn the_nested_exit_keeps_the_outer_storage_borrowed() {
     rejects(
         &format!(
             "{NESTED}
-            fn main() -> i64 ! {{alloc, panic, suspend}} {{
+            fn main() -> i64 ! {{alloc, suspend}} {{
                 let mut data: [i64; 3] = [5, 6, 7];
                 let e = make(Window {{ view: &data[..], start: 2 }});
                 data = [0, 0, 0];
@@ -129,7 +129,7 @@ fn the_nested_exit_keeps_the_outer_storage_borrowed() {
     rejects(
         &format!(
             "{NESTED}
-            fn main() -> i64 ! {{alloc, panic, suspend}} {{
+            fn main() -> i64 ! {{alloc, suspend}} {{
                 let mut data: [i64; 3] = [5, 6, 7];
                 let e = make(Window {{ view: &data[..], start: 2 }});
                 match e {{
@@ -147,12 +147,12 @@ fn the_nested_exit_keeps_the_outer_storage_borrowed() {
     rejects(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
                     let local: [i64; 2] = [8, 9];
-                    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                        Task.join(Task.spawn(fn() -> Window<'a> ! {panic, suspend} { Window { view: &local[..], start: 0 } }))
+                    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                        Task.join(Task.spawn(fn() -> Window<'a> ! {suspend} { Window { view: &local[..], start: 0 } }))
                     })
                 });
                 match Task.join(t) {
@@ -161,21 +161,21 @@ fn the_nested_exit_keeps_the_outer_storage_borrowed() {
                 }
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} { 0 }"#,
+        fn main() -> i64 ! {alloc, suspend} { 0 }"#,
         "",
     );
     // Only one level: a child cannot return a nested borrowed exit.
     rejects(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], start: i64 }
-        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<TaskExit<TaskExit<Window<'a>>>> = Task.spawn(fn() -> TaskExit<TaskExit<Window<'a>>> ! {panic, suspend} { panic() });
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t: Task<TaskExit<TaskExit<Window<'a>>>> = Task.spawn(fn() -> TaskExit<TaskExit<Window<'a>>> ! {suspend} { panic() });
                 Task.join(t);
                 0
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} { 0 }"#,
+        fn main() -> i64 ! {alloc, suspend} { 0 }"#,
         "a child task may return TaskExit<R> only for a borrowed record R",
     );
     // A joined exit still cannot be constructed by user code.
@@ -199,11 +199,11 @@ fn cancellation_never_exposes_a_dangling_view() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], owner: Vec<i64>, start: i64 }
-        fn run<'a>(view: &'a [i64]) -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                        let g: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {alloc, panic, suspend} {
+        fn run<'a>(view: &'a [i64]) -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                        let g: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {alloc, suspend} {
                             Task.yield();
                             Window { view: view, owner: [1, 2, 3], start: 1 }
                         });
@@ -211,9 +211,9 @@ fn cancellation_never_exposes_a_dangling_view() {
                         Task.join(g)
                     })
                 });
-                let u: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                        Task.join(Task.spawn(fn() -> Window<'a> ! {alloc, panic, suspend} {
+                let u: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                        Task.join(Task.spawn(fn() -> Window<'a> ! {alloc, suspend} {
                             Task.yield();
                             Window { view: view, owner: [4], start: 0 }
                         }))
@@ -237,7 +237,7 @@ fn cancellation_never_exposes_a_dangling_view() {
                 a + b
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [5, 6, 7];
             run(&data[..])
         }"#,
@@ -248,11 +248,11 @@ fn cancellation_never_exposes_a_dangling_view() {
     agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64], owner: Vec<i64>, start: i64 }
-        fn run<'a>(view: &'a [i64]) -> i64 ! {alloc, panic, suspend} {
-            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                        Task.join(Task.spawn(fn() -> Window<'a> ! {alloc, panic, suspend} {
+        fn run<'a>(view: &'a [i64]) -> i64 ! {alloc, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, suspend} {
+                let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                        Task.join(Task.spawn(fn() -> Window<'a> ! {alloc, suspend} {
                             Task.yield();
                             Window { view: view, owner: [1, 2, 3], start: 2 }
                         }))
@@ -267,7 +267,7 @@ fn cancellation_never_exposes_a_dangling_view() {
                 }
             })
         }
-        fn main() -> i64 ! {alloc, panic, suspend} {
+        fn main() -> i64 ! {alloc, suspend} {
             let data: [i64; 3] = [5, 6, 7];
             run(&data[..])
         }"#,

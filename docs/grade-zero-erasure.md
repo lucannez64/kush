@@ -17,7 +17,7 @@ way, provided the algebra's zero and one are distinct.
 An erased binding is not materialized:
 
 ```kush
-fn main() -> i64 ! {io, panic} {
+fn main() -> i64 ! {io} {
     let value: i64 @[0] = { print_i64(7); 1 };
     42
 }
@@ -31,7 +31,7 @@ Affine owning storage may be erased when the source semantics permit eager
 initialization and drop:
 
 ```kush
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let value: Box<i64> @[0] = Box.new(9);
     42
 }
@@ -52,8 +52,8 @@ signatures, and from the reference evaluator's argument binding. Arguments are
 always evaluated left to right, so their effects and order survive:
 
 ```kush
-fn pick(a: i64 @[0], b: i64, c: i64 @[0]) -> i64 ! {panic} { b }
-fn main() -> i64 ! {io, panic} {
+fn pick(a: i64 @[0], b: i64, c: i64 @[0]) -> i64 ! {} { b }
+fn main() -> i64 ! {io} {
     pick({ print_i64(1); 10 }, { print_i64(2); 20 }, { print_i64(3); 30 })
 }
 ```
@@ -99,8 +99,8 @@ is type-checked against the declared payload type, but the callee returns no
 payload and the call has type `Unit`:
 
 ```kush
-fn compute() -> i64 @[0] ! {io, panic} { print_i64(7); 42 }
-fn main() -> i64 ! {io, panic} { compute(); 9 }
+fn compute() -> i64 @[0] ! {io} { print_i64(7); 42 }
+fn main() -> i64 ! {io} { compute(); 9 }
 ```
 
 prints `7` and exits with status `9`. The native function has no return

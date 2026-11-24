@@ -50,7 +50,7 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) -> (usize, 
 const MEMORY: &str = r#"
     const SIZE: i64 = 0x2000;
     struct Memory { tag: u8, ram: Vec<u8> where len >= SIZE, log: Vec<u8> }
-    fn zeroed(n: i64) -> Vec<u8> ! {alloc, panic} {
+    fn zeroed(n: i64) -> Vec<u8> ! {alloc} {
         let mut v: Vec<u8> = Vec.with_capacity(n);
         let mut i = 0;
         while i < n { v = v.push(0); i = i + 1; }
@@ -62,20 +62,20 @@ const MEMORY: &str = r#"
 fn guarded_accesses_are_proved_and_others_stay_checked() {
     let source = format!(
         "{MEMORY}
-        fn read(m: &Memory, address: u16) -> u8 ! {{panic}} {{
+        fn read(m: &Memory, address: u16) -> u8 ! {{}} {{
             let at: i64 = Int.convert(address);
             if address < 0x8000 {{ return 0xFF; }}
             if address < 0xA000 {{ return m.ram[at - 0x8000]; }}
             0xFF
         }}
-        fn write(m: &mut Memory, address: u16, value: u8) -> Unit ! {{alloc, panic}} {{
+        fn write(m: &mut Memory, address: u16, value: u8) -> Unit ! {{alloc}} {{
             let at: i64 = Int.convert(address);
             if address < 0x8000 {{ m.log.push(value); return; }}
             if address < 0xA000 {{ m.ram[at - 0x8000] = value; return; }}
         }}
-        fn masked(m: &Memory, i: i64) -> u8 ! {{panic}} {{ m.ram[i & 0x1FFF] }}
-        fn unknown(m: &Memory, i: i64) -> u8 ! {{panic}} {{ m.ram[i] }}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn masked(m: &Memory, i: i64) -> u8 ! {{}} {{ m.ram[i & 0x1FFF] }}
+        fn unknown(m: &Memory, i: i64) -> u8 ! {{}} {{ m.ram[i] }}
+        fn main() -> i64 ! {{io, alloc}} {{
             let mut m = Memory {{ tag: 1, ram: zeroed(SIZE), log: Vec.new() }};
             write(&mut m, 0x8005, 42);
             write(&mut m, 0x9FFF, 9);
@@ -99,8 +99,8 @@ fn guarded_accesses_are_proved_and_others_stay_checked() {
 fn an_out_of_range_access_still_panics() {
     let source = format!(
         "{MEMORY}
-        fn unknown(m: &Memory, i: i64) -> u8 ! {{panic}} {{ m.ram[i] }}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn unknown(m: &Memory, i: i64) -> u8 ! {{}} {{ m.ram[i] }}
+        fn main() -> i64 ! {{io, alloc}} {{
             let m = Memory {{ tag: 1, ram: zeroed(SIZE), log: Vec.new() }};
             print_i64(1);
             Int.convert(unknown(&m, SIZE))
@@ -117,7 +117,7 @@ fn an_out_of_range_access_still_panics() {
 fn building_a_record_with_a_short_vector_panics() {
     let source = format!(
         "{MEMORY}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             print_i64(1);
             let m = Memory {{ tag: 1, ram: zeroed(SIZE - 1), log: Vec.new() }};
             print_i64(2);
@@ -148,10 +148,10 @@ fn contracts_carry_ranges_into_callers() {
         fn tile(entry: u8) -> i64 ! {{}} ensures {{ 0 <= result && result <= 0x0FF0 }} {{
             wide(entry) * 16
         }}
-        fn pair(m: &Memory, at: i64, erased inside: {{ 0 <= at && at < 0x1FFF }}) -> i64 ! {{panic}} {{
+        fn pair(m: &Memory, at: i64, erased inside: {{ 0 <= at && at < 0x1FFF }}) -> i64 ! {{}} {{
             wide(m.ram[at]) + wide(m.ram[at + 1])
         }}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let mut m = Memory {{ tag: 1, ram: zeroed(SIZE), log: Vec.new() }};
             let mut i = 0;
             while i < 16 {{ m.ram[i] = Int.truncate(i); i = i + 1; }}
@@ -170,13 +170,13 @@ fn contracts_carry_ranges_into_callers() {
 fn a_diverging_branch_does_not_hide_facts_after_it() {
     let source = format!(
         "{MEMORY}
-        fn touch(m: &mut Memory) -> Unit ! {{panic}} {{ m.tag = m.tag + 1; }}
-        fn store(m: &mut Memory, a: u16) -> Unit ! {{panic}} {{
+        fn touch(m: &mut Memory) -> Unit ! {{}} {{ m.tag = m.tag + 1; }}
+        fn store(m: &mut Memory, a: u16) -> Unit ! {{}} {{
             let at: i64 = Int.convert(a);
             if a < 8 {{ touch(m); return; }}
             if a < 0x2000 {{ m.ram[at] = 5; return; }}
         }}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let mut m = Memory {{ tag: 1, ram: zeroed(SIZE), log: Vec.new() }};
             store(&mut m, 3);
             store(&mut m, 9);
@@ -193,7 +193,7 @@ fn a_diverging_branch_does_not_hide_facts_after_it() {
 fn loop_exits_keep_only_sound_facts() {
     // With a `break`, the loop may exit early: nothing about `i` is known.
     rejects(
-        "fn a(n: i64) -> i64 ! {panic} ensures { result >= 10 } {
+        "fn a(n: i64) -> i64 ! {} ensures { result >= 10 } {
             let mut i = 0;
             while i < 10 { if i == n { break; } i = i + 1; }
             i
@@ -203,7 +203,7 @@ fn loop_exits_keep_only_sound_facts() {
     // A value rewritten in a `continue` branch is not trusted afterwards.
     let source = format!(
         "{MEMORY}
-        fn f(m: &Memory, c: Bool) -> i64 ! {{panic}} {{
+        fn f(m: &Memory, c: Bool) -> i64 ! {{}} {{
             let mut i = 3;
             let mut n = 0;
             let mut t = 0;
@@ -214,7 +214,7 @@ fn loop_exits_keep_only_sound_facts() {
             }}
             t
         }}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let m = Memory {{ tag: 1, ram: zeroed(SIZE), log: Vec.new() }};
             f(&m, false)
         }}"
@@ -229,7 +229,7 @@ fn the_bound_cannot_be_broken() {
     rejects(
         &format!(
             "{base}
-            fn f(m: &mut Memory) -> Unit ! {{alloc, panic}} {{ m.ram.clear(); }}"
+            fn f(m: &mut Memory) -> Unit ! {{alloc}} {{ m.ram.clear(); }}"
         ),
         "clearing it would break that",
     );
@@ -237,13 +237,13 @@ fn the_bound_cannot_be_broken() {
         &format!(
             "{base}
             fn shrink(v: &mut Vec<u8>) -> Unit ! {{}} {{ }}
-            fn f(m: &mut Memory) -> Unit ! {{alloc, panic}} {{ shrink(&mut m.ram); }}"
+            fn f(m: &mut Memory) -> Unit ! {{alloc}} {{ shrink(&mut m.ram); }}"
         ),
         "cannot be borrowed with '&mut'",
     );
     rejects(
         "struct S { v: u8 where len >= 4 }
-        fn main() -> i64 ! {alloc, panic} { let s = S { v: 1 }; 0 }",
+        fn main() -> i64 ! {alloc} { let s = S { v: 1 }; 0 }",
         "Vec",
     );
 }
@@ -251,7 +251,7 @@ fn the_bound_cannot_be_broken() {
 const SMALL: &str = r#"
     const SIZE: i64 = 16;
     struct Memory { tag: u8, ram: Vec<u8> where len >= SIZE, log: Vec<u8> }
-    fn zeroed(n: i64) -> Vec<u8> ! {alloc, panic} {
+    fn zeroed(n: i64) -> Vec<u8> ! {alloc} {
         let mut v: Vec<u8> = Vec.with_capacity(n);
         let mut i = 0;
         while i < n { v = v.push(0); i = i + 1; }
@@ -263,10 +263,10 @@ const SMALL: &str = r#"
 fn replace_swaps_a_vector_out_of_a_place_without_copying() {
     let source = format!(
         "{SMALL}
-        fn swap_in(m: &mut Memory, other: Vec<u8>) -> Vec<u8> ! {{alloc, panic}} {{
+        fn swap_in(m: &mut Memory, other: Vec<u8>) -> Vec<u8> ! {{alloc}} {{
             m.ram.replace(other)
         }}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let mut m = Memory {{ tag: 1, ram: zeroed(SIZE), log: Vec.new() }};
             m.ram[5] = 42;
             let mut log: Vec<u8> = Vec.new();
@@ -287,7 +287,7 @@ fn replace_swaps_a_vector_out_of_a_place_without_copying() {
     // Into a length-refined field, the incoming vector is checked.
     let short = format!(
         "{SMALL}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let mut m = Memory {{ tag: 1, ram: zeroed(SIZE), log: Vec.new() }};
             print_i64(1);
             let old = m.ram.replace(zeroed(SIZE - 1));

@@ -11,8 +11,8 @@ compiled code.
 ```rust
 use std.task.TaskExit;
 
-Task.scope(fn() -> T ! {e} { ... }) -> T ! {alloc, panic, suspend, e}
-Task.spawn(fn() -> T ! {e} { ... })  -> Task<T> ! {alloc, panic, suspend, e}
+Task.scope(fn() -> T ! {e} { ... }) -> T ! {alloc, suspend, e}
+Task.spawn(fn() -> T ! {e} { ... })  -> Task<T> ! {alloc, suspend, e}
 Task.yield()                        -> Bool ! {suspend}       // true: cancel requested
 Task.join(task: Task<T>)            -> TaskExit<T> ! {suspend}
 Task.cancel(&task: &Task<T>)        -> Unit ! {}
@@ -168,8 +168,8 @@ children may borrow slice views:
 
 ```rust
 let (first, second) = Slice.split_at_mut(output, 1);
-Task.spawn(fn() -> Unit ! {panic} { Slice.set(first, 0, sum(&input[0..3])); });
-Task.spawn(fn() -> Unit ! {panic} { Slice.set(second, 0, sum(&input[3..6])); });
+Task.spawn(fn() -> Unit ! {} { Slice.set(first, 0, sum(&input[0..3])); });
+Task.spawn(fn() -> Unit ! {} { Slice.set(second, 0, sum(&input[3..6])); });
 ```
 
 See [task-borrows.kush](../examples/task-borrows.kush). Execution is still
@@ -219,7 +219,7 @@ polled in ready-queue order; a program without tasks just polls. Tests:
 `Task.catch(fn() -> T ! {...} { ... })` runs the lambda in the current
 task and returns `Result<T, std.task.Panic>`: `Err` when a panic unwound out
 of it. Like `Task.scope` it is a scope (children spawned in it are joined
-before it returns) and needs `{alloc, panic, suspend}`. A panic unwinds
+before it returns) and needs `{alloc, suspend}`. A panic unwinds
 (docs/panic-unwinding.md): every frame up to the catch frees what it owns,
 and linear values run their `#[linear(unwind = f)]` cleanup.
 

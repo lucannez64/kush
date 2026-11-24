@@ -9,42 +9,42 @@ struct Pair {
     right: i64,
 }
 
-fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+fn inc(x: i64) -> i64 ! {} { x + 1 }
 
-fn double(x: i64) -> i64 ! {panic} { x * 2 }
+fn double(x: i64) -> i64 ! {} { x * 2 }
 
-fn id<T>(x: T) -> T ! {panic} { x }
+fn id<T>(x: T) -> T ! {} { x }
 
 // A wider parameter domain is contravariant: `classify` can be used wherever
 // only `fn(i64) -> i64` is promised.
-fn classify(x: i64 | Bool) -> i64 ! {panic} {
+fn classify(x: i64 | Bool) -> i64 ! {} {
     match x {
         i64 @n => n,
         Bool @b => if b { 1 } else { 0 },
     }
 }
 
-fn apply(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} {
+fn apply(f: fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} {
     f(x)
 }
 
 // Usage grades are part of the arrow contract and are propagated to the call.
-fn twice_graded(x: i64 @[2]) -> i64 ! {panic} { x + x }
+fn twice_graded(x: i64 @[2]) -> i64 ! {} { x + x }
 
-fn apply_twice(f: fn(i64 @[2]) -> i64 ! {panic}, x: i64 @[2]) -> i64 ! {panic} {
+fn apply_twice(f: fn(i64 @[2]) -> i64 ! {}, x: i64 @[2]) -> i64 ! {} {
     f(x)
 }
 
-fn make_pair(x: i64) -> Pair ! {panic} {
+fn make_pair(x: i64) -> Pair ! {} {
     Pair { left: x, right: x + 2 }
 }
 
-fn pair_sum(f: fn(i64) -> Pair ! {panic}, x: i64) -> i64 ! {panic} {
+fn pair_sum(f: fn(i64) -> Pair ! {}, x: i64) -> i64 ! {} {
     let p = f(x);
     p.left + p.right
 }
 
-fn map<T, U>(values: Vec<T>, f: fn(T) -> U ! {alloc, panic}) -> Vec<U> ! {alloc, panic} {
+fn map<T, U>(values: Vec<T>, f: fn(T) -> U ! {alloc}) -> Vec<U> ! {alloc} {
     let mut out: Vec<U> = Vec.new();
     let mut i = 0;
     while i < Vec.len(&values) {
@@ -56,11 +56,11 @@ fn map<T, U>(values: Vec<T>, f: fn(T) -> U ! {alloc, panic}) -> Vec<U> ! {alloc,
 
 // A capturing closure owns its environment exactly once. The returned value is
 // `once fn`, so it may be called at most once and is dropped otherwise.
-fn compose(f: fn(i64) -> i64 ! {panic}, g: fn(i64) -> i64 ! {panic}) -> (once fn(i64) -> i64 ! {alloc, panic}) ! {alloc, panic} {
-    fn(x: i64) -> i64 ! {panic} { g(f(x)) }
+fn compose(f: fn(i64) -> i64 ! {}, g: fn(i64) -> i64 ! {}) -> (once fn(i64) -> i64 ! {alloc}) ! {alloc} {
+    fn(x: i64) -> i64 ! {} { g(f(x)) }
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     print_i64(apply(inc, 41)); // 42
     print_i64(apply(classify, 42)); // 42, with union injection
     print_i64(apply(id::<i64>, 42)); // 42, specialized generic value
@@ -77,6 +77,6 @@ fn main() -> Unit ! {io, alloc, panic} {
     print_i64(pipeline(20)); // double(21)
 
     let base = Box.new(41);
-    let add_base = fn(x: i64) -> i64 ! {panic} { Box.take(base) + x };
+    let add_base = fn(x: i64) -> i64 ! {} { Box.take(base) + x };
     print_i64(add_base(1)); // 42
 }

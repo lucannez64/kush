@@ -36,7 +36,7 @@ kernel's ordinary data rules.
 | --- | --- | --- |
 | `Choose: i64 -> i64` | multishot, through `cap multi Choose` | the search handler |
 | `Fail` | `Choose` with no alternatives: `perform op(0)` | the same handler |
-| `Goal: Query -> i64 ! {alloc, panic}` | declared, tail-resumptive | the engine handler, which owns the kernel |
+| `Goal: Query -> i64 ! {alloc}` | declared, tail-resumptive | the engine handler, which owns the kernel |
 
 - **`Choose`.** `perform op(n)` returns one of `0..n`. The handler is
   depth-first backtracking: it resumes with `0`, `1`, ... and returns the
@@ -72,8 +72,8 @@ i64, depth: i64) -> i64 ! {Goal, ..}` that returns a proof of `goal` in
 `context`. Combinators are ordinary control flow around `perform op(n)`:
 
 ```text
-fn auto(op: cap multi Choose ! {panic}, context: i64, goal: i64, depth: i64)
-    -> i64 ! {Goal, alloc, panic} {
+fn auto(op: cap multi Choose ! {}, context: i64, goal: i64, depth: i64)
+    -> i64 ! {Goal, alloc} {
     if depth == 0 { return fail(op); }
     let head = whnf(context, goal);
     if is_pi(head) {                        // intro: always safe, no choice

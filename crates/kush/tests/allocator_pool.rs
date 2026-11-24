@@ -146,7 +146,7 @@ fn agrees(source: &str, expected: i64) -> (MemoryStats, Pool) {
 
 #[test]
 fn pool_diagnostics_are_opt_in_and_never_change_the_stable_line() {
-    let source = "fn main() -> i64 ! {alloc, panic} {
+    let source = "fn main() -> i64 ! {alloc} {
         let a = Box.new(7);
         let b = Box.new(8);
         Box.take(a) + Box.take(b)
@@ -175,7 +175,7 @@ fn pool_diagnostics_are_opt_in_and_never_change_the_stable_line() {
 #[test]
 fn repeated_boxes_reuse_one_retained_size_class() {
     let (stats, pool) = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut sum = 0;
             let mut i = 0;
             while i < 64 {
@@ -208,7 +208,7 @@ fn repeated_boxes_reuse_one_retained_size_class() {
 #[test]
 fn repeated_bytes_and_vectors_keep_counts_and_values() {
     let (stats, pool) = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut bytes = Bytes.with_capacity(4);
             let mut values: Vec<i64> = Vec.with_capacity(4);
             let mut i = 0;
@@ -241,7 +241,7 @@ fn zero_capacity_and_the_size_class_boundary_are_exact() {
     // A zero-capacity buffer still allocates its 16-byte struct header and is
     // pooled in the smallest class.
     let (stats, pool) = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let empty = Bytes.with_capacity(0);
             Bytes.len(&empty) + Bytes.capacity(&empty)
         }",
@@ -257,7 +257,7 @@ fn zero_capacity_and_the_size_class_boundary_are_exact() {
     // A 1024-byte payload is the largest pooled block (struct header 16 +
     // capacity 1008).
     let (stats, pool) = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let buffer = Bytes.with_capacity(1008);
             let capacity = Bytes.capacity(&buffer);
             drop(buffer);
@@ -278,7 +278,7 @@ fn zero_capacity_and_the_size_class_boundary_are_exact() {
     // One byte more (1025-byte payload) is unpooled: no miss, no retention,
     // and the block returns to the system immediately.
     let (stats, pool) = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let buffer = Bytes.with_capacity(1009);
             let capacity = Bytes.capacity(&buffer);
             drop(buffer);
@@ -300,7 +300,7 @@ fn buffer_growth_from_pooled_storage_preserves_contents() {
     // A vector starts in the pooled range, grows through several classes, and
     // crosses the 1024-byte boundary into unpooled system blocks.
     let (stats, pool) = agrees(
-        "fn main() -> Unit ! {io, alloc, panic} {
+        "fn main() -> Unit ! {io, alloc} {
             let mut values: Vec<i64> = Vec.new();
             let mut i = 0;
             while i < 400 {
@@ -338,7 +338,7 @@ fn buffer_growth_from_pooled_storage_preserves_contents() {
     // the retained size class, so no new physical block is requested, and the
     // growth counter still matches the reference exactly.
     let (stats, pool) = agrees(
-        "fn main() -> Unit ! {io, alloc, panic} {
+        "fn main() -> Unit ! {io, alloc} {
             let mut bytes = Bytes.with_capacity(0);
             let mut i = 0;
             while i < 3000 {
@@ -374,7 +374,7 @@ fn clear_reserve_and_push_reserved_integrate_with_the_pool() {
     // `clear` retains the allocation; `reserve` grows exactly once through the
     // header-aware path and the existing elements survive the move.
     let (stats, pool) = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 3);
             values = Vec.push(values, 4);
@@ -398,10 +398,10 @@ fn clear_reserve_and_push_reserved_integrate_with_the_pool() {
     // `alloc` and never grows; the pooled allocation happens in the caller.
     let (stats, pool) = agrees(
         "
-         fn append(buffer: Bytes, byte: i64) -> Bytes ! {panic} {
+         fn append(buffer: Bytes, byte: i64) -> Bytes ! {} {
              Bytes.push_reserved(buffer, byte)
          }
-         fn main() -> i64 ! {alloc, panic} {
+         fn main() -> i64 ! {alloc} {
              let buffer = append(Bytes.with_capacity(1), 7);
              Bytes.len(&buffer) + Bytes.get(&buffer, 0)
          }",
@@ -423,7 +423,7 @@ fn retention_never_exceeds_the_one_mebibyte_cap() {
     // The reference evaluator's step budget cannot model this many allocations,
     // so the native totals are pinned directly; every other test compares the
     // stable line with the reference.
-    let source = "fn main() -> i64 ! {alloc, panic} {
+    let source = "fn main() -> i64 ! {alloc} {
         let mut values: Vec<Box<i64>> = Vec.new();
         let mut i = 0;
         while i < 70000 {
@@ -459,15 +459,15 @@ fn retention_never_exceeds_the_one_mebibyte_cap() {
 #[test]
 fn task_blocks_use_the_same_header_aware_path_and_stats_are_unchanged() {
     let source = "use std.task.TaskExit;
-        fn worker(n: i64) -> i64 ! {panic} { n * 2 }
-        fn main() -> Unit ! {io, alloc, panic, suspend} {
-            Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-                let a: Task<i64> = Task.spawn(fn() -> i64 ! {panic, suspend} { worker(1) });
+        fn worker(n: i64) -> i64 ! {} { n * 2 }
+        fn main() -> Unit ! {io, alloc, suspend} {
+            Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+                let a: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} { worker(1) });
                 match Task.join(a) {
                     TaskExit.Completed(v) => print_i64(v),
                     TaskExit.Cancelled => print_i64(-1),
                 }
-                let b: Task<i64> = Task.spawn(fn() -> i64 ! {panic, suspend} { worker(2) });
+                let b: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} { worker(2) });
                 match Task.join(b) {
                     TaskExit.Completed(v) => print_i64(v),
                     TaskExit.Cancelled => print_i64(-1),
@@ -499,7 +499,7 @@ fn task_blocks_use_the_same_header_aware_path_and_stats_are_unchanged() {
 fn nested_owner_cleanup_and_invalid_free_contracts_are_unchanged() {
     // Nested owning boxes are freed exactly once each through the header path.
     let (stats, pool) = agrees(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let inner = Box.new(41);
             let outer = Box.new(inner);
             let owner = Box.take(outer);
@@ -523,8 +523,8 @@ fn nested_owner_cleanup_and_invalid_free_contracts_are_unchanged() {
     // physical pool.
     let noalloc_box = executable::check(
         "
-         fn make(x: i64) -> Box<i64> ! {panic} { Box.new(x) }
-         fn main() -> i64 ! {alloc, panic} { 42 }",
+         fn make(x: i64) -> Box<i64> ! {} { Box.new(x) }
+         fn main() -> i64 ! {alloc} { 42 }",
     )
     .unwrap_err();
     assert!(
@@ -535,10 +535,10 @@ fn nested_owner_cleanup_and_invalid_free_contracts_are_unchanged() {
     );
     let noalloc_vec = executable::check(
         "
-         fn push(values: Vec<i64>, value: i64) -> Vec<i64> ! {panic} {
+         fn push(values: Vec<i64>, value: i64) -> Vec<i64> ! {} {
              Vec.push(values, value)
          }
-         fn main() -> i64 ! {alloc, panic} { 42 }",
+         fn main() -> i64 ! {alloc} { 42 }",
     )
     .unwrap_err();
     assert!(noalloc_vec.message.contains("alloc"), "{noalloc_vec:?}");
@@ -546,7 +546,7 @@ fn nested_owner_cleanup_and_invalid_free_contracts_are_unchanged() {
     // Overflowing reserve is still rejected by the checked grow path instead
     // of reaching the allocator with a wrapped size.
     let program = executable::check(
-        "fn main() -> i64 ! {alloc, panic} {
+        "fn main() -> i64 ! {alloc} {
             let mut values: Vec<i64> = Vec.new();
             values = Vec.push(values, 1);
             let values = Vec.reserve(values, 9223372036854775807);
@@ -570,7 +570,7 @@ fn nested_owner_cleanup_and_invalid_free_contracts_are_unchanged() {
 fn many_size_classes_still_obey_the_global_byte_cap() {
     // Every class gets 64 simultaneous blocks. The aggregate exceeds 1 MiB,
     // so the byte cap remains independently necessary with a class limit.
-    let source = "fn main()->i64 ! {alloc,panic} {
+    let source = "fn main()->i64 ! {alloc} {
         let mut blocks:Vec<Bytes> =Vec.with_capacity(4096);
         let mut class=1;
         while class<=64 {

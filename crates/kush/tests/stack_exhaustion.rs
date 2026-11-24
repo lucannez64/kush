@@ -5,10 +5,10 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::Command;
 
 const DOWN: &str = "
-fn down(n: i64, salt: &[i64]) -> i64 ! {panic} {
+fn down(n: i64, salt: &[i64]) -> i64 ! {} {
     if n == 0 { 0 } else { Slice.get(salt, n & 3) + down(n - 1, salt) }
 }
-fn salt() -> Vec<i64> ! {alloc, panic} {
+fn salt() -> Vec<i64> ! {alloc} {
     let mut values: Vec<i64> = Vec.with_capacity(4);
     values = Vec.push(values, 1);
     values = Vec.push(values, 2);
@@ -16,7 +16,7 @@ fn salt() -> Vec<i64> ! {alloc, panic} {
     values = Vec.push(values, 4);
     values
 }
-fn depth() -> i64 ! {io, alloc, panic} {
+fn depth() -> i64 ! {io, alloc} {
     let bytes = match ENV.arg(1, Bytes.with_capacity(32)) { Ok(value) => value, Err(_) => { return 0; } };
     let mut n = 0;
     let mut i = 0;
@@ -89,7 +89,7 @@ fn unbounded_recursion_on_the_process_stack_panics() {
         &format!(
             "enum Result<T, E> {{ Ok(T), Err(E) }}
             {DOWN}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn main() -> i64 ! {{io, alloc}} {{
                 let values = salt();
                 print_int(down(depth(), &values[..]));
                 0
@@ -106,10 +106,10 @@ fn unbounded_recursion_on_a_task_stack_panics() {
             "enum Result<T, E> {{ Ok(T), Err(E) }}
             enum TaskExit<T> {{ Completed(T), Cancelled }}
             {DOWN}
-            fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
+            fn main() -> Unit ! {{io, alloc, suspend}} {{
                 let n = depth();
-                Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
-                    let task: Task<i64> = Task.spawn(fn() -> i64 ! {{io, alloc, panic, suspend}} {{
+                Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
+                    let task: Task<i64> = Task.spawn(fn() -> i64 ! {{io, alloc, suspend}} {{
                         let values = salt();
                         down(n, &values[..])
                     }});
@@ -132,13 +132,13 @@ fn tail_recursion_is_not_turned_into_a_loop() {
         &format!(
             "enum Result<T, E> {{ Ok(T), Err(E) }}
             {DOWN}
-            fn count(n: i64, acc: i64) -> i64 ! {{panic}} {{
+            fn count(n: i64, acc: i64) -> i64 ! {{}} {{
                 if n == 0 {{ acc }} else {{ count(n - 1, acc + 1) }}
             }}
-            fn climb(n: i64) -> i64 ! {{panic}} {{
+            fn climb(n: i64) -> i64 ! {{}} {{
                 if n == 0 {{ 0 }} else {{ 1 + climb(n - 1) }}
             }}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn main() -> i64 ! {{io, alloc}} {{
                 let n = depth();
                 print_int(count(n, 0) + climb(n));
                 0
@@ -192,7 +192,7 @@ fn an_overrun_past_the_top_of_the_stack_is_not_reported_as_exhaustion() {
     fs::write(
         root.join("main.kush"),
         "foreign \"ext_overrun\" fn overrun(n: i64) -> i64 ! {io};
-        fn main() -> Unit ! {io, panic} { print_i64(overrun(100000000)); }",
+        fn main() -> Unit ! {io} { print_i64(overrun(100000000)); }",
     )
     .unwrap();
     let mut configurations = vec![vec![]];
@@ -241,7 +241,7 @@ fn a_sent_fault_signal_keeps_its_default_action() {
     fs::write(
         root.join("main.kush"),
         "enum Result<T, E> { Ok(T), Err(E) }
-        fn main() -> Unit ! {io, alloc, panic} {
+        fn main() -> Unit ! {io, alloc} {
             print_i64(1);
             let line = match IO.read_line(IO.stdin(), Bytes.with_capacity(8)) {
                 Ok(bytes) => bytes,
@@ -298,7 +298,7 @@ fn a_larger_main_stack_holds_deeper_recursion_and_still_panics_when_exhausted() 
         "enum Result<T, E> {{ Ok(T), Err(E) }}
         {DOWN}
         #[stack_size(1024)]
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let values = salt();
             print_int(down(depth(), &values[..]));
             0

@@ -44,7 +44,7 @@ fn rejects(source: &str, fragment: &str) {
 
 const CONFIG: &str = "
 struct Config { retries: i64, verbose: Bool, name: Bytes, limit: i64 }
-fn config() -> Config ! {alloc, panic} {
+fn config() -> Config ! {alloc} {
     Config { retries: 1, verbose: false, name: Bytes.from(\"abc\"), limit: 10 }
 }
 ";
@@ -55,7 +55,7 @@ fn update_takes_the_other_fields_from_the_base() {
     agrees(
         &format!(
             "{CONFIG}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let c = config();
                 let d = Config {{ retries: c.retries + 4, ..c }};
                 let n = Bytes.len(&d.name);
@@ -71,7 +71,7 @@ fn update_takes_the_other_fields_from_the_base() {
     agrees(
         &format!(
             "{CONFIG}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let d = Config {{ name: Bytes.from(\"longer name\"), verbose: true, ..config() }};
                 let Config {{ retries, verbose, name, limit }} = d;
                 let n = Bytes.len(&name);
@@ -86,7 +86,7 @@ fn update_takes_the_other_fields_from_the_base() {
     agrees(
         "struct Pair<T> { left: T, right: T }
         struct Outer { inner: Pair<i64>, tag: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let p = Pair { left: 1, right: 2 };
             let q = Pair { ..p };
             let o = Outer { inner: q, tag: 5 };
@@ -99,8 +99,8 @@ fn update_takes_the_other_fields_from_the_base() {
     // Field values are evaluated in source order, after the base.
     agrees(
         "struct T { a: i64, b: i64, c: i64 }
-        fn say(n: i64) -> i64 ! {io, panic} { print_i64(n); n }
-        fn main() -> i64 ! {io, panic} {
+        fn say(n: i64) -> i64 ! {io} { print_i64(n); n }
+        fn main() -> i64 ! {io} {
             let t = T { c: say(3), a: say(1), ..T { a: say(7), b: say(8), c: say(9) } };
             t.a * 100 + t.b * 10 + t.c
         }",
@@ -135,7 +135,7 @@ fn update_rejections() {
         ),
     ] {
         rejects(
-            &format!("{base} fn main() -> i64 ! {{panic}} {{ {body} }}"),
+            &format!("{base} fn main() -> i64 ! {{}} {{ {body} }}"),
             fragment,
         );
     }
@@ -143,7 +143,7 @@ fn update_rejections() {
     rejects(
         &format!(
             "{CONFIG}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let c = config();
                 let d = Config {{ retries: 2, ..c }};
                 let n = Bytes.len(&c.name);
@@ -161,7 +161,7 @@ fn update_rejections() {
         "#[linear] struct Token { id: i64 }
         struct Holder { token: Token, n: i64 }
         fn spend(t: Token) -> i64 ! {} { let Token { id } = t; id }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let h = Holder { token: Token { id: 1 }, n: 2 };
             let g = Holder { token: Token { id: 3 }, ..h };
             let Holder { token, n } = g;
@@ -174,7 +174,7 @@ fn update_rejections() {
         "#[linear] struct Token { id: i64 }
         struct Holder { token: Token, n: i64 }
         fn spend(t: Token) -> i64 ! {} { let Token { id } = t; id }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let h = Holder { token: Token { id: 1 }, n: 2 };
             let g = Holder { n: 40, ..h };
             let Holder { token, n } = g;
@@ -193,7 +193,7 @@ fn update_fields_are_known_to_the_prover() {
     agrees(
         &format!(
             "{prelude}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let s = S {{ a: 3, b: 9, flag: true }};
                 let x = small(s.a, _) + small(s.b, _);
                 let t = S {{ a: 4, ..s }};
@@ -207,12 +207,12 @@ fn update_fields_are_known_to_the_prover() {
     agrees(
         &format!(
             "{prelude}
-            fn raise(s: S, by: i64) -> S ! {{panic}}
+            fn raise(s: S, by: i64) -> S ! {{}}
                 ensures {{ result.a == s.a + by && result.b == s.b && result.flag == s.flag }}
             {{
                 S {{ a: s.a + by, ..s }}
             }}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let r = raise(S {{ a: 1, b: 2, flag: false }}, 5);
                 small(r.a, _) + small(r.b, _)
             }}"
@@ -224,7 +224,7 @@ fn update_fields_are_known_to_the_prover() {
     rejects(
         &format!(
             "{prelude}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let s = S {{ a: 3, b: 11, flag: true }};
                 let t = S {{ a: 4, ..s }};
                 small(t.b, _)
@@ -235,12 +235,12 @@ fn update_fields_are_known_to_the_prover() {
     rejects(
         &format!(
             "{prelude}
-            fn raise(s: S, by: i64) -> S ! {{panic}}
+            fn raise(s: S, by: i64) -> S ! {{}}
                 ensures {{ result.b == s.b + 1 }}
             {{
                 S {{ a: s.a + by, ..s }}
             }}
-            fn main() -> i64 ! {{panic}} {{ 0 }}"
+            fn main() -> i64 ! {{}} {{ 0 }}"
         ),
         "cannot prove",
     );
@@ -249,7 +249,7 @@ fn update_fields_are_known_to_the_prover() {
     rejects(
         &format!(
             "{prelude}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let mut s = S {{ a: 3, b: 9, flag: true }};
                 let mut i = 0;
                 while i < 3 {{ s = S {{ a: s.a + 5, ..s }}; i = i + 1; }}
@@ -263,7 +263,7 @@ fn update_fields_are_known_to_the_prover() {
         &format!(
             "{prelude}
             fn set(s: &mut S) -> Unit ! {{}} {{ s.a = 20; }}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let mut s = S {{ a: 3, b: 9, flag: true }};
                 set(&mut s);
                 let t = S {{ b: 1, ..s }};

@@ -16,7 +16,7 @@ pub struct Segments { bytes: Bytes, entries: Vec<Range> }
 /// Duplicate names and empty values are kept.
 pub struct Fields { bytes: Bytes, entries: Vec<Field> }
 
-fn append(buffer: Bytes, part: &Bytes) -> Bytes ! {alloc, panic} {
+fn append(buffer: Bytes, part: &Bytes) -> Bytes ! {alloc} {
     let mut buffer = buffer;
     let mut i = 0;
     while i < Bytes.len(part) {
@@ -26,7 +26,7 @@ fn append(buffer: Bytes, part: &Bytes) -> Bytes ! {alloc, panic} {
     buffer
 }
 
-fn copy(buffer: &Bytes, range: Range) -> Bytes ! {alloc, panic} {
+fn copy(buffer: &Bytes, range: Range) -> Bytes ! {alloc} {
     let mut out = Bytes.with_capacity(range.end - range.start);
     let mut i = range.start;
     while i < range.end {
@@ -39,7 +39,7 @@ fn copy(buffer: &Bytes, range: Range) -> Bytes ! {alloc, panic} {
 impl Segments {
     pub fn segment_count(self: &Self) -> i64 ! {} { Vec.len(&self.entries) }
     /// Copy segment i; panics when the index is out of bounds.
-    pub fn segment(self: &Self, i: i64) -> Bytes ! {alloc, panic} {
+    pub fn segment(self: &Self, i: i64) -> Bytes ! {alloc} {
         copy(&self.bytes, Vec.get(&self.entries, i))
     }
 }
@@ -47,12 +47,12 @@ impl Segments {
 impl Fields {
     pub fn field_count(self: &Self) -> i64 ! {} { Vec.len(&self.entries) }
     /// Copy the name at i; panics when the index is out of bounds.
-    pub fn name(self: &Self, i: i64) -> Bytes ! {alloc, panic} {
+    pub fn name(self: &Self, i: i64) -> Bytes ! {alloc} {
         let field = Vec.get(&self.entries, i);
         copy(&self.bytes, field.name)
     }
     /// Copy the value at i; panics when the index is out of bounds.
-    pub fn value(self: &Self, i: i64) -> Bytes ! {alloc, panic} {
+    pub fn value(self: &Self, i: i64) -> Bytes ! {alloc} {
         let field = Vec.get(&self.entries, i);
         copy(&self.bytes, field.value)
     }
@@ -65,7 +65,7 @@ fn hex(c: i64) -> i64 ! {} {
     -1
 }
 
-fn valid_utf8(input: &Bytes) -> Bool ! {panic} {
+fn valid_utf8(input: &Bytes) -> Bool ! {} {
     let n = Bytes.len(input);
     let mut at = 0;
     while at < n {
@@ -95,7 +95,7 @@ fn valid_utf8(input: &Bytes) -> Bool ! {panic} {
 
 // Decode one range only once. Split delimiters before calling this, so
 // escaped delimiters cannot become structure. All ranges are internal.
-fn decode(input: &Bytes, start: i64, end: i64, plus: Bool) -> Result<Bytes, Error> ! {alloc, panic} {
+fn decode(input: &Bytes, start: i64, end: i64, plus: Bool) -> Result<Bytes, Error> ! {alloc} {
     let mut out = Bytes.with_capacity(end - start);
     let mut at = start;
     while at < end {
@@ -119,7 +119,7 @@ fn decode(input: &Bytes, start: i64, end: i64, plus: Bool) -> Result<Bytes, Erro
 /// Percent-decode UTF-8 text, leaving '+' literal. max_bytes bounds the
 /// encoded input before allocation; negative limits reject every input.
 /// Decoding does not validate application-level rules (e.g. filenames).
-pub fn percent_decode(input: &Bytes, max_bytes: i64) -> Result<Bytes, Error> ! {alloc, panic} {
+pub fn percent_decode(input: &Bytes, max_bytes: i64) -> Result<Bytes, Error> ! {alloc} {
     if Bytes.len(input) > max_bytes { return Err(Error.TooLong); }
     decode(input, 0, Bytes.len(input), false)
 }
@@ -127,7 +127,7 @@ pub fn percent_decode(input: &Bytes, max_bytes: i64) -> Result<Bytes, Error> ! {
 /// Split an encoded path on '/', then decode each segment. Empty segments
 /// are preserved, including the leading one in an absolute path. No dot
 /// normalization is performed. Pass Request.path(), without a query.
-pub fn path_segments(input: &Bytes, max_bytes: i64) -> Result<Segments, Error> ! {alloc, panic} {
+pub fn path_segments(input: &Bytes, max_bytes: i64) -> Result<Segments, Error> ! {alloc} {
     let n = Bytes.len(input);
     if n > max_bytes { return Err(Error.TooLong); }
     let mut out: Vec<Range> = Vec.new();
@@ -148,7 +148,7 @@ pub fn path_segments(input: &Bytes, max_bytes: i64) -> Result<Segments, Error> !
     Ok(Segments { bytes: bytes, entries: out })
 }
 
-fn fields(input: &Bytes, max_bytes: i64, plus: Bool) -> Result<Fields, Error> ! {alloc, panic} {
+fn fields(input: &Bytes, max_bytes: i64, plus: Bool) -> Result<Fields, Error> ! {alloc} {
     let n = Bytes.len(input);
     if n > max_bytes { return Err(Error.TooLong); }
     let mut out: Vec<Field> = Vec.new();
@@ -185,11 +185,11 @@ fn fields(input: &Bytes, max_bytes: i64, plus: Bool) -> Result<Fields, Error> ! 
 /// Decode a query without its leading '?'. '+' stays literal; use form
 /// when the sender uses application/x-www-form-urlencoded conventions.
 /// Split on '&' and the first '=' before decoding. Preserve field order.
-pub fn query(input: &Bytes, max_bytes: i64) -> Result<Fields, Error> ! {alloc, panic} {
+pub fn query(input: &Bytes, max_bytes: i64) -> Result<Fields, Error> ! {alloc} {
     fields(input, max_bytes, false)
 }
 
 /// Decode application/x-www-form-urlencoded: '+' is space; %2B is '+'.
-pub fn form(input: &Bytes, max_bytes: i64) -> Result<Fields, Error> ! {alloc, panic} {
+pub fn form(input: &Bytes, max_bytes: i64) -> Result<Fields, Error> ! {alloc} {
     fields(input, max_bytes, true)
 }

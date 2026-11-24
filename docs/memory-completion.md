@@ -95,7 +95,7 @@ let owner: Box<[i64; 2]> = Box.reuse_grow(owner, [20, 22]);
 - Both arguments are evaluated strictly, left to right, before mutation.
 - If the new payload fits the existing allocation, the allocation is kept and
   no allocator call occurs. If it is wider, storage may grow and **move**.
-- The operation requires `{alloc, panic}`. A growth is an allocating fallback
+- The operation requires `{alloc}`. A growth is an allocating fallback
   and can abort on allocation failure. `#[noalloc]` rejects the operation from
   its source signature; there is no hidden allocating fallback in `Box.reuse`
   or under `#[noalloc]`.
@@ -123,7 +123,7 @@ stable `reuses` counter increments once per successful operation.
 element in place is a separate explicit operation:
 
 ```rust
-fn widen(x: i64) -> [i64; 4] ! {panic} { [x, x + 1, x + 2, x + 3] }
+fn widen(x: i64) -> [i64; 4] ! {} { [x, x + 1, x + 2, x + 3] }
 
 let values: Vec<i64> = [1, 2];
 let values = Vec.map_in_place_grow(values, widen);
@@ -139,7 +139,7 @@ the same logical vector with a possibly wider element type:
 - The callbacks keep the ordinary in-place contract: noncapturing `fn` values,
   matching parameter layouts, non-erased parameters/results, and effect rows
   required by the enclosing function. The operation additionally requires
-  `{alloc, panic}` and is rejected under `#[noalloc]`.
+  `{alloc}` and is rejected under `#[noalloc]`.
 - If the retained physical allocation already covers `capacity * width(U)`
   bytes, the allocation is reused. Otherwise infallible storage growth happens
   once and may move the block. Allocation/deallocation counters stay unchanged;
@@ -171,7 +171,7 @@ there is no process abort disguised as `Err`. They require the exact
 | `Vec.try_reserve(values, n)` | `Ok(Vec<T>)`, room for `len + n` | `Err(values)`: untouched elements, length, and capacity | `{alloc}` |
 | `Bytes.try_with_capacity(n)` | `Ok(Bytes)` with exact capacity `n` | `Err(n)`: the requested capacity | `{alloc}` |
 | `Arena.try_alloc(&arena, value)` | `Ok(ArenaBox<T>)`, one region reference | `Err(value)`: the untouched payload | `{alloc}` |
-| `AllocBox.try_new(allocator, value)` | `Ok(AllocBox<T>)` from an allocator block | `Err(value)`: the untouched payload | `{alloc, panic}` |
+| `AllocBox.try_new(allocator, value)` | `Ok(AllocBox<T>)` from an allocator block | `Err(value)`: the untouched payload | `{alloc}` |
 
 - `Box.try_new` moves the payload into the box on success and returns the same
   owner unchanged in `Err`. Cleanup is therefore exact on both paths.
@@ -251,7 +251,7 @@ Neither requires FFI.
 ### 4.1 User-defined allocators
 
 ```rust
-fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+fn block_alloc(bytes: i64) -> Bytes ! {alloc} {
     Bytes.with_capacity(bytes)
 }
 fn block_free(block: Bytes) -> Unit ! {} {
@@ -266,7 +266,7 @@ let vector: AllocVec<i64> = AllocVec.with_capacity(allocator, 4);
 A third, optional growth hook extends the same value:
 
 ```rust
-fn block_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+fn block_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc} {
     // optionally copy the zeroed readable prefix into a fresh block and
     // release `block`
 }
@@ -349,7 +349,7 @@ state:
 struct Counting { calls: i64, limit: i64 }
 
 impl AllocatorProtocol for Counting {
-    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} {
+    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc} {
         self.calls = self.calls + 1;
         if self.limit > 0 && self.calls > self.limit {
             Bytes.with_capacity(0)
@@ -360,7 +360,7 @@ impl AllocatorProtocol for Counting {
     fn free(self: &mut Self, block: Bytes) -> Unit ! {} {
         drop(block)
     }
-    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc} {
         let mut out = Bytes.with_capacity(bytes);
         let mut i = 0;
         while i < old_bytes {
@@ -385,9 +385,9 @@ checked signatures:
 
 | Method | Signature | Effects |
 | --- | --- | --- |
-| `alloc` | `fn(&mut Self, bytes: i64) -> Bytes` | `{alloc, panic}` |
+| `alloc` | `fn(&mut Self, bytes: i64) -> Bytes` | `{alloc}` |
 | `free` | `fn(&mut Self, block: Bytes) -> Unit` | empty |
-| `grow` | `fn(&mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes` | `{alloc, panic}` |
+| `grow` | `fn(&mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes` | `{alloc}` |
 
 - An impl is checked by the ordinary exact trait-signature rule: receiver mode,
   parameter/result layouts, grades, lifetimes, and effect rows must match.
@@ -396,7 +396,7 @@ checked signatures:
   explicit rejection. There is no implicit conversion of a capturing `once`
   closure into these reusable callbacks; an allocator instance is a trait
   implementor, not a captured closure.
-- `AllocatorContext.new(instance)` requires `{alloc, panic}` and moves one
+- `AllocatorContext.new(instance)` requires `{alloc}` and moves one
   concrete record instance into compiler-owned reference-counted storage. The
   concrete type must be an owned record with stable inline layout; a bare
   `AllocatorContext` is not itself a state record. Borrowed leaves, task
@@ -466,7 +466,7 @@ ArenaBox.take(first) + ArenaBox.take(second)
   chunks are physical storage obtained directly from the system allocator and
   are not counted as separate logical allocations; the region is one logical
   deallocation when its last reference is released.
-- `Arena.alloc(&arena, value)` requires `{alloc, panic}`. It borrows the arena
+- `Arena.alloc(&arena, value)` requires `{alloc}`. It borrows the arena
   for the call and returns an owning `ArenaBox<T>` that retains one region
   reference. The region therefore cannot be used or freed after the last
   reference disappears.
@@ -546,7 +546,7 @@ or a proof obligation.
   dropped allocator bindings with live allocations, and reference/native
   allocation-counter parity.
 - `crates/kush/tests/memory_completion.rs`: fusion positives and rejections
-  (I/O, panic, loops, recursion, indirect calls), explicit-chain non-fusion,
+  (I/O, loops, recursion, indirect calls), explicit-chain non-fusion,
   widening reuse and owner obligations, vector widening reuse with callback
   order/drop/layout checks, fallible success/refusal with the reference budget
   and the native probe, fallible arena allocation and region preservation,

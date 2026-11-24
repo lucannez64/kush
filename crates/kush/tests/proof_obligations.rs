@@ -32,11 +32,11 @@ fn row(kind: &str, function: &str, goal: &str, text: &str) -> (String, String, S
 
 #[test]
 fn each_kind_of_unproved_check_is_recorded() {
-    let source = "fn add(a: i64, b: i64) -> i64 ! {panic} { a + b }
-fn neg(a: i64) -> i64 ! {panic} { -a }
-fn div(a: i64, b: i64) -> i64 ! {panic} { a / b }
-fn shift(a: u8, b: u8) -> u8 ! {panic} { a << b }
-fn main() -> i64 ! {panic} { add(1, 2) + neg(1) + div(4, 2) + Int.convert(shift(1, 1)) }";
+    let source = "fn add(a: i64, b: i64) -> i64 ! {} { a + b }
+fn neg(a: i64) -> i64 ! {} { -a }
+fn div(a: i64, b: i64) -> i64 ! {} { a / b }
+fn shift(a: u8, b: u8) -> u8 ! {} { a << b }
+fn main() -> i64 ! {} { add(1, 2) + neg(1) + div(4, 2) + Int.convert(shift(1, 1)) }";
     let rows = listed(source);
     assert!(rows.contains(&row(
         "overflow",
@@ -64,7 +64,7 @@ fn proved_checks_record_nothing() {
     let rows = listed(
         "fn next(c: i64, erased q: { c <= 100 }) -> i64 ! {} { c + 1 }
 fn bump(x: u8) -> u8 ! {} { if x < 255 { x + 1 } else { x } }
-fn main() -> i64 ! {panic} { next(1, _) + Int.convert(bump(3)) }",
+fn main() -> i64 ! {} { next(1, _) + Int.convert(bump(3)) }",
     );
     assert!(
         rows.iter().all(|(_, function, _, _)| function == "main"),
@@ -75,10 +75,10 @@ fn main() -> i64 ! {panic} { next(1, _) + Int.convert(bump(3)) }",
 #[test]
 fn vec_accesses_are_recorded_with_their_refinement() {
     let source = "struct Ram { cells: Vec<u8> where len >= 16 }
-fn plain(v: &Vec<i64>, i: i64) -> i64 ! {panic} { v[i] }
-fn refined(r: &Ram, i: i64) -> u8 ! {panic} { r.cells[i] }
-fn proved(r: &Ram, i: i64) -> u8 ! {panic} { if i >= 0 && i < 16 { r.cells[i] } else { 0 } }
-fn main() -> i64 ! {alloc, panic} {
+fn plain(v: &Vec<i64>, i: i64) -> i64 ! {} { v[i] }
+fn refined(r: &Ram, i: i64) -> u8 ! {} { r.cells[i] }
+fn proved(r: &Ram, i: i64) -> u8 ! {} { if i >= 0 && i < 16 { r.cells[i] } else { 0 } }
+fn main() -> i64 ! {alloc} {
     let mut v: Vec<i64> = Vec.new();
     v = v.push(1);
     let mut cells: Vec<u8> = Vec.new();
@@ -139,8 +139,8 @@ fn main() -> i64 ! {alloc, panic} {
 #[test]
 fn slice_and_array_accesses_are_recorded() {
     let rows = listed(
-        "fn first(s: &[i64], i: i64) -> i64 ! {panic} { s[i] }
-fn main() -> i64 ! {alloc, panic} {
+        "fn first(s: &[i64], i: i64) -> i64 ! {} { s[i] }
+fn main() -> i64 ! {alloc} {
     let mut v: Vec<i64> = Vec.new();
     v = v.push(7);
     first(&v[..], 0)
@@ -175,20 +175,20 @@ fn panics_at(source: &str, kind: &str, text: &str) {
 #[test]
 fn an_evaluator_panic_names_its_obligation() {
     panics_at(
-        "fn add(a: i64, b: i64) -> i64 ! {panic} { a + b }
-fn main() -> i64 ! {panic} { add(9223372036854775807, 1) }",
+        "fn add(a: i64, b: i64) -> i64 ! {} { a + b }
+fn main() -> i64 ! {} { add(9223372036854775807, 1) }",
         "overflow",
         "a + b",
     );
     panics_at(
-        "fn div(a: i64, b: i64) -> i64 ! {panic} { a / b }
-fn main() -> i64 ! {panic} { div(1, 0) }",
+        "fn div(a: i64, b: i64) -> i64 ! {} { a / b }
+fn main() -> i64 ! {} { div(1, 0) }",
         "division",
         "a / b",
     );
     panics_at(
-        "fn at(v: &Vec<i64>, i: i64) -> i64 ! {panic} { v[i] }
-fn main() -> i64 ! {alloc, panic} {
+        "fn at(v: &Vec<i64>, i: i64) -> i64 ! {} { v[i] }
+fn main() -> i64 ! {alloc} {
     let mut v: Vec<i64> = Vec.new();
     v = v.push(1);
     at(&v, 3)
@@ -201,8 +201,8 @@ fn main() -> i64 ! {alloc, panic} {
 #[test]
 fn a_generic_check_is_one_obligation_per_instance() {
     let program = checked(
-        "fn twice<T>(x: i64, t: T) -> i64 ! {panic} { x + x }
-fn main() -> i64 ! {panic} { twice(1, 2) + twice(1, true) }",
+        "fn twice<T>(x: i64, t: T) -> i64 ! {} { x + x }
+fn main() -> i64 ! {} { twice(1, 2) + twice(1, true) }",
     );
     let twice: Vec<_> = program
         .obligations()

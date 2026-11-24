@@ -347,8 +347,8 @@ Single-shot results are never used to justify multishot safety.
 ## 12. Worked example
 
 ```rust
-fn main() -> i64 ! {alloc, panic} {
-    handle Ask: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} {
+fn main() -> i64 ! {alloc} {
+    handle Ask: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
         resume(x * 10)
     } {
         let mut sum = 0;
@@ -478,7 +478,7 @@ is inherent (section 7).
    the `handle`. A continuation that writes a local of the enclosing function
    (assignment or mutable borrow) is rejected if the function reads it after
    the `handle`, because the continuation works on its own copy.
-5. A capturing continuation requires `{alloc, panic}` at the handle.
+5. A capturing continuation requires `{alloc}` at the handle.
 6. `return`, `?`, and `break`/`continue` to a loop outside the body are
    rejected in continuation code (code reachable after a point). They are
    allowed before the first point (they run in place) and anywhere under a

@@ -6,12 +6,12 @@ use std.text;
 // Three array kernels whose every `+`, `-` and `*` is overflow-checked.
 // Arguments: elements, repetitions, kernel (0 sum, 1 dot, 2 scale-and-sum).
 
-fn argument(index: i64) -> i64 ! {io, alloc, panic} {
+fn argument(index: i64) -> i64 ! {io, alloc} {
     let bytes = match ENV.arg(index, Bytes.with_capacity(64)) { Ok(value) => value, Err(_) => { return -1; } };
     match text.parse_i64(&bytes) { Ok(value) => value, Err(_) => -1 }
 }
 
-fn sum(values: &[i64]) -> i64 ! {panic} {
+fn sum(values: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(values) {
@@ -21,7 +21,7 @@ fn sum(values: &[i64]) -> i64 ! {panic} {
     acc
 }
 
-fn dot(left: &[i64], right: &[i64]) -> i64 ! {panic} {
+fn dot(left: &[i64], right: &[i64]) -> i64 ! {} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(left) {
@@ -31,7 +31,7 @@ fn dot(left: &[i64], right: &[i64]) -> i64 ! {panic} {
     acc
 }
 
-fn scale<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> Unit ! {panic} {
+fn scale<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> Unit ! {} {
     let mut i = 0;
     while i < Slice.len(source) {
         Slice.set(target, i, Slice.get(source, i) * factor - 7);
@@ -39,7 +39,7 @@ fn scale<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> Unit 
     }
 }
 
-fn fill(n: i64, salt: i64) -> Vec<i64> ! {alloc, panic} {
+fn fill(n: i64, salt: i64) -> Vec<i64> ! {alloc} {
     let mut values: Vec<i64> = Vec.with_capacity(n);
     let mut i = 0;
     while i < n {
@@ -49,7 +49,7 @@ fn fill(n: i64, salt: i64) -> Vec<i64> ! {alloc, panic} {
     values
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let n = argument(1);
     let repetitions = argument(2);
     let kernel = argument(3);

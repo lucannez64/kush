@@ -27,17 +27,17 @@ task outlives its scope. Cancellation is cooperative: a task sees it at
 ```kush eval
 use std.task.TaskExit;
 
-fn worker(id: i64) -> i64 ! {io, panic, suspend} {
+fn worker(id: i64) -> i64 ! {io, suspend} {
     print_i64(id * 10 + 1);
     Task.yield();
     print_i64(id * 10 + 2);
     id
 }
 
-fn main() -> Unit ! {io, alloc, panic, suspend} {
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let a: Task<i64> = Task.spawn(fn() -> i64 ! {io, panic, suspend} { worker(1) });
-        let b: Task<i64> = Task.spawn(fn() -> i64 ! {io, panic, suspend} { worker(2) });
+fn main() -> Unit ! {io, alloc, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let a: Task<i64> = Task.spawn(fn() -> i64 ! {io, suspend} { worker(1) });
+        let b: Task<i64> = Task.spawn(fn() -> i64 ! {io, suspend} { worker(2) });
         match Task.join(a) {
             TaskExit.Completed(v) => print_i64(v),
             TaskExit.Cancelled => print_i64(-1),
@@ -80,19 +80,19 @@ API, but each child runs on its own OS thread. A thread body captures values
 by move and slice views by borrow; the loans last until it is joined.
 
 ```kush eval
-fn part(v: &[i64], from: i64, to: i64) -> i64 ! {panic} {
+fn part(v: &[i64], from: i64, to: i64) -> i64 ! {} {
     let mut sum = 0;
     let mut i = from;
     while i < to { sum = sum + v.get(i); i = i + 1; }
     sum
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let data: [i64; 4] = [1, 2, 3, 4];
     let v = &data[..];
-    let total = Thread.scope(fn() -> i64 ! {alloc, panic} {
-        let a = Thread.spawn(fn() -> i64 ! {panic} { part(v, 0, 2) });
-        let b = Thread.spawn(fn() -> i64 ! {panic} { part(v, 2, 4) });
+    let total = Thread.scope(fn() -> i64 ! {alloc} {
+        let a = Thread.spawn(fn() -> i64 ! {} { part(v, 0, 2) });
+        let b = Thread.spawn(fn() -> i64 ! {} { part(v, 2, 4) });
         Thread.join(a) + Thread.join(b)
     });
     print_i64(total);
@@ -120,15 +120,15 @@ Atomics are sequentially consistent. Channel messages are plain data
 (scalars and records of scalars) in this version.
 
 ```kush eval
-fn bump(c: &[Atomic]) -> Unit ! {panic} { Atomic.fetch_add(c, 0, 1); }
+fn bump(c: &[Atomic]) -> Unit ! {} { Atomic.fetch_add(c, 0, 1); }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let mut cells: Vec<Atomic> = Vec.with_capacity(1);
     cells = Vec.push(cells, Atomic.new(0));
     let c: &[Atomic] = &cells[..];
-    Thread.scope(fn() -> Unit ! {alloc, panic} {
-        Thread.spawn(fn() -> Unit ! {panic} { bump(c); });
-        Thread.spawn(fn() -> Unit ! {panic} { bump(c); });
+    Thread.scope(fn() -> Unit ! {alloc} {
+        Thread.spawn(fn() -> Unit ! {} { bump(c); });
+        Thread.spawn(fn() -> Unit ! {} { bump(c); });
     });
     print_i64(Atomic.load(c, 0));
 }

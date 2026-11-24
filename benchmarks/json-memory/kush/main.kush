@@ -19,7 +19,7 @@ struct Document {
     node: Box<Node>, text: Bytes, children: Vec<i64>
 }
 
-fn equal(a: &Bytes, b: &Bytes) -> Bool ! {panic} {
+fn equal(a: &Bytes, b: &Bytes) -> Bool ! {} {
     if Bytes.len(a) != Bytes.len(b) {
         return false;
     }
@@ -33,7 +33,7 @@ fn equal(a: &Bytes, b: &Bytes) -> Bool ! {panic} {
     true
 }
 
-fn seed() -> Seed ! {alloc, panic} {
+fn seed() -> Seed ! {alloc} {
     let source = Bytes.from("{\"revision\":0,\"text\":\"seed\",\"children\":[1,2,3,4]}");
     let value = match json.parse(&source[..]) {
         Ok(v) => v, Err(_) => panic()
@@ -104,7 +104,7 @@ fn seed() -> Seed ! {alloc, panic} {
     }
 }
 
-fn create(id: i64, initial: &Seed) -> Document ! {alloc, panic} {
+fn create(id: i64, initial: &Seed) -> Document ! {alloc} {
     let mut children: Vec<i64> = Vec.with_capacity(Vec.len(&initial.children));
     let mut i = 0;
     while i < Vec.len(&initial.children) {
@@ -118,7 +118,7 @@ fn create(id: i64, initial: &Seed) -> Document ! {alloc, panic} {
     }
 }
 
-fn corpus(count: i64, initial: &Seed) -> Vec<Document> ! {alloc, panic} {
+fn corpus(count: i64, initial: &Seed) -> Vec<Document> ! {alloc} {
     let mut documents: Vec<Document> = Vec.with_capacity(count);
     let mut i = 0;
     while i < count {
@@ -128,7 +128,7 @@ fn corpus(count: i64, initial: &Seed) -> Vec<Document> ! {alloc, panic} {
     documents
 }
 
-fn content(out: Bytes, id: i64, revision: i64) -> Bytes ! {alloc, panic} {
+fn content(out: Bytes, id: i64, revision: i64) -> Bytes ! {alloc} {
     let mut out = out;
     let size = if revision % 2 == 1 {
         512
@@ -143,7 +143,7 @@ fn content(out: Bytes, id: i64, revision: i64) -> Bytes ! {alloc, panic} {
     out
 }
 
-fn subtree(out: Vec<i64>, id: i64, revision: i64) -> Vec<i64> ! {alloc, panic} {
+fn subtree(out: Vec<i64>, id: i64, revision: i64) -> Vec<i64> ! {alloc} {
     let mut out = out;
     let size = if revision % 2 == 1 {
         32
@@ -158,7 +158,7 @@ fn subtree(out: Vec<i64>, id: i64, revision: i64) -> Vec<i64> ! {alloc, panic} {
     out
 }
 
-fn rebuild(doc: Document) -> Document ! {alloc, panic} {
+fn rebuild(doc: Document) -> Document ! {alloc} {
     let Document {
         node: node, text: old_text, children: old_children
     } = doc;
@@ -177,7 +177,7 @@ fn rebuild(doc: Document) -> Document ! {alloc, panic} {
     }
 }
 
-fn reuse(doc: Document) -> Document ! {alloc, panic} {
+fn reuse(doc: Document) -> Document ! {alloc} {
     let Document {
         node: node, text: old_text, children: old_children
     } = doc;
@@ -209,7 +209,7 @@ fn reuse(doc: Document) -> Document ! {alloc, panic} {
     }
 }
 
-fn literal(out: Bytes, value: &[i64]) -> Bytes ! {alloc, panic} {
+fn literal(out: Bytes, value: &[i64]) -> Bytes ! {alloc} {
     let mut out = out;
     let mut i = 0;
     while i < Slice.len(value) {
@@ -219,7 +219,7 @@ fn literal(out: Bytes, value: &[i64]) -> Bytes ! {alloc, panic} {
     out
 }
 
-fn serialize(doc: Document) -> Bytes ! {alloc, panic} {
+fn serialize(doc: Document) -> Bytes ! {alloc} {
     let Document {
         node: node, text: content, children: children
     } = doc;
@@ -262,7 +262,7 @@ fn serialize(doc: Document) -> Bytes ! {alloc, panic} {
     }
 }
 
-fn finish(doc: Document, emit: Bool) -> i64 ! {io, alloc, panic} {
+fn finish(doc: Document, emit: Bool) -> i64 ! {io, alloc} {
     let mut out = serialize(doc);
     let mut hash = 0;
     let mut i = 0;
@@ -279,15 +279,15 @@ fn finish(doc: Document, emit: Bool) -> i64 ! {io, alloc, panic} {
     hash
 }
 
-fn quiet(doc: Document) -> i64 ! {io, alloc, panic} {
+fn quiet(doc: Document) -> i64 ! {io, alloc} {
     finish(doc, false)
 }
 
-fn verbose(doc: Document) -> i64 ! {io, alloc, panic} {
+fn verbose(doc: Document) -> i64 ! {io, alloc} {
     finish(doc, true)
 }
 
-fn consume(documents: Vec<Document>, emit: Bool) -> i64 ! {io, alloc, panic} {
+fn consume(documents: Vec<Document>, emit: Bool) -> i64 ! {io, alloc} {
     let sums = if emit {
         Vec.map_in_place(documents, verbose)
     } else {
@@ -302,7 +302,7 @@ fn consume(documents: Vec<Document>, emit: Bool) -> i64 ! {io, alloc, panic} {
     sum
 }
 
-fn argument(index: i64) -> i64 ! {io, alloc, panic} {
+fn argument(index: i64) -> i64 ! {io, alloc} {
     let value = match ENV.arg(index, Bytes.with_capacity(32)) {
         Ok(v) => v, Err(_) => {
             return -1;
@@ -313,7 +313,7 @@ fn argument(index: i64) -> i64 ! {io, alloc, panic} {
     }
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let count = argument(1);
     let rounds = argument(2);
     let mode = argument(3);

@@ -377,7 +377,7 @@ let decision: Decision = lib.plan(Facts { authenticated: true, revision: 3 });
 ```
 
 Rules, each a diagnostic: parameters are integers, floats, `Bool`, records of
-those, or `&Bytes`; the result is a scalar, a record of scalars or `Unit`; the effect row is `{}` or `{panic}`; no
+those, or `&Bytes`; the result is a scalar, a record of scalars or `Unit`; the effect row is `{}`; no
 generics, lifetimes, erased parameters or usage grades; the symbol is a C
 identifier, not `main`, not starting with `kush_`, and unique. A library
 needs at least one export and cannot import foreign functions yet.

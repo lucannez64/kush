@@ -83,7 +83,7 @@ use std.proc;
 use std.proc.Outcome;
 use std.result.Result;
 
-fn builtin(program: &Bytes, arguments: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc, panic} {
+fn builtin(program: &Bytes, arguments: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc} {
     let mut output = Bytes.with_capacity(capacity);
     match PROC.run(program, arguments, &mut output, timeout) {
         Result.Ok(status) => print_i64(status),
@@ -92,7 +92,7 @@ fn builtin(program: &Bytes, arguments: &Bytes, capacity: i64, timeout: i64) -> U
     print_i64(Bytes.len(&output));
 }
 
-fn library(program: &Bytes, arguments: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc, panic} {
+fn library(program: &Bytes, arguments: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc} {
     match proc.run(program, arguments, Bytes.with_capacity(capacity), timeout) {
         Outcome.Exited(output, status) => { print_i64(status); print_i64(Bytes.len(&output)); },
         Outcome.Stopped(output, code) => { print_i64(-code); print_i64(Bytes.len(&output)); },
@@ -100,12 +100,12 @@ fn library(program: &Bytes, arguments: &Bytes, capacity: i64, timeout: i64) -> U
     }
 }
 
-fn both(program: &Bytes, arguments: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc, panic} {
+fn both(program: &Bytes, arguments: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc} {
     builtin(program, arguments, capacity, timeout);
     library(program, arguments, capacity, timeout);
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let echo = Bytes.from("/bin/echo");
     let words = Bytes.from("hello\0\0world\0");
     both(&echo, &words, 64, 5000);
@@ -194,7 +194,7 @@ use std.net.Outcome;
 use std.result.Result;
 use std.text;
 
-fn builtin(host: &Bytes, port: i64, request: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc, panic} {
+fn builtin(host: &Bytes, port: i64, request: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc} {
     let mut response = Bytes.with_capacity(capacity);
     match NET.tcp_exchange(host, port, request, &mut response, timeout) {
         Result.Ok(count) => print_i64(count),
@@ -203,7 +203,7 @@ fn builtin(host: &Bytes, port: i64, request: &Bytes, capacity: i64, timeout: i64
     print_i64(Bytes.len(&response));
 }
 
-fn library(host: &Bytes, port: i64, request: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc, panic} {
+fn library(host: &Bytes, port: i64, request: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc} {
     match net.exchange(host, port, request, Bytes.with_capacity(capacity), timeout) {
         Outcome.Received(response, count) => { print_i64(count); print_i64(Bytes.len(&response)); },
         Outcome.Stopped(response, code) => { print_i64(-code); print_i64(Bytes.len(&response)); },
@@ -211,12 +211,12 @@ fn library(host: &Bytes, port: i64, request: &Bytes, capacity: i64, timeout: i64
     }
 }
 
-fn both(host: &Bytes, port: i64, request: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc, panic} {
+fn both(host: &Bytes, port: i64, request: &Bytes, capacity: i64, timeout: i64) -> Unit ! {io, alloc} {
     builtin(host, port, request, capacity, timeout);
     library(host, port, request, capacity, timeout);
 }
 
-fn argument(index: i64) -> i64 ! {io, alloc, panic} {
+fn argument(index: i64) -> i64 ! {io, alloc} {
     let digits = match ENV.arg(index, Bytes.with_capacity(16)) {
         Ok(value) => value,
         Err(code) => { return -code; },
@@ -227,7 +227,7 @@ fn argument(index: i64) -> i64 ! {io, alloc, panic} {
     }
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let port = argument(1);
     let closed = argument(2);
     let host = Bytes.from("127.0.0.1");

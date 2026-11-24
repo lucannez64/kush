@@ -20,12 +20,12 @@ BUILD = base.BUILD / "optimizations"
 
 def phases(kush, toolchain, n, rounds, repetitions, cpu, previous=None):
     source = base.kush_source("kush-fused")
-    source = source.replace("pub fn batch(n: i64, fused_mode: Bool) -> i64 ! {alloc, panic}", "pub fn batch(n: i64, fused_mode: Bool) -> i64 ! {io, alloc, panic}")
+    source = source.replace("pub fn batch(n: i64, fused_mode: Bool) -> i64 ! {alloc}", "pub fn batch(n: i64, fused_mode: Bool) -> i64 ! {io, alloc}")
     source = source.replace("    let ticket = standard_ticket(n);", "    let start = clock();\n    let ticket = standard_ticket(n);")
     source = source.replace("    let transformed = if fused_mode", "    let initialized = clock();\n    let transformed = if fused_mode")
     source = source.replace("    let view = &transformed[..];", "    let mapped = clock();\n    let view = &transformed[..];")
     source = source.replace("    finish(ticket, sum)\n}", "    let reduced = clock();\n    let result = finish(ticket, sum);\n    print_i64(initialized-start); print_i64(mapped-initialized); print_i64(reduced-mapped);\n    result\n}")
-    source += "\nfn clock()->i64 ! {io,panic} {match TIME.monotonic_ns(){Result.Ok(n)=>n,Result.Err(_)=>panic()}}\n"
+    source += "\nfn clock()->i64 ! {io} {match TIME.monotonic_ns(){Result.Ok(n)=>n,Result.Err(_)=>panic()}}\n"
     kush_path = BUILD / "phases.kush"
     kush_path.write_text(source)
     for name, flags in [("kush-default", []), ("kush-release", ["--release"])]:

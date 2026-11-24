@@ -38,13 +38,13 @@ by value and in the result:
 ```rust
 struct Window<'a> { view: &'a [i64], start: i64 }
 
-fn len<'a>(window: Window<'a>) -> i64 ! {panic} {
+fn len<'a>(window: Window<'a>) -> i64 ! {} {
     Slice.len(window.view) - window.start
 }
 
 fn advance<'a>(window: Window<'a>) -> Window<'a> ! {} { window }
 
-fn apply<'a>(f: fn<'b>(Window<'b>) -> i64 ! {panic}, w: Window<'a>) -> i64 ! {panic} {
+fn apply<'a>(f: fn<'b>(Window<'b>) -> i64 ! {}, w: Window<'a>) -> i64 ! {} {
     f(w)
 }
 ```
@@ -75,7 +75,7 @@ whose storage comes from one of its captures:
 
 ```rust
 let window = Window { view: &owner[..] };
-let tail = fn() -> &[i64] ! {panic} { window.view[1..] };
+let tail = fn() -> &[i64] ! {} { window.view[1..] };
 let rest = tail();
 ```
 
@@ -108,8 +108,8 @@ scope, and a child may capture that record in turn:
 
 ```rust
 let window = Window { view: &data[..], start: 1 };
-Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-    let t = Task.spawn(fn() -> i64 ! {panic, suspend} {
+Task.scope(fn() -> i64 ! {alloc, suspend} {
+    let t = Task.spawn(fn() -> i64 ! {suspend} {
         Task.yield();
         Slice.get(window.view, window.start)
     });
@@ -210,7 +210,7 @@ copy of the projected value.
 struct Inner { a: i64, b: i64 }
 struct Outer { inner: Inner, note: i64 }
 
-fn add(left: &mut i64, right: &mut i64) -> Unit ! {panic} {
+fn add(left: &mut i64, right: &mut i64) -> Unit ! {} {
     *left = *left + *right;
 }
 
@@ -279,7 +279,7 @@ records the pairs whose values the [linear facts](runtime-indices.md) prove
 distinct at that point:
 
 ```rust
-fn swap(v: &mut [i64], i: i64, j: i64) -> Unit ! {panic} {
+fn swap(v: &mut [i64], i: i64, j: i64) -> Unit ! {} {
     if i != j {
         let p = &mut v[i];
         let q = &mut v[j];        // i != j is established: disjoint
@@ -289,7 +289,7 @@ fn swap(v: &mut [i64], i: i64, j: i64) -> Unit ! {panic} {
     }
 }
 
-fn pairs(s: &mut [i64]) -> Unit ! {panic} {
+fn pairs(s: &mut [i64]) -> Unit ! {} {
     let n = Slice.len(s);
     let mut k = 0;
     while k + 1 < n {
@@ -351,7 +351,7 @@ struct Holder<'a> { point: &'a Point, note: i64 }
 fn reset<'a>(h: &mut Holder<'a>, p: &'a Point) -> Unit ! {} {
     *h = Holder { point: p, note: 7 };   // every leaf replaced at once
 }
-fn bump<'a>(h: &mut Holder<'a>) -> Unit ! {panic} { h.note = h.note + 1; }
+fn bump<'a>(h: &mut Holder<'a>) -> Unit ! {} { h.note = h.note + 1; }
 
 let mut h = Holder { point: &a, note: 1 };
 reset(&mut h, &b);    // h now borrows b: b cannot be replaced while h lives
@@ -420,10 +420,10 @@ the same escape contract extends to shared references to `Box`, `Vec`, `Bytes`,
 and `String`:
 
 ```rust
-fn identity<'a>(p: &'a Point) -> &'a Point ! {panic} { p }
-fn relay<'a>(p: &'a Point) -> &'a Point ! {panic} { identity(p) }
+fn identity<'a>(p: &'a Point) -> &'a Point ! {} { p }
+fn relay<'a>(p: &'a Point) -> &'a Point ! {} { identity(p) }
 
-fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {panic} {
+fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {} {
     p.x = p.x + 1;
     p
 }
@@ -545,11 +545,11 @@ representation while their declared lifetime travels in the same annotation.
 references with the same one-word runtime representation as their shared form:
 
 ```rust
-fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> Unit ! {panic} {
+fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> Unit ! {} {
     Box.set(b, p);
 }
 
-fn add<'a>(v: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} {
+fn add<'a>(v: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc} {
     Vec.push(v, p);
 }
 ```
@@ -580,7 +580,7 @@ Arrow parameters and results may be `&'a T` / `&'a mut T` in addition to slice
 views and borrowed records:
 
 ```rust
-fn apply<'a>(f: fn<'b>(&'b Point) -> &'b Point ! {panic}, p: &'a Point) -> &'a Point ! {panic} {
+fn apply<'a>(f: fn<'b>(&'b Point) -> &'b Point ! {}, p: &'a Point) -> &'a Point ! {} {
     f(p)
 }
 ```
@@ -601,9 +601,9 @@ fn apply<'a>(f: fn<'b>(&'b Point) -> &'b Point ! {panic}, p: &'a Point) -> &'a P
 `TaskExit<T>` may travel across function and callable boundaries:
 
 ```rust
-fn make<'a>(window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-        Task.join(Task.spawn(fn() -> Window<'a> ! {panic, suspend} { window }))
+fn make<'a>(window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, suspend} {
+    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+        Task.join(Task.spawn(fn() -> Window<'a> ! {suspend} { window }))
     })
 }
 ```
@@ -628,11 +628,11 @@ A child task may return a borrowed `TaskExit<R>` that it produced by joining a
 grandchild in its own `Task.scope`:
 
 ```rust
-fn make<'a>(window: Window<'a>) -> TaskExit<TaskExit<Window<'a>>> ! {alloc, panic, suspend} {
-    Task.scope(fn() -> TaskExit<TaskExit<Window<'a>>> ! {alloc, panic, suspend} {
-        let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
-                Task.join(Task.spawn(fn() -> Window<'a> ! {panic, suspend} { window }))
+fn make<'a>(window: Window<'a>) -> TaskExit<TaskExit<Window<'a>>> ! {alloc, suspend} {
+    Task.scope(fn() -> TaskExit<TaskExit<Window<'a>>> ! {alloc, suspend} {
+        let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, suspend} {
+                Task.join(Task.spawn(fn() -> Window<'a> ! {suspend} { window }))
             })
         });
         Task.join(t)     // TaskExit<TaskExit<Window<'a>>>
@@ -753,7 +753,7 @@ a parameter, or one side of a `Slice.split_at_mut` pair, over an inline array,
 a `DynArray`, a record's `DynArray` field, or a `Vec<T>`.
 
 ```rust
-fn last_mut<'a>(s: &'a mut [i64]) -> &'a mut i64 ! {panic} {
+fn last_mut<'a>(s: &'a mut [i64]) -> &'a mut i64 ! {} {
     let n = Slice.len(s);
     &mut s[n - 1]
 }

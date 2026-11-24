@@ -49,21 +49,21 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) -> MemorySt
 /// method. `Text` owns a `String`, so every object payload owns storage.
 const PICK: &str = r#"
 trait Pick {
-    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
-    fn el(self: &Self) -> &[i64] ! {alloc, panic};
-    fn bump(self: &mut Self) -> i64 ! {panic};
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {};
+    fn el(self: &Self) -> &[i64] ! {alloc};
+    fn bump(self: &mut Self) -> i64 ! {};
 }
 struct Text { tag: i64, name: String, arr: DynArray<i64, 3> }
 struct Plain { tag: i64, arr: DynArray<i64, 3> }
 impl Pick for Text {
-    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values }
-    fn el(self: &Self) -> &[i64] ! {alloc, panic} { &self.arr[..] }
-    fn bump(self: &mut Self) -> i64 ! {panic} { self.tag = self.tag + 1; self.tag }
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values }
+    fn el(self: &Self) -> &[i64] ! {alloc} { &self.arr[..] }
+    fn bump(self: &mut Self) -> i64 ! {} { self.tag = self.tag + 1; self.tag }
 }
 impl Pick for Plain {
-    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values }
-    fn el(self: &Self) -> &[i64] ! {alloc, panic} { &self.arr[..] }
-    fn bump(self: &mut Self) -> i64 ! {panic} { self.tag = self.tag + 10; self.tag }
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values }
+    fn el(self: &Self) -> &[i64] ! {alloc} { &self.arr[..] }
+    fn bump(self: &mut Self) -> i64 ! {} { self.tag = self.tag + 10; self.tag }
 }
 "#;
 
@@ -72,23 +72,23 @@ impl Pick for Plain {
 const OPEN: &str = r#"
 struct Wrap<T> { value: T, arr: DynArray<i64, 3> }
 impl<T> Pick for Wrap<T> {
-    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values }
-    fn el(self: &Self) -> &[i64] ! {alloc, panic} { &self.arr[..] }
-    fn bump(self: &mut Self) -> i64 ! {panic} { 70 }
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values }
+    fn el(self: &Self) -> &[i64] ! {alloc} { &self.arr[..] }
+    fn bump(self: &mut Self) -> i64 ! {} { 70 }
 }
-fn wrap() -> dyn Pick ! {alloc, panic} {
+fn wrap() -> dyn Pick ! {alloc} {
     Wrap { value: Text { tag: 0, name: "w", arr: [0] }, arr: [4, 5, 6] }
 }
 "#;
 
 const MAKE: &str = r#"
-fn make() -> dyn Pick ! {alloc, panic} { Text { tag: 1, name: "t", arr: [8, 9, 10] } }
-fn plain() -> dyn Pick ! {alloc, panic} { Plain { tag: 2, arr: [1, 2, 3] } }
+fn make() -> dyn Pick ! {alloc} { Text { tag: 1, name: "t", arr: [8, 9, 10] } }
+fn plain() -> dyn Pick ! {alloc} { Plain { tag: 2, arr: [1, 2, 3] } }
 "#;
 
 fn program(open: bool, main: &str) -> String {
     format!(
-        "{PICK}{}{MAKE}\nfn main() -> i64 ! {{io, alloc, panic}} {{\n{main}\n}}\n",
+        "{PICK}{}{MAKE}\nfn main() -> i64 ! {{io, alloc}} {{\n{main}\n}}\n",
         if open { OPEN } else { "" }
     )
 }
@@ -186,10 +186,10 @@ fn views_of_hidden_receiver_storage_cannot_outlive_their_block() {
         rejects(
             &format!(
                 "{PICK}{}{MAKE}
-                fn leak<'a>(values: &'a [i64]) -> &'a [i64] ! {{alloc, panic}} {{
+                fn leak<'a>(values: &'a [i64]) -> &'a [i64] ! {{alloc}} {{
                     make().pick(values)
                 }}
-                fn main() -> i64 ! {{io, alloc, panic}} {{
+                fn main() -> i64 ! {{io, alloc}} {{
                     let values = [1, 2];
                     print_i64(leak(&values[..])[0]);
                     0
@@ -208,21 +208,21 @@ fn linear_temporary_receivers_must_still_be_consumed() {
         struct Ticket { id: i64 }
         struct Wrap<T> { value: T }
         trait Look {
-            fn look(self: &Self) -> i64 ! {panic};
-            fn done(self: Self) -> i64 ! {panic};
+            fn look(self: &Self) -> i64 ! {};
+            fn done(self: Self) -> i64 ! {};
         }
         impl Look for Ticket {
-            fn look(self: &Self) -> i64 ! {panic} { self.id }
-            fn done(self: Self) -> i64 ! {panic} { let Ticket { id } = self; id + 1 }
+            fn look(self: &Self) -> i64 ! {} { self.id }
+            fn done(self: Self) -> i64 ! {} { let Ticket { id } = self; id + 1 }
         }
         impl<T: Look> Look for Wrap<T> {
-            fn look(self: &Self) -> i64 ! {panic} { 3 }
-            fn done(self: Self) -> i64 ! {panic} { let Wrap { value } = self; value.done() }
+            fn look(self: &Self) -> i64 ! {} { 3 }
+            fn done(self: Self) -> i64 ! {} { let Wrap { value } = self; value.done() }
         }
     "#;
     rejects(
         &format!(
-            "{linear} fn main() -> i64 ! {{alloc, panic}} {{
+            "{linear} fn main() -> i64 ! {{alloc}} {{
             {{ let ticket: dyn Look = Ticket {{ id: 1 }}; ticket }}.look()
         }}"
         ),
@@ -230,7 +230,7 @@ fn linear_temporary_receivers_must_still_be_consumed() {
     );
     agrees(
         &format!(
-            "{linear} fn main() -> i64 ! {{alloc, panic}} {{
+            "{linear} fn main() -> i64 ! {{alloc}} {{
             {{ let ticket: dyn Look = Ticket {{ id: 1 }}; ticket }}.done()
         }}"
         ),
@@ -246,43 +246,43 @@ const BUMP: &str = r#"
 struct Text { name: String, count: i64 }
 struct Other { count: i64 }
 trait Bump {
-    fn bump(self: &mut Self, by: i64) -> i64 ! {panic};
-    fn look(self: &Self) -> i64 ! {panic};
-    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+    fn bump(self: &mut Self, by: i64) -> i64 ! {};
+    fn look(self: &Self) -> i64 ! {};
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {};
 }
 impl Bump for Text {
-    fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count }
-    fn look(self: &Self) -> i64 ! {panic} { self.count }
-    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values }
+    fn bump(self: &mut Self, by: i64) -> i64 ! {} { self.count = self.count + by; self.count }
+    fn look(self: &Self) -> i64 ! {} { self.count }
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values }
 }
 impl Bump for Other {
-    fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count }
-    fn look(self: &Self) -> i64 ! {panic} { self.count }
-    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values }
+    fn bump(self: &mut Self, by: i64) -> i64 ! {} { self.count = self.count + by; self.count }
+    fn look(self: &Self) -> i64 ! {} { self.count }
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values }
 }
 struct Holder<T> { inner: T, tag: i64 }
 struct Outer<T> { holder: Holder<T>, extra: i64 }
-fn poke(holder: &mut Holder<dyn Bump>, by: i64) -> i64 ! {panic} { holder.inner.bump(by) }
-fn peek(holder: &Holder<dyn Bump>) -> i64 ! {panic} { holder.inner.look() }
+fn poke(holder: &mut Holder<dyn Bump>, by: i64) -> i64 ! {} { holder.inner.bump(by) }
+fn peek(holder: &Holder<dyn Bump>) -> i64 ! {} { holder.inner.look() }
 "#;
 
 const OPEN_BUMP: &str = r#"
 struct Nominal { inner: dyn Bump, tag: i64 }
 impl Nominal {
-    fn poke(self: &mut Self, by: i64) -> i64 ! {panic} { self.inner.bump(by) }
-    fn peek(self: &Self) -> i64 ! {panic} { self.inner.look() }
+    fn poke(self: &mut Self, by: i64) -> i64 ! {} { self.inner.bump(by) }
+    fn peek(self: &Self) -> i64 ! {} { self.inner.look() }
 }
 struct Wrap<T> { value: T }
 impl<T> Bump for Wrap<T> {
-    fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { by }
-    fn look(self: &Self) -> i64 ! {panic} { 0 }
-    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values }
+    fn bump(self: &mut Self, by: i64) -> i64 ! {} { by }
+    fn look(self: &Self) -> i64 ! {} { 0 }
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {} { values }
 }
 "#;
 
 fn bump_program(open: bool, main: &str) -> String {
     format!(
-        "{BUMP}{}\nfn main() -> i64 ! {{io, alloc, panic}} {{\n{main}\n}}\n",
+        "{BUMP}{}\nfn main() -> i64 ! {{io, alloc}} {{\n{main}\n}}\n",
         if open { OPEN_BUMP } else { "" }
     )
 }
@@ -394,8 +394,8 @@ fn projected_mutable_dispatch_respects_owner_capabilities_and_loans() {
         rejects(
             &format!(
                 "{BUMP}{}
-                fn bad(holder: &Holder<dyn Bump>) -> i64 ! {{panic}} {{ holder.inner.bump(1) }}
-                fn main() -> i64 ! {{alloc, panic}} {{ 0 }}",
+                fn bad(holder: &Holder<dyn Bump>) -> i64 ! {{}} {{ holder.inner.bump(1) }}
+                fn main() -> i64 ! {{alloc}} {{ 0 }}",
                 if open { OPEN_BUMP } else { "" }
             ),
             "needs a mutable owner",
@@ -409,11 +409,11 @@ const EAT: &str = r#"
 struct Ticket { id: i64 }
 struct Text { name: String, count: i64 }
 struct Other { count: i64 }
-trait Eat { fn eat(self: Self, extra: i64) -> i64 ! {panic}; }
-impl Eat for Text { fn eat(self: Self, extra: i64) -> i64 ! {panic} { self.count + extra } }
-impl Eat for Other { fn eat(self: Self, extra: i64) -> i64 ! {panic} { self.count + extra } }
+trait Eat { fn eat(self: Self, extra: i64) -> i64 ! {}; }
+impl Eat for Text { fn eat(self: Self, extra: i64) -> i64 ! {} { self.count + extra } }
+impl Eat for Other { fn eat(self: Self, extra: i64) -> i64 ! {} { self.count + extra } }
 impl Eat for Ticket {
-    fn eat(self: Self, extra: i64) -> i64 ! {panic} { let Ticket { id } = self; id + extra }
+    fn eat(self: Self, extra: i64) -> i64 ! {} { let Ticket { id } = self; id + extra }
 }
 struct Holder<T> { inner: T, label: String }
 struct Outer<T> { holder: Holder<T>, extra: Vec<i64> }
@@ -422,12 +422,12 @@ fn ticket() -> Ticket @[1] ! {} { Ticket { id: 40 } }
 
 const OPEN_EAT: &str = r#"
 struct Wrap<T> { value: T }
-impl<T> Eat for Wrap<T> { fn eat(self: Self, extra: i64) -> i64 ! {panic} { 100 + extra } }
+impl<T> Eat for Wrap<T> { fn eat(self: Self, extra: i64) -> i64 ! {} { 100 + extra } }
 "#;
 
 fn eat_program(open: bool, main: &str) -> String {
     format!(
-        "{EAT}{}\nfn main() -> i64 ! {{io, alloc, panic}} {{\n{main}\n}}\n",
+        "{EAT}{}\nfn main() -> i64 ! {{io, alloc}} {{\n{main}\n}}\n",
         if open { OPEN_EAT } else { "" }
     )
 }
@@ -497,8 +497,8 @@ fn consuming_projected_dispatch_follows_destructuring_rules() {
         rejects(
             &format!(
                 "{EAT}{}
-                fn bad(holder: &Holder<dyn Eat>) -> i64 ! {{panic}} {{ holder.inner.eat(0) }}
-                fn main() -> i64 ! {{alloc, panic}} {{ 0 }}",
+                fn bad(holder: &Holder<dyn Eat>) -> i64 ! {{}} {{ holder.inner.eat(0) }}
+                fn main() -> i64 ! {{alloc}} {{ 0 }}",
                 if open { OPEN_EAT } else { "" }
             ),
             "behind a reference",
@@ -512,14 +512,14 @@ fn consuming_projected_dispatch_follows_destructuring_rules() {
 const SINGLE: &str = r#"
 struct Text { tag: i64, name: String }
 trait Show {
-    fn show(self: &Self) -> i64 ! {panic};
-    fn bump(self: &mut Self) -> i64 ! {panic};
-    fn eat(self: Self) -> i64 ! {panic};
+    fn show(self: &Self) -> i64 ! {};
+    fn bump(self: &mut Self) -> i64 ! {};
+    fn eat(self: Self) -> i64 ! {};
 }
 impl Show for Text {
-    fn show(self: &Self) -> i64 ! {panic} { self.tag }
-    fn bump(self: &mut Self) -> i64 ! {panic} { self.tag = self.tag + 1; self.tag }
-    fn eat(self: Self) -> i64 ! {panic} { let Text { tag, name } = self; tag * 10 }
+    fn show(self: &Self) -> i64 ! {} { self.tag }
+    fn bump(self: &mut Self) -> i64 ! {} { self.tag = self.tag + 1; self.tag }
+    fn eat(self: Self) -> i64 ! {} { let Text { tag, name } = self; tag * 10 }
 }
 "#;
 
@@ -528,7 +528,7 @@ fn single_impl_objects_keep_their_object_type_inside_tuples() {
     let stats = agrees(
         &format!(
             r#"{SINGLE}
-            fn main() -> i64 ! {{io, alloc, panic}} {{
+            fn main() -> i64 ! {{io, alloc}} {{
                 let mut pair: (dyn Show, i64) = (Text {{ tag: 7, name: String.from("hello") }}, 1);
                 print_i64(pair.0.show());
                 print_i64(pair.0.bump());
@@ -553,9 +553,9 @@ fn single_impl_objects_are_not_their_member_type() {
     // Projected out of a tuple (previously accepted through the collapse).
     rejects(
         r#"struct Text { name: i64 }
-        trait Show { fn show(self: &Self) -> i64 ! {panic}; }
-        impl Show for Text { fn show(self: &Self) -> i64 ! {panic} { self.name } }
-        fn main() -> i64 ! {alloc, panic} {
+        trait Show { fn show(self: &Self) -> i64 ! {}; }
+        impl Show for Text { fn show(self: &Self) -> i64 ! {} { self.name } }
+        fn main() -> i64 ! {alloc} {
             let pair: (dyn Show, i64) = (Text { name: 7 }, 1);
             let t: Text = pair.0;
             t.show()
@@ -566,7 +566,7 @@ fn single_impl_objects_are_not_their_member_type() {
     rejects(
         &format!(
             r#"{SINGLE}
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 let object: dyn Show = Text {{ tag: 7, name: String.from("a") }};
                 let t: Text = object;
                 t.eat()
@@ -582,7 +582,7 @@ fn single_impl_objects_stay_objects_through_joins() {
         let stats = agrees(
             &format!(
                 r#"{SINGLE}
-                fn main() -> i64 ! {{io, alloc, panic}} {{
+                fn main() -> i64 ! {{io, alloc}} {{
                     let a: dyn Show = Text {{ tag: 1, name: String.from("a") }};
                     let b: dyn Show = Text {{ tag: 2, name: String.from("b") }};
                     let n = 7;
@@ -603,11 +603,11 @@ fn single_impl_objects_stay_objects_through_joins() {
 fn objects_sharing_one_representation_name_every_trait() {
     rejects(
         r#"struct Text { tag: i64 }
-        trait Show { fn show(self: &Self) -> i64 ! {panic}; }
-        trait Other { fn other(self: &Self) -> i64 ! {panic}; }
-        impl Show for Text { fn show(self: &Self) -> i64 ! {panic} { self.tag } }
-        impl Other for Text { fn other(self: &Self) -> i64 ! {panic} { self.tag * 2 } }
-        fn main() -> i64 ! {panic} {
+        trait Show { fn show(self: &Self) -> i64 ! {}; }
+        trait Other { fn other(self: &Self) -> i64 ! {}; }
+        impl Show for Text { fn show(self: &Self) -> i64 ! {} { self.tag } }
+        impl Other for Text { fn other(self: &Self) -> i64 ! {} { self.tag * 2 } }
+        fn main() -> i64 ! {} {
             let b: dyn Other = Text { tag: 1 };
             let z: i64 = b;
             z
@@ -623,7 +623,7 @@ fn single_main(body: &str) -> String {
     format!(
         r#"{SINGLE}
         fn first<T>(a: T, b: T) -> T ! {{}} {{ let _ = b; a }}
-        fn main() -> i64 ! {{io, alloc, panic}} {{
+        fn main() -> i64 ! {{io, alloc}} {{
             let a: dyn Show = Text {{ tag: 1, name: String.from("a") }};
             let n = 7;
             {body}

@@ -15,26 +15,26 @@ const LIB: &str = "module app.lib;
 pub struct Pair { pub a: i64, pub b: i64 }
 
 // Off by one: `i <= len` lets `i == len` through.
-pub fn last(v: &Vec<i64>, i: i64) -> i64 ! {panic} {
+pub fn last(v: &Vec<i64>, i: i64) -> i64 ! {} {
     if i < 0 || i > v.len() { return 0; }
     v[i]
 }
-pub fn next(x: i64) -> i64 ! {panic} { x + 1 }
-pub fn bump(x: u8) -> u8 ! {panic} { x + 1 }
+pub fn next(x: i64) -> i64 ! {} { x + 1 }
+pub fn bump(x: u8) -> u8 ! {} { x + 1 }
 // True for every input, but the prover cannot see it (a product).
-pub fn square(x: i64) -> i64 ! {panic} {
+pub fn square(x: i64) -> i64 ! {} {
     if x > 1000 || x < 0 - 1000 { return 0; }
     x * x
 }
 // `x % 7` is never 13, so the addition is never reached.
-pub fn never(x: i64, y: i64) -> i64 ! {panic} {
+pub fn never(x: i64, y: i64) -> i64 ! {} {
     if x % 7 == 13 { return y + 1; }
     0
 }
-pub fn sum(p: Pair) -> i64 ! {panic} { p.a + p.b }
+pub fn sum(p: Pair) -> i64 ! {} { p.a + p.b }
 // Private fields and no constructor: nothing can build it.
 pub struct Secret { n: i64 }
-pub fn reveal(s: Secret) -> i64 ! {panic} { s.n + 1 }
+pub fn reveal(s: Secret) -> i64 ! {} { s.n + 1 }
 ";
 
 // `main` calls nothing: a harness of `main` would reach every function.
@@ -235,7 +235,7 @@ fn the_command_reports_and_exits_by_findings() {
     let buggy = project("buggy");
     std::fs::write(
         buggy.join("src/main.kush"),
-        "module demo;\nfn next(x: i64) -> i64 ! {panic} { x + 1 }\nfn main() -> i64 ! {panic} { next(1) }\n",
+        "module demo;\nfn next(x: i64) -> i64 ! {} { x + 1 }\nfn main() -> i64 ! {} { next(1) }\n",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_kush"))
@@ -251,7 +251,7 @@ fn the_command_reports_and_exits_by_findings() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        stdout.contains("FOUND  overflow demo.next  src/main.kush:2:36"),
+        stdout.contains("FOUND  overflow demo.next  src/main.kush:2:31"),
         "{stdout}"
     );
     assert!(
@@ -262,7 +262,7 @@ fn the_command_reports_and_exits_by_findings() {
     let safe = project("safe");
     std::fs::write(
         safe.join("src/main.kush"),
-        "module demo;\nfn small(x: u8) -> i64 ! {panic} { let y: i64 = Int.convert(x); y * y }\nfn main() -> i64 ! {panic} { small(3) }\n",
+        "module demo;\nfn small(x: u8) -> i64 ! {} { let y: i64 = Int.convert(x); y * y }\nfn main() -> i64 ! {} { small(3) }\n",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_kush"))
@@ -300,9 +300,9 @@ fn coverage_is_reported_per_function_and_as_json() {
     std::fs::write(
         path.join("src/main.kush"),
         "module demo;
-fn next(x: i64) -> i64 ! {panic} { x + 1 }
+fn next(x: i64) -> i64 ! {} { x + 1 }
 fn bounded(x: u8) -> u8 ! {} { if x < 255 { x + 1 } else { x } }
-fn mixed(x: u8, y: i64) -> i64 ! {panic} { let a: i64 = Int.convert(x); a + 1 + y }
+fn mixed(x: u8, y: i64) -> i64 ! {} { let a: i64 = Int.convert(x); a + 1 + y }
 fn main() -> i64 ! {} { 0 }
 ",
     )

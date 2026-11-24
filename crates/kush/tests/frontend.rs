@@ -439,7 +439,7 @@ fn block_statement_runs(source: &str, expected: i64) {
 fn block_statement_ends_before_a_new_line_starting_with_paren_or_minus() {
     // `if` then a tuple on the next line.
     block_statement_runs(
-        "fn main() -> i64 ! {panic} {
+        "fn main() -> i64 ! {} {
             let mut a = 1;
             if a > 0 { a = a + 1; }
             (a, 7).1 + a
@@ -448,7 +448,7 @@ fn block_statement_ends_before_a_new_line_starting_with_paren_or_minus() {
     );
     // `while` then a negative tail.
     block_statement_runs(
-        "fn main() -> i64 ! {panic} {
+        "fn main() -> i64 ! {} {
             let mut i = 0;
             while i < 3 { i = i + 1; }
             -1 + i * 10
@@ -457,7 +457,7 @@ fn block_statement_ends_before_a_new_line_starting_with_paren_or_minus() {
     );
     // `match` then a negative tail.
     block_statement_runs(
-        "fn main() -> i64 ! {panic} {
+        "fn main() -> i64 ! {} {
             let n = 2;
             match n { 2 => {}, _ => {} }
             -(n - 7)
@@ -466,7 +466,7 @@ fn block_statement_ends_before_a_new_line_starting_with_paren_or_minus() {
     );
     // A plain block then a parenthesized expression.
     block_statement_runs(
-        "fn main() -> i64 ! {panic} {
+        "fn main() -> i64 ! {} {
             { let x = 1; }
             (40 + 2)
         }",
@@ -474,7 +474,7 @@ fn block_statement_ends_before_a_new_line_starting_with_paren_or_minus() {
     );
     // Same line: still an operator, as before.
     block_statement_runs(
-        "fn main() -> i64 ! {panic} {
+        "fn main() -> i64 ! {} {
             let c = true;
             if c { 10 } else { 20 } - 3
         }",
@@ -482,7 +482,7 @@ fn block_statement_ends_before_a_new_line_starting_with_paren_or_minus() {
     );
     // Not at statement start (a let value): the next line still continues it.
     block_statement_runs(
-        "fn main() -> i64 ! {panic} {
+        "fn main() -> i64 ! {} {
             let c = false;
             let v = if c { 10 } else { 20 }
                 - 3;
@@ -494,7 +494,7 @@ fn block_statement_ends_before_a_new_line_starting_with_paren_or_minus() {
     block_statement_runs(
         "struct P { x: i64 }
         impl P { fn value(self: Self) -> i64 ! {} { self.x } }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let c = true;
             if c { P { x: 4 } } else { P { x: 5 } }
                 .value()
@@ -521,7 +521,7 @@ fn block_statement_parse_shape_and_rejections() {
     );
     // A let value continues onto the next line: calling an integer is rejected.
     let error = kush::executable::check(
-        "fn main() -> i64 ! {panic} {
+        "fn main() -> i64 ! {} {
             let v = if true { 1 } else { 2 }
                 (3);
             v
@@ -532,7 +532,7 @@ fn block_statement_parse_shape_and_rejections() {
     assert!(!error.message.is_empty());
     // A statement `if` with a non-unit value followed by `(..)` is two statements.
     let error = kush::executable::check(
-        "fn main() -> i64 ! {panic} {
+        "fn main() -> i64 ! {} {
             if true { 1 } else { 2 }
             (true)
         }",

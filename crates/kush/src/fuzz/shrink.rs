@@ -506,7 +506,7 @@ pub fn reproduction(
         format!("{}.{}", target.module.last()?, target.function)
     };
     Some(format!(
-        "#[test]\nfn {}() -> Unit ! {{io, alloc, panic}} {{\n    // kush fuzz: {what}\n{body}    let _ = {callee}({});\n}}\n",
+        "#[test]\nfn {}() -> Unit ! {{io, alloc}} {{\n    // kush fuzz: {what}\n{body}    let _ = {callee}({});\n}}\n",
         test_name(target, line),
         arguments.join(", ")
     ))

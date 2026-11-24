@@ -64,7 +64,7 @@ fn a_validated_algebra_checks_exact_usage_in_both_backends() {
     agrees(
         &format!(
             "{SATURATED}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let x: i64 @[Usage.Twice] = 21;
                 x + x
             }}"
@@ -78,9 +78,9 @@ fn an_algebra_element_can_be_a_parameter_or_result_contract() {
     agrees(
         &format!(
             "{SATURATED}
-            fn twice(x: i64 @[Usage.Twice]) -> i64 ! {{panic}} {{ x + x }}
+            fn twice(x: i64 @[Usage.Twice]) -> i64 ! {{}} {{ x + x }}
             fn make() -> i64 @[Usage.Once] ! {{}} {{ 41 }}
-            fn main() -> i64 ! {{panic}} {{ twice(1) + make() }}"
+            fn main() -> i64 ! {{}} {{ twice(1) + make() }}"
         ),
         43,
     );
@@ -91,7 +91,7 @@ fn a_saturated_algebra_counts_two_or_more_uses_as_twice() {
     agrees(
         &format!(
             "{SATURATED}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let x: i64 @[Usage.Twice] = 10;
                 x + x + x
             }}"
@@ -105,7 +105,7 @@ fn wrong_use_counts_are_rejected_in_the_algebra() {
     rejects(
         &format!(
             "{SATURATED}
-            fn main() -> i64 ! {{panic}} {{ let x: i64 @[Usage.Once] = 1; x + x }}"
+            fn main() -> i64 ! {{}} {{ let x: i64 @[Usage.Once] = 1; x + x }}"
         ),
         "not used consistently",
     );
@@ -234,7 +234,7 @@ fn an_idempotent_one_is_not_equated_with_exactly_one_physical_observation() {
         &format!(
             "{IDEMPOTENT_ONE}
             fn make() -> i64 @[Flag.On] ! {{}} {{ 21 }}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let value = make();
                 value + value
             }}"
@@ -245,7 +245,7 @@ fn an_idempotent_one_is_not_equated_with_exactly_one_physical_observation() {
         &format!(
             "{IDEMPOTENT_ONE}
             fn make() -> i64 @[Flag.On] ! {{}} {{ 21 }}
-            fn main() -> i64 ! {{panic}} {{
+            fn main() -> i64 ! {{}} {{
                 let value = make();
                 0
             }}"
@@ -255,7 +255,7 @@ fn an_idempotent_one_is_not_equated_with_exactly_one_physical_observation() {
     // Builtin `@[1]` keeps the physical exactly-once contract.
     rejects(
         r#"fn make() -> i64 @[1] ! {} { 21 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let value = make();
             value + value
         }"#,
@@ -288,7 +288,7 @@ fn an_algebra_whose_nonzero_uses_add_to_zero_is_rejected() {
             add { Even + Even = Even, Even + Odd = Odd, Odd + Even = Odd, Odd + Odd = Even }
             mul { Even * Even = Even, Even * Odd = Even, Odd * Even = Even, Odd * Odd = Odd }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {} {
             let x: i64 @[Parity.Even] = 21;
             x + x
         }"#,

@@ -5,14 +5,14 @@ use std.task.TaskExit;
 // Direct-style cooperative tasks. There is no async fn/await coloring:
 // suspending calls use ordinary syntax and declare the suspend effect.
 
-fn worker(name: i64) -> i64 ! {io, panic, suspend} {
+fn worker(name: i64) -> i64 ! {io, suspend} {
     print_i64(name * 10 + 1);
     Task.yield();
     print_i64(name * 10 + 2);
     name
 }
 
-fn cancellable(owner: Box<i64>) -> i64 ! {io, panic, suspend} {
+fn cancellable(owner: Box<i64>) -> i64 ! {io, suspend} {
     let value = Box.take(owner);
     print_i64(value);
     if Task.yield() {
@@ -23,12 +23,12 @@ fn cancellable(owner: Box<i64>) -> i64 ! {io, panic, suspend} {
     value + 1
 }
 
-fn main() -> Unit ! {io, alloc, panic, suspend} {
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
-        let a: Task<i64> = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+fn main() -> Unit ! {io, alloc, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
+        let a: Task<i64> = Task.spawn(fn() -> i64 ! {io, suspend} {
             worker(1)
         });
-        let b: Task<i64> = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+        let b: Task<i64> = Task.spawn(fn() -> i64 ! {io, suspend} {
             worker(2)
         });
         print_i64(0);
@@ -42,9 +42,9 @@ fn main() -> Unit ! {io, alloc, panic, suspend} {
         }
     });
 
-    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, suspend} {
         let owned = Box.new(7);
-        let c: Task<i64> = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+        let c: Task<i64> = Task.spawn(fn() -> i64 ! {io, suspend} {
             cancellable(owned)
         });
         Task.cancel(&c);

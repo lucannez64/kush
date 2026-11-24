@@ -21,7 +21,7 @@ consumes a boxed list, and automatically destroys another list at scope exit.
 ## Operations and effects
 
 ```rust
-let value = Box.new(42);   // Box<i64>, effects {alloc, panic}
+let value = Box.new(42);   // Box<i64>, effects {alloc}
 let moved = value;         // moves ownership; value is now unavailable
 let number = Box.take(moved); // i64; consumes/frees the outer box
 ```
@@ -100,7 +100,7 @@ fn inspect(value: &Box<i64>) -> i64 ! {} {
     Box.read(value)
 }
 
-fn main() -> Unit ! {io, alloc, panic} {
+fn main() -> Unit ! {io, alloc} {
     let value = Box.new(42);
     print_i64(inspect(&value));
     print_i64(Box.take(value)); // the preceding borrow has ended
@@ -198,7 +198,7 @@ when returned from a helper. No payload ownership is copied by a borrow.
 enum List { Nil, Cons(i64, Box<List>) }
 
 #[noalloc]
-fn sum(list: List) -> i64 ! {panic} {
+fn sum(list: List) -> i64 ! {} {
     match list {
         List.Nil => 0,
         List.Cons(head, tail) => head + sum(Box.take(tail)),

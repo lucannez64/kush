@@ -129,7 +129,7 @@ fn stringify_validates_user_constructed_numbers_and_strings() {
     ] {
         let source = format!(
             r#"use std.result.Result; use std.json;
-            fn main() -> i64 ! {{alloc, panic}} {{
+            fn main() -> i64 ! {{alloc}} {{
                 match json.stringify({value}) {{ Ok(_) => 9, Err(_) => 0 }}
             }}"#
         );

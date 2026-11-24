@@ -24,11 +24,11 @@ unions, and linear-once closures.
 ## Function types
 
 ```rust
-fn(i64, i64) -> i64 ! {panic}
-fn(i64 @[2]) -> i64 ! {panic}
-once fn(i64) -> i64 ! {alloc, panic}
-linear once fn(i64) -> i64 ! {panic}
-type Unary = fn(i64) -> i64 ! {panic};
+fn(i64, i64) -> i64 ! {}
+fn(i64 @[2]) -> i64 ! {}
+once fn(i64) -> i64 ! {alloc}
+linear once fn(i64) -> i64 ! {}
+type Unary = fn(i64) -> i64 ! {};
 type Mapper<e: Effects> = fn(i64) -> i64 ! {e};
 ```
 
@@ -65,11 +65,11 @@ type Mapper<e: Effects> = fn(i64) -> i64 ! {e};
 A function may quantify over an effect row with `<e: Effects>`:
 
 ```rust
-fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
     f(x)
 }
 
-fn twice<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+fn twice<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} {
     f(f(x))
 }
 ```
@@ -77,20 +77,21 @@ fn twice<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
 - `e` is a row variable, not a type, grade, or natural const parameter. The
   generic categories remain separate; `::<...>` arguments are interpreted by
   declared category and may not be supplied in another category's position.
-- The supported effect names are `panic`, `io`, `alloc`, and `suspend`.
-  Suspension propagates through direct calls, indirect calls, and instantiated
-  rows exactly like the other effects; `#[nosuspend]` rejects a reachable
-  suspension or an unconstrained row variable.
+- The builtin effect names are `io`, `alloc`, and `suspend`. `panic` is not
+  an effect: any function may panic. Suspension propagates through direct
+  calls, indirect calls, and instantiated rows exactly like the other effects;
+  a row without `suspend` (or a row variable bound `Effects - suspend`)
+  rejects a reachable suspension.
 - A row is the union of fixed effect names and row variables: `! {e}`,
   `! {io, e}`, `! {io | e}` are equivalent spellings.
 - An effect row is inferred from a callable argument when exactly one
   unbound row variable occurs in the callee parameter type. For example
-  `apply(inc, 41)` instantiates `e = {panic}` and `apply(io_inc, 41)`
-  instantiates `e = {io, panic}`. If several row variables are unbound, or the
+  `apply(inc, 41)` instantiates `e = {}` and `apply(io_inc, 41)`
+  instantiates `e = {io}`. If several row variables are unbound, or the
   row is not mentioned by any callable argument, the call is rejected with a
   request for explicit specialization.
 - Explicit effect specialization uses an effect expression:
-  `apply::<io | panic>(io_inc, 41)`. A type or grade argument in an effect
+  `apply::<io>(io_inc, 41)`. A type or grade argument in an effect
   slot (or an effect name in a type/grade slot) is rejected.
 - The instantiated row is part of the callable's signature and propagates
   transitively: a polymorphic caller cannot hide an effect required by a
@@ -110,8 +111,8 @@ fn twice<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
 Distinct callable signatures may be alternatives of a heterogeneous union:
 
 ```rust
-let f: fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = inc;
-let g: i64 | once fn(i64) -> i64 ! {panic} = inc;
+let f: fn(i64) -> i64 ! {} | fn() -> i64 ! {} = inc;
+let g: i64 | once fn(i64) -> i64 ! {} = inc;
 ```
 
 - Normalization is the same as for other alternatives. Two callable
@@ -130,7 +131,7 @@ let g: i64 | once fn(i64) -> i64 ! {panic} = inc;
   repack that would change the callable ABI is rejected explicitly; bind and
   adapt the value as an explicit `once fn` first.
 - Narrowing uses a type pattern such as
-  `fn(i64) -> i64 ! {panic} @ h => h(41)`. The binder has the narrowed callable
+  `fn(i64) -> i64 ! {} @ h => h(41)`. The binder has the narrowed callable
   type and the existing per-signature indirect-call ABI.
 - A union is owning if any alternative owns storage and linear if any
   alternative is linear. Dropping a union dispatches on the active tag, so an
@@ -142,15 +143,15 @@ let g: i64 | once fn(i64) -> i64 ! {panic} = inc;
 A function name used in value position becomes a function value:
 
 ```rust
-fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+fn inc(x: i64) -> i64 ! {} { x + 1 }
 
-fn apply(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} {
+fn apply(f: fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} {
     f(x)
 }
 
-fn id<T>(x: T) -> T ! {panic} { x }
+fn id<T>(x: T) -> T ! {} { x }
 
-fn main() -> i64 ! {panic} {
+fn main() -> i64 ! {} {
     apply(inc, 41) + apply(id::<i64>, 42) - 42
 }
 ```
@@ -172,8 +173,8 @@ abstract usage grades likewise require explicit specialization.
 A fully annotated lambda:
 
 ```rust
-let double = fn(x: i64) -> i64 ! {panic} { x * 2 };
-let f: fn(i64) -> i64 ! {panic} = double;
+let double = fn(x: i64) -> i64 ! {} { x * 2 };
+let f: fn(i64) -> i64 ! {} = double;
 ```
 
 ### Lambda annotation inference
@@ -185,11 +186,11 @@ decisions 3-4). Inference is local and never inserts a coercion:
 ```rust
 fn apply<T, e: Effects>(f: fn(T) -> T ! {e}, x: T) -> T ! {e} { f(x) }
 
-apply(fn(x) { x * 2 }, 21)            // x: i64 from 21, row {panic} from the body
+apply(fn(x) { x * 2 }, 21)            // x: i64 from 21, row {} from the body
 let double = fn(x) { x * 2 };         // fixed by the first use below
 apply(double, 21)
-let g: fn(i64) -> i64 ! {panic} = fn(x) { x + 1 };
-let h = fn(x: i64) { x + 1 };         // result i64 and row {panic} from the body
+let g: fn(i64) -> i64 ! {} = fn(x) { x + 1 };
+let h = fn(x: i64) { x + 1 };         // result i64 and row {} from the body
 ```
 
 - **Parameters** come from, in order: the expected arrow type (an annotated
@@ -231,7 +232,7 @@ single slice parameter. Its result lifetime is elided from that parameter and
 preserved through function values and higher-order calls:
 
 ```rust
-let tail = fn(v: &[i64]) -> &[i64] ! {panic} { &v[1..] };
+let tail = fn(v: &[i64]) -> &[i64] ! {} { &v[1..] };
 let identity = fn(v: &mut [i64]) -> &mut [i64] ! {} { v };
 ```
 
@@ -245,7 +246,7 @@ A lambda that captures affine owned storage is an owning `once fn(...)` value:
 
 ```rust
 let n = Box.new(41);
-let add = fn(x: i64) -> i64 ! {panic} { Box.take(n) + x };
+let add = fn(x: i64) -> i64 ! {} { Box.take(n) + x };
 add(1);
 ```
 
@@ -265,10 +266,10 @@ a `let` initializer or called immediately, and the local may only be called or
 implicitly dropped in the same lexical scope:
 
 ```rust
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let mut values: [i64; 3] = [1, 2, 3];
     let view: &mut [i64] = &mut values[..];
-    let bump = fn(by: i64) -> Unit ! {panic} {
+    let bump = fn(by: i64) -> Unit ! {} {
         Slice.set(view, 0, Slice.get(view, 0) + by);
     };
     bump(41);
@@ -322,10 +323,10 @@ value graded `@[1]`) is a `linear once fn(...)` value. Linearity is
 propagated, not erased:
 
 ```rust
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let n: Box<i64> @[1] = Box.new(20);
-    let f: linear once fn(i64) -> i64 ! {panic} =
-        fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 };
+    let f: linear once fn(i64) -> i64 ! {} =
+        fn(x: i64) -> i64 ! {} { Box.take(n) + x + 1 };
     f(21)                                  // 42
 }
 ```

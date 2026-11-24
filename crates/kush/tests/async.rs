@@ -86,16 +86,16 @@ fn compare(source: &str) -> (Vec<u8>, MemoryStats, MemoryStats) {
 fn scheduling_order_is_deterministic_and_agrees_across_backends() {
     let source = format!(
         "{TASK_EXIT}
-        fn worker(n: i64) -> i64 ! {{io, panic, suspend}} {{
+        fn worker(n: i64) -> i64 ! {{io, suspend}} {{
             print_i64(n * 10 + 1);
             Task.yield();
             print_i64(n * 10 + 2);
             n
         }}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
-                let a: Task<i64> = Task.spawn(fn() -> i64 ! {{io, panic, suspend}} {{ worker(1) }});
-                let b: Task<i64> = Task.spawn(fn() -> i64 ! {{io, panic, suspend}} {{ worker(2) }});
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
+                let a: Task<i64> = Task.spawn(fn() -> i64 ! {{io, suspend}} {{ worker(1) }});
+                let b: Task<i64> = Task.spawn(fn() -> i64 ! {{io, suspend}} {{ worker(2) }});
                 print_i64(0);
                 match Task.join(a) {{
                     TaskExit.Completed(v) => print_i64(v),
@@ -119,9 +119,9 @@ fn scheduling_order_is_deterministic_and_agrees_across_backends() {
 fn independent_tasks_yield_join_and_cancel_before_and_after_start() {
     let source = format!(
         "{TASK_EXIT}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
-                let before: Task<i64> = Task.spawn(fn() -> i64 ! {{io, panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
+                let before: Task<i64> = Task.spawn(fn() -> i64 ! {{io, suspend}} {{
                     print_i64(1);
                     Task.yield();
                     10
@@ -131,7 +131,7 @@ fn independent_tasks_yield_join_and_cancel_before_and_after_start() {
                     TaskExit.Completed(v) => print_i64(v),
                     TaskExit.Cancelled => print_i64(-1),
                 }}
-                let after: Task<i64> = Task.spawn(fn() -> i64 ! {{io, panic, suspend}} {{
+                let after: Task<i64> = Task.spawn(fn() -> i64 ! {{io, suspend}} {{
                     print_i64(2);
                     Task.yield();
                     print_i64(3);
@@ -156,17 +156,17 @@ fn sibling_results_and_scope_epilogue_join_ignored_children() {
     let source = format!(
         "{TASK_EXIT}
         {RESULT}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
-                let good: Task<i64> = Task.spawn(fn() -> i64 ! {{io, panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
+                let good: Task<i64> = Task.spawn(fn() -> i64 ! {{io, suspend}} {{
                     print_i64(1);
                     7
                 }});
-                let ignored: Task<i64> = Task.spawn(fn() -> i64 ! {{io, panic, suspend}} {{
+                let ignored: Task<i64> = Task.spawn(fn() -> i64 ! {{io, suspend}} {{
                     print_i64(2);
                     8
                 }});
-                let bad: Task<Result<i64, i64>> = Task.spawn(fn() -> Result<i64, i64> ! {{io, panic, suspend}} {{
+                let bad: Task<Result<i64, i64>> = Task.spawn(fn() -> Result<i64, i64> ! {{io, suspend}} {{
                     print_i64(3);
                     Err(9)
                 }});
@@ -193,9 +193,9 @@ fn fallible_scope_cancels_unjoined_siblings_on_err() {
     let source = format!(
         "{TASK_EXIT}
         {RESULT}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            match Task.scope(fn() -> Result<Unit, i64> ! {{io, alloc, panic, suspend}} {{
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{io, panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            match Task.scope(fn() -> Result<Unit, i64> ! {{io, alloc, suspend}} {{
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{io, suspend}} {{
                     print_i64(1);
                     if Task.yield() {{ return -1; }}
                     print_i64(2);
@@ -216,14 +216,14 @@ fn fallible_scope_cancels_unjoined_siblings_on_err() {
 #[test]
 fn early_return_and_question_mark_still_join_children() {
     for body in [
-        "let t: Task<i64> = Task.spawn(fn() -> i64 ! {io, panic, suspend} { print_i64(5); 1 }); if true { return Ok(()); }",
-        "let t: Task<i64> = Task.spawn(fn() -> i64 ! {io, panic, suspend} { print_i64(6); 1 }); let r: Result<Unit, i64> = Err(3); r?;",
+        "let t: Task<i64> = Task.spawn(fn() -> i64 ! {io, suspend} { print_i64(5); 1 }); if true { return Ok(()); }",
+        "let t: Task<i64> = Task.spawn(fn() -> i64 ! {io, suspend} { print_i64(6); 1 }); let r: Result<Unit, i64> = Err(3); r?;",
     ] {
         let source = format!(
             "{TASK_EXIT}
             {RESULT}
-            fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-                let _ = Task.scope(fn() -> Result<Unit, i64> ! {{io, alloc, panic, suspend}} {{
+            fn main() -> Unit ! {{io, alloc, suspend}} {{
+                let _ = Task.scope(fn() -> Result<Unit, i64> ! {{io, alloc, suspend}} {{
                     {body}
                     Ok(())
                 }});
@@ -241,10 +241,10 @@ fn early_return_and_question_mark_still_join_children() {
 fn owned_capture_and_owned_result_cleanup_is_balanced() {
     let source = format!(
         "{TASK_EXIT}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
                 let owner = Box.new(40);
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{io, alloc, panic, suspend}} {{
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{io, alloc, suspend}} {{
                     let value = Box.take(owner);
                     Task.yield();
                     value + 2
@@ -253,7 +253,7 @@ fn owned_capture_and_owned_result_cleanup_is_balanced() {
                     TaskExit.Completed(v) => print_i64(v),
                     TaskExit.Cancelled => print_i64(-1),
                 }}
-                let owned: Task<Box<i64>> = Task.spawn(fn() -> Box<i64> ! {{alloc, panic, suspend}} {{
+                let owned: Task<Box<i64>> = Task.spawn(fn() -> Box<i64> ! {{alloc, suspend}} {{
                     Box.new(42)
                 }});
                 match Task.join(owned) {{
@@ -273,9 +273,9 @@ fn owned_capture_and_owned_result_cleanup_is_balanced() {
 fn cancelled_owned_result_is_dropped_exactly_once() {
     let source = format!(
         "{TASK_EXIT}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
-                let t: Task<Box<i64>> = Task.spawn(fn() -> Box<i64> ! {{alloc, panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
+                let t: Task<Box<i64>> = Task.spawn(fn() -> Box<i64> ! {{alloc, suspend}} {{
                     if Task.yield() {{ return Box.new(1); }}
                     Box.new(2)
                 }});
@@ -297,9 +297,9 @@ fn cancelled_owned_result_is_dropped_exactly_once() {
 fn slice_and_borrow_lifetimes_survive_same_task_suspension() {
     let source = format!(
         "{TASK_EXIT}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{suspend}} {{
                     let a: [i64; 3] = [10, 20, 30];
                     let view = a[0..2];
                     Task.yield();
@@ -330,22 +330,22 @@ fn nosuspend_rejects_reachable_suspension_and_unconstrained_rows() {
         "fn f() -> Unit ! {} { Task.yield(); } fn main()->i64 ! {} {0}",
         "requires effects {suspend}",
     );
-    check("fn f(x: i64) -> i64 ! {panic} { x + 1 } fn main()->i64 ! {panic} {f(1)}");
+    check("fn f(x: i64) -> i64 ! {} { x + 1 } fn main()->i64 ! {} {f(1)}");
 }
 
 #[test]
 fn noalloc_rejects_spawn_and_effect_polymorphic_suspending_calls_propagate() {
     rejects(
-        "fn f() -> Unit ! {panic, suspend} { Task.scope(fn() -> Unit ! {alloc, panic, suspend} { }) } fn main()->i64 ! {} {0}",
+        "fn f() -> Unit ! {suspend} { Task.scope(fn() -> Unit ! {alloc, suspend} { }) } fn main()->i64 ! {} {0}",
         "requires effects {alloc}",
     );
     let source = format!(
         "{TASK_EXIT}
-        fn apply<e: Effects>(f: fn(i64) -> i64 ! {{e}}, x: i64) -> i64 ! {{panic, e}} {{ f(x) }}
-        fn susp(x: i64) -> i64 ! {{panic, suspend}} {{ Task.yield(); x + 1 }}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{ apply(susp, 41) }});
+        fn apply<e: Effects>(f: fn(i64) -> i64 ! {{e}}, x: i64) -> i64 ! {{e}} {{ f(x) }}
+        fn susp(x: i64) -> i64 ! {{suspend}} {{ Task.yield(); x + 1 }}
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{suspend}} {{ apply(susp, 41) }});
                 match Task.join(t) {{
                     TaskExit.Completed(v) => print_i64(v),
                     TaskExit.Cancelled => print_i64(-1),
@@ -365,9 +365,9 @@ fn noalloc_tasks_can_yield_and_join_existing_tasks() {
             Task.yield();
             Task.join(t)
         }}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{suspend}} {{
                     Task.yield();
                     42
                 }});
@@ -387,10 +387,10 @@ fn linear_task_results_are_joined_and_consumed_or_rejected() {
     rejects(
         &format!(
             "{TASK_EXIT}
-            fn main() -> Unit ! {{alloc, panic, suspend}} {{
-                Task.scope(fn() -> Unit ! {{alloc, panic, suspend}} {{
+            fn main() -> Unit ! {{alloc, suspend}} {{
+                Task.scope(fn() -> Unit ! {{alloc, suspend}} {{
                     let b: Box<i64> @[1] = Box.new(1);
-                    let t: Task<Box<i64>> = Task.spawn(fn() -> Box<i64> ! {{alloc, panic, suspend}} {{ b }});
+                    let t: Task<Box<i64>> = Task.spawn(fn() -> Box<i64> ! {{alloc, suspend}} {{ b }});
                     let _ = Task.join(t);
                 }})
             }}"
@@ -402,11 +402,11 @@ fn linear_task_results_are_joined_and_consumed_or_rejected() {
     rejects(
         &format!(
             "{TASK_EXIT}
-            fn main() -> Unit ! {{alloc, panic, suspend}} {{
-                Task.scope(fn() -> Unit ! {{alloc, panic, suspend}} {{
+            fn main() -> Unit ! {{alloc, suspend}} {{
+                Task.scope(fn() -> Unit ! {{alloc, suspend}} {{
                     let b: Box<i64> @[1] = Box.new(1);
                     let t: Task<Box<i64>> = Task.spawn(
-                        fn() -> Box<i64> @[1] ! {{alloc, panic, suspend}} {{ b }}
+                        fn() -> Box<i64> @[1] ! {{alloc, suspend}} {{ b }}
                     );
                     let _ = Task.join(t);
                 }})
@@ -418,10 +418,10 @@ fn linear_task_results_are_joined_and_consumed_or_rejected() {
     // observed remains the ordinary cleanup path.
     let source = format!(
         "{TASK_EXIT}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
                 let b: Box<i64> @[1] = Box.new(1);
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{alloc, panic, suspend}} {{
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{alloc, suspend}} {{
                     if Task.yield() {{ return Box.take(b); }}
                     Box.take(b)
                 }});
@@ -442,15 +442,15 @@ fn linear_task_results_are_joined_and_consumed_or_rejected() {
 #[test]
 fn task_handles_cannot_escape_through_data_results_or_callbacks() {
     rejects(
-        "fn f() -> Task<i64> ! {panic} { panic() } fn main()->i64 ! {} {0}",
+        "fn f() -> Task<i64> ! {} { panic() } fn main()->i64 ! {} {0}",
         "a function cannot return a task handle",
     );
     rejects(
-        "fn main() -> Unit ! {alloc,panic,suspend} { let _ = Task.scope(fn() -> Task<i64> ! {alloc,panic,suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic,suspend} {1}); t }); }",
+        "fn main() -> Unit ! {alloc, suspend} { let _ = Task.scope(fn() -> Task<i64> ! {alloc, suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {1}); t }); }",
         "cannot return a task handle",
     );
     rejects(
-        "fn main() -> Unit ! {alloc,panic,suspend} { Task.scope(fn() -> Unit ! {alloc,panic,suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic,suspend} {1}); let b = Box.new(t); drop(b); }) }",
+        "fn main() -> Unit ! {alloc, suspend} { Task.scope(fn() -> Unit ! {alloc, suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {1}); let b = Box.new(t); drop(b); }) }",
         "task handles cannot be stored in Box",
     );
     rejects(
@@ -462,35 +462,35 @@ fn task_handles_cannot_escape_through_data_results_or_callbacks() {
         "task handles cannot be stored in enum payloads",
     );
     rejects(
-        "fn main() -> Unit ! {alloc,panic,suspend} { Task.scope(fn() -> Unit ! {alloc,panic,suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic,suspend} {1}); let u: Task<i64> | i64 = t; }) }",
+        "fn main() -> Unit ! {alloc, suspend} { Task.scope(fn() -> Unit ! {alloc, suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {1}); let u: Task<i64> | i64 = t; }) }",
         "task handles cannot be union members",
     );
     rejects(
-        "fn id<T>(x: T) -> T ! {panic} { x } fn main() -> Unit ! {alloc,panic,suspend} { Task.scope(fn() -> Unit ! {alloc,panic,suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic,suspend} {1}); let _ = id(t); }) }",
+        "fn id<T>(x: T) -> T ! {} { x } fn main() -> Unit ! {alloc, suspend} { Task.scope(fn() -> Unit ! {alloc, suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {1}); let _ = id(t); }) }",
         "a function cannot return a task handle",
     );
     rejects(
-        "fn main() -> Unit ! {alloc,panic,suspend} { Task.scope(fn() -> Unit ! {alloc,panic,suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic,suspend} {1}); let a: [Task<i64>; 1] = [t]; }) }",
+        "fn main() -> Unit ! {alloc, suspend} { Task.scope(fn() -> Unit ! {alloc, suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {1}); let a: [Task<i64>; 1] = [t]; }) }",
         "task handles cannot be stored in arrays",
     );
     rejects(
-        "fn main() -> Unit ! {alloc,panic,suspend} { let v: Vec<Task<i64>> = Vec.new(); }",
+        "fn main() -> Unit ! {alloc, suspend} { let v: Vec<Task<i64>> = Vec.new(); }",
         "task handles cannot be stored",
     );
     rejects(
-        "fn main() -> Unit ! {alloc,panic,suspend} { Task.scope(fn() -> Unit ! {alloc,panic,suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic,suspend} {1}); let f = fn() -> Task<i64> ! {panic} { t }; }) }",
+        "fn main() -> Unit ! {alloc, suspend} { Task.scope(fn() -> Unit ! {alloc, suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {1}); let f = fn() -> Task<i64> ! {} { t }; }) }",
         "a lambda cannot capture a task handle",
     );
     rejects(
-        "fn main() -> Unit ! {alloc,panic,suspend} { Task.spawn(fn() -> i64 ! {panic,suspend} {1}); }",
+        "fn main() -> Unit ! {alloc, suspend} { Task.spawn(fn() -> i64 ! {suspend} {1}); }",
         "Task.spawn requires an enclosing Task.scope",
     );
     rejects(
-        "fn main() -> Unit ! {alloc,panic,suspend} { Task.scope(fn() -> Unit ! {alloc,panic,suspend} { let f: once fn() -> i64 ! {panic,suspend} = fn() -> i64 ! {panic,suspend} {1}; let t: Task<i64> = Task.spawn(f); let _ = Task.join(t); }) }",
+        "fn main() -> Unit ! {alloc, suspend} { Task.scope(fn() -> Unit ! {alloc, suspend} { let f: once fn() -> i64 ! {suspend} = fn() -> i64 ! {suspend} {1}; let t: Task<i64> = Task.spawn(f); let _ = Task.join(t); }) }",
         "Task.spawn requires a statically known function or lambda body",
     );
     rejects(
-        "fn main() -> Unit ! {alloc,panic,suspend} { Task.scope(fn() -> Unit ! {alloc,panic,suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic,suspend} {1}); Task.cancel(t); }) }",
+        "fn main() -> Unit ! {alloc, suspend} { Task.scope(fn() -> Unit ! {alloc, suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {1}); Task.cancel(t); }) }",
         "Task.cancel borrows the handle",
     );
 }
@@ -498,15 +498,15 @@ fn task_handles_cannot_escape_through_data_results_or_callbacks() {
 #[test]
 fn task_effects_are_required_and_join_needs_the_conventional_exit_enum() {
     rejects(
-        "fn main() -> Unit ! {alloc, panic} { Task.scope(fn() -> Unit ! {alloc, panic, suspend} { }) }",
+        "fn main() -> Unit ! {alloc} { Task.scope(fn() -> Unit ! {alloc, suspend} { }) }",
         "requires effects {suspend}",
     );
     rejects(
-        "fn main() -> Unit ! {panic, suspend} { Task.scope(fn() -> Unit ! {alloc, panic, suspend} { }) }",
+        "fn main() -> Unit ! {suspend} { Task.scope(fn() -> Unit ! {alloc, suspend} { }) }",
         "requires effects {alloc}",
     );
     rejects(
-        "fn main() -> Unit ! {alloc,panic,suspend} { Task.scope(fn() -> Unit ! {alloc,panic,suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic,suspend} {1}); let _ = Task.join(t); }) }",
+        "fn main() -> Unit ! {alloc, suspend} { Task.scope(fn() -> Unit ! {alloc, suspend} { let t: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {1}); let _ = Task.join(t); }) }",
         "Task.join requires enum TaskExit<T>",
     );
 }
@@ -515,12 +515,12 @@ fn task_effects_are_required_and_join_needs_the_conventional_exit_enum() {
 fn suspending_map_callbacks_are_not_fused_as_pure() {
     let source = format!(
         "{TASK_EXIT}
-        fn inc(x: i64) -> i64 ! {{panic, suspend}} {{
+        fn inc(x: i64) -> i64 ! {{suspend}} {{
             Task.yield();
             x + 1
         }}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
                 let mut values: Vec<i64> = Vec.new();
                 values = Vec.push(values, 1);
                 values = Vec.push(values, 2);
@@ -555,8 +555,8 @@ fn task_result_widening_inserts_checked_callable_adapters() {
     ] {
         let source = format!(
             "{TASK_EXIT}
-            fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-                Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
+            fn main() -> Unit ! {{io, alloc, suspend}} {{
+                Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
                     let task: Task<i64 | Bool> = {spawn};
                     match Task.join(task) {{
                         TaskExit.Completed(value) => match value {{
@@ -573,10 +573,10 @@ fn task_result_widening_inserts_checked_callable_adapters() {
     }
     let source = format!(
         "{TASK_EXIT}
-        fn main() -> Unit ! {{alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{alloc, panic, suspend}} {{
+        fn main() -> Unit ! {{alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{alloc, suspend}} {{
                 let task: Task<Box<i64> | Bool> =
-                    Task.spawn(fn() -> Box<i64> ! {{alloc, panic}} {{ Box.new(42) }});
+                    Task.spawn(fn() -> Box<i64> ! {{alloc}} {{ Box.new(42) }});
                 Task.cancel(&task);
                 let _ = Task.join(task);
             }})
@@ -592,16 +592,16 @@ fn nested_task_scopes_fit_the_reference_evaluator_task_stack() {
     // and overflowed at about five levels in debug builds.
     let source = format!(
         "{TASK_EXIT}
-        fn spawn_e(x: i64) -> i64 ! {{alloc, panic, suspend}} {{
-            Task.scope(fn() -> i64 ! {{alloc, panic, suspend}} {{
-                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{ x + 1 }});
+        fn spawn_e(x: i64) -> i64 ! {{alloc, suspend}} {{
+            Task.scope(fn() -> i64 ! {{alloc, suspend}} {{
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{suspend}} {{ x + 1 }});
                 match Task.join(t) {{ TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 }}
             }})
         }}
-        fn rec(n: i64) -> i64 ! {{alloc, panic, suspend}} {{
+        fn rec(n: i64) -> i64 ! {{alloc, suspend}} {{
             if n == 0 {{ spawn_e(1) }} else {{ rec(n - 1) + 1 }}
         }}
-        fn main() -> i64 ! {{alloc, panic, suspend}} {{ rec(12) }}"
+        fn main() -> i64 ! {{alloc, suspend}} {{ rec(12) }}"
     );
     compare(&source);
     let (exit, _) = check(&source)
@@ -616,13 +616,13 @@ fn joined_task_slots_are_reused_past_the_old_255_task_limit() {
     // program never holds more than two tasks at once.
     let source = format!(
         "{TASK_EXIT}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
                 let mut i = 0;
                 let mut sum = 0;
                 while i < 600 {{
                     let n = i;
-                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{
+                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {{suspend}} {{
                         Task.yield();
                         n * 2
                     }});
@@ -645,12 +645,12 @@ fn one_scope_holds_more_than_64_live_children() {
     // 150 children are alive at once; the scope epilogue joins them all.
     let source = format!(
         "{TASK_EXIT}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, suspend}} {{
                 let mut i = 0;
                 while i < 150 {{
                     let n = i;
-                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {{io, panic, suspend}} {{
+                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {{io, suspend}} {{
                         Task.yield();
                         if n % 50 == 0 {{ print_i64(n); }}
                         n
@@ -674,17 +674,17 @@ fn scope_cancellation_after_slot_reuse_reaches_only_live_children() {
     let source = format!(
         "{TASK_EXIT}
         {RESULT}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
             let mut round = 0;
             while round < 300 {{
-                let r: Result<i64, i64> = Task.scope(fn() -> Result<i64, i64> ! {{io, alloc, panic, suspend}} {{
-                    let first: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{ 1 }});
+                let r: Result<i64, i64> = Task.scope(fn() -> Result<i64, i64> ! {{io, alloc, suspend}} {{
+                    let first: Task<i64> = Task.spawn(fn() -> i64 ! {{suspend}} {{ 1 }});
                     let a = match Task.join(first) {{
                         TaskExit.Completed(v) => v,
                         TaskExit.Cancelled => 100,
                     }};
-                    let inner: Result<i64, i64> = Task.scope(fn() -> Result<i64, i64> ! {{io, alloc, panic, suspend}} {{
-                        let second: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{
+                    let inner: Result<i64, i64> = Task.scope(fn() -> Result<i64, i64> ! {{io, alloc, suspend}} {{
+                        let second: Task<i64> = Task.spawn(fn() -> i64 ! {{suspend}} {{
                             Task.yield();
                             if Task.check_cancel() {{ 100 }} else {{ 2 }}
                         }});
@@ -713,18 +713,18 @@ fn scope_cancellation_after_slot_reuse_reaches_only_live_children() {
 fn reused_task_slots_start_with_only_inherited_handlers() {
     let source = format!(
         "{TASK_EXIT}
-        effect D: i64 -> i64 ! {{panic}};
-        fn d(n: i64) -> i64 ! {{D, panic}} {{ perform D(n) }}
-        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
-            let total = handle D: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{panic}} {{
+        effect D: i64 -> i64 ! {{}};
+        fn d(n: i64) -> i64 ! {{D}} {{ perform D(n) }}
+        fn main() -> Unit ! {{io, alloc, suspend}} {{
+            let total = handle D: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{
                 resume(x + 1)
             }} {{
-                Task.scope(fn() -> i64 ! {{D, alloc, panic, suspend}} {{
+                Task.scope(fn() -> i64 ! {{D, alloc, suspend}} {{
                     let mut i = 0;
                     let mut sum = 0;
                     while i < 300 {{
                         let n = i;
-                        let t: Task<i64> = Task.spawn(fn() -> i64 ! {{D, panic, suspend}} {{
+                        let t: Task<i64> = Task.spawn(fn() -> i64 ! {{D, suspend}} {{
                             Task.yield();
                             d(n)
                         }});

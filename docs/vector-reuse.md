@@ -71,7 +71,7 @@ capacity >= length + additional
 - A successful growth increments `buffer-growths` by one. Reallocation replaces
   storage and is not an allocation/deallocation pair; `allocations` and
   `deallocations` do not change.
-- `Vec.reserve` requires the `{alloc, panic}` effects. A `#[noalloc]` function
+- `Vec.reserve` requires the `{alloc}` effects. A `#[noalloc]` function
   rejects it from the source signature, independently of whether a particular
   call would actually reallocate.
 - The receiver is consumed and returned, so the same ownership and borrow rules

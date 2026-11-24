@@ -14,7 +14,7 @@ use std.path;
 use std.sort;
 use std.collections;
 
-fn show(value: &Bytes) -> Unit ! {io, panic} {
+fn show(value: &Bytes) -> Unit ! {io} {
     let mut i = 0;
     while i < Bytes.len(value) {
         print_i64(Bytes.get(value, i));
@@ -23,7 +23,7 @@ fn show(value: &Bytes) -> Unit ! {io, panic} {
     print_i64(-1);
 }
 
-fn main() -> i64 ! {io, alloc, panic} {
+fn main() -> i64 ! {io, alloc} {
     let sample = Bytes.from("alpha,beta,,gamma ");
     let beta = Bytes.from("beta");
     let comma = Bytes.from(",");
@@ -234,7 +234,7 @@ fn text_path_sort_and_collections_match_across_backends() {
 #[test]
 fn path_and_newline_edges_have_exact_results() {
     let source = r#"use std.text; use std.path;
-        fn main() -> i64 ! {io, alloc, panic} {
+        fn main() -> i64 ! {io, alloc} {
             let cr = Bytes.from("a\r"); let newline = text.trim_newline(&cr);
             print_i64(Bytes.len(&newline));
             let crlf = Bytes.from("a\r\n"); let newline2 = text.trim_newline(&crlf);

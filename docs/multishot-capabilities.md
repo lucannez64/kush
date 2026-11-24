@@ -62,7 +62,7 @@ declares its token as `multi fn`:
 ```text
 effect Choose: i64 -> i64;
 
-fn pick(op: cap multi Choose ! {alloc, panic}, depth: i64) -> i64 ! {alloc, panic} {
+fn pick(op: cap multi Choose ! {alloc}, depth: i64) -> i64 ! {alloc} {
     if depth == 0 { 0 } else {
         let x = perform op(2);              // live after: depth
         x + 10 * pick(op, depth - 1)        // live across the call: x
@@ -70,7 +70,7 @@ fn pick(op: cap multi Choose ! {alloc, panic}, depth: i64) -> i64 ! {alloc, pani
 }
 
 handle Choose: i64 -> i64 as op
-    with fn(n: i64, resume: multi fn(i64) -> i64) -> i64 ! {alloc, panic} {
+    with fn(n: i64, resume: multi fn(i64) -> i64) -> i64 ! {alloc} {
         resume(0) + resume(1)               // two calls of one token
     }
     { pick(op, 3) }
@@ -236,7 +236,7 @@ other way out.
 - A token's static row is `{}`, as for one-shot tokens; the continuation's
   effects are the body's and are required at the `handle` (unchanged).
 - Pushing a capturing environment can run out of memory: a `handle` whose
-  multishot continuations capture values requires `{alloc, panic}`, as
+  multishot continuations capture values requires `{alloc}`, as
   non-tail handles do today. Calling a token adds nothing.
 - `cap multi Op ! {e}` adds `e` to the caller's row at each perform, as
   `cap Op ! {e}` does (section 3.3 of the capability design).
@@ -493,7 +493,7 @@ list in `crates/kush/tests/llvm_backend.rs`.
   operation id (the CAP-CAPTURING-LEXICAL mechanism), and callees receive a
   trampoline that finds the frame and calls the handler with their token,
   once per perform and per resumed branch. As for capturing one-shot
-  handlers, the parameter must allow `panic` (`cap multi Op ! {panic}`). A
+  handlers, the parameter's row must hold the handler's own effects. A
   handler that owns a capture stays rejected.
 - **Capability-only.** A multishot handler bound `as op` is never on the
   dynamic stack, so it does not discharge `Op` for its body (a callee that

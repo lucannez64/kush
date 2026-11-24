@@ -59,23 +59,23 @@ fn native(source: &str) -> Option<std::process::Output> {
 fn inherited_defaults_dispatch_to_overrides_and_other_defaults() {
     agrees(
         "trait Scaled {
-            fn base(self: Self) -> i64 ! {panic};
-            fn scaled(self: Self, factor: i64) -> i64 ! {panic} {
+            fn base(self: Self) -> i64 ! {};
+            fn scaled(self: Self, factor: i64) -> i64 ! {} {
                 self.base() * factor
             }
-            fn quadrupled(self: Self) -> i64 ! {panic} {
+            fn quadrupled(self: Self) -> i64 ! {} {
                 self.scaled(2) * 2
             }
         }
         struct Point { x: i64 }
         struct Other { x: i64 }
         impl Scaled for Point {
-            fn base(self: Self) -> i64 ! {panic} { self.x + 1 }
+            fn base(self: Self) -> i64 ! {} { self.x + 1 }
         }
         impl Scaled for Other {
-            fn base(self: Self) -> i64 ! {panic} { self.x + 100 }
+            fn base(self: Self) -> i64 ! {} { self.x + 100 }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 4 };
             let other = Other { x: 4 };
             print_i64(point.scaled(2));
@@ -93,13 +93,13 @@ fn default_bodies_can_call_inherent_methods() {
     agrees(
         "struct Point { x: i64 }
         impl Point {
-            fn double(self: Point) -> i64 ! {panic} { self.x * 2 }
+            fn double(self: Point) -> i64 ! {} { self.x * 2 }
         }
         trait Show {
-            fn show(self: Self) -> i64 ! {panic} { self.double() }
+            fn show(self: Self) -> i64 ! {} { self.double() }
         }
         impl Show for Point { }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 6 };
             print_i64(point.show());
             0
@@ -112,12 +112,12 @@ fn default_bodies_can_call_inherent_methods() {
 #[test]
 fn overrides_must_match_the_trait_signature_exactly() {
     agrees(
-        "trait Greet { fn greet(self: Self) -> i64 ! {panic} { 1 } }
+        "trait Greet { fn greet(self: Self) -> i64 ! {} { 1 } }
         struct Point { x: i64 }
         impl Greet for Point {
-            fn greet(self: Self) -> i64 ! {panic} { self.x }
+            fn greet(self: Self) -> i64 ! {} { self.x }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 7 };
             print_i64(point.greet());
             0
@@ -126,7 +126,7 @@ fn overrides_must_match_the_trait_signature_exactly() {
         "7\n",
     );
     rejects(
-        "trait Greet { fn greet(self: Self) -> i64 ! {panic} { 1 } }
+        "trait Greet { fn greet(self: Self) -> i64 ! {io} { 1 } }
         struct Point { x: i64 }
         impl Greet for Point {
             fn greet(self: Self) -> i64 ! {} { self.x }
@@ -135,19 +135,19 @@ fn overrides_must_match_the_trait_signature_exactly() {
         "does not match the trait signature exactly",
     );
     rejects(
-        "trait Greet { fn greet(self: Self) -> i64 ! {panic} { 1 } }
+        "trait Greet { fn greet(self: Self) -> i64 ! {} { 1 } }
         struct Point { x: i64 }
         impl Greet for Point {
-            fn greet(self: Self) -> Bool ! {panic} { true }
+            fn greet(self: Self) -> Bool ! {} { true }
         }
         fn main() -> i64 ! {} { 0 }",
         "does not match the trait signature exactly",
     );
     rejects(
-        "trait Greet { fn greet(self: Self) -> i64 ! {panic} { 1 } }
+        "trait Greet { fn greet(self: Self) -> i64 ! {} { 1 } }
         struct Point { x: i64 }
         impl Greet for Point {
-            fn greet(self: Self, extra: i64) -> i64 ! {panic} { extra }
+            fn greet(self: Self, extra: i64) -> i64 ! {} { extra }
         }
         fn main() -> i64 ! {} { 0 }",
         "does not match the trait signature exactly",
@@ -160,7 +160,7 @@ fn empty_impls_inherit_every_default_and_still_require_bodyless_methods() {
         "trait Identity { fn identity(self: Self) -> i64 ! {} { 9 } }
         struct Point { x: i64 }
         impl Identity for Point { }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 0 };
             print_i64(point.identity());
             0
@@ -184,7 +184,7 @@ fn empty_impls_inherit_every_default_and_still_require_bodyless_methods() {
 fn self_is_substituted_per_impl_target() {
     agrees(
         "trait Choose {
-            fn choose(self: Self, other: Self) -> Self ! {panic} {
+            fn choose(self: Self, other: Self) -> Self ! {} {
                 if self.x >= other.x { self } else { other }
             }
         }
@@ -192,7 +192,7 @@ fn self_is_substituted_per_impl_target() {
         struct Other { x: i64 }
         impl Choose for Point { }
         impl Choose for Other { }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let low = Point { x: 1 };
             let high = Point { x: 5 };
             let chosen = low.choose(high);
@@ -212,17 +212,17 @@ fn self_is_substituted_per_impl_target() {
 fn trait_arguments_are_substituted_into_default_signatures_and_bodies() {
     agrees(
         "trait Wrap<T> {
-            fn value(self: Self) -> T ! {panic};
-            fn wrapped(self: Self) -> T ! {panic} { self.value() }
+            fn value(self: Self) -> T ! {};
+            fn wrapped(self: Self) -> T ! {} { self.value() }
         }
         struct Point { x: i64 }
         impl Wrap<i64> for Point {
-            fn value(self: Self) -> i64 ! {panic} { self.x }
+            fn value(self: Self) -> i64 ! {} { self.x }
         }
         impl Wrap<Bool> for Point {
-            fn value(self: Self) -> Bool ! {panic} { self.x == 0 }
+            fn value(self: Self) -> Bool ! {} { self.x == 0 }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 0 };
             print_i64(point.Wrap::<i64>.wrapped());
             if point.Wrap::<Bool>.wrapped() { print_i64(1) } else { print_i64(0) }
@@ -233,17 +233,17 @@ fn trait_arguments_are_substituted_into_default_signatures_and_bodies() {
     );
     rejects(
         "trait Wrap<T> {
-            fn value(self: Self) -> T ! {panic};
-            fn wrapped(self: Self) -> T ! {panic} { self.value() }
+            fn value(self: Self) -> T ! {};
+            fn wrapped(self: Self) -> T ! {} { self.value() }
         }
         struct Point { x: i64 }
         impl Wrap<i64> for Point {
-            fn value(self: Self) -> i64 ! {panic} { self.x }
+            fn value(self: Self) -> i64 ! {} { self.x }
         }
         impl Wrap<Bool> for Point {
-            fn value(self: Self) -> Bool ! {panic} { self.x == 0 }
+            fn value(self: Self) -> Bool ! {} { self.x == 0 }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 0 };
             print_i64(point.wrapped());
             0
@@ -265,7 +265,7 @@ fn generic_methods_infer_beside_trait_parameters_in_defaults() {
         impl Pairing<i64> for Point {
             fn head(self: Self) -> i64 ! {} { self.x }
         }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 9 };
             let pair = point.Pairing::<i64>.echo(4, true);
             if pair.1 { print_i64(pair.0) }
@@ -282,13 +282,13 @@ fn generic_methods_infer_beside_trait_parameters_in_defaults() {
 fn trait_grade_arguments_are_substituted_into_defaults() {
     agrees(
         "trait Graded<gr: Grade> {
-            fn consume2(self: Self, value: i64 @[gr]) -> i64 ! {panic} {
+            fn consume2(self: Self, value: i64 @[gr]) -> i64 ! {} {
                 value + value
             }
         }
         struct Point { x: i64 }
         impl Graded<2> for Point { }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 0 };
             let value = 3;
             print_i64(point.Graded::<2>.consume2(value));
@@ -299,13 +299,13 @@ fn trait_grade_arguments_are_substituted_into_defaults() {
     );
     rejects(
         "trait Graded<gr: Grade> {
-            fn consume2(self: Self, value: i64 @[gr]) -> i64 ! {panic} {
+            fn consume2(self: Self, value: i64 @[gr]) -> i64 ! {} {
                 value + value
             }
         }
         struct Point { x: i64 }
         impl Graded<1> for Point { }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 0 };
             let value = 3;
             print_i64(point.Graded::<1>.consume2(value));
@@ -319,13 +319,13 @@ fn trait_grade_arguments_are_substituted_into_defaults() {
 fn borrowed_receiver_defaults_keep_their_receiver_contract() {
     agrees(
         "trait Offset {
-            fn sum_with(self: &Self, other: i64) -> i64 ! {panic} {
+            fn sum_with(self: &Self, other: i64) -> i64 ! {} {
                 self.x + other
             }
         }
         struct Point { x: i64 }
         impl Offset for Point { }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 7 };
             print_i64(point.sum_with(5));
             0
@@ -342,14 +342,14 @@ fn borrowed_receiver_defaults_keep_their_receiver_contract() {
     );
     agrees(
         "trait Bump {
-            fn bump(self: &mut Self) -> i64 ! {panic} {
+            fn bump(self: &mut Self) -> i64 ! {} {
                 self.x = self.x + 1;
                 self.x
             }
         }
         struct Point { x: i64 }
         impl Bump for Point { }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let mut point = Point { x: 4 };
             print_i64(point.bump());
             print_i64(point.x);
@@ -368,7 +368,7 @@ fn inherited_defaults_join_unqualified_ambiguity_and_qualification() {
         struct Point { x: i64 }
         impl First for Point { }
         impl Second for Point { }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 0 };
             print_i64(point.First.tag());
             print_i64(point.Second.tag());
@@ -383,7 +383,7 @@ fn inherited_defaults_join_unqualified_ambiguity_and_qualification() {
         struct Point { x: i64 }
         impl First for Point { }
         impl Second for Point { }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let point = Point { x: 0 };
             print_i64(point.tag());
             0
@@ -395,11 +395,11 @@ fn inherited_defaults_join_unqualified_ambiguity_and_qualification() {
 #[test]
 fn default_bodies_are_checked_when_inherited() {
     rejects(
-        "trait Bad { fn bad(self: Self) -> i64 ! {} { self.x + 1 } }
+        "trait Bad { fn bad(self: Self) -> i64 ! {} { print_i64(self.x); 1 } }
         struct Point { x: i64 }
         impl Bad for Point { }
         fn main() -> i64 ! {} { 0 }",
-        "operation requires effects {panic}",
+        "operation requires effects {io}",
     );
     rejects(
         "trait Fieldy { fn x(self: Self) -> i64 ! {} { 1 } }
@@ -425,7 +425,7 @@ fn cross_module_defaults_inherit_the_trait_visibility() {
         pub struct Marker { pub x: i64 }
         fn bias() -> i64 ! {} { 40 }
         pub trait Show {
-            fn show(self: Self) -> i64 ! {panic} { bias() + 2 }
+            fn show(self: Self) -> i64 ! {} { bias() + 2 }
         }
         "#,
     )
@@ -445,7 +445,7 @@ fn cross_module_defaults_inherit_the_trait_visibility() {
         root.join("main.kush"),
         r#"use demo.show.Marker;
         use demo.impls;
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let marker = Marker { x: 1 };
             print_i64(marker.show());
             0
@@ -486,7 +486,7 @@ fn cross_module_defaults_inherit_the_trait_visibility() {
     std::fs::write(
         root.join("main.kush"),
         r#"use demo.show.Marker;
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io} {
             let marker = Marker { x: 1 };
             print_i64(marker.show());
             0

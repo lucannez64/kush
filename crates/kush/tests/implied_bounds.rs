@@ -56,7 +56,7 @@ fn bad<'a, 'z>(unit: &'z Anchor<'z>, x: &'a Point) -> &'z Point ! {} {
     let f: fn<'p, 'q>(&'p Anchor<'q>, &'q Point) -> &'p Point ! {} = foo;
     f(unit, x)
 }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let keep = Point { x: 1, y: 1 };
     let unit = Anchor { p: &keep };
     let r = {
@@ -69,7 +69,7 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Point { x: i64, y: i64 }
 struct Anchor<'b> { p: &'b Point }
 fn foo<'a, 'b>(u: &'a Anchor<'b>, v: &'b Point) -> &'a Point ! {} { v }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let keep = Point { x: 1, y: 1 };
     let unit = Anchor { p: &keep };
     let f: fn<'p, 'q>(&'p Anchor<'q>, &'q Point) -> &'p Point ! {} = foo;
@@ -101,7 +101,7 @@ fn the_inferred_bound_is_checked_at_every_call() {
         r#"struct Point { x: i64, y: i64 }
 struct Anchor<'b> { p: &'b Point }
 fn foo<'a, 'b>(u: &'a Anchor<'b>, v: &'b Point) -> &'a Point ! {} { v }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let keep = Point { x: 1, y: 1 };
     let unit = Anchor { p: &keep };
     let r = {
@@ -117,7 +117,7 @@ fn main() -> i64 ! {alloc, panic} {
         r#"struct Point { x: i64, y: i64 }
 struct Anchor<'b> { p: &'b Point }
 fn foo<'a, 'b>(u: &'a Anchor<'b>, v: &'b Point) -> &'a Point ! {} { v }
-fn main() -> i64 ! {alloc, panic} {
+fn main() -> i64 ! {alloc} {
     let keep = Point { x: 1, y: 1 };
     let unit = Anchor { p: &keep };
     let f = foo;

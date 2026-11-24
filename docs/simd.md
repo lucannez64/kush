@@ -38,7 +38,7 @@ fn compress_ni(sha: &cpu.Sha, state: (u32x4, u32x4), data: &Bytes, n: i64, at: i
     ...
 }
 
-pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc, panic} {
+pub fn update(hasher: Hasher, data: &Bytes) -> Hasher ! {alloc} {
     match cpu.sha() {                                // Option<cpu.Sha>
         Option.Some(sha) => /* blocks through compress_ni */,
         Option.None => /* the proved portable compress */,
