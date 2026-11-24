@@ -46,6 +46,15 @@ testing.
   count. One minute of 2048 (3,600 frames) takes 2.1 s instead of 5.4 s in a
   development build, and a test checks that the machine, the screen and every
   sound sample come out exactly as when stepping four cycles at a time.
+- **Matt Currie's [`dmg-acid2`](https://github.com/mattcurrie/dmg-acid2)**
+  (v1.0 release ROM): after 120 frames the screen matches the test's
+  reference image pixel for pixel (all 23,040 pixels, compared by shade),
+  so background, window and sprite priorities, flips, palettes, 8×16
+  objects, the 10-objects-per-line limit and the window's internal line
+  counter behave as on hardware.
+
+![dmg-acid2, matching its reference image](images/dmg_acid2.png)
+
 - **Graphics**: `tools/make_ppu_test.py` writes a ROM whose scene exercises
   scrolling, the window, 8×16 sprites, X and Y flips, both sprite palettes and
   the behind-background flag; the screenshot matches the hardware rules for
@@ -212,5 +221,3 @@ references as scoped borrows ([functions](../../docs/functions.md)).
 - The exact timing of reads and writes inside an instruction is not
   modelled: an instruction's memory accesses happen at its start, and
   the picture processor draws each line whole when it finishes.
-- Not checked against `dmg-acid2` yet: no built ROM could be fetched in the
-  environment this was written in; it builds from source with RGBDS.
