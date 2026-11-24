@@ -5573,6 +5573,20 @@ impl Module for CodeModule {
     }
 }
 
+/// The local symbol of a Kush function. With `KUSH_SYMBOL_NAMES` set, a
+/// profiling aid, it also carries the declaration's name.
+fn function_symbol(program: &Executable, index: usize) -> String {
+    if std::env::var_os("KUSH_SYMBOL_NAMES").is_none() {
+        return format!("kush_fn_{index}");
+    }
+    let readable: String = program.functions[index]
+        .name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("kush_fn_{index}_{readable}")
+}
+
 fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
     object_for(program, codegen, false)
 }
@@ -6337,7 +6351,7 @@ fn lower(
         let name = if index == entry {
             "kush_entry".to_owned()
         } else {
-            format!("kush_fn_{index}")
+            function_symbol(program, index)
         };
         let id = module
             .declare_function(
@@ -8005,7 +8019,7 @@ fn synthesize_drops(
                     .extend((0..program.width(Type::Enum(index))).map(|_| AbiParam::new(I64)));
                 signature.returns.push(AbiParam::new(I64));
                 let cleanup = module
-                    .declare_function(&format!("kush_fn_{function}"), Linkage::Local, &signature)
+                    .declare_function(&function_symbol(program, function), Linkage::Local, &signature)
                     .map_err(error)?;
                 let mut hold_signature = module.make_signature();
                 hold_signature.returns.push(AbiParam::new(I64));
