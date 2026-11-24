@@ -40,7 +40,12 @@ testing.
 - **Speed**: the combined `cpu_instrs` run (227 million emulated clock cycles)
   takes 0.83 s in an LLVM build, about **65 times the real console's speed**,
   and 5 s in a Cranelift development build (11 times). The LLVM build compiles
-  in 2.8 s, a development build in 0.5 s.
+  in 2.8 s, a development build in 0.5 s. Games spend most of each frame in
+  HALT, waiting for the next one; while the CPU is halted, the emulator skips
+  ahead to the next step in which the timer, display or sound does more than
+  count. One minute of 2048 (3,600 frames) takes 2.1 s instead of 5.4 s in a
+  development build, and a test checks that the machine, the screen and every
+  sound sample come out exactly as when stepping four cycles at a time.
 - **Graphics**: `tools/make_ppu_test.py` writes a ROM whose scene exercises
   scrolling, the window, 8×16 sprites, X and Y flips, both sprite palettes and
   the behind-background flag; the screenshot matches the hardware rules for

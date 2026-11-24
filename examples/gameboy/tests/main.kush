@@ -1,6 +1,7 @@
 module gameboy.tests.main;
 
 use std.test;
+use gameboy.apu;
 use gameboy.cartridge;
 use gameboy.cartridge.Mapper;
 use gameboy.cpu;
@@ -259,6 +260,112 @@ fn a_file_without_a_header_is_rejected_not_a_crash() -> Unit ! {io, alloc, panic
     test.is_true(match cartridge.kind(&short) { cartridge.Kind.Unsupported(_) => true, _ => false });
 }
 
+// --- Skipping halted steps ----------------------------------------------------
+
+fn same_voice(a: &apu.Voice, b: &apu.Voice) -> Bool ! {} {
+    a.enabled == b.enabled && a.length == b.length && a.volume == b.volume
+        && a.envelope_timer == b.envelope_timer && a.frequency == b.frequency
+        && a.timer == b.timer && a.position == b.position
+}
+
+fn same_bytes(a: &Vec<u8>, b: &Vec<u8>) -> Bool ! {panic} {
+    if a.len() != b.len() { return false; }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+fn same_samples(a: &Vec<i64>, b: &Vec<i64>) -> Bool ! {panic} {
+    if a.len() != b.len() { return false; }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+/// Everything a program, the screen or the speaker could observe.
+fn same_state<M>(a: &Machine<M>, b: &Machine<M>) -> Bool ! {panic} {
+    a.a == b.a && a.f == b.f && a.b == b.b && a.c == b.c && a.d == b.d && a.e == b.e
+        && a.h == b.h && a.l == b.l && a.sp == b.sp && a.pc == b.pc
+        && a.ime == b.ime && a.ime_pending == b.ime_pending && a.halted == b.halted
+        && a.ie == b.ie && a.divider == b.divider && a.dot == b.dot
+        && a.window_line == b.window_line && a.stat_line == b.stat_line
+        && a.frame_done == b.frame_done && a.cycles == b.cycles
+        && same_bytes(&a.io, &b.io) && same_bytes(&a.screen, &b.screen)
+        && same_bytes(&a.serial, &b.serial)
+        && same_voice(&a.apu.square1, &b.apu.square1) && same_voice(&a.apu.square2, &b.apu.square2)
+        && same_voice(&a.apu.wave, &b.apu.wave) && same_voice(&a.apu.noise, &b.apu.noise)
+        && a.apu.step == b.apu.step && a.apu.lfsr == b.apu.lfsr
+        && a.apu.sample_clock == b.apu.sample_clock
+        && a.apu.left_charge == b.apu.left_charge && a.apu.right_charge == b.apu.right_charge
+        && same_samples(&a.apu.samples, &b.apu.samples)
+}
+
+/// Run `count` frames on two copies of a program, one skipping halted
+/// steps and one stepping through them, and compare them after each frame.
+fn skipping_matches_stepping(image: &Vec<u8>, count: i64) -> Bool ! {alloc, panic} {
+    let mut fast = machine.new(cartridge.plain(image));
+    let mut slow = machine.new(cartridge.plain(image));
+    let mut frame = 0;
+    while frame < count {
+        emulator.run_frame(&mut fast);
+        emulator.run_frame_reference(&mut slow);
+        if !same_state(&fast, &slow) { return false; }
+        drop(fast.apu.samples.replace(Vec.new()));
+        drop(slow.apu.samples.replace(Vec.new()));
+        frame = frame + 1;
+    }
+    true
+}
+
+/// Interrupt handlers count in C, D and E, then return with RETI.
+fn with_handlers(code: &Vec<u8>) -> Vec<u8> ! {alloc, panic} {
+    let mut image = rom(code);
+    image[0x40] = 0x0C; image[0x41] = 0xD9; // VBlank: INC C; RETI
+    image[0x48] = 0x14; image[0x49] = 0xD9; // STAT: INC D; RETI
+    image[0x50] = 0x1C; image[0x51] = 0xD9; // Timer: INC E; RETI
+    image
+}
+
+/// Sound on, interrupts from the timer (TAC as given), STAT and VBlank,
+/// then HALT in a loop.
+fn halting_program(tac: u8) -> Vec<u8> ! {alloc, panic} {
+    let code: Vec<u8> = [
+        0x3E, 0x80, 0xE0, 0x26,     // NR52: sound on
+        0x3E, 0x77, 0xE0, 0x24,     // NR50: full volume
+        0x3E, 0xFF, 0xE0, 0x25,     // NR51: every channel on both sides
+        0x3E, 0x80, 0xE0, 0x11,     // square 1: 50% duty
+        0x3E, 0xF3, 0xE0, 0x12,     // envelope down from 15
+        0x3E, 0x40, 0xE0, 0x13,     // frequency, low byte
+        0x3E, 0x87, 0xE0, 0x14,     // trigger
+        0x3E, 0xF1, 0xE0, 0x21,     // noise envelope
+        0x3E, 0x23, 0xE0, 0x22,     // noise frequency
+        0x3E, 0x80, 0xE0, 0x23,     // noise trigger
+        0x3E, 0xF0, 0xE0, 0x06,     // TMA
+        0x3E, tac, 0xE0, 0x07,      // TAC
+        0x3E, 0x48, 0xE0, 0x41,     // STAT: LYC and OAM-search interrupts
+        0x3E, 0x40, 0xE0, 0x45,     // LYC = 64
+        0x3E, 0x07, 0xE0, 0xFF,     // IE: VBlank, STAT, timer
+        0xFB,                       // EI
+        0x76, 0x00, 0x04, 0x18, 0xFB, // loop: HALT; NOP; INC B; JR loop
+    ];
+    with_handlers(&code)
+}
+
+#[test]
+fn skipping_halted_steps_matches_stepping_through_them() -> Unit ! {io, alloc, panic} {
+    // The fastest timer, the slowest, and the timer off: ever longer
+    // stretches to skip between events.
+    test.is_true(skipping_matches_stepping(&halting_program(0x05), 30));
+    test.is_true(skipping_matches_stepping(&halting_program(0x04), 30));
+    test.is_true(skipping_matches_stepping(&halting_program(0x00), 30));
+}
+
 // `kush fuzz` entries (docs/proof-fuzz.md). The machine holds state no
 // generator can build, so these reach the CPU, video, sound and bank
 // controllers' checks from raw bytes.
@@ -269,6 +376,13 @@ fn random_program(input: &Bytes) -> Unit ! {alloc, panic} {
     let mut m = machine_for(&assemble(input));
     emulator.run_frame(&mut m);
     emulator.run_frame(&mut m);
+}
+
+/// Arbitrary code with the interrupt handlers in place: skipping halted
+/// steps must leave the machine exactly as stepping through them does.
+#[fuzz]
+fn random_halting_program(input: &Bytes) -> Unit ! {alloc, panic} {
+    if !skipping_matches_stepping(&with_handlers(&assemble(input)), 3) { panic(); }
 }
 
 fn frames<M: Mapper>(board: M) -> Unit ! {alloc, panic} {

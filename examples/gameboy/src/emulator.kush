@@ -20,6 +20,48 @@ pub fn run_frame<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc, panic} {
     m.frame_done = false;
     let mut budget = CYCLES_PER_FRAME;
     while !m.frame_done && budget > 0 {
+        // A halted CPU spends four cycles per step until an interrupt is
+        // pending. Skip the steps before the next one in which the timer,
+        // the display or the sound does more than count: the state after
+        // them is the same as after stepping through them one by one.
+        if m.halted && (m.ie & m.io[0x0F] & 0x1F) == 0 {
+            let steps = quiet(m, budget) - 1;
+            if steps > 0 {
+                machine.skip_timer(m, steps);
+                ppu.skip(m, steps);
+                apu.tick(&mut m.apu, steps * 4);
+                m.cycles = m.cycles + steps * 4;
+                budget = budget - steps * 4;
+            }
+        }
+        let cycles = cpu.step(m);
+        machine.tick_timer(m, cycles);
+        ppu.advance(m, cycles);
+        apu.tick(&mut m.apu, cycles);
+        m.cycles = m.cycles + cycles;
+        budget = budget - cycles;
+    }
+}
+
+/// The four-cycle steps, within the frame budget, until the first one in
+/// which something besides counting happens.
+fn quiet<M: Mapper>(m: &Machine<M>, budget: i64) -> i64 ! {panic} {
+    let mut steps = (budget + 3) / 4;
+    let timer = machine.timer_quiet(m);
+    if timer < steps { steps = timer; }
+    let display = ppu.quiet(m);
+    if display < steps { steps = display; }
+    let sound = apu.quiet(&m.apu);
+    if sound < steps { steps = sound; }
+    steps
+}
+
+/// `run_frame` one instruction (or halted step) at a time, without
+/// skipping: the reference the faster loop is tested against.
+pub fn run_frame_reference<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc, panic} {
+    m.frame_done = false;
+    let mut budget = CYCLES_PER_FRAME;
+    while !m.frame_done && budget > 0 {
         let cycles = cpu.step(m);
         machine.tick_timer(m, cycles);
         ppu.advance(m, cycles);

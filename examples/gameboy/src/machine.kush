@@ -285,3 +285,27 @@ pub fn tick_timer<M>(m: &mut Machine<M>, cycles: i64) -> Unit ! {panic} {
         left = left - 4;
     }
 }
+
+/// Four-cycle steps until the timer does more than count: the step that
+/// increments TIMA or steps the sound sequencer. Both happen on a falling
+/// edge of a divider bit, when the divider reaches a multiple of twice it.
+pub fn timer_quiet<M>(m: &Machine<M>) -> i64 ! {panic} {
+    let mut steps = steps_to_fall(m.divider, 12);
+    let tac = m.io[0x07];
+    if (tac & 0x04) != 0 {
+        let shift = match tac & 0x03 { 0 => 9, 1 => 3, 2 => 5, _ => 7 };
+        let tima = steps_to_fall(m.divider, shift);
+        if tima < steps { steps = tima; }
+    }
+    steps
+}
+
+fn steps_to_fall(divider: i64, bit: i64) -> i64 ! {panic} {
+    let period = 2 << bit;
+    (period - (divider & (period - 1)) + 3) / 4
+}
+
+/// `tick_timer` over steps that `timer_quiet` showed only count.
+pub fn skip_timer<M>(m: &mut Machine<M>, steps: i64) -> Unit ! {panic} {
+    m.divider = (m.divider + steps * 4) & 0xFFFF;
+}

@@ -407,6 +407,13 @@ fn advance_square(v: &mut Voice, cycles: i64) -> Unit ! {panic} {
     }
 }
 
+/// Four-cycle steps until `tick` mixes a sample. Before then, one `tick`
+/// over several steps leaves the channels exactly as one per step would.
+pub fn quiet(a: &Apu) -> i64 ! {panic} {
+    let step = 4 * SAMPLE_RATE;
+    (CLOCK - a.sample_clock + step - 1) / step
+}
+
 /// Advance the channels by `cycles` clock cycles and produce the samples
 /// that fall in that time.
 pub fn tick(a: &mut Apu, cycles: i64) -> Unit ! {alloc, panic} {

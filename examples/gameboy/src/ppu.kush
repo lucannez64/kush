@@ -50,6 +50,20 @@ pub fn advance<M>(m: &mut Machine<M>, cycles: i64) -> Unit ! {panic} {
     update_stat(m);
 }
 
+/// Four-cycle steps until `advance` changes the mode or the line. Before
+/// then it only counts dots, and the STAT inputs stay the same.
+pub fn quiet<M>(m: &Machine<M>) -> i64 ! {panic} {
+    if (m.io[0x40] & DISPLAY_ON) == 0 { return 1 << 40; }
+    let line = wide(m.io[0x44]);
+    let next = if line >= VISIBLE_LINES || m.dot >= 252 { DOTS_PER_LINE } else if m.dot < 80 { 80 } else { 252 };
+    (next - m.dot + 3) / 4
+}
+
+/// `advance` over steps that `quiet` showed only count dots.
+pub fn skip<M>(m: &mut Machine<M>, steps: i64) -> Unit ! {panic} {
+    if (m.io[0x40] & DISPLAY_ON) != 0 { m.dot = m.dot + steps * 4; }
+}
+
 fn next_line<M>(m: &mut Machine<M>) -> Unit ! {panic} {
     let mut line = wide(m.io[0x44]) + 1;
     if line == VISIBLE_LINES {
