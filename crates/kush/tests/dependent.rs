@@ -429,3 +429,22 @@ fn mutual_polymorphic_recursion_is_rejected_promptly() {
     rejects(&source, "1024 instances of generic functions");
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
 }
+
+/// LANG-NAT-VALUE: a `N: Nat` parameter read as a value is the instance's
+/// `i64` constant.
+#[test]
+fn a_nat_parameter_is_an_i64_value_in_bodies() {
+    let source = "fn sum<N: Nat>(a: [i64; N]) -> i64 ! {} {
+             let mut total = 0;
+             let mut i = 0;
+             while i < N { total = total + a[i]; i = i + 1; }
+             total + N
+         }
+         fn count<N: Nat>(a: [i64; N]) -> i64 ! {} { N }
+         fn main() -> i64 ! {} {
+             let a: [i64; 3] = [4, 5, 6];
+             let b: [i64; 2] = [1, 1];
+             sum(a) + count(b) * 100
+         }";
+    assert_eq!(evaluate(source), 15 + 3 + 200);
+}

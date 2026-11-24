@@ -285,13 +285,28 @@ fn main() -> Unit ! {io} {
 6
 ```
 
-`N` is a compile-time length and index, not a run-time value; loop over a
-slice view of the array instead:
+Read as a value, `N` is the instance's `i64` constant, so a loop can count
+to it:
 
-```kush reject
-fn count<N: Nat>(a: [i64; N]) -> i64 ! {} { N }
-fn main() -> i64 ! {} { let a: [i64; 2] = [1, 2]; count(a) }
-// error: function values are not supported yet
+```kush eval
+fn sum<N: Nat>(a: [i64; N]) -> i64 ! {} {
+    let mut total = 0;
+    let mut i = 0;
+    while i < N {
+        total = total + a[i];
+        i = i + 1;
+    }
+    total
+}
+
+fn main() -> Unit ! {io} {
+    let a: [i64; 3] = [4, 5, 6];
+    print_i64(sum(a));
+}
+```
+
+```output
+15
 ```
 
 `DynArray<T, C>` holds up to `C` elements inline with a run-time length, and

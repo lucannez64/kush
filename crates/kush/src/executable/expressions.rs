@@ -251,6 +251,20 @@ impl Checker<'_, '_> {
                         "'_' is a proof hole; it is only valid as an erased argument",
                     ));
                 }
+                // LANG-NAT-VALUE: a `N: Nat` parameter read as a value is the
+                // instance's `i64` constant, so the prover knows its value.
+                ast::ExprKind::Name(_)
+                    if let Some(id) = c.resolution.reference(span)
+                        && let Some(&value) = c.consts.get(&id) =>
+                {
+                    let value = i64::try_from(value).map_err(|_| {
+                        Diagnostic::new(
+                            span,
+                            format!("the natural {value} does not fit in an i64 value"),
+                        )
+                    })?;
+                    (ExprKind::Constant(value), Type::I64)
+                }
                 ast::ExprKind::Name(_) => {
                     if let Some(id) = c.resolution.reference(span) {
                         // A `&mut Vec` parameter that keeps `len >= N` is used
