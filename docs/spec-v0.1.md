@@ -2,6 +2,14 @@
 
 Status: design draft, 2026-10-30. No implementation conformance is claimed.
 
+> **Stale.** This draft predates effect handlers, capabilities, tasks on an
+> epoll reactor, threads, traits, staging, SIMD and the GPU subset, and some
+> boundaries below (for example "general multi-shot effect handlers" being out
+> of scope) no longer match the implementation. The
+> [language reference](reference/README.md) describes the language as
+> implemented; [foundations-review.md](foundations-review.md) lists the
+> changes under way.
+
 Kush is an eagerly evaluated functional systems language for application developers. It combines dependent types, algebraic subtyping, graded resource usage, explicit ownership, and checked effects. Its first target is Linux x86-64; its first substantial application is a parser/compiler.
 
 **MUST**, **MUST NOT**, and **SHOULD** describe requirements for a conforming implementation of this draft. Examples specify proposed syntax, not currently executable programs. Sections explicitly marked **research gate** identify requirements whose full sound implementation is not yet designed. They MUST NOT be advertised as implemented guarantees.
@@ -159,6 +167,8 @@ Type-level evaluation MUST NOT execute I/O, access mutable process state, consul
 `erased` arguments are removed before runtime lowering. Runtime control flow MUST NOT depend on erased data. A proof cannot hide a file, buffer, or linear capability and thereby cause its runtime obligations to disappear. Eliminating propositions into runtime data is restricted to forms justified by the logical core, such as equality transport.
 
 Initial automation supports definitional equality, constructor reasoning, and a documented bounded arithmetic fragment. Solver failure means “not established,” not “false.” External solvers and future tactics MUST produce proof terms or certificates checked by the trusted kernel.
+
+**Implementation status (2026-11-24):** the current implementation does not meet this requirement yet. Arithmetic `{ ... }` obligations, `ensures` and loop invariants are proved by the bounded linear search in `facts.rs`, and their certificates are rechecked by `facts::verify`, not by the kernel. Until plan node FND-PROOF-TRUST, the trusted base for executable proofs is the kernel **and** `facts::verify` **and** the compiler's fact collection (which hypotheses hold at each program point). See [proof-systems.md](proof-systems.md).
 
 No safe `admit` or unchecked theorem declaration is permitted. Imported assumptions MUST be declared and reported transitively. Foreign code and compiler optimizations do not become logical axioms merely because they execute successfully.
 

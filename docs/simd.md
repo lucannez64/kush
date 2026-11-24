@@ -2,8 +2,10 @@
 
 Status: design approved by the user 2026-11-14 (SIMD-DESIGN; decisions at
 the end). The user chose this route the same day for the CPU's SHA
-instructions, reopening the `SIMD` node deferred on 2026-11-06. Nothing is
-implemented yet.
+instructions, reopening the `SIMD` node deferred on 2026-11-06. Implemented:
+SIMD-TYPES, SIMD-OPS, SIMD-LLVM, SIMD-CPU, SIMD-X86-SHA,
+SIMD-CRANELIFT-FEATURES, SIMD-256, SIMD-NATIVE, and SIMD-REVIEW; only the
+closing `SIMD` node is open.
 Plan nodes are named in brackets.
 
 Goal: Kush code can use 128-bit vectors and CPU-specific instructions (first

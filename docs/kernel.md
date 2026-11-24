@@ -70,6 +70,14 @@ compiler/runtime, and the machine remain trusted. Correct elaboration is also
 needed to connect an accepted core statement to what a source author intended.
 The checker does not establish program ownership, effect, or memory guarantees.
 
+The kernel is not the only trusted proof checker. Arithmetic `{ ... }`
+obligations in executable code (erased preconditions, `ensures`, loop
+invariants, bounds and overflow elision) never reach the kernel: they are
+proved by `facts.rs` and their certificates are rechecked by `facts::verify`,
+which, together with the compiler's fact collection, is trusted beside this
+kernel until FND-PROOF-TRUST moves certificate checking into it. See
+[proof-systems.md](proof-systems.md).
+
 ## 2. Core syntax and binding
 
 Core terms are explicit and use zero-based de Bruijn indices. Index 0 denotes

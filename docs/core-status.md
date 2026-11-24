@@ -4,6 +4,11 @@ This page records the implemented programming-language core and its validation.
 It is not a claim of complete v0.1 conformance, a formal soundness proof, or
 memory/performance superiority over Rust.
 
+Test counts and gate runs below are historical milestone records. "Boat" was a
+remote build machine that is no longer available; every milestone below is
+committed. The open structural changes are in
+[foundations-review.md](foundations-review.md).
+
 | Area | Implemented |
 | --- | --- |
 | Modules | Imports, visibility, cross-file spans, embedded library modules |

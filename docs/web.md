@@ -1,7 +1,10 @@
 # A web framework written in Kush
 
 Status: design approved by the user 2026-11-14 (WEB-DESIGN); the decisions
-are at the end. Nothing else is implemented. Plan nodes are named in brackets; dependencies
+are at the end. Implemented: WEB-NET, WEB-HTTP-PARSE, WEB-URL, WEB-CORE,
+WEB-REACTOR, WEB-SERVER, WEB-MULTICORE, WEB-CRYPTO and WEB-PANIC-500; the
+router, effects, codecs, HTML, sessions, TLS, database and WebSocket nodes are
+open. Plan nodes are named in brackets; dependencies
 are in `plan/plan.json` (prefix `WEB-`).
 
 Goal: an HTTP server framework written in Kush, in the family of Axum and

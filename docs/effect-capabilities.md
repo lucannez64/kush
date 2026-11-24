@@ -1,10 +1,13 @@
 # Lexical capability handlers alongside declared dynamic handlers
 
-Status: **design** (RES-EFFECT-CAPABILITY). Nothing here is implemented. The
-decisions below fix the semantics a capability feature must have so that it
-can coexist with today's handlers without changing which handler any existing
-program observes. Implementation is split into the plan nodes listed at the
-end.
+Status: **implemented** (design RES-EFFECT-CAPABILITY; built by EFF-CAP-LEXICAL,
+EFF-CAP-RESUME, EFF-CAP-PERF, EFF-CAP-RESUME-CALLS, EFF-CAP-LAMBDA,
+EFF-CAP-RESUME-CAPTURING and EFF-CAP-RESUME-MULTISHOT; the "As built"
+subsections record where each departs from the design). The decisions below
+fix the semantics capabilities must have so that they coexist with declared
+handlers without changing which handler any existing program observes. The
+number of handler-lookup models is under review in
+[foundations-review.md](foundations-review.md) section 3.
 
 Inputs, used as design references, not as transferred results:
 

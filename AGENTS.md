@@ -19,6 +19,11 @@ and use conservative build concurrency (start with two jobs).
   the rest. `scripts/test-all.sh` runs the whole suite with cargo-nextest,
   sized to the machine's free memory and cores (about 3.5 minutes instead of
   about 40 with `mbx test -j 2`); targeted runs can stay on `mbx test`.
+- `docs/reference/` is the language as implemented. A change to language
+  behavior updates the affected chapter in the same commit, and
+  `scripts/check-reference.py` (uses `target/release/kush`, `--native` to also
+  run natively) must pass. Limits are written as `kush reject` examples, so
+  lifting one makes the check fail until the reference is updated.
 - Preserve all existing uncommitted work. The initial cooperative task system is implemented; see `docs/async.md` for its limits.
 - Work plan: `plan/plan.json` is the dependency graph of remaining work. View it
   with `scripts/plan-server.py` (http://127.0.0.1:4318/). Update it with

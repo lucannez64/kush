@@ -1,6 +1,7 @@
 # Representation-disjointness certificates for further unboxing
 
-Status: **design** (RES-UNBOX-CERT). Nothing here changes a layout yet. It
+Status: **implemented** (design RES-UNBOX-CERT; built by UNBOX-CERT-CHECKER,
+UNBOX-ALIGN-CONTRACT, UNBOX-MULTI-NICHE and UNBOX-TAG-NICHE). It
 defines the evidence the compiler must produce and check before it removes a
 tag, so that today's niche encodings become *instances* of one checked rule
 and any extension is justified by a certificate rather than by a case in

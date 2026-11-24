@@ -7,8 +7,11 @@ graded ownership, and direct-style cooperative tasks.
 
 See the [core implementation and integration status](docs/core-status.md).
 
-Read the [v0.1 language specification](docs/spec-v0.1.md) for the proposed syntax,
-semantics, research gates, and implementation milestones.
+Read the [language reference](docs/reference/README.md) for the language as it
+is implemented today; every example in it is checked against the compiler by
+`scripts/check-reference.py`. The [v0.1 language specification](docs/spec-v0.1.md)
+is the original design draft, and [foundations-review.md](docs/foundations-review.md)
+lists the structural changes under way.
 
 Kush has a working native compiler on Linux x86-64 using Cranelift, and an
 opt-in [LLVM release backend](docs/llvm-backend.md)
