@@ -26,7 +26,11 @@ module.exports = grammar({
       seq(field('kind', 'effect'), 'row', field('name', $.identifier)),
     ),
     impl_item: $ => 'impl',
-    use_item: $ => seq(choice('use', 'module'), field('path', $.path)),
+    use_item: $ => prec.right(seq(
+      choice('use', 'module'),
+      field('path', $.path),
+      optional(seq('as', field('alias', $.identifier))),
+    )),
     path: $ => seq($.identifier, repeat(seq('.', $.identifier))),
     attribute: $ => seq('#[', repeat(choice($.identifier, $.punctuation, $.parenthesized, $.string, $.number)), ']'),
     block: $ => seq('{', repeat($._element), '}'),

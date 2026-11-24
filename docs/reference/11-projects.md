@@ -22,7 +22,31 @@ fn main() -> Unit ! {io} {
 1
 ```
 
-Renamed imports (`use a.b as c`) do not exist yet (LANG-IMPORT-ALIAS).
+`use a.b as c;` imports a module or an item under another name, so two
+modules with the same last segment can both be imported. A renamed enum
+brings its constructors under the new name (`c.Variant`). The new name must
+not clash with another declaration or import.
+
+```kush eval
+use std.option.Option as Maybe;
+use std.option as opt;
+
+fn main() -> Unit ! {io} {
+    let some: Maybe<i64> = Maybe.Some(5);
+    print_i64(opt.unwrap_or(some, 0));
+}
+```
+
+```output
+5
+```
+
+```kush reject
+use std.option;
+use std.result as option;
+fn main() -> i64 ! {} { 0 }
+// error: import 'option' conflicts with another declaration or import
+```
 
 ## Projects
 

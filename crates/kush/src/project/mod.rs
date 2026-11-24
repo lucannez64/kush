@@ -514,7 +514,7 @@ pub fn check(project: &Project, locked: bool) -> Result<Vec<CheckSummary>, Failu
             &declaration.item.kind,
             ItemKind::Enum { total: false, .. }
                 | ItemKind::Struct { .. }
-                | ItemKind::Use(_)
+                | ItemKind::Use(..)
                 | ItemKind::Trait { .. }
                 | ItemKind::Impl { .. }
         ) || matches!(&declaration.item.kind, ItemKind::Function(function) if !function.total)

@@ -520,6 +520,16 @@
     "type": "use_item",
     "named": true,
     "fields": {
+      "alias": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
       "path": {
         "multiple": false,
         "required": true,

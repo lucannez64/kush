@@ -53,10 +53,12 @@
     "module-paths": {
       "patterns": [
         {
-          "match": "\\b(module|use)\\s+([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)",
+          "match": "\\b(module|use)\\s+([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)(?:\\s+(as)\\s+([A-Za-z_][A-Za-z0-9_]*))?",
           "captures": {
             "1": { "name": "keyword.control.import.kush" },
-            "2": { "name": "entity.name.namespace.kush" }
+            "2": { "name": "entity.name.namespace.kush" },
+            "3": { "name": "keyword.control.import.kush" },
+            "4": { "name": "entity.name.namespace.kush" }
           }
         }
       ]

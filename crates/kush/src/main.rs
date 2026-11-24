@@ -896,7 +896,7 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
                 &d.item.kind,
                 ItemKind::Enum { total: false, .. }
                     | ItemKind::Struct { .. }
-                    | ItemKind::Use(_)
+                    | ItemKind::Use(..)
                     | ItemKind::Trait { .. }
                     | ItemKind::Impl { .. }
             ) || matches!(&d.item.kind, ItemKind::Function(f) if !f.total)

@@ -13,7 +13,7 @@
 (type_item kind: _ @keyword)
 (type_item "row" @keyword)
 (impl_item) @keyword
-(use_item ["use" "module"] @keyword)
+(use_item ["use" "module" "as"] @keyword)
 (use_item path: (path (identifier) @namespace))
 
 (primitive_type) @type.builtin

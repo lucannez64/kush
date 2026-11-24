@@ -157,7 +157,7 @@ impl Checker<'_, '_> {
                     None => Ok(current),
                 };
             }
-            return c.vec_literal(values, span, expected);
+            c.vec_literal(values, span, expected)
         }
     }
 }

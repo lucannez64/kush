@@ -754,7 +754,7 @@ impl Resolver {
                         self.units[unit].path = path.clone();
                         continue;
                     }
-                    ItemKind::Use(_) => continue,
+                    ItemKind::Use(..) => continue,
                     ItemKind::Function(f) => (&f.name, BindingKind::Function),
                     ItemKind::Struct { name, .. } | ItemKind::Enum { name, .. } => {
                         (name, BindingKind::Data)
@@ -885,7 +885,7 @@ impl Resolver {
         // 3. Imports, after every module's public surface is known.
         for (unit, info) in units.iter().enumerate() {
             for declaration in &items[info.items.clone()] {
-                let ItemKind::Use(path) = &declaration.item.kind else {
+                let ItemKind::Use(path, alias) = &declaration.item.kind else {
                     continue;
                 };
                 let span = declaration.item.span;
@@ -895,7 +895,10 @@ impl Resolver {
                         "imports need a loaded program; use 'kush check/run' on a file path",
                     ));
                 };
-                let local = item.clone().unwrap_or_else(|| path.last().unwrap().clone());
+                let local = alias
+                    .clone()
+                    .or_else(|| item.clone())
+                    .unwrap_or_else(|| path.last().unwrap().clone());
                 if self.units[unit].globals.contains_key(&local)
                     || self.units[unit].aliases.contains_key(&local)
                 {
@@ -956,7 +959,7 @@ impl Resolver {
                 let item = &declaration.item;
                 self.owner = self.result.declarations.get(&item.span.start).copied();
                 self.scoped(|r| match &item.kind {
-                    ItemKind::Module(_) | ItemKind::Use(_) => Ok(()),
+                    ItemKind::Module(_) | ItemKind::Use(..) => Ok(()),
                     ItemKind::GradeAlgebra(_) => Ok(()),
                     ItemKind::Function(f) => r.function(f),
                     ItemKind::Trait {

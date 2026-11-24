@@ -61,7 +61,9 @@ pub struct Attribute {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemKind {
     Module(Vec<String>),
-    Use(Vec<String>),
+    /// `use a.b.c;` or `use a.b.c as name;`: the imported path and the local
+    /// name it is bound to, when renamed (LANG-IMPORT-ALIAS).
+    Use(Vec<String>, Option<String>),
     Function(Function),
     Struct {
         name: String,

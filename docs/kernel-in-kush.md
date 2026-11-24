@@ -436,8 +436,9 @@ actually blocks the port; until then the workaround stands.
 - **A `match` scrutinee's exclusive loan lasts through its arms**, even when
   the matched value (`Result<i64, i64>`) holds no borrow; the result is bound
   with a `let` first. To fix: LANG-MATCH-SCRUTINEE-LOAN.
-- **Module imports cannot be renamed**: `kernel.env` clashed with `std.env`,
-  so the kernel state module is `kernel.engine`. To fix: LANG-IMPORT-ALIAS.
+- **Module imports could not be renamed** when the kernel was written:
+  `kernel.env` clashed with `std.env`, so the kernel state module is
+  `kernel.engine`. `use a.b as c` now exists (LANG-IMPORT-ALIAS).
 - **`refl` is a reserved name** even for a module function; the constructor is
   `term.reflexive`.
 - An explicit `drop` after a condition's borrow was rejected; fixed in the

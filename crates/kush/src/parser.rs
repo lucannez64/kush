@@ -287,8 +287,14 @@ impl Parser {
                 ItemKind::Module(path)
             } else if self.eat(&Kind::Use) {
                 let path = self.path()?;
+                let alias = if self.word_keyword("as") {
+                    self.bump();
+                    Some(self.ident()?)
+                } else {
+                    None
+                };
                 self.expect(&Kind::Semi, "';' after import")?;
-                ItemKind::Use(path)
+                ItemKind::Use(path, alias)
             } else if self.word_keyword("trait") {
                 if total {
                     return Err(self.error("'total' applies only to fn and enum declarations"));

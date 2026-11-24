@@ -1065,7 +1065,7 @@ fn has_executable_items(program: &Program) -> bool {
                 &declaration.item.kind,
                 ItemKind::Enum { total: false, .. }
                     | ItemKind::Struct { .. }
-                    | ItemKind::Use(_)
+                    | ItemKind::Use(..)
                     | ItemKind::Trait { .. }
                     | ItemKind::Impl { .. }
             ) || matches!(&declaration.item.kind, ItemKind::Function(function) if !function.total)
@@ -1085,7 +1085,7 @@ fn use_definition(
     let file = &program.sources.files[file_index];
     let tokens = crate::lexer::lex(&document.text).ok()?;
     for declaration in &program.module.items[program.units[unit_index].items.clone()] {
-        let ItemKind::Use(path) = &declaration.item.kind else {
+        let ItemKind::Use(path, _) = &declaration.item.kind else {
             continue;
         };
         let item_span = local_span(declaration.item.span, file.base);
@@ -1111,7 +1111,8 @@ fn use_definition(
         let (target_unit, imported_item) = program.units[unit_index]
             .imports
             .get(&declaration.item.span.start)?;
-        if imported_item.is_some() && segment + 1 == path.len() {
+        // The last segment, or an `as` alias after it, names the imported item.
+        if imported_item.is_some() && segment + 1 >= path.len() {
             let target = named_item_span(program, *target_unit, imported_item.as_deref()?)?;
             return location_for_span(program, target);
         }

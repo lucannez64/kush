@@ -115,10 +115,10 @@ impl Checker<'_, '_> {
                 span,
                 resource: None,
             };
-            return match expected {
+            match expected {
                 Some(expected) => c.coerce(value, expected, span),
                 None => Ok(value),
-            };
+            }
         }
     }
 }

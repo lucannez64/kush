@@ -88,7 +88,7 @@ pub(crate) fn check_program(
     for declaration in &module.items {
         match &declaration.item.kind {
             ItemKind::Module(_)
-            | ItemKind::Use(_)
+            | ItemKind::Use(..)
             | ItemKind::Struct { .. }
             | ItemKind::Trait { .. }
             | ItemKind::Impl { .. }

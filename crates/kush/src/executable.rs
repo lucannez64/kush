@@ -2185,7 +2185,7 @@ fn check_program_pass(
             | ast::ItemKind::GradeAlgebra(_)
             | ast::ItemKind::Effect { .. }
             | ast::ItemKind::EffectRow { .. }
-            | ast::ItemKind::Use(_) => continue,
+            | ast::ItemKind::Use(..) => continue,
             ast::ItemKind::Alias { .. } => continue,
             ast::ItemKind::Function(f) => f,
         };

@@ -141,8 +141,8 @@ impl<'p> Types<'p> {
                         types.names.insert(function.name.clone());
                     }
                     ItemKind::Impl { .. } => types.impls.push(index),
-                    ItemKind::Use(path) => {
-                        let Some(last) = path.last() else {
+                    ItemKind::Use(path, alias) => {
+                        let Some(last) = alias.as_ref().or(path.last()) else {
                             continue;
                         };
                         types.names.insert(last.clone());

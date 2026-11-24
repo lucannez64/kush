@@ -299,7 +299,7 @@ impl Loader<'_> {
             let uses = self.items[self.units[unit].items.clone()]
                 .iter()
                 .filter_map(|d| match &d.item.kind {
-                    ast::ItemKind::Use(path) => Some((d.item.span, d.public, path.clone())),
+                    ast::ItemKind::Use(path, _) => Some((d.item.span, d.public, path.clone())),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
