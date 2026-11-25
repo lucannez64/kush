@@ -35,9 +35,12 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
         local(place.local)?;
         let base = body.locals[place.local].ty;
         let base = if place.deref {
-            let pointee = base
-                .ref_pointee()
-                .ok_or_else(|| format!("*_{} dereferences a {base:?}", place.local))?;
+            // A reference, or a box: both point at their pointee.
+            let pointee = match base {
+                Type::Box(pointee) => Some(pointee),
+                other => other.ref_pointee(),
+            }
+            .ok_or_else(|| format!("*_{} dereferences a {base:?}", place.local))?;
             if place.field.is_none() {
                 return Err(format!("*_{} names no field", place.local));
             }
@@ -152,6 +155,11 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                         Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::StrMut => target_ty,
                         other => return Err(here(format!("a view stored in a {other:?}"))),
                     }
+                }
+                Rvalue::ByteAt(handle, index) => {
+                    operand(*handle).map_err(here)?;
+                    operand(*index).map_err(here)?;
+                    target_ty
                 }
                 Rvalue::Coerce(value, index) => {
                     operand(*value).map_err(here)?;

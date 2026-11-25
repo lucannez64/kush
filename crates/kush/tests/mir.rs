@@ -41,7 +41,7 @@ fn every_built_body_verifies_and_reads_back_from_its_text() {
     assert_eq!(checked, built);
     // The corpus exercises the builder; coverage only grows.
     assert!(
-        built >= 260,
+        built >= 300,
         "MIR covers {built} of {total} example functions"
     );
 }
@@ -376,26 +376,45 @@ fn closures_and_indirect_calls_match_the_tree_path() {
     assert_eq!(output, "5\n18\n15\n32\n8\n6\n");
 }
 
-/// Whole example programs the MIR covers completely: unions, `dyn`
-/// objects, traits, subtyping coercions and borrowed closures.
+/// Every example program the MIR covers completely (and that reads no
+/// input) behaves the same on both paths: output, exit status and balanced
+/// allocations.
 #[test]
 fn fully_covered_examples_match_the_tree_path() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let mut compared = Vec::new();
+    for path in examples() {
+        let source = fs::read_to_string(&path).unwrap();
+        if source.contains("stdin") {
+            continue;
+        }
+        let Ok(program) = kush::program::load_path(&path) else {
+            continue;
+        };
+        let Ok(program) = executable::check_program(&program) else {
+            continue;
+        };
+        let (built, total) = kush::mir::coverage(&program);
+        if built != total || total == 0 || !source.contains("fn main(") {
+            continue;
+        }
+        same_program_on_both_paths(&program, true);
+        compared.push(path.file_stem().unwrap().to_string_lossy().into_owned());
+    }
+    // Coverage only grows: these must stay compared.
     for name in [
         "functions",
         "subtyping",
         "traits",
-        "advanced-traits",
-        "generic_traits",
-        "borrowed-closures",
+        "results",
+        "ownership",
+        "slices",
     ] {
-        let path = root.join(format!("{name}.kush"));
-        let program = kush::program::load_path(&path).unwrap();
-        let program = executable::check_program(&program).unwrap();
-        let (built, total) = kush::mir::coverage(&program);
-        assert_eq!(built, total, "{name}: MIR covers {built} of {total}");
-        same_program_on_both_paths(&program, true);
+        assert!(
+            compared.iter().any(|c| c == name),
+            "{name} not compared: {compared:?}"
+        );
     }
+    assert!(compared.len() >= 30, "{compared:?}");
 }
 
 #[test]

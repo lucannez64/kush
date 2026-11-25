@@ -225,6 +225,18 @@ representation:
 
 `multi fn` values, continuations and suspension wait for FND-MIR-EFFECTS.
 
+FND-MIR-BUILTINS finished the ordinary values:
+
+- Recursive enums (through boxes) are covered. The type check treats a
+  type it is already checking as covered.
+- `?` is a switch on the tag word. The error branch builds the function's
+  error variant and returns through the usual cleanup.
+- Box reads are two loads through places. A proved byte read is `byte_at`.
+  I/O handles are one-word values.
+
+What remains outside the MIR, apart from effects, is listed on
+FND-MIR-SHAPES.
+
 The flags are dynamic everywhere, as on the tree path. Removing the ones
 a dataflow pass can decide statically is FND-MIR-DROP-FLAGS.
 

@@ -178,12 +178,9 @@ impl Generator<'_, '_> {
                 Capture::Value(operand) => self.mir_operand(*operand),
             };
             for word in &words {
-                self.builder.ins().store(
-                    ir::MemFlagsData::new(),
-                    *word,
-                    environment,
-                    offset,
-                );
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), *word, environment, offset);
                 offset += 8;
             }
         }
@@ -298,6 +295,18 @@ impl Generator<'_, '_> {
                 Some(values)
             }
             Rvalue::Ref(place) => Some(vec![self.mir_address(*place)]),
+            Rvalue::ByteAt(handle, index) => {
+                let handle = self.mir_scalar(*handle);
+                let index = self.mir_scalar(*index);
+                // Data follows the 16-byte header.
+                let address = self.builder.ins().iadd(handle, index);
+                Some(vec![self.builder.ins().uload8(
+                    I64,
+                    ir::MemFlagsData::new(),
+                    address,
+                    16,
+                )])
+            }
             Rvalue::Coerce(operand, index) => {
                 let (to, coercion) = body.coercions.0[*index].clone();
                 let values = self.mir_operand(*operand);

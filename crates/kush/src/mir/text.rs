@@ -108,6 +108,8 @@ fn type_name(ty: Type) -> String {
         Type::Box(pointee) => format!("box#{pointee}"),
         Type::Vec(pointee) => format!("vec#{pointee}"),
         Type::Bytes => "bytes".into(),
+        Type::Stdin => "stdin".into(),
+        Type::Stdout => "stdout".into(),
         Type::Fn(signature) => format!("fn#{signature}"),
         Type::Union(id) => format!("union#{id}"),
         Type::DynObj(id) => format!("dyn#{id}"),
@@ -177,6 +179,11 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
         Rvalue::BoxNew(operand) => format!("box_new({})", operand_text(*operand)),
         Rvalue::BoxTake(operand) => format!("box_take({})", operand_text(*operand)),
         Rvalue::Ref(place) => format!("&{}", place_text(*place)),
+        Rvalue::ByteAt(handle, index) => format!(
+            "byte_at({}, {})",
+            operand_text(*handle),
+            operand_text(*index)
+        ),
         Rvalue::Coerce(operand, index) => format!("coerce {index}({})", operand_text(*operand)),
         Rvalue::FnValue { function, captures } => {
             let captures = captures
@@ -440,6 +447,8 @@ impl Parser {
             "bytes" => Type::Bytes,
             "string" => Type::String,
             "str" => Type::Str,
+            "stdin" => Type::Stdin,
+            "stdout" => Type::Stdout,
             "fn" => {
                 self.expect("#")?;
                 Type::Fn(self.number()?)
@@ -677,6 +686,15 @@ impl Parser {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| format!("invalid hex bytes '{hex}'"))?;
             return Ok(Rvalue::Bytes(bytes));
+        }
+        if name == "byte_at" {
+            self.at += 1;
+            self.expect("(")?;
+            let handle = self.operand()?;
+            self.expect(",")?;
+            let index = self.operand()?;
+            self.expect(")")?;
+            return Ok(Rvalue::ByteAt(handle, index));
         }
         if name == "coerce" {
             self.at += 1;

@@ -135,6 +135,9 @@ pub(crate) enum Rvalue {
     BoxTake(Operand),
     /// A new `Bytes` holding a copy of a literal.
     Bytes(Vec<u8>),
+    /// The byte at an index of a `Bytes` handle, proved in bounds (no
+    /// run-time check).
+    ByteAt(Operand, Operand),
     /// The address of a place: a reference to it.
     Ref(Place),
     /// Change the representation of a value: inject it into a union, box it

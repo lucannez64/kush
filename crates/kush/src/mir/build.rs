@@ -92,44 +92,52 @@ fn scalar(ty: Type) -> bool {
 /// A value the builder covers: a scalar, a box, vector, reference, view,
 /// `Bytes` or `String`, or a record, enum or inline array of such values.
 fn plain(program: &Executable, ty: Type) -> bool {
-    fn go(program: &Executable, ty: Type, depth: usize) -> bool {
-        if scalar(ty) || matches!(ty, Type::Bytes | Type::String | Type::Str | Type::StrMut) {
+    /// `visiting` holds the types being checked: meeting one again (through
+    /// a box in a recursive enum) adds nothing, so it counts as covered.
+    fn go(program: &Executable, ty: Type, visiting: &mut Vec<Type>) -> bool {
+        if scalar(ty)
+            || matches!(
+                ty,
+                Type::Bytes | Type::String | Type::Str | Type::StrMut | Type::Stdin | Type::Stdout
+            )
+        {
             return true;
         }
         if matches!(ty, Type::Fn(_) | Type::Once(_) | Type::DynObj(_)) {
             return true;
         }
-        if let Type::Union(id) = ty {
-            return depth < 16
-                && program.unions[id]
-                    .members
-                    .iter()
-                    .all(|member| go(program, *member, depth + 1));
+        let ty = ty.full();
+        if visiting.contains(&ty) {
+            return true;
         }
-        if let Type::Box(pointee)
-        | Type::Vec(pointee)
-        | Type::Ref(pointee)
-        | Type::RefMut(pointee)
-        | Type::Slice(pointee)
-        | Type::SliceMut(pointee) = ty
-        {
-            return depth < 16 && go(program, program.pointees[pointee], depth + 1);
-        }
-        let Some(id) = ty.layout() else {
-            return false;
+        visiting.push(ty);
+        let covered = match ty {
+            Type::Union(id) => program.unions[id]
+                .members
+                .iter()
+                .all(|member| go(program, *member, visiting)),
+            Type::Box(pointee)
+            | Type::Vec(pointee)
+            | Type::Ref(pointee)
+            | Type::RefMut(pointee)
+            | Type::Slice(pointee)
+            | Type::SliceMut(pointee) => go(program, program.pointees[pointee], visiting),
+            _ => ty.layout().is_some_and(|id| {
+                let definition = &program.enums[id];
+                definition.dynamic_array.is_none()
+                    && definition.runtime_length.is_none()
+                    && definition.variants.iter().all(|variant| {
+                        variant
+                            .fields
+                            .iter()
+                            .all(|field| go(program, *field, visiting))
+                    })
+            }),
         };
-        let definition = &program.enums[id];
-        depth < 16
-            && definition.dynamic_array.is_none()
-            && definition.runtime_length.is_none()
-            && definition.variants.iter().all(|variant| {
-                variant
-                    .fields
-                    .iter()
-                    .all(|field| go(program, *field, depth + 1))
-            })
+        visiting.pop();
+        covered
     }
-    go(program, ty, 0)
+    go(program, ty, &mut Vec::new())
 }
 
 fn erased(grade: Option<crate::grades::Grade>) -> bool {
@@ -756,6 +764,76 @@ impl Builder<'_> {
                     span,
                 );
                 Operand::Move(Place::local(temp))
+            }
+            ExprKind::BoxRead(reference) => {
+                let Some(value) = self.expr(reference)? else {
+                    return Ok(None);
+                };
+                let reference_local = self.pointer_local(value, reference.ty, span);
+                let pointee = reference
+                    .ty
+                    .ref_pointee()
+                    .map(|pointee| self.program.pointees[pointee])
+                    .ok_or("a box read through a non-reference")?;
+                let boxed = self.temp(pointee);
+                let handle = Operand::Copy(Place::deref(reference_local, 0, pointee));
+                self.assign(boxed, Rvalue::Use(handle), span);
+                Operand::Copy(Place::deref(boxed, 0, expr.ty))
+            }
+            ExprKind::BytesAt(bytes, index) => {
+                let Some(values) = self.operands(&[bytes, index])? else {
+                    return Ok(None);
+                };
+                let reference = self.pointer_local(values[0], bytes.ty, span);
+                let handle = self.temp(Type::Bytes);
+                let read = Operand::Copy(Place::deref(reference, 0, Type::Bytes));
+                self.assign(handle, Rvalue::Use(read), span);
+                let temp = self.temp(expr.ty);
+                self.assign(
+                    temp,
+                    Rvalue::ByteAt(Operand::Copy(Place::local(handle)), values[1]),
+                    span,
+                );
+                Operand::Move(Place::local(temp))
+            }
+            ExprKind::Try {
+                value,
+                input,
+                output,
+            } => {
+                let Some(operand) = self.expr(value)? else {
+                    return Ok(None);
+                };
+                self.consume(value);
+                let subject = self.temp(value.ty);
+                self.assign(subject, Rvalue::Use(operand), span);
+                let result = self.function.result;
+                let layout = result
+                    .layout()
+                    .ok_or("a `?` in a function without a result enum")?;
+                let ok = self.new_block();
+                let failed = self.new_block();
+                self.terminate(
+                    TerminatorKind::Switch {
+                        value: self.word(subject, 0),
+                        targets: vec![(input.ok_tag as i64, ok)],
+                        otherwise: failed,
+                    },
+                    span,
+                );
+                // The error propagates: the function returns it in its own
+                // result shape, after dropping what is live.
+                self.enter(failed);
+                let error = Operand::Copy(Place::field(subject, 1, input.error));
+                let returned = self.temp(result);
+                self.assign(
+                    returned,
+                    Rvalue::Aggregate(Type::Enum(layout), output.err_tag, vec![error]),
+                    span,
+                );
+                self.return_value(Operand::Move(Place::local(returned)), span);
+                self.enter(ok);
+                Operand::Copy(Place::field(subject, 1, input.ok))
             }
             ExprKind::Coerce {
                 value,
