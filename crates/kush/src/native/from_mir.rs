@@ -6,14 +6,16 @@
 //! run-time calls are the ones the tree emits.
 
 use super::*;
-use crate::mir::{Body, Callee, Operand, Rvalue, StatementKind, TerminatorKind};
+use crate::mir::{Body, Callee, Operand, Place, Rvalue, StatementKind, TerminatorKind};
 
 impl Generator<'_, '_> {
     pub(super) fn mir_body(&mut self, body: &Body) {
         // Temporaries follow the checked function's locals.
-        for _ in self.variables.len()..body.locals.len() {
-            let variable = self.builder.declare_var(I64);
-            self.variables.push(vec![variable]);
+        for local in &body.locals[self.variables.len()..] {
+            let variables = (0..self.program.width(local.ty))
+                .map(|_| self.builder.declare_var(I64))
+                .collect();
+            self.variables.push(variables);
             self.locations.push(None);
         }
         let blocks = body
@@ -27,21 +29,44 @@ impl Generator<'_, '_> {
             for statement in &block.statements {
                 let StatementKind::Assign(local, rvalue) = &statement.kind;
                 let ty = body.locals[*local].ty;
-                let Some(value) = self.mir_rvalue(body, rvalue, ty, statement.span) else {
+                let Some(words) = self.mir_rvalue(body, rvalue, ty, statement.span) else {
                     // The operation always panics; the block has ended.
                     continue 'blocks;
                 };
-                self.assign(*local, &[value]);
+                self.assign(*local, &words);
             }
             self.mir_terminator(&blocks, &block.terminator.kind);
         }
     }
 
-    fn mir_operand(&mut self, operand: Operand) -> Value {
-        match operand {
-            Operand::Copy(local) | Operand::Move(local) => self.local_words(local)[0],
-            Operand::Constant(value, _) => self.constant(value),
+    fn mir_place(&mut self, place: Place) -> Words {
+        let words = self.local_words(place.local);
+        match place.field {
+            Some(field) => {
+                let width = self.program.width(field.ty);
+                words[field.offset..field.offset + width].to_vec()
+            }
+            None => words,
         }
+    }
+
+    fn mir_operand(&mut self, operand: Operand) -> Words {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) => self.mir_place(place),
+            Operand::Constant(value, _) => vec![self.constant(value)],
+        }
+    }
+
+    /// A one-word operand.
+    fn mir_scalar(&mut self, operand: Operand) -> Value {
+        self.mir_operand(operand)[0]
+    }
+
+    fn mir_operands(&mut self, operands: &[Operand]) -> Words {
+        operands
+            .iter()
+            .flat_map(|operand| self.mir_operand(*operand))
+            .collect()
     }
 
     /// `ty` is the type of the local receiving the value.
@@ -51,36 +76,38 @@ impl Generator<'_, '_> {
         rvalue: &Rvalue,
         ty: Type,
         span: crate::Span,
-    ) -> Option<Value> {
+    ) -> Option<Words> {
         match rvalue {
             Rvalue::Use(operand) => Some(self.mir_operand(*operand)),
             Rvalue::Unary(op, operand) => {
                 let ty = body.operand_ty(*operand);
-                let value = self.mir_operand(*operand);
+                let value = self.mir_scalar(*operand);
                 self.unary_value(span, &op.kind(), ty, value, None, 0)
+                    .map(|value| vec![value])
             }
             Rvalue::Binary(op, left, right) => {
                 let op = op.kind();
                 let left_ty = body.operand_ty(*left);
                 let right_ty = body.operand_ty(*right);
-                let left = self.mir_operand(*left);
-                let right = self.mir_operand(*right);
+                let left = self.mir_scalar(*left);
+                let right = self.mir_scalar(*right);
                 let left_kind = left_ty.int_kind();
                 let right_kind = right_ty.int_kind();
                 self.fuzz_arith(span, &op, left_kind, right_kind, left, right);
                 if let Some(kind) = left_ty.float_kind() {
                     let left = self.float_value(kind, left);
                     let right = self.float_value(kind, right);
-                    return Some(self.float_binary(kind, &op, left, right));
+                    return Some(vec![self.float_binary(kind, &op, left, right)]);
                 }
-                Some(self.scalar_binary(&op, left_kind, right_kind, left, right, None))
+                Some(vec![self.scalar_binary(&op, left_kind, right_kind, left, right, None)])
             }
             Rvalue::Int(op, source, target, operands) => {
-                let values = operands
-                    .iter()
-                    .map(|operand| self.mir_operand(*operand))
-                    .collect::<Vec<_>>();
-                Some(self.int_builtin(*op, *source, *target, &values, ty)[0])
+                let values = self.mir_operands(operands);
+                Some(self.int_builtin(*op, *source, *target, &values, ty))
+            }
+            Rvalue::Aggregate(aggregate, tag, operands) => {
+                let payload = self.mir_operands(operands);
+                Some(self.encode_variant(*aggregate, *tag, &payload))
             }
         }
     }
@@ -93,7 +120,7 @@ impl Generator<'_, '_> {
                 targets,
                 otherwise,
             } => {
-                let value = self.mir_operand(*value);
+                let value = self.mir_scalar(*value);
                 if let [(0, zero)] = targets[..] {
                     self.builder
                         .ins()
@@ -115,28 +142,25 @@ impl Generator<'_, '_> {
                 next,
                 ..
             } => {
-                let values = args
-                    .iter()
-                    .map(|arg| self.mir_operand(*arg))
-                    .collect::<Vec<_>>();
+                let values = self.mir_operands(args);
                 let result = match callee {
-                    Callee::Function(index) => self.function_call(*index, values)[0],
+                    Callee::Function(index) => self.function_call(*index, values),
                     Callee::PrintInt(kind) => {
                         let print = if *kind == IntKind::U64 {
                             self.print_u64
                         } else {
                             self.print
                         };
-                        self.runtime_call(print, &values)
+                        vec![self.runtime_call(print, &values)]
                     }
                 };
-                self.assign(*destination, &[result]);
+                self.assign(*destination, &result);
                 self.jump(blocks[*next], &[]);
             }
             TerminatorKind::Return(value) => {
-                let value = self.mir_operand(*value);
+                let words = self.mir_operand(*value);
                 self.cleanup_all();
-                self.return_value(&[value]);
+                self.return_value(&words);
             }
             TerminatorKind::Panic { .. } => self.abort(),
             TerminatorKind::Unreachable => {

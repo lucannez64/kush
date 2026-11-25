@@ -40,7 +40,7 @@ fn every_built_body_verifies_and_reads_back_from_its_text() {
     }
     assert_eq!(checked, built);
     // The corpus exercises the builder; coverage only grows.
-    assert!(built >= 60, "MIR covers {built} of {total} example functions");
+    assert!(built >= 95, "MIR covers {built} of {total} example functions");
 }
 
 #[test]
@@ -138,6 +138,54 @@ fn scalar_control_flow_matches_the_tree_path() {
         }",
     );
     assert_eq!(output, "986\n560\n8\n1\n1\n21\n");
+}
+
+#[test]
+fn records_and_enums_match_the_tree_path() {
+    let source = "
+        struct Point { x: i64, y: i64 }
+        struct Segment { from: Point, to: Point }
+        enum Shape { Dot(Point), Line(Segment), Empty }
+        enum Sign { Negative, Zero, Positive }
+        enum Maybe { Just(i64), Nothing }
+        fn sign(x: i64) -> Sign {
+            if x < 0 { Sign.Negative } else if x == 0 { Sign.Zero } else { Sign.Positive }
+        }
+        fn shift(p: Point, by: i64) -> Point { Point { x: p.x + by, y: p.y - by } }
+        fn length(s: Segment) -> i64 { (s.to.x - s.from.x) + (s.to.y - s.from.y) }
+        fn weight(shape: Shape) -> i64 {
+            match shape {
+                Shape.Dot(Point { x: 0, y }) => y,
+                Shape.Dot(p) => p.x * 10 + p.y,
+                Shape.Line(s) if length(s) > 100 => 100,
+                Shape.Line(s) => length(s),
+                Shape.Empty => -1,
+            }
+        }
+        fn code(s: Sign) -> i64 {
+            match s { Sign.Negative | Sign.Zero => 0, Sign.Positive => 1 }
+        }
+        fn first(o: Maybe, fallback: i64) -> i64 {
+            match o { Maybe.Just(v) => v, Maybe.Nothing => fallback }
+        }
+        fn main() -> Unit ! {io} {
+            let p = shift(Point { x: 1, y: 2 }, 3);
+            print_i64(p.x * 100 + p.y);
+            let s = Segment { from: p, to: shift(p, 5) };
+            print_i64(length(s));
+            print_i64(weight(Shape.Dot(Point { x: 0, y: 7 })));
+            print_i64(weight(Shape.Dot(p)));
+            print_i64(weight(Shape.Line(s)));
+            print_i64(weight(Shape.Line(Segment { from: p, to: Point { x: 500, y: 500 } })));
+            print_i64(weight(Shape.Empty));
+            print_i64(code(sign(-3)) + code(sign(0)) * 10 + code(sign(9)) * 100);
+            print_i64(first(Maybe.Just(4), 0) + first(Maybe.Nothing, 30));
+        }";
+    let program = executable::check(source).unwrap();
+    let (built, total) = kush::mir::coverage(&program);
+    assert!(built + 1 >= total, "MIR covers {built} of {total} functions");
+    let output = same_on_both_paths(source);
+    assert_eq!(output, "399\n0\n7\n39\n0\n100\n-1\n100\n34\n");
 }
 
 #[test]

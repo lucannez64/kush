@@ -64,10 +64,25 @@ pub(crate) enum StatementKind {
     Assign(LocalId, Rvalue),
 }
 
+/// A local, or a run of its words. Records and enums are flat words, so
+/// a nested field is one offset from the start of the local.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Place {
+    pub local: LocalId,
+    pub field: Option<Field>,
+}
+
+/// The words `offset..offset + width(ty)` of a local.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Field {
+    pub offset: usize,
+    pub ty: Type,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Operand {
-    Copy(LocalId),
-    Move(LocalId),
+    Copy(Place),
+    Move(Place),
     Constant(i64, Type),
 }
 
@@ -82,6 +97,8 @@ pub(crate) enum Rvalue {
     /// `target`: conversions, wrapping and saturating arithmetic, and
     /// arithmetic the checker proved in range (no run-time check).
     Int(IntOp, IntKind, IntKind, Vec<Operand>),
+    /// The variant `tag` of a record or enum of type `ty`, from its fields.
+    Aggregate(Type, usize, Vec<Operand>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,8 +165,28 @@ pub(crate) enum Callee {
 impl Body {
     pub(crate) fn operand_ty(&self, operand: Operand) -> Type {
         match operand {
-            Operand::Copy(local) | Operand::Move(local) => self.locals[local].ty,
+            Operand::Copy(place) | Operand::Move(place) => self.place_ty(place),
             Operand::Constant(_, ty) => ty,
+        }
+    }
+    pub(crate) fn place_ty(&self, place: Place) -> Type {
+        place
+            .field
+            .map_or(self.locals[place.local].ty, |field| field.ty)
+    }
+}
+
+impl Place {
+    pub(crate) fn local(local: LocalId) -> Self {
+        Place { local, field: None }
+    }
+}
+
+impl Operand {
+    pub(crate) fn place(self) -> Option<Place> {
+        match self {
+            Operand::Copy(place) | Operand::Move(place) => Some(place),
+            Operand::Constant(..) => None,
         }
     }
 }
@@ -317,7 +354,7 @@ pub fn coverage(program: &Executable) -> (usize, usize) {
 pub fn self_check(program: &Executable) -> Result<usize, String> {
     let mut checked = 0;
     for body in bodies(program).into_iter().flatten() {
-        verify(&body).map_err(|e| format!("fn {}: {e}", body.name))?;
+        verify(program, &body).map_err(|e| format!("fn {}: {e}", body.name))?;
         let printed = text::print(&body);
         let parsed = text::parse(&printed).map_err(|e| format!("fn {}: {e}\n{printed}", body.name))?;
         if parsed != body {

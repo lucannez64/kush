@@ -1,11 +1,12 @@
 //! Lower one checked function to a [`Body`].
 //!
 //! Coverage grows node by node (docs/mir-design.md section 6). Today the
-//! builder takes functions whose locals and values are one-word scalars
-//! (integers, floats, `char`, `bool`, `()`), with arithmetic, assignments,
-//! `if`, `match` on literals, loops, direct calls, `print` of integers and
-//! `panic`. Anything else is reported by name, and native code generation
-//! then lowers that function from the tree.
+//! builder takes functions whose values are scalars (integers, floats,
+//! `char`, `bool`, `()`) or records and enums of them that own nothing and
+//! hold no borrow, with arithmetic, assignments, construction, field reads,
+//! `if`, `match` on literals and variants, loops, direct calls, `print` of
+//! integers and `panic`. Anything else is reported by name, and native code
+//! generation then lowers that function from the tree.
 
 use super::*;
 use crate::executable::{Expr, ExprKind, Function, Pattern, Target};
@@ -13,7 +14,7 @@ use crate::executable::Statement as TreeStatement;
 
 pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> {
     let function = &program.functions[index];
-    eligible(function)?;
+    eligible(program, function)?;
     let mut builder = Builder {
         program,
         locals: function
@@ -59,7 +60,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
     })
 }
 
-/// A one-word value with no ownership: the types the builder covers.
+/// A one-word value with no ownership.
 fn scalar(ty: Type) -> bool {
     matches!(
         ty,
@@ -73,12 +74,38 @@ fn scalar(ty: Type) -> bool {
     )
 }
 
+/// A value the builder covers: a scalar, or a record or enum of such
+/// values that owns nothing and holds no borrow.
+fn plain(program: &Executable, ty: Type) -> bool {
+    fn go(program: &Executable, ty: Type, depth: usize) -> bool {
+        if scalar(ty) {
+            return true;
+        }
+        let Some(id) = ty.layout() else {
+            return false;
+        };
+        let definition = &program.enums[id];
+        depth < 16
+            && !program.owns(ty)
+            && !definition.borrowed
+            && !definition.mutable_borrow
+            && definition.array.is_none()
+            && definition.dynamic_array.is_none()
+            && definition.runtime_length.is_none()
+            && definition
+                .variants
+                .iter()
+                .all(|variant| variant.fields.iter().all(|field| go(program, *field, depth + 1)))
+    }
+    go(program, ty, 0)
+}
+
 fn erased(grade: Option<crate::grades::Grade>) -> bool {
     grade.is_some_and(crate::grades::Grade::is_zero)
 }
 
 /// The function's frame and calling convention are ones the builder covers.
-fn eligible(function: &Function) -> Result<(), String> {
+fn eligible(program: &Executable, function: &Function) -> Result<(), String> {
     if function.closure.is_some() || !function.capture_refs.is_empty() {
         return Err("a closure".into());
     }
@@ -91,11 +118,11 @@ fn eligible(function: &Function) -> Result<(), String> {
     if erased(function.result_grade) || function.parameter_grades.iter().any(|g| erased(*g)) {
         return Err("an erased parameter or result".into());
     }
-    if !scalar(function.result) {
+    if !plain(program, function.result) {
         return Err(format!("a {:?} result", function.result));
     }
     for (slot, local) in function.locals.iter().enumerate() {
-        if !scalar(local.ty) {
+        if !plain(program, local.ty) {
             return Err(format!("a local of type {:?}", local.ty));
         }
         if local.pinned {
@@ -121,16 +148,58 @@ fn callable(program: &Executable, index: usize) -> Result<(), String> {
     if erased(callee.result_grade) || callee.parameter_grades.iter().any(|g| erased(*g)) {
         return Err("a call with an erased parameter or result".into());
     }
-    if !scalar(callee.result) {
+    if !plain(program, callee.result) {
         return Err(format!("a call returning {:?}", callee.result));
     }
     if callee.locals[..callee.parameters]
         .iter()
-        .any(|local| !scalar(local.ty))
+        .any(|local| !plain(program, local.ty))
     {
-        return Err("a call with a non-scalar parameter".into());
+        return Err("a call with a parameter the IR does not cover".into());
     }
     Ok(())
+}
+
+/// Patterns the builder compiles: literals, variants and bindings, and
+/// alternatives without bindings.
+fn supported(pattern: &Pattern) -> Result<(), String> {
+    match pattern {
+        Pattern::Any | Pattern::Bind(_) | Pattern::Literal(_) => Ok(()),
+        Pattern::Variant { fields, .. } => fields.iter().try_for_each(|(_, p)| supported(p)),
+        Pattern::Or(alternatives) => alternatives.iter().try_for_each(|p| {
+            if binds(p) {
+                Err("alternatives with bindings".into())
+            } else {
+                supported(p)
+            }
+        }),
+        Pattern::Type { .. } => Err("a union pattern".into()),
+        Pattern::DynArray { .. } => Err("an array pattern".into()),
+    }
+}
+
+fn binds(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Bind(_) => true,
+        Pattern::Variant { fields, .. } => fields.iter().any(|(_, p)| binds(p)),
+        Pattern::Or(alternatives) => alternatives.iter().any(binds),
+        _ => false,
+    }
+}
+
+/// Whether a pattern can fail to match a value of its type.
+fn refutable(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Any | Pattern::Bind(_) => false,
+        Pattern::Variant {
+            fields,
+            tagged,
+            niche,
+            ..
+        } => niche.is_some() || *tagged || fields.iter().any(|(_, p)| refutable(p)),
+        Pattern::Or(alternatives) => alternatives.iter().all(refutable),
+        _ => true,
+    }
 }
 
 /// An expression whose evaluation cannot assign a local.
@@ -218,7 +287,7 @@ impl Builder<'_> {
         (!matches!(ty, Type::Unit | Type::Never)).then(|| self.temp(ty))
     }
     fn result(temp: Option<LocalId>, ty: Type) -> Operand {
-        temp.map_or_else(|| Self::no_value(ty), Operand::Move)
+        temp.map_or_else(|| Self::no_value(ty), |temp| Operand::Move(Place::local(temp)))
     }
 
     fn block(&mut self, block: &crate::executable::Block) -> Result<Option<Operand>, String> {
@@ -254,13 +323,13 @@ impl Builder<'_> {
                 return Ok(None);
             };
             let exposed = match value {
-                Operand::Copy(local) | Operand::Move(local) => !self.locals[local].temporary,
+                Operand::Copy(place) | Operand::Move(place) => !self.locals[place.local].temporary,
                 Operand::Constant(..) => false,
             };
             let value = if exposed && exprs[index + 1..].iter().any(|later| !leaf(later)) {
                 let temp = self.temp(expr.ty);
                 self.assign(temp, Rvalue::Use(value), expr.span);
-                Operand::Move(temp)
+                Operand::Move(Place::local(temp))
             } else {
                 value
             };
@@ -273,15 +342,40 @@ impl Builder<'_> {
         if expr.resource.is_some() {
             return Err("an owned resource".into());
         }
-        if !scalar(expr.ty) {
+        if !plain(self.program, expr.ty) {
             return Err(format!("a value of type {:?}", expr.ty));
         }
         let span = expr.span;
         Ok(Some(match &expr.kind {
             ExprKind::Constant(value) => Operand::Constant(*value, expr.ty),
-            ExprKind::Local(slot) | ExprKind::Peek(slot) => Operand::Copy(*slot),
-            ExprKind::Move(slot) => Operand::Move(*slot),
+            ExprKind::Local(slot) | ExprKind::Peek(slot) => Operand::Copy(Place::local(*slot)),
+            ExprKind::Move(slot) => Operand::Move(Place::local(*slot)),
             ExprKind::Block(block) => return self.block(block),
+            ExprKind::Construct { enum_id, tag, fields } => {
+                let fields = fields.iter().collect::<Vec<_>>();
+                let Some(values) = self.operands(&fields)? else {
+                    return Ok(None);
+                };
+                let temp = self.temp(expr.ty);
+                self.assign(temp, Rvalue::Aggregate(Type::Enum(*enum_id), *tag, values), span);
+                Operand::Move(Place::local(temp))
+            }
+            ExprKind::Project(base, offset) => {
+                if base.ty.is_ref() {
+                    return Err("a field read through a reference".into());
+                }
+                let Some(value) = self.expr(base)? else {
+                    return Ok(None);
+                };
+                let place = value.place().ok_or("a field of a constant")?;
+                Operand::Copy(Place {
+                    local: place.local,
+                    field: Some(Field {
+                        offset: place.field.map_or(0, |field| field.offset) + offset,
+                        ty: expr.ty,
+                    }),
+                })
+            }
             ExprKind::Unary(op, operand) => {
                 let op = UnOp::from_kind(op).ok_or("an unknown unary operator")?;
                 let Some(value) = self.expr(operand)? else {
@@ -289,7 +383,7 @@ impl Builder<'_> {
                 };
                 let temp = self.temp(expr.ty);
                 self.assign(temp, Rvalue::Unary(op, value), span);
-                Operand::Move(temp)
+                Operand::Move(Place::local(temp))
             }
             ExprKind::Binary(op @ (Kind::AmpAmp | Kind::PipePipe), left, right) => {
                 return self.short_circuit(op, left, right, span);
@@ -301,7 +395,7 @@ impl Builder<'_> {
                 };
                 let temp = self.temp(expr.ty);
                 self.assign(temp, Rvalue::Binary(op, values[0], values[1]), span);
-                Operand::Move(temp)
+                Operand::Move(Place::local(temp))
             }
             ExprKind::Assign(slot, value) => {
                 let Some(value) = self.expr(value)? else {
@@ -469,7 +563,7 @@ impl Builder<'_> {
             self.goto_join(&mut join, span);
         }
         self.enter(join.expect("the shortcut reaches the join"));
-        Ok(Some(Operand::Move(temp)))
+        Ok(Some(Operand::Move(Place::local(temp))))
     }
 
     fn matching(
@@ -488,45 +582,12 @@ impl Builder<'_> {
         let temp = self.result_temp(expr.ty);
         let mut join = None;
         for arm in arms {
-            let (literals, binding) = match &arm.pattern {
-                Pattern::Any => (None, None),
-                Pattern::Bind(slot) => (None, Some(*slot)),
-                Pattern::Literal(value) => (Some(vec![*value]), None),
-                Pattern::Or(patterns) => {
-                    let mut literals = Some(Vec::new());
-                    for pattern in patterns {
-                        match pattern {
-                            Pattern::Literal(value) => {
-                                if let Some(literals) = &mut literals {
-                                    literals.push(*value);
-                                }
-                            }
-                            Pattern::Any => literals = None,
-                            _ => return Err("a pattern other than a literal".into()),
-                        }
-                    }
-                    (literals, None)
-                }
-                _ => return Err("a pattern other than a literal".into()),
-            };
+            supported(&arm.pattern)?;
             // An arm without a test or guard matches everything left.
-            let irrefutable = literals.is_none() && arm.guard.is_none();
+            let irrefutable = !refutable(&arm.pattern) && arm.guard.is_none();
             let next = if irrefutable { usize::MAX } else { self.new_block() };
-            if let Some(literals) = literals {
-                let body = self.new_block();
-                self.terminate(
-                    TerminatorKind::Switch {
-                        value: Operand::Copy(subject),
-                        targets: literals.into_iter().map(|value| (value, body)).collect(),
-                        otherwise: next,
-                    },
-                    arm.body.span,
-                );
-                self.enter(body);
-            }
-            if let Some(slot) = binding {
-                self.assign(slot, Rvalue::Use(Operand::Copy(subject)), arm.body.span);
-            }
+            self.test(subject, 0, &arm.pattern, next, arm.body.span);
+            self.bind(subject, 0, &arm.pattern, arm.body.span);
             if let Some(guard) = &arm.guard {
                 match self.expr(guard)? {
                     Some(condition) => {
@@ -569,6 +630,112 @@ impl Builder<'_> {
         Ok(Some(Self::result(temp, expr.ty)))
     }
 
+    /// The word at `offset` of the subject, as an integer.
+    fn word(&self, subject: LocalId, offset: usize) -> Operand {
+        if offset == 0 && self.program.width(self.locals[subject].ty) == 1 {
+            Operand::Copy(Place::local(subject))
+        } else {
+            Operand::Copy(Place {
+                local: subject,
+                field: Some(Field {
+                    offset,
+                    ty: Type::I64,
+                }),
+            })
+        }
+    }
+
+    /// Continue when `value` equals (or, with `equal` false, differs from)
+    /// `constant`; otherwise jump to `fail`.
+    fn expect_word(&mut self, value: Operand, constant: i64, equal: bool, fail: BlockId, span: Span) {
+        let ok = self.new_block();
+        let (hit, miss) = if equal { (ok, fail) } else { (fail, ok) };
+        self.terminate(
+            TerminatorKind::Switch {
+                value,
+                targets: vec![(constant, hit)],
+                otherwise: miss,
+            },
+            span,
+        );
+        self.enter(ok);
+    }
+
+    /// Emit the tests of `pattern` against the subject's words from
+    /// `offset`: the current block continues when they pass, and jumps to
+    /// `fail` when one does not.
+    fn test(&mut self, subject: LocalId, offset: usize, pattern: &Pattern, fail: BlockId, span: Span) {
+        match pattern {
+            Pattern::Any | Pattern::Bind(_) => {}
+            Pattern::Literal(value) => {
+                let word = self.word(subject, offset);
+                self.expect_word(word, *value, true, fail, span);
+            }
+            Pattern::Variant {
+                tag,
+                fields,
+                tagged,
+                niche,
+            } => {
+                let word = self.word(subject, offset);
+                if let Some(niche) = niche {
+                    match niche.decoder(*tag) {
+                        crate::layout_cert::Decoder::Equal(constant) => {
+                            self.expect_word(word, constant, true, fail, span);
+                        }
+                        crate::layout_cert::Decoder::NotEqual(constant) => {
+                            self.expect_word(word, constant, false, fail, span);
+                        }
+                    }
+                } else if *tagged {
+                    self.expect_word(word, *tag as i64, true, fail, span);
+                }
+                for (field, pattern) in fields {
+                    self.test(subject, offset + field, pattern, fail, span);
+                }
+            }
+            Pattern::Or(alternatives) => {
+                let success = self.new_block();
+                for alternative in alternatives {
+                    if !refutable(alternative) {
+                        self.goto(success, span);
+                        self.enter(success);
+                        return;
+                    }
+                    let next = self.new_block();
+                    self.test(subject, offset, alternative, next, span);
+                    self.goto(success, span);
+                    self.enter(next);
+                }
+                self.goto(fail, span);
+                self.enter(success);
+            }
+            _ => unreachable!("supported() rejects other patterns"),
+        }
+    }
+
+    /// Assign the bindings of a pattern that matched.
+    fn bind(&mut self, subject: LocalId, offset: usize, pattern: &Pattern, span: Span) {
+        match pattern {
+            Pattern::Bind(slot) => {
+                let ty = self.locals[*slot].ty;
+                let whole = offset == 0
+                    && self.program.width(ty) == self.program.width(self.locals[subject].ty);
+                let place = Place {
+                    local: subject,
+                    field: (!whole).then_some(Field { offset, ty }),
+                };
+                self.assign(*slot, Rvalue::Use(Operand::Copy(place)), span);
+            }
+            Pattern::Variant { fields, .. } => {
+                for (field, pattern) in fields {
+                    self.bind(subject, offset + field, pattern, span);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn call(
         &mut self,
         expr: &Expr,
@@ -588,7 +755,7 @@ impl Builder<'_> {
                 };
                 let temp = self.temp(expr.ty);
                 self.assign(temp, Rvalue::Int(*op, *source, *target, values), span);
-                return Ok(Some(Operand::Move(temp)));
+                return Ok(Some(Operand::Move(Place::local(temp))));
             }
             Target::Print => Callee::PrintInt(IntKind::I64),
             Target::PrintInt(kind) => Callee::PrintInt(*kind),
@@ -625,7 +792,7 @@ impl Builder<'_> {
             self.terminate(TerminatorKind::Unreachable, span);
             return Ok(None);
         }
-        Ok(Some(Operand::Move(destination)))
+        Ok(Some(Operand::Move(Place::local(destination))))
     }
 }
 

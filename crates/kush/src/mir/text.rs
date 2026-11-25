@@ -92,14 +92,31 @@ fn type_name(ty: Type) -> String {
         Type::Bool => "bool".into(),
         Type::Unit => "unit".into(),
         Type::Never => "never".into(),
+        Type::Enum(id) => format!("enum#{id}"),
+        Type::Variants(id, mask) => format!("variants#{id}#{mask}"),
         other => format!("?{other:?}"),
     }
 }
 
+fn place_text(place: Place) -> String {
+    match place.field {
+        Some(field) => format!("_{}.{}:{}", place.local, field.offset, type_name(field.ty)),
+        None => format!("_{}", place.local),
+    }
+}
+
+fn operands_text(operands: &[Operand]) -> String {
+    operands
+        .iter()
+        .map(|operand| operand_text(*operand))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn operand_text(operand: Operand) -> String {
     match operand {
-        Operand::Copy(local) => format!("copy _{local}"),
-        Operand::Move(local) => format!("move _{local}"),
+        Operand::Copy(place) => format!("copy {}", place_text(place)),
+        Operand::Move(place) => format!("move {}", place_text(place)),
         Operand::Constant(value, ty) => format!("const {value}: {}", type_name(ty)),
     }
 }
@@ -119,11 +136,12 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
             int_op_name(*op).unwrap_or_else(|| format!("?{op:?}")),
             source.name(),
             target.name(),
-            operands
-                .iter()
-                .map(|operand| operand_text(*operand))
-                .collect::<Vec<_>>()
-                .join(", ")
+            operands_text(operands)
+        ),
+        Rvalue::Aggregate(ty, tag, operands) => format!(
+            "aggregate {} {tag}({})",
+            type_name(*ty),
+            operands_text(operands)
         ),
     }
 }
@@ -317,6 +335,16 @@ impl Parser {
             "bool" => Type::Bool,
             "unit" => Type::Unit,
             "never" => Type::Never,
+            "enum" => {
+                self.expect("#")?;
+                Type::Enum(self.number()?)
+            }
+            "variants" => {
+                self.expect("#")?;
+                let id = self.number()?;
+                self.expect("#")?;
+                Type::Variants(id, self.number()?)
+            }
             other => match IntKind::named(other) {
                 Some(kind) => Type::int(kind),
                 None => return Err(format!("unknown type '{other}'")),
@@ -429,10 +457,35 @@ impl Parser {
             Err(format!("expected _{expected}, found _{local}"))
         }
     }
+    fn place(&mut self) -> Result<Place, String> {
+        let local = self.local()?;
+        let field = if self.eat(".") {
+            let offset = self.number()?;
+            self.expect(":")?;
+            Some(Field {
+                offset,
+                ty: self.ty()?,
+            })
+        } else {
+            None
+        };
+        Ok(Place { local, field })
+    }
+    fn operands(&mut self) -> Result<Vec<Operand>, String> {
+        self.expect("(")?;
+        let mut operands = Vec::new();
+        while !self.eat(")") {
+            if !operands.is_empty() {
+                self.expect(",")?;
+            }
+            operands.push(self.operand()?);
+        }
+        Ok(operands)
+    }
     fn operand(&mut self) -> Result<Operand, String> {
         match self.next()?.as_str() {
-            "copy" => Ok(Operand::Copy(self.local()?)),
-            "move" => Ok(Operand::Move(self.local()?)),
+            "copy" => Ok(Operand::Copy(self.place()?)),
+            "move" => Ok(Operand::Move(self.place()?)),
             "const" => {
                 let value = self.number()?;
                 self.expect(":")?;
@@ -451,15 +504,13 @@ impl Parser {
             let op = int_op_named(&op).ok_or_else(|| format!("unknown integer builtin '{op}'"))?;
             let source = self.int_kind()?;
             let target = self.int_kind()?;
-            self.expect("(")?;
-            let mut operands = Vec::new();
-            while !self.eat(")") {
-                if !operands.is_empty() {
-                    self.expect(",")?;
-                }
-                operands.push(self.operand()?);
-            }
-            return Ok(Rvalue::Int(op, source, target, operands));
+            return Ok(Rvalue::Int(op, source, target, self.operands()?));
+        }
+        if name == "aggregate" {
+            self.at += 1;
+            let ty = self.ty()?;
+            let tag = self.number()?;
+            return Ok(Rvalue::Aggregate(ty, tag, self.operands()?));
         }
         if let Some(op) = UnOp::ALL.into_iter().find(|op| op.name() == name) {
             self.at += 1;

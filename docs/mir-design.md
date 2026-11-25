@@ -150,9 +150,16 @@ The first slice (FND-MIR-CORE) is in `crates/kush/src/mir.rs`:
   from the MIR for every covered function and from the tree for the rest.
   The leaf operations share the tree path's helpers.
 
-Nothing in this slice needs drops or cleanup blocks, so every `unwind` is
-`continue`. Records, enums, references and owned values come next, with
-drop elaboration (decision 2) and cleanup blocks (decision 1).
+FND-MIR-AGGREGATES added records and enums that own nothing and hold no
+borrow. A record or enum is a run of words, so a place is a local plus at
+most one field (a word offset and a type), however deeply the source
+nests. `aggregate` builds a variant, and `match` compiles variant,
+literal and or-patterns to switches on words, following each variant's
+tag or niche.
+
+Nothing so far needs drops or cleanup blocks, so every `unwind` is
+`continue`. Owned values come next, with drop elaboration (decision 2)
+and cleanup blocks (decision 1), and references with them.
 
 ## 7. Decisions
 

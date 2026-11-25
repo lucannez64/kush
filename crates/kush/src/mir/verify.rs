@@ -1,10 +1,16 @@
 //! Structural checks of a built [`Body`]: every block, local and parameter
 //! it names exists, operands have the types their operations need, and a
-//! returned value has the function's result type.
+//! returned value has the function's result type. Fields lie inside their
+//! local, and aggregates have their variant's fields.
 
 use super::*;
 
-pub(crate) fn verify(body: &Body) -> Result<(), String> {
+/// The same type, or the same record or enum with other variant refinements.
+fn compatible(a: Type, b: Type) -> bool {
+    a == b || a == Type::Never || (a.layout().is_some() && a.layout() == b.layout())
+}
+
+pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
     if body.parameters > body.locals.len() {
         return Err("more parameters than locals".into());
     }
@@ -26,7 +32,19 @@ pub(crate) fn verify(body: &Body) -> Result<(), String> {
         }
     };
     let operand = |operand: Operand| match operand {
-        Operand::Copy(id) | Operand::Move(id) => local(id),
+        Operand::Copy(place) | Operand::Move(place) => {
+            local(place.local)?;
+            if let Some(field) = place.field {
+                let width = program.width(body.locals[place.local].ty);
+                if field.offset + program.width(field.ty) > width {
+                    return Err(format!(
+                        "_{}.{} reads past the {width} words of the local",
+                        place.local, field.offset
+                    ));
+                }
+            }
+            Ok(())
+        }
         Operand::Constant(..) => Ok(()),
     };
     for (index, data) in body.blocks.iter().enumerate() {
@@ -55,11 +73,35 @@ pub(crate) fn verify(body: &Body) -> Result<(), String> {
                     }
                     Type::int(*target)
                 }
+                Rvalue::Aggregate(ty, tag, values) => {
+                    let layout = ty.layout().ok_or_else(|| here(format!("an aggregate of {ty:?}")))?;
+                    let variant = program.enums[layout]
+                        .variants
+                        .get(*tag)
+                        .ok_or_else(|| here(format!("variant {tag} of {ty:?} does not exist")))?;
+                    if variant.fields.len() != values.len() {
+                        return Err(here(format!(
+                            "variant {tag} of {ty:?} has {} fields, given {}",
+                            variant.fields.len(),
+                            values.len()
+                        )));
+                    }
+                    for (field, value) in variant.fields.iter().zip(values) {
+                        operand(*value).map_err(here)?;
+                        if program.width(*field) != program.width(body.operand_ty(*value)) {
+                            return Err(here(format!(
+                                "a {:?} given for a field of type {field:?}",
+                                body.operand_ty(*value)
+                            )));
+                        }
+                    }
+                    *ty
+                }
                 Rvalue::Binary(op, left, right) => {
                     operand(*left).map_err(here)?;
                     operand(*right).map_err(here)?;
                     let shift = matches!(op, BinOp::Shl | BinOp::Shr);
-                    if !shift && body.operand_ty(*left) != body.operand_ty(*right) {
+                    if !shift && !compatible(body.operand_ty(*left), body.operand_ty(*right)) {
                         return Err(here(format!(
                             "{} of {:?} and {:?}",
                             op.name(),
@@ -77,7 +119,7 @@ pub(crate) fn verify(body: &Body) -> Result<(), String> {
                     }
                 }
             };
-            if ty != body.locals[*target].ty && ty != Type::Never {
+            if !compatible(ty, body.locals[*target].ty) {
                 return Err(here(format!(
                     "_{target} of type {:?} is assigned a {ty:?}",
                     body.locals[*target].ty
@@ -116,7 +158,7 @@ pub(crate) fn verify(body: &Body) -> Result<(), String> {
             TerminatorKind::Return(value) => {
                 operand(*value).map_err(here)?;
                 let ty = body.operand_ty(*value);
-                if ty != body.result && ty != Type::Never {
+                if !compatible(ty, body.result) {
                     return Err(here(format!(
                         "returns a {ty:?} from a function of result {:?}",
                         body.result
