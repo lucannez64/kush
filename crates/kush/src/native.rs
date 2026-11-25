@@ -1019,19 +1019,6 @@ fn report_fallback(program: &Executable, index: usize, reason: &str) {
         .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
 }
 
-/// Whether a body contains a `while` loop anywhere.
-fn block_has_while(block: &ex::Block) -> bool {
-    fn expression(expr: &Expr) -> bool {
-        let mut found = matches!(expr.kind, ExprKind::While(..));
-        expr.for_each_child(&mut |child| found = found || expression(child));
-        found
-    }
-    block.statements.iter().any(|statement| match statement {
-        ex::Statement::Let(_, expr) | ex::Statement::Expr(expr) => expression(expr),
-        ex::Statement::Declare(_) => false,
-    }) || block.tail.as_deref().is_some_and(expression)
-}
-
 pub(crate) fn block_installs_handler(block: &ex::Block) -> bool {
     fn expression(expr: &Expr) -> bool {
         if matches!(
@@ -2139,26 +2126,33 @@ fn lower(
     // caller can absorb any small reachable callee.
     let mut bodies: Vec<Option<ir::Function>> = vec![None; program.functions.len()];
     // FND-MIR: the functions the CFG IR covers are lowered from it, after
-    // the loop passes of docs/mir-design.md section 8. Deferred overflow
-    // checks are not ported yet (FND-MIR-DEFERRED): when they are on, a
-    // function with a `while` loop keeps the tree path.
-    let loop_optimized = codegen.defers_overflow();
+    // the loop passes of docs/mir-design.md section 8, in the tree path's
+    // order: push shadows, then deferred overflow checks or else
+    // slice-layout versioning, then upper-bound facts.
     let trace_shadows = std::env::var_os("KUSH_TRACE_SHADOWS").is_some();
+    let deferral = crate::mir::deferred::Options {
+        wide_multiply: codegen.wide_multiply(),
+        wide_vectors: codegen.native_cpu,
+        speed: codegen.optimization == Optimization::Speed,
+        trace: std::env::var_os("KUSH_TRACE_DEFERRED").is_some(),
+    };
     let mir_bodies: Vec<Option<crate::mir::Body>> = if codegen.mir {
         (0..program.functions.len())
             .map(|index| {
-                let body = &program.functions[index].body;
-                if loop_optimized && block_has_while(body) {
-                    return None;
-                }
                 let mut body = crate::mir::build(program, index)
                     .inspect_err(|reason| report_fallback(program, index, reason))
                     .ok()?;
-                if codegen.optimization == Optimization::Speed {
-                    if codegen.backend == Backend::Llvm {
-                        crate::mir::push_shadows::shadow(&mut body, trace_shadows);
-                    }
-                    crate::mir::slice_layout::version(program, &mut body);
+                let speed = codegen.optimization == Optimization::Speed;
+                if speed && codegen.backend == Backend::Llvm {
+                    crate::mir::push_shadows::shadow(&mut body, trace_shadows);
+                }
+                let deferred = if codegen.defers_overflow() {
+                    crate::mir::deferred::defer(program, &mut body, deferral)
+                } else {
+                    Default::default()
+                };
+                if speed {
+                    crate::mir::slice_layout::version(program, &mut body, &deferred);
                     crate::mir::bounds::mark(&mut body);
                 }
                 Some(body)
@@ -2323,6 +2317,8 @@ fn lower(
             store_proved: false,
             upper_bounds: Vec::new(),
             index_below: false,
+            access_proved: false,
+            mir_sticky: None,
             vec_shadows: BTreeMap::new(),
             pending_pushes: Vec::new(),
             push_shadow: None,
@@ -4265,8 +4261,13 @@ struct Generator<'a, 'b> {
     // Dominating signed `index < length` tests, identified by SSA value.
     upper_bounds: Vec<(Value, Value)>,
     /// The MIR call being lowered has its index proved below its slice's
-    /// length (`Callee::Builtin { below: true }`, FND-MIR-BOUNDS).
+    /// length (`CallHint::Below`, FND-MIR-BOUNDS).
     index_below: bool,
+    /// The MIR call being lowered is an access a deferred chunk proved in
+    /// range (`CallHint::Proved`, FND-MIR-DEFERRED).
+    access_proved: bool,
+    /// The sticky word of the MIR deferred operation being lowered.
+    mir_sticky: Option<Variable>,
     /// Vector locals whose length and capacity a loop keeps in variables:
     /// slot to (length, capacity). See [`Generator::lower_while`].
     vec_shadows: BTreeMap<usize, (Variable, Variable)>,
@@ -8832,9 +8833,16 @@ impl Generator<'_, '_> {
             .get(&deferred::key(expr))
             .copied()
     }
+    /// Whether a deferred chunk proved the element access being lowered in
+    /// range: the tree path's call at `site`, or a MIR call marked proved.
+    fn proved(&self, site: Option<(usize, usize)>) -> bool {
+        self.access_proved || site.is_some_and(|(_, key)| self.proved_accesses.contains(&key))
+    }
     /// Record a deferred overflow whose indicator is the word's sign bit.
     fn defer_sign(&mut self, word: Value) {
-        let sticky = self.deferred.as_ref().expect("deferred loop").sticky;
+        let sticky = self
+            .mir_sticky
+            .unwrap_or_else(|| self.deferred.as_ref().expect("deferred loop").sticky);
         let previous = self.builder.use_var(sticky);
         let merged = self.builder.ins().bor(previous, word);
         self.builder.def_var(sticky, merged);
@@ -9219,6 +9227,35 @@ impl Generator<'_, '_> {
         start: Value,
         bound: Value,
     ) -> Value {
+        // Every access to one receiver lies between its smallest and largest
+        // offset, so those two bound all the others.
+        let mut ranges: Vec<(usize, &deferred::Access<'_>, i64, i64)> = Vec::new();
+        for access in accesses {
+            let receiver = deferred::key(access.receiver);
+            match ranges.iter_mut().find(|(known, ..)| *known == receiver) {
+                Some((_, _, least, most)) => {
+                    *least = (*least).min(access.offset);
+                    *most = (*most).max(access.offset);
+                }
+                None => ranges.push((receiver, access, access.offset, access.offset)),
+            }
+        }
+        let ranges = ranges
+            .into_iter()
+            .map(|(_, access, least, most)| (self.container_length(access), least, most))
+            .collect::<Vec<_>>();
+        self.ranges_outside(comparison, start, bound, &ranges)
+    }
+    /// Whether an index `counter + offset` with `offset` in one of the
+    /// `(length, least, most)` ranges could fall outside `0..length` while
+    /// the counter runs from `start` to `bound` under `comparison`.
+    fn ranges_outside(
+        &mut self,
+        comparison: &Kind,
+        start: Value,
+        bound: Value,
+        ranges: &[(Value, i64, i64)],
+    ) -> Value {
         // The counter's extremes: [low, high].
         let (low, high, mut outside) = match comparison {
             Kind::Lt | Kind::Le => {
@@ -9240,21 +9277,7 @@ impl Generator<'_, '_> {
                 (low, start, overflow)
             }
         };
-        // Every access to one receiver lies between its smallest and largest
-        // offset, so those two bound all the others.
-        let mut ranges: Vec<(usize, &deferred::Access<'_>, i64, i64)> = Vec::new();
-        for access in accesses {
-            let receiver = deferred::key(access.receiver);
-            match ranges.iter_mut().find(|(known, ..)| *known == receiver) {
-                Some((_, _, least, most)) => {
-                    *least = (*least).min(access.offset);
-                    *most = (*most).max(access.offset);
-                }
-                None => ranges.push((receiver, access, access.offset, access.offset)),
-            }
-        }
-        for (_, access, least, most) in ranges {
-            let length = self.container_length(access);
+        for &(length, least, most) in ranges {
             let mut flags = Vec::with_capacity(4);
             let first = if least == 0 {
                 low
@@ -10467,9 +10490,7 @@ impl Generator<'_, '_> {
                         .ins()
                         .load(I64, ir::MemFlagsData::new(), values[0], 0);
                 }
-                if *op == BytesOp::Get
-                    && site.is_some_and(|(_, key)| self.proved_accesses.contains(&key))
-                {
+                if *op == BytesOp::Get && self.proved(site) {
                     // A deferred chunk proved it in range. Data
                     // follows the 16-byte header.
                     let address = self.builder.ins().iadd(values[0], values[1]);
@@ -10569,7 +10590,7 @@ impl Generator<'_, '_> {
                 };
                 let op = match op {
                     VecOp::Get
-                        if site.is_some_and(|(_, key)| self.proved_accesses.contains(&key)) =>
+                        if self.proved(site) =>
                     {
                         VecOp::At
                     }
@@ -10584,7 +10605,7 @@ impl Generator<'_, '_> {
             }
             Target::Slice(op, element) => {
                 // A deferred chunk proved this access in range.
-                let proved = site.is_some_and(|(_, key)| self.proved_accesses.contains(&key));
+                let proved = self.proved(site);
                 let op = match op {
                     SliceOp::Get if proved => SliceOp::At,
                     other => *other,

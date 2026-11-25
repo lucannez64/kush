@@ -317,6 +317,14 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
             let json = serde_json::to_string(op).expect("a map operation serializes");
             format!("map {json:?}({})", operands_text(operands))
         }
+        Rvalue::Deferred(deferral, operands) => {
+            let json = serde_json::to_string(deferral).expect("a deferral serializes");
+            format!("deferred {json:?}({})", operands_text(operands))
+        }
+        Rvalue::Loop(op, operands) => {
+            let json = serde_json::to_string(op).expect("a loop operation serializes");
+            format!("loop {json:?}({})", operands_text(operands))
+        }
         Rvalue::Runtime(op, operands) => {
             let json = serde_json::to_string(op).expect("a runtime operation serializes");
             format!("runtime {json:?}({})", operands_text(operands))
@@ -377,6 +385,7 @@ fn terminator_text(kind: &TerminatorKind) -> String {
                         CallHint::Shadow(length, capacity) => {
                             format!(" shadow _{length} _{capacity}")
                         }
+                        CallHint::Proved => " proved".into(),
                     };
                     format!("builtin {index}{hint}")
                 }
@@ -830,6 +839,18 @@ impl Parser {
             let op = serde_json::from_str(&json).map_err(|e| format!("map operation: {e}"))?;
             return Ok(Rvalue::Map(op, self.operands()?));
         }
+        if name == "deferred" {
+            self.at += 1;
+            let json = self.string()?;
+            let deferral = serde_json::from_str(&json).map_err(|e| format!("deferral: {e}"))?;
+            return Ok(Rvalue::Deferred(deferral, self.operands()?));
+        }
+        if name == "loop" {
+            self.at += 1;
+            let json = self.string()?;
+            let op = serde_json::from_str(&json).map_err(|e| format!("loop operation: {e}"))?;
+            return Ok(Rvalue::Loop(op, self.operands()?));
+        }
         if name == "runtime" {
             self.at += 1;
             let json = self.string()?;
@@ -1040,6 +1061,8 @@ impl Parser {
                             CallHint::Below
                         } else if self.eat("shadow") {
                             CallHint::Shadow(self.local()?, self.local()?)
+                        } else if self.eat("proved") {
+                            CallHint::Proved
                         } else {
                             CallHint::None
                         },

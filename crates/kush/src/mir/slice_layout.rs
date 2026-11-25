@@ -49,11 +49,18 @@ fn candidate(body: &Body, lp: &loops::Loop, all: &[loops::Loop]) -> Option<(Loca
     Some((view, element))
 }
 
-/// Version every candidate loop of `body`. Returns how many it versioned.
-pub(crate) fn version(program: &Executable, body: &mut Body) -> usize {
+/// Version every candidate loop of `body` except those with a header in
+/// `skip` (deferred loops, whose chunk has its own specialization). Returns
+/// how many it versioned.
+pub(crate) fn version(
+    program: &Executable,
+    body: &mut Body,
+    skip: &std::collections::BTreeSet<BlockId>,
+) -> usize {
     let all = loops::loops(body);
     let candidates = all
         .iter()
+        .filter(|lp| !skip.contains(&lp.header))
         .filter_map(|lp| candidate(body, lp, &all).map(|found| (lp.clone(), found)))
         .collect::<Vec<_>>();
     for (lp, (view, element)) in &candidates {
@@ -138,7 +145,7 @@ mod tests {
             .position(|function| function.name.rsplit('.').next() == Some("f"))
             .expect("the function");
         let mut body = build(&program, index).expect("the function builds");
-        let count = version(&program, &mut body);
+        let count = version(&program, &mut body, &Default::default());
         verify(&program, &body).expect("the versioned body verifies");
         let printed = text::print(&body);
         assert_eq!(text::parse(&printed).unwrap(), body, "{printed}");
@@ -159,8 +166,9 @@ mod tests {
 
     #[test]
     fn a_loop_over_a_view_gets_a_copy_for_whole_elements() {
-        let (body, count) =
-            versioned(&function("while i < xs.len() { total = total + xs[i]; i = i + 1; }"));
+        let (body, count) = versioned(&function(
+            "while i < xs.len() { total = total + xs[i]; i = i + 1; }",
+        ));
         assert_eq!(count, 1);
         assert_eq!(loops::loops(&body).len(), 2);
         // The copy's entry stores the constant layout.

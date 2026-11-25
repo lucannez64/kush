@@ -189,6 +189,32 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     operand(*vector).map_err(here)?;
                     Type::I64
                 }
+                Rvalue::Deferred(deferral, values) => {
+                    for value in values {
+                        operand(*value).map_err(here)?;
+                    }
+                    local(deferral.sticky).map_err(here)?;
+                    let arity = if deferral.op.is_some() { 2 } else { 1 };
+                    if values.len() != arity || body.locals[deferral.sticky].ty != Type::I64 {
+                        return Err(here("a malformed deferred operation".into()));
+                    }
+                    body.operand_ty(values[0])
+                }
+                Rvalue::Loop(op, values) => {
+                    for value in values {
+                        operand(*value).map_err(here)?;
+                    }
+                    match op {
+                        LoopOp::Magnitude => Type::I64,
+                        LoopOp::ChunkLimit { .. } => match values.first() {
+                            Some(start) => body.operand_ty(*start),
+                            None => return Err(here("a chunk limit without a start".into())),
+                        },
+                        LoopOp::Outside { .. }
+                        | LoopOp::Certificate { .. }
+                        | LoopOp::Unsuitable { .. } => Type::Bool,
+                    }
+                }
                 Rvalue::StructEq(left, right, _) => {
                     operand(*left).map_err(here)?;
                     operand(*right).map_err(here)?;

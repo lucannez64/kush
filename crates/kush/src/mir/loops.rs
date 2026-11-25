@@ -260,7 +260,11 @@ pub(crate) fn clone_loop(body: &mut Body, lp: &Loop) -> BTreeMap<BlockId, BlockI
     }
     for copy in copies.values() {
         for (original, replacement) in &copies {
-            retarget(&mut body.blocks[*copy].terminator.kind, *original, *replacement);
+            retarget(
+                &mut body.blocks[*copy].terminator.kind,
+                *original,
+                *replacement,
+            );
         }
     }
     copies
@@ -325,9 +329,6 @@ pub(crate) struct Counted {
     pub comparison: BinOp,
     pub bound: Term,
     pub step: i64,
-    /// The blocks from the header to the test, in order; the last one
-    /// switches on the condition.
-    pub condition: Vec<BlockId>,
     /// Where the condition goes when it holds, and when it does not.
     pub body: BlockId,
     pub exit: BlockId,
@@ -379,9 +380,12 @@ pub(crate) fn assigned(body: &Body, blocks: &BTreeSet<BlockId>) -> BTreeSet<Loca
     for block in blocks {
         let data = &body.blocks[*block];
         for statement in &data.statements {
-            let StatementKind::Assign(place, _) = &statement.kind;
+            let StatementKind::Assign(place, rvalue) = &statement.kind;
             if !place.deref {
                 out.insert(place.local);
+            }
+            if let Rvalue::Deferred(deferral, _) = rvalue {
+                out.insert(deferral.sticky);
             }
         }
         if let TerminatorKind::Call {
@@ -410,11 +414,7 @@ enum Definition<'b> {
     Call(&'b TerminatorKind),
 }
 
-fn definition<'b>(
-    body: &'b Body,
-    blocks: &[BlockId],
-    local: LocalId,
-) -> Option<Definition<'b>> {
+fn definition<'b>(body: &'b Body, blocks: &[BlockId], local: LocalId) -> Option<Definition<'b>> {
     let mut found = None;
     for block in blocks {
         let data = &body.blocks[*block];
@@ -454,13 +454,15 @@ fn term(body: &Body, blocks: &[BlockId], operand: Operand) -> Option<Term> {
     }
     match definition(body, blocks, place.local)? {
         Definition::Statement(Rvalue::Use(operand)) => term(body, blocks, *operand),
-        Definition::Statement(Rvalue::Binary(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r)) => {
-            Some(Term::Binary(
-                *op,
-                Box::new(term(body, blocks, *l)?),
-                Box::new(term(body, blocks, *r)?),
-            ))
-        }
+        Definition::Statement(Rvalue::Binary(
+            op @ (BinOp::Add | BinOp::Sub | BinOp::Mul),
+            l,
+            r,
+        )) => Some(Term::Binary(
+            *op,
+            Box::new(term(body, blocks, *l)?),
+            Box::new(term(body, blocks, *r)?),
+        )),
         Definition::Call(TerminatorKind::Call {
             callee: Callee::Builtin { index, .. },
             args,
@@ -597,7 +599,10 @@ pub(crate) fn test(body: &Body, lp: &Loop) -> Option<Test> {
     left.locals(&mut read);
     right.locals(&mut read);
     let in_condition = assigned(body, &condition.iter().copied().collect());
-    if read.iter().any(|local| taken.contains(local) || in_condition.contains(local)) {
+    if read
+        .iter()
+        .any(|local| taken.contains(local) || in_condition.contains(local))
+    {
         return None;
     }
     Some(Test {
@@ -613,12 +618,12 @@ pub(crate) fn test(body: &Body, lp: &Loop) -> Option<Test> {
 /// The loop's counted shape, if it has one.
 pub(crate) fn counted(body: &Body, lp: &Loop) -> Option<Counted> {
     let Test {
-        condition,
         comparison,
         left,
         right: bound,
         body: inside,
         exit,
+        ..
     } = test(body, lp)?;
     if !matches!(comparison, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
         return None;
@@ -655,7 +660,11 @@ pub(crate) fn counted(body: &Body, lp: &Loop) -> Option<Counted> {
         return None;
     };
     let idom = dominators(body);
-    if !lp.latches.iter().all(|latch| dominates(&idom, *block, *latch)) {
+    if !lp
+        .latches
+        .iter()
+        .all(|latch| dominates(&idom, *block, *latch))
+    {
         return None;
     }
     let (direction, step) = update_step(body, *block, *at, counter)?;
@@ -668,7 +677,6 @@ pub(crate) fn counted(body: &Body, lp: &Loop) -> Option<Counted> {
         comparison,
         bound,
         step,
-        condition,
         body: inside,
         exit,
         update: (*block, *at),
@@ -713,7 +721,7 @@ mod tests {
         let counted = counted(&body, lp).expect("a counted loop");
         assert_eq!(counted.comparison, BinOp::Lt);
         assert_eq!(counted.step, 1);
-        assert_eq!(counted.condition.first(), Some(&lp.header));
+        assert_eq!(test(&body, lp).unwrap().condition.first(), Some(&lp.header));
         assert!(!lp.blocks.contains(&counted.exit));
         assert!(matches!(
             counted.bound,
@@ -728,7 +736,10 @@ mod tests {
             ("while i > 0 { i = i - 2; }", true),
             ("while i < n { i = i * 2; }", false),
             ("while i < n { i = i - 1; }", false),
-            ("while i < n { if i > 3 { i = i + 1; } else { i = i + 2; } }", false),
+            (
+                "while i < n { if i > 3 { i = i + 1; } else { i = i + 2; } }",
+                false,
+            ),
             ("while i < n { n = n - 1; i = i + 1; }", false),
             ("while i <= n { i = i + 3; }", true),
         ];

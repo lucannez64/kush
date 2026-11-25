@@ -12,9 +12,8 @@
 
 pub(crate) mod bounds;
 mod build;
+pub(crate) mod deferred;
 mod drop_flags;
-// The loop passes of docs/mir-design.md section 8 use it as they land.
-#[allow(dead_code)]
 pub(crate) mod loops;
 pub(crate) mod push_shadows;
 pub(crate) mod slice_layout;
@@ -155,6 +154,12 @@ pub(crate) enum Rvalue {
     StructEq(Operand, Operand, bool),
     /// A word of the buffer header of the vector (operand).
     Buffer(Operand, BufferWord),
+    /// Arithmetic whose overflow check is deferred (FND-MIR-DEFERRED): the
+    /// wrapped result, with an exact overflow ORed into the sign of the
+    /// sticky local.
+    Deferred(Deferral, Vec<Operand>),
+    /// A computation of a deferred loop's frame (FND-MIR-DEFERRED).
+    Loop(LoopOp, Vec<Operand>),
     /// `Vec.map` in place on the vector (operand 0) with the callbacks
     /// (the other operands) applied in order.
     Map(MapOp, Vec<Operand>),
@@ -434,13 +439,13 @@ impl ViewSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum UnOp {
     Neg,
     Not,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BinOp {
     Add,
     Sub,
@@ -524,6 +529,80 @@ pub(crate) enum CallHint {
     /// (FND-MIR-PUSH-SHADOWS). The call reads them instead of the buffer
     /// header and updates them.
     Shadow(LocalId, LocalId),
+    /// An element access a deferred chunk proved in range
+    /// (FND-MIR-DEFERRED): no bound check.
+    Proved,
+}
+
+/// How a deferred operation is checked (`native/deferred.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum DeferMode {
+    /// Wrap and record the exact overflow bit in the sticky local.
+    Exact,
+    /// Wrap; the loop's certificate validates the result.
+    Certified,
+    /// A certified reduction step `acc = acc +/- e`.
+    Accumulate,
+}
+
+/// The operation of an `Rvalue::Deferred`: binary on two operands, or
+/// negation of one.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Deferral {
+    pub mode: DeferMode,
+    pub sticky: LocalId,
+    /// `None` negates.
+    pub op: Option<BinOp>,
+}
+
+/// `u` with `|value| <= 2^u`, in terms of a certificate's words.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Bound {
+    Constant(u32),
+    /// The magnitude word at this index of the certificate's words.
+    Word(usize),
+    Sum(Box<Bound>, Box<Bound>),
+    Product(Box<Bound>, Box<Bound>),
+    /// Every prefix sum of a reduction: its entry magnitude word (by
+    /// index) and the bounds of its terms.
+    Accumulated { entry: usize, operands: Vec<Bound> },
+}
+
+/// A computation of a deferred loop's frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum LoopOp {
+    /// `v ^ (v << 1)` of the operand: its magnitude word.
+    Magnitude,
+    /// Where a chunk starting at the counter value (operand 0) stops: the
+    /// bound (1), or `CHUNK` steps on if that comes first.
+    ChunkLimit {
+        comparison: BinOp,
+        unsigned: bool,
+        step: i64,
+    },
+    /// Whether an access of a chunk could fall outside its container: from
+    /// the start (0) and bound (1), the counter's range, plus each range's
+    /// least and greatest offset, against each range's container length
+    /// (operands 2..).
+    Outside {
+        comparison: BinOp,
+        ranges: Vec<(i64, i64)>,
+    },
+    /// Whether every obligation is within the limit, after a chunk from the
+    /// start (0) to the end (1) counter value; the bounds' words follow.
+    Certificate {
+        obligations: Vec<Bound>,
+        comparison: BinOp,
+        step: i64,
+        accumulating: i64,
+    },
+    /// Whether the views (the operands) rule the chunk out: two of
+    /// `overlaps` overlap, or one of `layouts` has another stride than
+    /// its own or is over bytes.
+    Unsuitable {
+        overlaps: Vec<(usize, usize)>,
+        layouts: Vec<(usize, i64)>,
+    },
 }
 
 /// A word of a vector's buffer header.

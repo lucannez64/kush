@@ -137,10 +137,9 @@ impl Analysis<'_> {
                 ..
             } => {
                 let length = match callee {
-                    Callee::Builtin { index, .. } => matches!(
-                        self.body.builtins.0[*index],
-                        Target::Slice(SliceOp::Len, _)
-                    ),
+                    Callee::Builtin { index, .. } => {
+                        matches!(self.body.builtins.0[*index], Target::Slice(SliceOp::Len, _))
+                    }
                     _ => false,
                 };
                 let view = match args.as_slice() {

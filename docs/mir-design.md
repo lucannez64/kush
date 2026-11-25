@@ -336,9 +336,9 @@ expressions and lowers the loop body more than once:
 | Push shadows: a vector's length and capacity in variables across `v = v.push(e)` | `Speed` and LLVM | `lower_while`, `vec_push` |
 | Deferred overflow checks (`native/deferred.rs`) | `defers_overflow()` | `lower_deferred_while` |
 
-Until all four exist on the MIR, `native::lower` keeps the tree path for
-functions with a `while` loop when one of them is on. FND-MIR-DEFAULT
-removes that gate.
+All four now exist on the MIR. With `KUSH_MIR=1`, every function the
+builder covers lowers from the MIR in every build mode. FND-MIR-DEFAULT
+makes that the default and deletes the tree lowering.
 
 The MIR versions are passes over a built body, run before native
 lowering. Each writes its result into the body, so the text form shows
@@ -414,8 +414,20 @@ it and tests can check it without compiling.
   - the chunk limit and the proof that its accesses are in range;
   - the certificate after the chunk;
   - the replay of the entry state when the certificate fails.
-- Deferred arithmetic is an `Rvalue::Binary` with a mode (exact, certified
-  or accumulate). The frame's computations are `loop` rvalues: magnitude,
-  chunk limit, ranges and the certificate.
+- Deferred arithmetic is an `Rvalue::Deferred` with a mode (exact,
+  certified or accumulate) and the sticky local it ORs an exact overflow
+  into. The frame's computations are `loop` rvalues: magnitude, chunk
+  limit, access ranges, the certificate, and the views that rule a chunk
+  out. Accesses the chunk proved in range are `call builtin N proved`.
 - `native/deferred.rs` and the tree versions are deleted once the MIR
   passes cover the optimization-shape tests in `tests/llvm_backend.rs`.
+- Status: `mir/deferred.rs` runs when `defers_overflow()` holds. It
+  passes `tests/deferred_overflow.rs` and the planner's
+  `KUSH_TRACE_DEFERRED` reasons in `tests/llvm_backend.rs`.
+  - The chunk copy's header tests the counter against the limit directly,
+    as the tree path's `chunk_test` does.
+  - Deferred loops skip slice-layout versioning: the chunk is already
+    specialized to the views' layout.
+  - Native code reuses the tree path's helpers: `deferred_i64`,
+    `chunk_limit`, `ranges_outside` (split out of `accesses_outside`) and
+    `magnitude_bound`.

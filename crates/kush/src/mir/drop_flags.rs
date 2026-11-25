@@ -161,7 +161,9 @@ pub(super) fn rvalue_operands(rvalue: &Rvalue) -> Vec<Operand> {
         | Rvalue::Runtime(_, operands)
         | Rvalue::Alloc(_, operands)
         | Rvalue::Array(_, operands)
-        | Rvalue::Map(_, operands) => operands.clone(),
+        | Rvalue::Map(_, operands)
+        | Rvalue::Deferred(_, operands)
+        | Rvalue::Loop(_, operands) => operands.clone(),
         Rvalue::Bytes(_) => Vec::new(),
         Rvalue::Ref(place) => vec![Operand::Copy(*place)],
         Rvalue::ElementAddress(base, index) => {

@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::mir::{
-    AllocOp, ArrayOp, BlockId, BufferWord, CallHint, Body, Callee, Capture, ElementBase, Operand, Place, RuntimeOp, Rvalue,
+    AllocOp, ArrayOp, BinOp, BlockId, Bound, BufferWord, CallHint, DeferMode, LoopOp, Body, Callee, Capture, ElementBase, Operand, Place, RuntimeOp, Rvalue,
     StatementKind, TaskOp, Terminator, TerminatorKind, ViewSource,
 };
 
@@ -279,6 +279,130 @@ impl Generator<'_, '_> {
                 self.arena_try_alloc(handle, &words[1], types[1], ty, shape)
             }
         })
+    }
+
+    /// A computation of a deferred loop's frame, through the tree path's
+    /// helpers. `words` has each operand's words.
+    fn mir_loop(&mut self, op: &LoopOp, words: &[Words]) -> Value {
+        let scalar = |at: usize| words[at][0];
+        match op {
+            LoopOp::Magnitude => self.magnitude(scalar(0)),
+            LoopOp::ChunkLimit {
+                comparison,
+                unsigned,
+                step,
+            } => self.chunk_limit(&comparison.kind(), *unsigned, scalar(0), scalar(1), *step),
+            LoopOp::Outside { comparison, ranges } => {
+                let ranges = ranges
+                    .iter()
+                    .enumerate()
+                    .map(|(at, (least, most))| (scalar(2 + at), *least, *most))
+                    .collect::<Vec<_>>();
+                let outside =
+                    self.ranges_outside(&comparison.kind(), scalar(0), scalar(1), &ranges);
+                self.builder.ins().uextend(I64, outside)
+            }
+            LoopOp::Certificate {
+                obligations,
+                comparison,
+                step,
+                accumulating,
+            } => {
+                let (start, end) = (scalar(0), scalar(1));
+                // How many terms the reductions took in, at most (see
+                // `lower_deferred_while`).
+                let distance = match comparison {
+                    BinOp::Lt | BinOp::Le => self.builder.ins().isub(end, start),
+                    _ => self.builder.ins().isub(start, end),
+                };
+                let iterations = if *step == 1 {
+                    distance
+                } else {
+                    let step = self.constant(*step);
+                    self.builder.ins().udiv(distance, step)
+                };
+                let started = self.builder.ins().iadd_imm_s(iterations, 1);
+                let count = self.builder.ins().imul_imm_s(started, *accumulating);
+                let bounds = words[2..].iter().map(|word| word[0]).collect::<Vec<_>>();
+                let mut worst = self.constant(0);
+                for obligation in obligations {
+                    let value = self.mir_bound(obligation, &bounds, count);
+                    worst = self.builder.ins().umax(worst, value);
+                }
+                let proved = self.builder.ins().icmp_imm_u(
+                    IntCC::UnsignedLessThanOrEqual,
+                    worst,
+                    deferred::LIMIT,
+                );
+                self.builder.ins().uextend(I64, proved)
+            }
+            LoopOp::Unsuitable { overlaps, layouts } => {
+                let mut unsuitable = self.constant(0);
+                let range = |g: &mut Self, view: &Words| {
+                    let bytes = g.builder.ins().imul(view[1], view[2]);
+                    (view[0], g.builder.ins().iadd(view[0], bytes))
+                };
+                for (stored, loaded) in overlaps {
+                    let (stored_start, stored_end) = range(self, &words[*stored]);
+                    let (loaded_start, loaded_end) = range(self, &words[*loaded]);
+                    let before =
+                        self.builder
+                            .ins()
+                            .icmp(IntCC::UnsignedLessThan, stored_start, loaded_end);
+                    let after =
+                        self.builder
+                            .ins()
+                            .icmp(IntCC::UnsignedLessThan, loaded_start, stored_end);
+                    let both = self.builder.ins().band(before, after);
+                    let both = self.builder.ins().uextend(I64, both);
+                    unsuitable = self.builder.ins().bor(unsuitable, both);
+                }
+                for (view, stride) in layouts {
+                    let view = &words[*view];
+                    let other = self
+                        .builder
+                        .ins()
+                        .icmp_imm_s(IntCC::NotEqual, view[2], *stride);
+                    let other = self.builder.ins().uextend(I64, other);
+                    let flag = self.builder.ins().icmp_imm_s(IntCC::NotEqual, view[3], 0);
+                    let flag = self.builder.ins().uextend(I64, flag);
+                    unsuitable = self.builder.ins().bor(unsuitable, other);
+                    unsuitable = self.builder.ins().bor(unsuitable, flag);
+                }
+                unsuitable
+            }
+        }
+    }
+
+    /// A certificate bound's value: `u` with `|value| <= 2^u`, from the
+    /// magnitude words and the reduction term count.
+    fn mir_bound(&mut self, bound: &Bound, words: &[Value], count: Value) -> Value {
+        match bound {
+            Bound::Constant(bits) => self.constant(i64::from(*bits)),
+            Bound::Word(at) => self.magnitude_bound(words[*at]),
+            Bound::Sum(left, right) => {
+                let left = self.mir_bound(left, words, count);
+                let right = self.mir_bound(right, words, count);
+                let larger = self.builder.ins().umax(left, right);
+                self.builder.ins().iadd_imm_s(larger, 1)
+            }
+            Bound::Product(left, right) => {
+                let left = self.mir_bound(left, words, count);
+                let right = self.mir_bound(right, words, count);
+                self.builder.ins().iadd(left, right)
+            }
+            Bound::Accumulated { entry, operands } => {
+                let mut largest = self.magnitude_bound(words[*entry]);
+                for operand in operands {
+                    let operand = self.mir_bound(operand, words, count);
+                    largest = self.builder.ins().umax(largest, operand);
+                }
+                let zeros = self.leading_zeros(count);
+                let sixty_four = self.constant(64);
+                let bits = self.builder.ins().isub(sixty_four, zeros);
+                self.builder.ins().iadd(largest, bits)
+            }
+        }
     }
 
     /// The runtime-length array operations, through the tree path's
@@ -557,6 +681,39 @@ impl Generator<'_, '_> {
                     self.element_address(body.place_ty(*place), location, index)
                 }
             }]),
+            Rvalue::Deferred(deferral, operands) => {
+                let mode = match deferral.mode {
+                    DeferMode::Exact => deferred::Mode::Exact,
+                    DeferMode::Certified => deferred::Mode::Certified,
+                    DeferMode::Accumulate => deferred::Mode::Accumulate,
+                };
+                let ty = body.operand_ty(operands[0]);
+                let values = self.mir_operands(operands);
+                self.mir_sticky = Some(self.variables[deferral.sticky][0]);
+                let value = match deferral.op {
+                    Some(op) => {
+                        let right_kind = body.operand_ty(operands[1]).int_kind();
+                        Some(self.scalar_binary(
+                            &op.kind(),
+                            ty.int_kind(),
+                            right_kind,
+                            values[0],
+                            values[1],
+                            Some(mode),
+                        ))
+                    }
+                    None => self.unary_value(span, &Kind::Minus, ty, values[0], Some(mode), 0),
+                };
+                self.mir_sticky = None;
+                value.map(|value| vec![value])
+            }
+            Rvalue::Loop(op, operands) => {
+                let words = operands
+                    .iter()
+                    .map(|operand| self.mir_operand(*operand))
+                    .collect::<Vec<_>>();
+                Some(vec![self.mir_loop(op, &words)])
+            }
             Rvalue::Buffer(vector, word) => {
                 let handle = self.mir_scalar(*vector);
                 Some(vec![match word {
@@ -907,6 +1064,7 @@ impl Generator<'_, '_> {
                         match hint {
                             CallHint::None => {}
                             CallHint::Below => self.index_below = true,
+                            CallHint::Proved => self.access_proved = true,
                             CallHint::Shadow(length, capacity) => {
                                 self.push_shadow = Some((
                                     self.variables[*length][0],
@@ -916,6 +1074,7 @@ impl Generator<'_, '_> {
                         }
                         let words = self.call_target(&target, values, ty, terminator.span, None);
                         self.index_below = false;
+                        self.access_proved = false;
                         self.push_shadow = None;
                         let Some(words) = words else {
                             // The builtin always panics; the block has ended.

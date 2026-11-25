@@ -94,7 +94,11 @@ fn push_only(body: &Body, lp: &Loop, vector: LocalId) -> Option<Vec<BlockId>> {
             let StatementKind::Assign(_, rvalue) = &statement.kind;
             let defines = matches!(rvalue, Rvalue::Use(operand) if whole(*operand) == Some(vector))
                 || matches!(rvalue, Rvalue::Ref(source) if source.local == vector);
-            if !defines && rvalue_operands(rvalue).iter().any(|o| mentions(o, &watched)) {
+            if !defines
+                && rvalue_operands(rvalue)
+                    .iter()
+                    .any(|o| mentions(o, &watched))
+            {
                 return None;
             }
         }
