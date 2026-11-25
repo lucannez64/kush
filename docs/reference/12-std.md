@@ -22,6 +22,7 @@ codes.
 | `std.task` | `TaskExit<T>`, `Panic` |
 | `std.text`, `std.ascii` | byte-string helpers (`eq`, `find`, `split_part`, `trim`, `parse_i64`, `format_i64`, …) and ASCII classes |
 | `std.json` | owned JSON values, parser and writer |
+| `std.bincode` | binary codec on the bincode 1.x wire format (little-endian fixed-width integers, u64 length prefixes); `put_*` append to `Bytes`, `take_*` walk a `Decoder` and return `Result<_, Error>` |
 | `std.bytemap`, `std.collections`, `std.sort` | a hash map from byte keys, fixed-capacity sets/maps over arrays, sorting and binary search |
 | `std.math`, `std.natural`, `std.random` | `min`/`max`/`abs`, arbitrary-precision naturals, OS random bytes |
 | `std.sha1`, `std.sha256`, `std.hmac`, `std.base64`, `std.crc32`, `std.ct` | hashing, MACs, encodings, checksums, constant-time comparison |

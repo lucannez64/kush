@@ -8548,6 +8548,23 @@
           "text": "Decision approved by the user 2026-11-24; doc updated."
         }
       ]
+    },
+    {
+      "id": "STD-BINCODE",
+      "title": "std.bincode: bincode 1.x wire-compatible binary codec",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "std/bincode.kush implementing the bincode 1.3 legacy wire format (little-endian fixed-width ints, u64 length prefixes, u8 option/result tags, u32 variant index) in Kush: put_* append to Bytes, take_* walk a Decoder returning Result<_, Error>. Byte-exact vectors vs to_le_bytes, round-trip and malformed-input tests in tests/std_bincode.rs. No floats (no bit access in the language) and no 128-bit ints (no such types).",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-25 21:15:59",
+          "who": "agent",
+          "text": "writing std/bincode.kush + tests"
+        }
+      ]
     }
   ]
 }

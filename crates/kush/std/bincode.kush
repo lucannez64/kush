@@ -1,0 +1,327 @@
+module std.bincode;
+
+// Bincode-compatible binary encoding (STD-BINCODE): the wire format of Rust
+// bincode 1.x with its default ("legacy") options — little-endian, fixed-width
+// integers, u64 length prefixes, no overall size limit — so Kush programs can
+// exchange values byte-for-byte with Rust programs using
+// `bincode::serialize` / `bincode::deserialize`.
+//
+//   integers  u8..u64, i8..i64   fixed width, little-endian two's complement
+//   bool      one byte, 0 or 1
+//   char      u32 LE Unicode scalar value
+//   unit      nothing
+//   Option    u8 tag (0 = None, 1 = Some), then the payload
+//   Result    u8 tag (0 = Ok, 1 = Err), then the payload
+//   enum      u32 LE variant index, then the variant's fields
+//   str, String, Bytes, Vec, slices, maps   u64 LE length, then the elements
+//   tuples, structs   fields in declaration order, no tags or lengths
+//
+// Kush has no 128-bit integers, so there is no u128/i128 here, and floats have
+// no bit access, so f32/f64 cannot be encoded bit-exactly; everything else
+// round-trips byte-for-byte with bincode 1.3.
+//
+// Encoding appends to a `Bytes` buffer (consume and return, like `Bytes.push`):
+//
+//     let mut b = Bytes.with_capacity(64);
+//     b = bincode.put_u32(b, 7);
+//     b = bincode.put_str(b, name.as_str());
+//
+// A struct encodes its fields in order with its own function:
+//
+//     struct Point { x: i32, y: i32 }
+//     fn put_point(b: Bytes, p: Point) -> Bytes ! {alloc} {
+//         let b = bincode.put_i32(b, p.x);
+//         bincode.put_i32(b, p.y)
+//     }
+//
+// Decoding walks a `Decoder` cursor through `&mut`; every read returns
+// `Result<T, Error>`, so truncated or malformed input is an `Err`, never a
+// panic:
+//
+//     let mut d = bincode.new(&bytes);
+//     let n = bincode.take_u32(&mut d)?;
+//     let name = bincode.take_str(&mut d)?;
+//     bincode.finish(&d)?;   // bincode's default rejects trailing bytes
+//
+// Options and results are read through their tag byte:
+//
+//     match bincode.take_tag(&mut d)? {
+//         0 => .. None ..,
+//         1 => .. Some(bincode.take_u8(&mut d)?) ..,
+//         t => .. invalid tag t ..,
+//     }
+
+use std.option.Option;
+use std.result.Result;
+
+/// Why decoding failed. Payloads are byte offsets or offending values.
+pub enum Error {
+    Truncated(i64),   // input ended inside a value
+    BadLength(u64),   // string/byte length larger than the remaining input
+    InvalidBool(i64), // bool tag byte other than 0 or 1
+    InvalidChar(u64), // code point that is not a Unicode scalar
+    InvalidUtf8(i64), // string payload that is not valid UTF-8
+    Trailing(i64),    // bytes left after the top-level value
+}
+
+/// A cursor over the input. Construct with `new`; reads take `&mut` and advance
+/// `pos`, so every byte is decoded exactly once.
+pub struct Decoder<'a> {
+    data: &'a Bytes,
+    pos: i64,
+}
+
+/// A decoder at the start of `data`.
+pub fn new<'a>(data: &'a Bytes) -> Decoder<'a> ! {} {
+    Decoder { data: data, pos: 0 }
+}
+
+/// Bytes consumed so far.
+pub fn position<'a>(d: &Decoder<'a>) -> i64 ! {} { d.pos }
+
+/// Bytes not yet consumed.
+pub fn remaining<'a>(d: &Decoder<'a>) -> i64 ! {} { Bytes.len(d.data) - d.pos }
+
+/// Succeeds when the whole input was consumed; bincode's default rejects
+/// trailing bytes, so this is the last call of a top-level decode.
+pub fn finish<'a>(d: &Decoder<'a>) -> Result<Unit, Error> ! {} {
+    let left = remaining(d);
+    if left == 0 { Result.Ok(()) } else { Result.Err(Error.Trailing(left)) }
+}
+
+// ---------------------------------------------------------------------------
+// Encoding: every put_* appends to `out` and returns the grown buffer.
+// ---------------------------------------------------------------------------
+
+/// Append `w`'s low `n` bytes, least significant first.
+fn put_le(out: Bytes, w: i64, n: i64) -> Bytes ! {alloc} {
+    let mut out = out;
+    let mut i = 0;
+    while i < n {
+        out = Bytes.push(out, (w >> (8 * i)) & 255);
+        i = i + 1;
+    }
+    out
+}
+
+pub fn put_u8(out: Bytes, v: u8) -> Bytes ! {alloc} { put_le(out, Int.convert(v), 1) }
+pub fn put_u16(out: Bytes, v: u16) -> Bytes ! {alloc} { put_le(out, Int.convert(v), 2) }
+pub fn put_u32(out: Bytes, v: u32) -> Bytes ! {alloc} { put_le(out, Int.convert(v), 4) }
+pub fn put_u64(out: Bytes, v: u64) -> Bytes ! {alloc} { put_le(out, Int.truncate(v), 8) }
+pub fn put_i8(out: Bytes, v: i8) -> Bytes ! {alloc} { put_le(out, Int.convert(v), 1) }
+pub fn put_i16(out: Bytes, v: i16) -> Bytes ! {alloc} { put_le(out, Int.convert(v), 2) }
+pub fn put_i32(out: Bytes, v: i32) -> Bytes ! {alloc} { put_le(out, Int.convert(v), 4) }
+pub fn put_i64(out: Bytes, v: i64) -> Bytes ! {alloc} { put_le(out, v, 8) }
+
+/// One byte: 1 for `true`, 0 for `false`.
+pub fn put_bool(out: Bytes, b: Bool) -> Bytes ! {alloc} {
+    if b { Bytes.push(out, 1) } else { Bytes.push(out, 0) }
+}
+
+/// The scalar value as u32 LE.
+pub fn put_char(out: Bytes, c: Char) -> Bytes ! {alloc} { put_u32(out, Char.code(c)) }
+
+/// The u64 LE length prefix of a sequence, map, string or byte string.
+pub fn put_len(out: Bytes, n: u64) -> Bytes ! {alloc} { put_u64(out, n) }
+
+/// The u32 LE variant index of an enum.
+pub fn put_variant(out: Bytes, index: u32) -> Bytes ! {alloc} { put_u32(out, index) }
+
+/// Length prefix, then a copy of the bytes.
+pub fn put_bytes(out: Bytes, b: &Bytes) -> Bytes ! {alloc} {
+    let n = Bytes.len(b);
+    let mut out = put_len(out, Int.truncate(n));
+    let mut i = 0;
+    while i < n {
+        out = Bytes.push(out, Bytes.get(b, i));
+        i = i + 1;
+    }
+    out
+}
+
+/// Length prefix, then the UTF-8 bytes.
+pub fn put_str(out: Bytes, s: &str) -> Bytes ! {alloc} {
+    let n = Str.len(s);
+    let mut out = put_len(out, Int.truncate(n));
+    let mut i = 0;
+    while i < n {
+        out = Bytes.push(out, Str.byte_at(s, i));
+        i = i + 1;
+    }
+    out
+}
+
+/// Tag 1 then `put(out, x)` for `Some`, tag 0 for `None`.
+pub fn put_option<T>(
+    out: Bytes,
+    v: Option<T>,
+    put: fn(Bytes, T) -> Bytes ! {alloc},
+) -> Bytes ! {alloc} {
+    match v {
+        Option.Some(x) => put(Bytes.push(out, 1), x),
+        Option.None => Bytes.push(out, 0),
+    }
+}
+
+/// Tag 0 then `put_ok(out, x)` for `Ok`, tag 1 then `put_err(out, e)` for `Err`.
+pub fn put_result<T, E>(
+    out: Bytes,
+    v: Result<T, E>,
+    put_ok: fn(Bytes, T) -> Bytes ! {alloc},
+    put_err: fn(Bytes, E) -> Bytes ! {alloc},
+) -> Bytes ! {alloc} {
+    match v {
+        Result.Ok(x) => put_ok(Bytes.push(out, 0), x),
+        Result.Err(e) => put_err(Bytes.push(out, 1), e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decoding: every take_* advances the cursor and returns the value or an Error.
+// ---------------------------------------------------------------------------
+
+/// Read `n` bytes as a little-endian u64 bit pattern, or `Truncated`.
+fn take_le<'a>(d: &mut Decoder<'a>, n: i64) -> Result<u64, Error> ! {} {
+    let data = d.data;
+    let len = Bytes.len(data);
+    if n < 0 || n > len - d.pos {
+        return Result.Err(Error.Truncated(d.pos));
+    }
+    let mut acc: u64 = 0;
+    let mut i = 0;
+    while i < n {
+        let byte: u64 = Int.truncate(Bytes.get(data, d.pos + i));
+        let shift: u64 = Int.truncate(8 * i);
+        acc = acc | (byte << shift);
+        i = i + 1;
+    }
+    d.pos = d.pos + n;
+    Result.Ok(acc)
+}
+
+pub fn take_u8<'a>(d: &mut Decoder<'a>) -> Result<u8, Error> ! {} {
+    match take_le(d, 1) {
+        Result.Ok(w) => Result.Ok(Int.truncate(w)),
+        Result.Err(e) => Result.Err(e),
+    }
+}
+
+pub fn take_u16<'a>(d: &mut Decoder<'a>) -> Result<u16, Error> ! {} {
+    match take_le(d, 2) {
+        Result.Ok(w) => Result.Ok(Int.truncate(w)),
+        Result.Err(e) => Result.Err(e),
+    }
+}
+
+pub fn take_u32<'a>(d: &mut Decoder<'a>) -> Result<u32, Error> ! {} {
+    match take_le(d, 4) {
+        Result.Ok(w) => Result.Ok(Int.truncate(w)),
+        Result.Err(e) => Result.Err(e),
+    }
+}
+
+pub fn take_u64<'a>(d: &mut Decoder<'a>) -> Result<u64, Error> ! {} { take_le(d, 8) }
+
+pub fn take_i8<'a>(d: &mut Decoder<'a>) -> Result<i8, Error> ! {} {
+    match take_le(d, 1) {
+        Result.Ok(w) => Result.Ok(Int.truncate(w)),
+        Result.Err(e) => Result.Err(e),
+    }
+}
+
+pub fn take_i16<'a>(d: &mut Decoder<'a>) -> Result<i16, Error> ! {} {
+    match take_le(d, 2) {
+        Result.Ok(w) => Result.Ok(Int.truncate(w)),
+        Result.Err(e) => Result.Err(e),
+    }
+}
+
+pub fn take_i32<'a>(d: &mut Decoder<'a>) -> Result<i32, Error> ! {} {
+    match take_le(d, 4) {
+        Result.Ok(w) => Result.Ok(Int.truncate(w)),
+        Result.Err(e) => Result.Err(e),
+    }
+}
+
+pub fn take_i64<'a>(d: &mut Decoder<'a>) -> Result<i64, Error> ! {} {
+    match take_le(d, 8) {
+        Result.Ok(w) => Result.Ok(Int.truncate(w)),
+        Result.Err(e) => Result.Err(e),
+    }
+}
+
+/// The u64 LE length prefix of a sequence, map, string or byte string.
+pub fn take_len<'a>(d: &mut Decoder<'a>) -> Result<u64, Error> ! {} { take_u64(d) }
+
+/// The u32 LE variant index of an enum.
+pub fn take_variant<'a>(d: &mut Decoder<'a>) -> Result<u32, Error> ! {} { take_u32(d) }
+
+/// One tag byte: Option/Result discriminants are a single u8.
+pub fn take_tag<'a>(d: &mut Decoder<'a>) -> Result<i64, Error> ! {} {
+    match take_u8(d) {
+        Result.Ok(b) => Result.Ok(Int.convert(b)),
+        Result.Err(e) => Result.Err(e),
+    }
+}
+
+/// One byte: 0 is `false`, 1 is `true`, anything else is `InvalidBool`.
+pub fn take_bool<'a>(d: &mut Decoder<'a>) -> Result<Bool, Error> ! {} {
+    match take_u8(d) {
+        Result.Err(e) => Result.Err(e),
+        Result.Ok(b) => {
+            if b == 0 {
+                Result.Ok(false)
+            } else if b == 1 {
+                Result.Ok(true)
+            } else {
+                Result.Err(Error.InvalidBool(Int.convert(b)))
+            }
+        },
+    }
+}
+
+/// A u32 LE code point; surrogates and values above U+10FFFF are `InvalidChar`.
+pub fn take_char<'a>(d: &mut Decoder<'a>) -> Result<Char, Error> ! {} {
+    match take_u32(d) {
+        Result.Err(e) => Result.Err(e),
+        Result.Ok(code) => match Char.from_code(code) {
+            Option.Some(c) => Result.Ok(c),
+            Option.None => Result.Err(Error.InvalidChar(Int.convert(code))),
+        },
+    }
+}
+
+/// A length-prefixed byte string. The length must fit in the remaining input,
+/// so a corrupt length is `BadLength`, not a huge allocation.
+pub fn take_bytes<'a>(d: &mut Decoder<'a>) -> Result<Bytes, Error> ! {alloc} {
+    match take_u64(d) {
+        Result.Err(e) => Result.Err(e),
+        Result.Ok(n) => {
+            let data = d.data;
+            let rest: u64 = Int.truncate(Bytes.len(data) - d.pos);
+            if n > rest {
+                return Result.Err(Error.BadLength(n));
+            }
+            let count: i64 = Int.truncate(n);
+            let mut out = Bytes.with_capacity(count);
+            let mut i = 0;
+            while i < count {
+                out = Bytes.push(out, Bytes.get(data, d.pos + i));
+                i = i + 1;
+            }
+            d.pos = d.pos + count;
+            Result.Ok(out)
+        },
+    }
+}
+
+/// A length-prefixed UTF-8 string; invalid UTF-8 is `InvalidUtf8`.
+pub fn take_str<'a>(d: &mut Decoder<'a>) -> Result<String, Error> ! {alloc} {
+    match take_bytes(d) {
+        Result.Err(e) => Result.Err(e),
+        Result.Ok(b) => match String.from_utf8(b) {
+            Result.Ok(s) => Result.Ok(s),
+            Result.Err(_) => Result.Err(Error.InvalidUtf8(d.pos)),
+        },
+    }
+}

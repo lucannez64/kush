@@ -254,6 +254,8 @@ mod stack_exhaustion;
 mod staging;
 #[path = "stateful_handlers.rs"]
 mod stateful_handlers;
+#[path = "std_bincode.rs"]
+mod std_bincode;
 #[path = "std_crc_bytemap.rs"]
 mod std_crc_bytemap;
 #[path = "std_crypto.rs"]
