@@ -440,6 +440,56 @@ fn alternatives_bind_and_drop_as_on_the_tree_path() {
     assert_eq!(output, "7\n30\n-1\n");
 }
 
+/// FND-MIR-DROP-FLAGS: a drop-flag test whose outcome is known is folded.
+/// On normal paths only a value moved on some paths (`pick` moves `a` or
+/// `b`) keeps a test; the shared unwind cleanup (blocks without an
+/// `(unwind ..)` of their own) is reached from many points and keeps its.
+#[test]
+fn drop_flags_are_tested_only_where_paths_disagree() {
+    let program = executable::check(
+        "struct Pair { left: Box<i64>, right: i64 }
+        fn keep(p: Pair) -> i64 { p.right }
+        fn open(b: Box<i64>) -> i64 { b.take() }
+        fn pick(flag: Bool) -> i64 ! {alloc} {
+            let a = Box.new(1);
+            let b = Box.new(2);
+            if flag { open(a) } else { open(b) }
+        }
+        fn main() -> Unit ! {io, alloc} {
+            print_i64(keep(Pair { left: Box.new(5), right: 6 }) + pick(true) + pick(false));
+        }",
+    )
+    .unwrap();
+    let text = kush::mir::dump(&program);
+    let mut conditional = 0;
+    for function in text.split("\n\n") {
+        let pick = function.contains("fn \"pick\"(");
+        let flags = function
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("temp "))
+            .filter_map(|decl| decl.strip_suffix(": bool;"))
+            .map(|local| local.trim_start_matches("mut ").to_string())
+            .collect::<Vec<_>>();
+        let mut in_cleanup = false;
+        for line in function.lines() {
+            let line = line.trim();
+            if line.starts_with("bb") && line.ends_with('{') {
+                in_cleanup = !line.contains("(unwind");
+            }
+            if let Some(rest) = line.strip_prefix("switch copy ") {
+                let tested = rest.split_whitespace().next().unwrap();
+                if !in_cleanup && flags.iter().any(|flag| flag == tested) {
+                    assert!(pick, "a flag test on a normal path: {line}\n{function}");
+                    conditional += 1;
+                }
+            }
+        }
+    }
+    assert!(conditional > 0, "the moves in `pick` need a dynamic flag");
+    let output = same_program_on_both_paths(&program, true);
+    assert_eq!(output, "9\n");
+}
+
 #[test]
 fn checked_arithmetic_panics_on_the_mir_path_as_on_the_tree() {
     same_on_both_paths(

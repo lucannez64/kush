@@ -11,6 +11,7 @@
 //! parser reads the same form back, and the tests check that the two agree.
 
 mod build;
+mod drop_flags;
 mod text;
 mod verify;
 

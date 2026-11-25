@@ -236,8 +236,21 @@ FND-MIR-BUILTINS finished the ordinary values:
 What remains outside the MIR, apart from effects, is listed on
 FND-MIR-SHAPES.
 
-The flags are dynamic everywhere, as on the tree path. Removing the ones
-a dataflow pass can decide statically is FND-MIR-DROP-FLAGS.
+FND-MIR-DROP-FLAGS (`mir/drop_flags.rs`) runs on every built body:
+
+- A forward dataflow over normal and unwind edges computes each drop
+  flag's value. Drop flags are boolean temporaries that are only assigned
+  constants and only tested by `switch`.
+- The dataflow is path-sensitive: a test of a known flag only reaches the
+  branch it takes, and a block's unwind target sees the values at every
+  statement.
+- Each test whose outcome is known becomes a `goto`, and flags that are
+  no longer tested lose their assignments.
+
+On normal paths a flag test survives only where a value was moved on some
+paths but not others. The shared unwind cleanup is reached from points
+where the flags differ, so it keeps its tests. Specializing the cleanup
+per call site would remove those too; that is not done.
 
 ## 7. Decisions
 

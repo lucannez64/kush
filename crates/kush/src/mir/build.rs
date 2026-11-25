@@ -64,7 +64,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(Body {
+    let mut body = Body {
         name: function.name.clone(),
         parameters: function.parameters,
         locals: builder.locals,
@@ -72,7 +72,9 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
         result: function.result,
         builtins: Builtins(builder.builtins),
         coercions: Coercions(builder.coercions),
-    })
+    };
+    super::drop_flags::eliminate(&mut body);
+    Ok(body)
 }
 
 /// A one-word value with no ownership.
