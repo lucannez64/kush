@@ -222,7 +222,28 @@ representation:
   declared in the text form as `coercion N = "<json>";`.
 - Union patterns test the member tag word, then the member's words.
 
-`multi fn` values, continuations and suspension wait for FND-MIR-EFFECTS.
+FND-MIR-EFFECTS covered the effect machinery that remains after
+`suspend::lower`, which still runs on the tree before the MIR is built
+(decision 4):
+
+- **Continuations:** continuation functions activate their parameters at
+  their slots. `multi fn` values push their environment on the
+  continuation stack, and calls through them mark and restore it.
+- **Regions:** a region is an exit block plus a finish block that calls
+  the finish callable.
+- **Tasks:** a `task` rvalue runs spawn, scope, catch, yield, cancel and
+  join through helpers shared with the tree path.
+- **Handler stack:** a `runtime` rvalue manages the handler and
+  continuation stacks (push, pop, redirect, depth, marks, dynamic
+  performs). In functions that install handlers, loops and regions restore
+  the handler depth on their exits.
+- **Aborts:**
+  - An abort scope lands in a block that runs its handler.
+  - `AbortExit` jumps there.
+  - `AbortPerform` raises the abort and leaves with the `abort`
+    terminator.
+  - `AbortCall` dispatches a set abort word to the scope it names, or
+    propagates it.
 
 FND-MIR-BUILTINS finished the ordinary values:
 

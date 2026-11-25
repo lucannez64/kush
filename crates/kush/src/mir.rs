@@ -211,6 +211,33 @@ pub(crate) enum RuntimeOp {
     HandlerPop,
     /// Perform as if at a depth (operand 0); yields the previous depth.
     HandlerRedirect,
+    /// Perform `operation` with a payload and a resume value (operands 0
+    /// and 1) through the innermost dynamic handler frame, whose callable
+    /// has signature `handler`.
+    Perform {
+        operation: usize,
+        handler: usize,
+    },
+    /// The address of a fresh stack buffer of `words` words: an abortive
+    /// operation's payload lands there.
+    AbortBuffer {
+        words: usize,
+    },
+    /// Install an abort frame for `operation` whose payload buffer is
+    /// operand 0.
+    AbortHandlerPush {
+        operation: usize,
+    },
+    /// Abort to the frame handling `operation`: store the payload (operand
+    /// 0) in its buffer and set the abort word to the buffer's address. A
+    /// missing handler panics.
+    AbortRaise {
+        operation: usize,
+    },
+    /// The calling thread's abort word.
+    AbortWord,
+    /// Clear the abort word.
+    AbortClear,
     /// The current continuation-stack mark.
     ContinuationMark,
     /// Release the continuation stack back to a mark (operand 0).
@@ -316,6 +343,9 @@ pub(crate) enum TerminatorKind {
     },
     /// End of a cleanup block: continue unwinding into the caller.
     Resume,
+    /// Leave the function while an abort travels to its handler: the
+    /// result is a dummy and the abort word names the target.
+    Abort,
     Unreachable,
 }
 

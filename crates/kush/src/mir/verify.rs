@@ -295,7 +295,7 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     block(*unwind).map_err(here)?;
                 }
             }
-            TerminatorKind::Resume | TerminatorKind::Unreachable => {}
+            TerminatorKind::Resume | TerminatorKind::Abort | TerminatorKind::Unreachable => {}
         }
     }
     Ok(())

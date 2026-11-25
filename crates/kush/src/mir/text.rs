@@ -368,6 +368,7 @@ fn terminator_text(kind: &TerminatorKind) -> String {
             unwind_text(*unwind)
         ),
         TerminatorKind::Resume => "resume".into(),
+        TerminatorKind::Abort => "abort".into(),
         TerminatorKind::Unreachable => "unreachable".into(),
     }
 }
@@ -933,6 +934,10 @@ impl Parser {
             Some("resume") => {
                 self.at += 1;
                 TerminatorKind::Resume
+            }
+            Some("abort") => {
+                self.at += 1;
+                TerminatorKind::Abort
             }
             Some("drop") => {
                 self.at += 1;

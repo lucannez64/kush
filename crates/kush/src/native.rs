@@ -5979,79 +5979,12 @@ impl Generator<'_, '_> {
                 let resume_values = lower!(self.expr(resume));
                 self.consume(payload);
                 self.consume(resume);
-                let out = self.stack_words(3);
-                let op = self.constant(*operation as i64);
-                let found = self.runtime_call(self.handler_lookup, &[op, out]);
-                let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
-                self.guard(missing);
-                let code = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), out, 0);
-                let environment = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), out, 8);
-                let once = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), out, 16);
-                let signature = self.program.function_types[*handler].clone();
-                let result = signature.result;
-                let pointer = if aggregate_result(self.program, result) {
-                    let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                        ir::StackSlotKind::ExplicitSlot,
-                        (self.program.width(result) * 8) as u32,
-                        STACK_SLOT_ALIGN_SHIFT,
-                    ));
-                    Some(self.builder.ins().stack_addr(I64, slot, 0))
-                } else {
-                    None
-                };
-                // A dynamic frame may hold either a copyable noncapturing `fn`
-                // (no environment word in its ABI) or an owning `once` handler
-                // (an environment word). The runtime frame records which, so
-                // generate both checked call shapes and select at run time.
-                let once_block = self.builder.create_block();
-                let fn_block = self.builder.create_block();
-                let Some(join) = self.join(result) else {
-                    unreachable!("a declared effect result is never Never")
-                };
-                self.builder
-                    .ins()
-                    .brif(once, once_block, &[], fn_block, &[]);
-                for (call_once, block) in [(false, fn_block), (true, once_block)] {
-                    self.builder.switch_to_block(block);
-                    let mut values = Vec::new();
-                    if let Some(pointer) = pointer {
-                        values.push(pointer);
-                    }
-                    if call_once {
-                        values.push(environment);
-                    }
-                    values.extend(payload_values.iter().copied());
-                    values.extend(resume_values.iter().copied());
-                    let signature = self.indirect_signature_mode(*handler, call_once);
-                    let signature = self.builder.import_signature(signature);
-                    let call = self.builder.ins().call_indirect(signature, code, &values);
-                    self.test_panic();
-                    let results = match pointer {
-                        Some(pointer) => (0..self.program.width(result))
-                            .map(|i| {
-                                self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    pointer,
-                                    (i * 8) as i32,
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                        None => self.builder.inst_results(call).to_vec(),
-                    };
-                    self.jump(join, &results);
-                }
-                self.builder.switch_to_block(join);
-                return Some(self.builder.block_params(join).to_vec());
+                return Some(self.dynamic_perform(
+                    *operation,
+                    *handler,
+                    &payload_values,
+                    &resume_values,
+                ));
             }
             ExprKind::BytesLiteral(bytes) => {
                 let id = match self.module.literal(bytes) {
@@ -10673,6 +10606,89 @@ impl Generator<'_, '_> {
         self.drop_value(exit.payload, &payload);
         let values = self.encode_variant(exit.result, exit.cancelled_tag, &[]);
         self.jump(join, &values);
+        self.builder.switch_to_block(join);
+        self.builder.block_params(join).to_vec()
+    }
+    /// Perform `operation` through the innermost dynamic handler frame,
+    /// whose callable has signature `handler`; a missing handler panics.
+    fn dynamic_perform(
+        &mut self,
+        operation: usize,
+        handler: usize,
+        payload_values: &[Value],
+        resume_values: &[Value],
+    ) -> Words {
+        let out = self.stack_words(3);
+        let op = self.constant(operation as i64);
+        let found = self.runtime_call(self.handler_lookup, &[op, out]);
+        let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
+        self.guard(missing);
+        let code = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), out, 0);
+        let environment = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), out, 8);
+        let once = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), out, 16);
+        let signature = self.program.function_types[handler].clone();
+        let result = signature.result;
+        let pointer = if aggregate_result(self.program, result) {
+            let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                (self.program.width(result) * 8) as u32,
+                STACK_SLOT_ALIGN_SHIFT,
+            ));
+            Some(self.builder.ins().stack_addr(I64, slot, 0))
+        } else {
+            None
+        };
+        // A dynamic frame may hold either a copyable noncapturing `fn`
+        // (no environment word in its ABI) or an owning `once` handler
+        // (an environment word). The runtime frame records which, so
+        // generate both checked call shapes and select at run time.
+        let once_block = self.builder.create_block();
+        let fn_block = self.builder.create_block();
+        let Some(join) = self.join(result) else {
+            unreachable!("a declared effect result is never Never")
+        };
+        self.builder
+            .ins()
+            .brif(once, once_block, &[], fn_block, &[]);
+        for (call_once, block) in [(false, fn_block), (true, once_block)] {
+            self.builder.switch_to_block(block);
+            let mut values = Vec::new();
+            if let Some(pointer) = pointer {
+                values.push(pointer);
+            }
+            if call_once {
+                values.push(environment);
+            }
+            values.extend(payload_values.iter().copied());
+            values.extend(resume_values.iter().copied());
+            let signature = self.indirect_signature_mode(handler, call_once);
+            let signature = self.builder.import_signature(signature);
+            let call = self.builder.ins().call_indirect(signature, code, &values);
+            self.test_panic();
+            let results = match pointer {
+                Some(pointer) => (0..self.program.width(result))
+                    .map(|i| {
+                        self.builder.ins().load(
+                            I64,
+                            ir::MemFlagsData::new(),
+                            pointer,
+                            (i * 8) as i32,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                None => self.builder.inst_results(call).to_vec(),
+            };
+            self.jump(join, &results);
+        }
         self.builder.switch_to_block(join);
         self.builder.block_params(join).to_vec()
     }

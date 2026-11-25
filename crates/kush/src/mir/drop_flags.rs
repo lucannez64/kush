@@ -133,6 +133,7 @@ fn flag_locals(body: &Body) -> Vec<LocalId> {
             TerminatorKind::Goto(_)
             | TerminatorKind::Panic { .. }
             | TerminatorKind::Resume
+            | TerminatorKind::Abort
             | TerminatorKind::Unreachable => {}
         }
     }
@@ -271,7 +272,10 @@ fn entry_states(
                 successors.extend(*unwind);
             }
             TerminatorKind::Panic { unwind } => successors.extend(*unwind),
-            TerminatorKind::Return(_) | TerminatorKind::Resume | TerminatorKind::Unreachable => {}
+            TerminatorKind::Return(_)
+            | TerminatorKind::Resume
+            | TerminatorKind::Abort
+            | TerminatorKind::Unreachable => {}
         }
         for target in successors {
             flow(&mut states, &mut pending, &mut queued, target, &state);

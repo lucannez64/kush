@@ -36,6 +36,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
         current: None,
         loops: Vec::new(),
         regions: Vec::new(),
+        aborts: Vec::new(),
         installs_handlers: crate::native::block_installs_handler(&function.body),
     };
     let entry = builder.new_block();
@@ -267,6 +268,21 @@ struct Region {
     result: Option<LocalId>,
 }
 
+/// An enclosing `AbortScope`: where its aborts land.
+struct Abort {
+    label: usize,
+    /// Runs the handler on the payload.
+    aborted: BlockId,
+    /// Receives the payload.
+    payload: LocalId,
+    payload_ty: Type,
+    /// The handler-stack depth before the scope pushed anything.
+    depth: Option<LocalId>,
+    /// The payload buffer of a declared operation's frame; its address is
+    /// the abort word that targets this scope.
+    buffer: Option<LocalId>,
+}
+
 struct Loop {
     head: BlockId,
     /// The handler-stack depth on entry (see [`Region::depth`]).
@@ -299,6 +315,7 @@ struct Builder<'a> {
     current: Option<BlockId>,
     loops: Vec<Loop>,
     regions: Vec<Region>,
+    aborts: Vec<Abort>,
     /// The function installs dynamic handler frames (the native frame
     /// setup then restores the entry depth on every return).
     installs_handlers: bool,
@@ -916,6 +933,68 @@ impl Builder<'_> {
                 );
                 Operand::Move(Place::local(temp))
             }
+            ExprKind::AbortScope {
+                label,
+                body,
+                handler,
+                operation,
+            } => return self.abort_scope(expr, *label, body, handler, *operation),
+            ExprKind::AbortExit {
+                label,
+                value,
+                cleanup,
+                ..
+            } => {
+                let Some(operand) = self.expr(value)? else {
+                    return Ok(None);
+                };
+                self.consume(value);
+                for id in cleanup {
+                    self.cleanup_resource(Some(*id), span);
+                }
+                let target = self.abort_target(*label)?;
+                let (aborted, payload, depth) = (target.aborted, target.payload, target.depth);
+                self.restore_depth(depth, span);
+                self.assign(payload, Rvalue::Use(operand), span);
+                self.goto(aborted, span);
+                return Ok(None);
+            }
+            ExprKind::AbortPerform { operation, value } => {
+                let Some(operand) = self.expr(value)? else {
+                    return Ok(None);
+                };
+                self.consume(value);
+                let op = RuntimeOp::AbortRaise {
+                    operation: *operation,
+                };
+                self.runtime(op, vec![operand], Type::Unit, span);
+                self.cleanup_all(span);
+                self.terminate(TerminatorKind::Abort, span);
+                return Ok(None);
+            }
+            ExprKind::AbortCall {
+                call,
+                exits,
+                propagates,
+            } => return self.abort_call(call, exits, *propagates),
+            ExprKind::DynamicPerform {
+                operation,
+                payload,
+                resume,
+                handler,
+            } => {
+                let Some(values) = self.operands(&[payload, resume])? else {
+                    return Ok(None);
+                };
+                self.consume(payload);
+                self.consume(resume);
+                let op = RuntimeOp::Perform {
+                    operation: *operation,
+                    handler: *handler,
+                };
+                let result = self.runtime(op, values, expr.ty, span);
+                Operand::Move(Place::local(result))
+            }
             ExprKind::HandlerDepth => {
                 let temp = self.temp(expr.ty);
                 self.assign(temp, Rvalue::Runtime(RuntimeOp::HandlerDepth, vec![]), span);
@@ -1413,6 +1492,185 @@ impl Builder<'_> {
             ExprKind::Call(target, args) => return self.call(expr, target, args),
             other => return Err(variant_name(other)),
         }))
+    }
+
+    /// The innermost enclosing abort scope with `label`.
+    fn abort_target(&self, label: usize) -> Result<&Abort, String> {
+        self.aborts
+            .iter()
+            .rev()
+            .find(|scope| scope.label == label)
+            .ok_or_else(|| "an abort outside its scope".into())
+    }
+
+    /// An `AbortScope`: the body runs with an abort frame for `operation`
+    /// installed; an abort to it lands in a block that runs `handler` on
+    /// the payload, as on the tree path.
+    fn abort_scope(
+        &mut self,
+        expr: &Expr,
+        label: usize,
+        body: &crate::executable::Block,
+        handler: &Expr,
+        operation: Option<usize>,
+    ) -> Result<Option<Operand>, String> {
+        let span = expr.span;
+        let (Type::Fn(id) | Type::Once(id)) = handler.ty else {
+            return Err("an abortive handler that is not a function value".into());
+        };
+        let payload_ty = self.program.function_types[id].parameters[0];
+        if !plain(self.program, payload_ty) {
+            return Err(format!("an abort payload of type {payload_ty:?}"));
+        }
+        let aborted = self.new_block();
+        let payload = self.temp(payload_ty);
+        let depth = self.save_depth(span);
+        // An abort can leave a multishot `handle` without its
+        // continuation-stack restore; the landing restores instead.
+        let mark = self
+            .program
+            .functions
+            .iter()
+            .any(|function| function.shared_environment)
+            .then(|| self.runtime(RuntimeOp::ContinuationMark, vec![], Type::I64, span));
+        let buffer = operation.map(|operation| {
+            let words = self.program.width(payload_ty);
+            let buffer = self.runtime(RuntimeOp::AbortBuffer { words }, vec![], Type::I64, span);
+            let push = RuntimeOp::AbortHandlerPush { operation };
+            self.runtime(
+                push,
+                vec![Operand::Copy(Place::local(buffer))],
+                Type::Unit,
+                span,
+            );
+            buffer
+        });
+        let result = self.result_temp(expr.ty);
+        let mut exit = None;
+        self.aborts.push(Abort {
+            label,
+            aborted,
+            payload,
+            payload_ty,
+            depth,
+            buffer,
+        });
+        let finished = self.block(body);
+        self.aborts.pop();
+        if let Some(value) = finished? {
+            if buffer.is_some() {
+                self.runtime(RuntimeOp::HandlerPop, vec![], Type::Unit, span);
+            }
+            if let Some(result) = result {
+                self.assign(result, Rvalue::Use(value), span);
+            }
+            self.goto_join(&mut exit, span);
+        }
+        self.enter(aborted);
+        if let Some(mark) = mark {
+            let mark = Operand::Copy(Place::local(mark));
+            self.runtime(RuntimeOp::ContinuationRestore, vec![mark], Type::Unit, span);
+        }
+        if let Some(callable) = self.expr(handler)? {
+            self.consume(handler);
+            let call = Expr {
+                kind: ExprKind::Constant(0),
+                ty: expr.ty,
+                span,
+                resource: None,
+            };
+            let payload = Operand::Move(Place::local(payload));
+            if let Some(value) = self.emit_call(&call, Callee::Indirect(callable), vec![payload]) {
+                if let Some(result) = result {
+                    self.assign(result, Rvalue::Use(value), span);
+                }
+                self.goto_join(&mut exit, span);
+            }
+        }
+        let Some(exit) = exit else {
+            return Ok(None);
+        };
+        self.enter(exit);
+        Ok(Some(Self::result(result, expr.ty)))
+    }
+
+    /// A call whose callee may abort to an enclosing scope: after it, a set
+    /// abort word is dispatched to the scope it names, or keeps travelling.
+    fn abort_call(
+        &mut self,
+        call: &Expr,
+        exits: &[(usize, Vec<usize>)],
+        propagates: bool,
+    ) -> Result<Option<Operand>, String> {
+        let span = call.span;
+        let Some(value) = self.expr(call)? else {
+            return Ok(None);
+        };
+        let word = self.runtime(RuntimeOp::AbortWord, vec![], Type::I64, span);
+        let dispatch = self.new_block();
+        let normal = self.new_block();
+        self.terminate(
+            TerminatorKind::Switch {
+                value: Operand::Copy(Place::local(word)),
+                targets: vec![(0, normal)],
+                otherwise: dispatch,
+            },
+            span,
+        );
+        self.enter(dispatch);
+        // The call's result words are meaningless on this path.
+        self.consume(call);
+        for (label, cleanup) in exits {
+            let target = self.abort_target(*label)?;
+            let Some(buffer) = target.buffer else {
+                continue;
+            };
+            let (aborted, payload, payload_ty, depth) = (
+                target.aborted,
+                target.payload,
+                target.payload_ty,
+                target.depth,
+            );
+            let same = self.temp(Type::Bool);
+            self.assign(
+                same,
+                Rvalue::Binary(
+                    BinOp::Eq,
+                    Operand::Copy(Place::local(word)),
+                    Operand::Copy(Place::local(buffer)),
+                ),
+                span,
+            );
+            let hit = self.new_block();
+            let miss = self.new_block();
+            self.terminate(
+                TerminatorKind::Switch {
+                    value: Operand::Copy(Place::local(same)),
+                    targets: vec![(0, miss)],
+                    otherwise: hit,
+                },
+                span,
+            );
+            self.enter(hit);
+            self.runtime(RuntimeOp::AbortClear, vec![], Type::Unit, span);
+            for id in cleanup {
+                self.cleanup_resource(Some(*id), span);
+            }
+            self.restore_depth(depth, span);
+            let landed = Operand::Copy(Place::deref(buffer, 0, payload_ty));
+            self.assign(payload, Rvalue::Use(landed), span);
+            self.goto(aborted, span);
+            self.enter(miss);
+        }
+        if propagates || self.program.uses_unwinding {
+            // A foreign abort, or a panic unwinding through.
+            self.cleanup_all(span);
+            self.terminate(TerminatorKind::Abort, span);
+        } else {
+            self.terminate(TerminatorKind::Unreachable, span);
+        }
+        self.enter(normal);
+        Ok(Some(value))
     }
 
     /// A handler- or continuation-stack operation; the local holding its

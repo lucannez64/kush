@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::mir::{
-    BlockId, Body, Callee, Capture, ElementBase, Operand, Place, Rvalue, RuntimeOp, StatementKind,
+    BlockId, Body, Callee, Capture, ElementBase, Operand, Place, RuntimeOp, Rvalue, StatementKind,
     TaskOp, Terminator, TerminatorKind, ViewSource,
 };
 
@@ -433,6 +433,49 @@ impl Generator<'_, '_> {
                     RuntimeOp::HandlerRedirect => {
                         vec![self.runtime_call(self.handler_redirect, &[words[0][0]])]
                     }
+                    RuntimeOp::Perform { operation, handler } => {
+                        self.dynamic_perform(operation, handler, &words[0], &words[1])
+                    }
+                    RuntimeOp::AbortBuffer { words } => vec![self.stack_words(words)],
+                    RuntimeOp::AbortHandlerPush { operation } => {
+                        let op = self.constant(operation as i64);
+                        let zero = self.constant(0);
+                        self.runtime_void(self.handler_push, &[op, words[0][0], zero, zero]);
+                        unit(self)
+                    }
+                    RuntimeOp::AbortRaise { operation } => {
+                        let out = self.stack_words(3);
+                        let op = self.constant(operation as i64);
+                        let found = self.runtime_call(self.handler_lookup, &[op, out]);
+                        let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
+                        self.guard(missing);
+                        let buffer = self
+                            .builder
+                            .ins()
+                            .load(I64, ir::MemFlagsData::new(), out, 0);
+                        self.store_words(buffer, &words[0]);
+                        let word = self.abort_word_address();
+                        self.builder
+                            .ins()
+                            .store(ir::MemFlagsData::new(), buffer, word, 0);
+                        unit(self)
+                    }
+                    RuntimeOp::AbortWord => {
+                        let address = self.abort_word_address();
+                        vec![
+                            self.builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), address, 0),
+                        ]
+                    }
+                    RuntimeOp::AbortClear => {
+                        let address = self.abort_word_address();
+                        let zero = self.constant(0);
+                        self.builder
+                            .ins()
+                            .store(ir::MemFlagsData::new(), zero, address, 0);
+                        unit(self)
+                    }
                     RuntimeOp::ContinuationMark => vec![self.runtime_call(self.kstack_mark, &[])],
                     RuntimeOp::ContinuationRestore => {
                         self.runtime_void(self.kstack_restore, &[words[0][0]]);
@@ -601,7 +644,7 @@ impl Generator<'_, '_> {
                 self.drop_value(ty, &words);
                 self.jump(blocks[*next], &[]);
             }
-            TerminatorKind::Resume => self.return_dummy(),
+            TerminatorKind::Resume | TerminatorKind::Abort => self.return_dummy(),
             TerminatorKind::Unreachable => {
                 self.builder.ins().trap(TrapCode::unwrap_user(2));
             }
