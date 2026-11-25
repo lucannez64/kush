@@ -145,11 +145,36 @@ impl Generator<'_, '_> {
             .declare_func_in_func(self.ids[function], self.builder.func);
         let code = self.builder.ins().func_addr(I64, reference);
         if captures.is_empty() {
-            if matches!(ty, Type::Once(_)) {
+            if matches!(ty, Type::Once(_) | Type::Multi(_)) {
                 let zero = self.constant(0);
                 return vec![code, zero];
             }
             return vec![code];
+        }
+        if matches!(ty, Type::Multi(_)) {
+            // A multishot token: the captures go on the continuation stack,
+            // after a word holding the environment size.
+            let words = captures
+                .iter()
+                .map(|capture| match capture {
+                    Capture::Value(operand) => self.mir_operand(*operand),
+                    Capture::Address(local) => vec![self.local_address(*local)],
+                })
+                .collect::<Vec<_>>();
+            let bytes = 8 + words.iter().map(|words| words.len() * 8).sum::<usize>();
+            let size = self.constant(bytes as i64);
+            let environment = self.runtime_call(self.kstack_push, &[size]);
+            self.builder
+                .ins()
+                .store(ir::MemFlagsData::new(), size, environment, 0);
+            let mut offset = 8;
+            for word in words.iter().flatten() {
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), *word, environment, offset);
+                offset += 8;
+            }
+            return vec![code, environment];
         }
         let types = captures
             .iter()
@@ -197,7 +222,7 @@ impl Generator<'_, '_> {
     ) -> Words {
         let (id, once) = match callee_ty {
             Type::Fn(id) => (id, false),
-            Type::Once(id) => (id, true),
+            Type::Once(id) | Type::Multi(id) => (id, true),
             other => unreachable!("an indirect call through a {other:?}"),
         };
         let signature = self.program.function_types[id].clone();
@@ -221,6 +246,14 @@ impl Generator<'_, '_> {
             if !signature.parameter_erased(index) {
                 values.extend(words);
             }
+        }
+        if matches!(callee_ty, Type::Multi(_)) {
+            // Everything the token call pushes is released when it returns
+            // (docs/multishot-capabilities.md section 5).
+            let mark = self.runtime_call(self.kstack_mark, &[]);
+            let words = self.finish_indirect_call_mode(id, callable[0], pointer, values, true);
+            self.runtime_void(self.kstack_restore, &[mark]);
+            return words;
         }
         self.finish_indirect_call(id, callable[0], pointer, values)
     }

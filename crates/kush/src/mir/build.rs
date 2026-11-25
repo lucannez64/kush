@@ -111,6 +111,7 @@ fn plain(program: &Executable, ty: Type) -> bool {
             ty,
             Type::Fn(_)
                 | Type::Once(_)
+                | Type::Multi(_)
                 | Type::DynObj(_)
                 | Type::Atomic
                 | Type::Arena
@@ -167,12 +168,6 @@ fn erased(grade: Option<crate::grades::Grade>) -> bool {
 
 /// The function's frame and calling convention are ones the builder covers.
 fn eligible(program: &Executable, function: &Function) -> Result<(), String> {
-    if function.parameter_slots.is_some() || function.shared_environment {
-        return Err("a continuation".into());
-    }
-    if !function.capability_parameters.is_empty() {
-        return Err("a capability parameter".into());
-    }
     if !plain(program, function.result) {
         return Err(format!("a {:?} result", function.result));
     }
@@ -377,7 +372,14 @@ impl Builder<'_> {
             self.cleanup = Some(self.new_block());
             self.in_cleanup = false;
         }
-        for slot in 0..self.function.parameters {
+        // A continuation receives its captures and parameters at the
+        // enclosing function's slots; the native frame setup puts them there.
+        for position in 0..self.function.parameters {
+            let slot = self
+                .function
+                .parameter_slots
+                .as_ref()
+                .map_or(position, |slots| slots[position]);
             // An erased parameter has no words and owns nothing.
             if !self.erased_local(slot) {
                 self.activate_local(slot, span);
