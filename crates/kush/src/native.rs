@@ -6220,93 +6220,7 @@ impl Generator<'_, '_> {
                 let payload = lower!(self.expr(value));
                 self.consume(allocator);
                 self.consume(value);
-                let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
-                let block = self.runtime_call(
-                    self.alloc_ops.block_try,
-                    &[pair[0], pair[1], pair[3], bytes],
-                );
-                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, block, 0);
-                let ok = self.builder.create_block();
-                let error = self.builder.create_block();
-                let done = self.builder.create_block();
-                let result_width = self.program.width(expr.ty);
-                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                    ir::StackSlotKind::ExplicitSlot,
-                    (result_width * 8).max(1) as u32,
-                    STACK_SLOT_ALIGN_SHIFT,
-                ));
-                let destination = self.builder.ins().stack_addr(I64, slot, 0);
-                self.builder.ins().brif(failed, error, &[], ok, &[]);
-                self.builder.switch_to_block(ok);
-                let data = self.runtime_call(self.alloc_ops.block_data, &[block]);
-                for (index, word) in payload.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        data,
-                        (index * 8) as i32,
-                    );
-                }
-                let owner = self.runtime_call(
-                    self.alloc_ops.box_create,
-                    &[pair[0], pair[1], block, pair[3]],
-                );
-                let tag = self.constant(shape.ok_tag as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), tag, destination, 0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), owner, destination, 8);
-                let zero = self.constant(0);
-                for index in 2..result_width {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        destination,
-                        (index * 8) as i32,
-                    );
-                }
-                self.builder.ins().jump(done, &[]);
-                self.builder.switch_to_block(error);
-                let tag = self.constant(shape.err_tag as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), tag, destination, 0);
-                for (index, word) in payload.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        destination,
-                        ((index + 1) * 8) as i32,
-                    );
-                }
-                let zero = self.constant(0);
-                for index in (payload.len() + 1)..result_width {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        destination,
-                        (index * 8) as i32,
-                    );
-                }
-                // Nothing retained the context on refusal; drop the operation's
-                // reference before returning the untouched payload.
-                self.runtime_void(self.alloc_ops.context_release, &[pair[3]]);
-                self.builder.ins().jump(done, &[]);
-                self.builder.switch_to_block(done);
-                return Some(
-                    (0..result_width)
-                        .map(|index| {
-                            self.builder.ins().load(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                destination,
-                                (index * 8) as i32,
-                            )
-                        })
-                        .collect(),
-                );
+                return Some(self.alloc_box_try_new(pair, &payload, value.ty, expr.ty, *shape));
             }
             ExprKind::AllocBoxRead(argument) => {
                 let reference = lower!(self.scalar(argument));
@@ -6363,61 +6277,16 @@ impl Generator<'_, '_> {
                 );
                 return Some(vec![handle]);
             }
-            ExprKind::BoxReuse { owner, payload } => {
+            ExprKind::BoxReuse { owner, payload } | ExprKind::BoxReuseGrow { owner, payload } => {
                 let pointer = lower!(self.scalar(owner));
-                let old = match owner.ty {
-                    Type::Box(index) => self.program.pointees[index],
-                    _ => unreachable!("checked Box.reuse owner"),
-                };
-                let old_width = self.program.width(old);
                 // Both arguments are evaluated before the old payload is
                 // destroyed. If the payload diverges, the owner's tracked
                 // resource is still live and cleanup reclaims the box.
                 let new = lower!(self.expr(payload));
                 self.consume(owner);
                 self.consume(payload);
-                let previous = self.load_words(pointer, 0, old_width);
-                self.drop_value(old, &previous);
-                for (index, value) in new.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *value,
-                        pointer,
-                        (index * 8) as i32,
-                    );
-                }
-                let _ = self.runtime_call(self.note_reuse, &[]);
-                pointer
-            }
-            ExprKind::BoxReuseGrow { owner, payload } => {
-                let pointer = lower!(self.scalar(owner));
-                let old = match owner.ty {
-                    Type::Box(index) => self.program.pointees[index],
-                    _ => unreachable!("checked Box.reuse_grow owner"),
-                };
-                let old_width = self.program.width(old);
-                let new = lower!(self.expr(payload));
-                self.consume(owner);
-                self.consume(payload);
-                let previous = self.load_words(pointer, 0, old_width);
-                self.drop_value(old, &previous);
-                let new_width = self.program.width(payload.ty);
-                let pointer = if new_width > old_width {
-                    let bytes = self.constant((new_width * 8) as i64);
-                    self.runtime_call(self.grow, &[pointer, bytes])
-                } else {
-                    pointer
-                };
-                for (index, value) in new.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *value,
-                        pointer,
-                        (index * 8) as i32,
-                    );
-                }
-                let _ = self.runtime_call(self.note_reuse, &[]);
-                pointer
+                let grow = matches!(expr.kind, ExprKind::BoxReuseGrow { .. });
+                self.box_reuse(pointer, owner.ty, &new, payload.ty, grow)
             }
             ExprKind::ArenaNew => self.runtime_call(self.arena_new, &[]),
             ExprKind::ArenaNewWith { strategy } => {
@@ -6459,82 +6328,7 @@ impl Generator<'_, '_> {
                 let payload = lower!(self.expr(value));
                 self.consume(arena);
                 self.consume(value);
-                let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
-                let pointer = self.runtime_call(self.arena_try_alloc, &[handle, bytes]);
-                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, pointer, 0);
-                let ok = self.builder.create_block();
-                let error = self.builder.create_block();
-                let done = self.builder.create_block();
-                let result_width = self.program.width(expr.ty);
-                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                    ir::StackSlotKind::ExplicitSlot,
-                    (result_width * 8).max(1) as u32,
-                    STACK_SLOT_ALIGN_SHIFT,
-                ));
-                let destination = self.builder.ins().stack_addr(I64, slot, 0);
-                self.builder.ins().brif(failed, error, &[], ok, &[]);
-                self.builder.switch_to_block(ok);
-                for (index, word) in payload.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        pointer,
-                        (index * 8) as i32,
-                    );
-                }
-                let tag = self.constant(shape.ok_tag as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), tag, destination, 0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), pointer, destination, 8);
-                let zero = self.constant(0);
-                for index in 2..result_width {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        destination,
-                        (index * 8) as i32,
-                    );
-                }
-                self.builder.ins().jump(done, &[]);
-                self.builder.switch_to_block(error);
-                let tag = self.constant(shape.err_tag as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), tag, destination, 0);
-                for (index, word) in payload.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        destination,
-                        ((index + 1) * 8) as i32,
-                    );
-                }
-                let zero = self.constant(0);
-                for index in (payload.len() + 1)..result_width {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        destination,
-                        (index * 8) as i32,
-                    );
-                }
-                self.builder.ins().jump(done, &[]);
-                self.builder.switch_to_block(done);
-                return Some(
-                    (0..result_width)
-                        .map(|index| {
-                            self.builder.ins().load(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                destination,
-                                (index * 8) as i32,
-                            )
-                        })
-                        .collect(),
-                );
+                return Some(self.arena_try_alloc(handle, &payload, value.ty, expr.ty, *shape));
             }
             ExprKind::ArenaBoxRead(argument) => {
                 let reference = lower!(self.scalar(argument));
@@ -6574,84 +6368,7 @@ impl Generator<'_, '_> {
             ExprKind::BoxTryNew { value, shape } => {
                 let payload = lower!(self.expr(value));
                 self.consume(value);
-                let width = self.program.width(value.ty);
-                let bytes = self.constant((width * 8) as i64);
-                let handle = self.runtime_call(self.try_allocate, &[bytes]);
-                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, handle, 0);
-                let ok = self.builder.create_block();
-                let error = self.builder.create_block();
-                let done = self.builder.create_block();
-                let result_width = self.program.width(expr.ty);
-                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                    ir::StackSlotKind::ExplicitSlot,
-                    (result_width * 8).max(1) as u32,
-                    STACK_SLOT_ALIGN_SHIFT,
-                ));
-                let destination = self.builder.ins().stack_addr(I64, slot, 0);
-                self.builder.ins().brif(failed, error, &[], ok, &[]);
-                self.builder.switch_to_block(ok);
-                for (index, word) in payload.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        handle,
-                        (index * 8) as i32,
-                    );
-                }
-                let tag = self.constant(shape.ok_tag as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), tag, destination, 0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), handle, destination, 8);
-                let zero = self.constant(0);
-                for index in 2..result_width {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        destination,
-                        (index * 8) as i32,
-                    );
-                }
-                self.builder.ins().jump(done, &[]);
-                self.builder.switch_to_block(error);
-                let tag = self.constant(shape.err_tag as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), tag, destination, 0);
-                for (index, word) in payload.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        destination,
-                        ((index + 1) * 8) as i32,
-                    );
-                }
-                let zero = self.constant(0);
-                for index in (payload.len() + 1)..result_width {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        destination,
-                        (index * 8) as i32,
-                    );
-                }
-                self.builder.ins().jump(done, &[]);
-                self.builder.switch_to_block(done);
-                let _ = shape;
-                return Some(
-                    (0..result_width)
-                        .map(|index| {
-                            self.builder.ins().load(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                destination,
-                                (index * 8) as i32,
-                            )
-                        })
-                        .collect(),
-                );
+                return Some(self.box_try_new(&payload, value.ty, expr.ty, *shape));
             }
             ExprKind::BoxTryReuse {
                 owner,
@@ -6659,157 +6376,15 @@ impl Generator<'_, '_> {
                 shape,
             } => {
                 let pointer = lower!(self.scalar(owner));
-                let old = match owner.ty {
-                    Type::Box(index) => self.program.pointees[index],
-                    _ => unreachable!("checked Box.try_reuse owner"),
-                };
-                let old_width = self.program.width(old);
                 let new = lower!(self.expr(payload));
                 self.consume(owner);
                 self.consume(payload);
-                let previous = self.load_words(pointer, 0, old_width);
-                let new_width = self.program.width(payload.ty);
-                let bytes = self.constant((new_width * 8) as i64);
-                let grown = self.runtime_call(self.try_grow, &[pointer, bytes]);
-                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, grown, 0);
-                let ok = self.builder.create_block();
-                let error = self.builder.create_block();
-                let done = self.builder.create_block();
-                let result_width = self.program.width(expr.ty);
-                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                    ir::StackSlotKind::ExplicitSlot,
-                    (result_width * 8).max(1) as u32,
-                    STACK_SLOT_ALIGN_SHIFT,
-                ));
-                let destination = self.builder.ins().stack_addr(I64, slot, 0);
-                self.builder.ins().brif(failed, error, &[], ok, &[]);
-                self.builder.switch_to_block(ok);
-                self.drop_value(old, &previous);
-                for (index, word) in new.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        grown,
-                        (index * 8) as i32,
-                    );
-                }
-                let _ = self.runtime_call(self.note_reuse, &[]);
-                let tag = self.constant(shape.ok_tag as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), tag, destination, 0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), grown, destination, 8);
-                let zero = self.constant(0);
-                for index in 2..result_width {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        destination,
-                        (index * 8) as i32,
-                    );
-                }
-                self.builder.ins().jump(done, &[]);
-                self.builder.switch_to_block(error);
-                let tag = self.constant(shape.err_tag as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), tag, destination, 0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), pointer, destination, 8);
-                let zero = self.constant(0);
-                for index in 2..result_width {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        destination,
-                        (index * 8) as i32,
-                    );
-                }
-                self.builder.ins().jump(done, &[]);
-                self.builder.switch_to_block(done);
-                let _ = shape;
-                return Some(
-                    (0..result_width)
-                        .map(|index| {
-                            self.builder.ins().load(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                destination,
-                                (index * 8) as i32,
-                            )
-                        })
-                        .collect(),
-                );
+                return Some(self.box_try_reuse(pointer, owner.ty, &new, payload.ty, expr.ty, *shape));
             }
             ExprKind::BytesTryWithCapacity { capacity, shape } => {
                 let requested = lower!(self.scalar(capacity));
                 self.consume(capacity);
-                let handle = self.runtime_call(self.try_bytes_with_capacity, &[requested]);
-                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, handle, 0);
-                let ok = self.builder.create_block();
-                let error = self.builder.create_block();
-                let done = self.builder.create_block();
-                let result_width = self.program.width(expr.ty);
-                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                    ir::StackSlotKind::ExplicitSlot,
-                    (result_width * 8).max(1) as u32,
-                    STACK_SLOT_ALIGN_SHIFT,
-                ));
-                let destination = self.builder.ins().stack_addr(I64, slot, 0);
-                self.builder.ins().brif(failed, error, &[], ok, &[]);
-                self.builder.switch_to_block(ok);
-                let tag = self.constant(shape.ok_tag as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), tag, destination, 0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), handle, destination, 8);
-                let zero = self.constant(0);
-                for index in 2..result_width {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        destination,
-                        (index * 8) as i32,
-                    );
-                }
-                self.builder.ins().jump(done, &[]);
-                self.builder.switch_to_block(error);
-                let tag = self.constant(shape.err_tag as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), tag, destination, 0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), requested, destination, 8);
-                let zero = self.constant(0);
-                for index in 2..result_width {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        destination,
-                        (index * 8) as i32,
-                    );
-                }
-                self.builder.ins().jump(done, &[]);
-                self.builder.switch_to_block(done);
-                let _ = shape;
-                return Some(
-                    (0..result_width)
-                        .map(|index| {
-                            self.builder.ins().load(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                destination,
-                                (index * 8) as i32,
-                            )
-                        })
-                        .collect(),
-                );
+                return Some(self.bytes_try_with_capacity(requested, expr.ty, *shape));
             }
             ExprKind::Drop(arg) => {
                 let value = lower!(self.expr(arg));
@@ -10691,6 +10266,205 @@ impl Generator<'_, '_> {
         }
         self.builder.switch_to_block(join);
         self.builder.block_params(join).to_vec()
+    }
+    /// A fallible operation's result, of type `ty` in `shape`: the error
+    /// variant holding the words `error` emits when `failed` is set, else
+    /// the ok variant holding the words `ok` emits. Unused words are zero.
+    fn try_result(
+        &mut self,
+        failed: Value,
+        ty: Type,
+        shape: crate::runtime_types::ResultShape,
+        ok: impl FnOnce(&mut Self) -> Words,
+        error: impl FnOnce(&mut Self) -> Words,
+    ) -> Words {
+        let ok_block = self.builder.create_block();
+        let error_block = self.builder.create_block();
+        let done = self.builder.create_block();
+        let width = self.program.width(ty);
+        let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            (width * 8).max(1) as u32,
+            STACK_SLOT_ALIGN_SHIFT,
+        ));
+        let destination = self.builder.ins().stack_addr(I64, slot, 0);
+        self.builder
+            .ins()
+            .brif(failed, error_block, &[], ok_block, &[]);
+        self.builder.switch_to_block(ok_block);
+        let mut words = vec![self.constant(shape.ok_tag as i64)];
+        words.extend(ok(self));
+        self.store_variant(destination, words, width);
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(error_block);
+        let mut words = vec![self.constant(shape.err_tag as i64)];
+        words.extend(error(self));
+        self.store_variant(destination, words, width);
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
+        self.load_words(destination, 0, width)
+    }
+    /// Store `words`, padded with zeros to `width` words.
+    fn store_variant(&mut self, destination: Value, mut words: Words, width: usize) {
+        let zero = self.constant(0);
+        words.resize(width.max(words.len()), zero);
+        self.store_words(destination, &words);
+    }
+    /// `Box.try_new`: allocate and move `payload` (a `value_ty`) in, or
+    /// hand the payload back in the error variant.
+    fn box_try_new(
+        &mut self,
+        payload: &[Value],
+        value_ty: Type,
+        ty: Type,
+        shape: crate::runtime_types::ResultShape,
+    ) -> Words {
+        let bytes = self.constant((self.program.width(value_ty) * 8) as i64);
+        let handle = self.runtime_call(self.try_allocate, &[bytes]);
+        let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, handle, 0);
+        self.try_result(
+            failed,
+            ty,
+            shape,
+            |g| {
+                g.store_words(handle, payload);
+                vec![handle]
+            },
+            |_| payload.to_vec(),
+        )
+    }
+    /// `Box.reuse` (and with `grow`, `Box.reuse_grow`): drop the old
+    /// payload of the box at `pointer` and store `new` (a `payload_ty`) in
+    /// it, growing the allocation when needed.
+    fn box_reuse(
+        &mut self,
+        pointer: Value,
+        owner_ty: Type,
+        new: &[Value],
+        payload_ty: Type,
+        grow: bool,
+    ) -> Value {
+        let old = match owner_ty {
+            Type::Box(index) => self.program.pointees[index],
+            _ => unreachable!("checked Box.reuse owner"),
+        };
+        let old_width = self.program.width(old);
+        let previous = self.load_words(pointer, 0, old_width);
+        self.drop_value(old, &previous);
+        let new_width = self.program.width(payload_ty);
+        let pointer = if grow && new_width > old_width {
+            let bytes = self.constant((new_width * 8) as i64);
+            self.runtime_call(self.grow, &[pointer, bytes])
+        } else {
+            pointer
+        };
+        self.store_words(pointer, new);
+        let _ = self.runtime_call(self.note_reuse, &[]);
+        pointer
+    }
+    /// `Box.try_reuse`: drop the old payload and store `new` in the box,
+    /// growing it when needed, or hand the box back in the error variant.
+    fn box_try_reuse(
+        &mut self,
+        pointer: Value,
+        owner_ty: Type,
+        new: &[Value],
+        payload_ty: Type,
+        ty: Type,
+        shape: crate::runtime_types::ResultShape,
+    ) -> Words {
+        let old = match owner_ty {
+            Type::Box(index) => self.program.pointees[index],
+            _ => unreachable!("checked Box.try_reuse owner"),
+        };
+        let previous = self.load_words(pointer, 0, self.program.width(old));
+        let bytes = self.constant((self.program.width(payload_ty) * 8) as i64);
+        let grown = self.runtime_call(self.try_grow, &[pointer, bytes]);
+        let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, grown, 0);
+        self.try_result(
+            failed,
+            ty,
+            shape,
+            |g| {
+                g.drop_value(old, &previous);
+                g.store_words(grown, new);
+                let _ = g.runtime_call(g.note_reuse, &[]);
+                vec![grown]
+            },
+            |_| vec![pointer],
+        )
+    }
+    /// `Bytes.try_with_capacity`: a buffer, or the requested capacity in
+    /// the error variant.
+    fn bytes_try_with_capacity(
+        &mut self,
+        requested: Value,
+        ty: Type,
+        shape: crate::runtime_types::ResultShape,
+    ) -> Words {
+        let handle = self.runtime_call(self.try_bytes_with_capacity, &[requested]);
+        let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, handle, 0);
+        self.try_result(failed, ty, shape, |_| vec![handle], |_| vec![requested])
+    }
+    /// `Box.try_new_in`: a box of `payload` (a `value_ty`) from the
+    /// allocator words `pair`, or the payload back in the error variant.
+    fn alloc_box_try_new(
+        &mut self,
+        pair: [Value; 4],
+        payload: &[Value],
+        value_ty: Type,
+        ty: Type,
+        shape: crate::runtime_types::ResultShape,
+    ) -> Words {
+        let bytes = self.constant((self.program.width(value_ty) * 8) as i64);
+        let block = self.runtime_call(
+            self.alloc_ops.block_try,
+            &[pair[0], pair[1], pair[3], bytes],
+        );
+        let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, block, 0);
+        self.try_result(
+            failed,
+            ty,
+            shape,
+            |g| {
+                let data = g.runtime_call(g.alloc_ops.block_data, &[block]);
+                g.store_words(data, payload);
+                vec![g.runtime_call(
+                    g.alloc_ops.box_create,
+                    &[pair[0], pair[1], block, pair[3]],
+                )]
+            },
+            |g| {
+                // Nothing retained the context on refusal; drop the
+                // operation's reference before returning the payload.
+                g.runtime_void(g.alloc_ops.context_release, &[pair[3]]);
+                payload.to_vec()
+            },
+        )
+    }
+    /// `Arena.try_alloc`: move `payload` (a `value_ty`) into the arena
+    /// `handle`, or hand it back in the error variant.
+    fn arena_try_alloc(
+        &mut self,
+        handle: Value,
+        payload: &[Value],
+        value_ty: Type,
+        ty: Type,
+        shape: crate::runtime_types::ResultShape,
+    ) -> Words {
+        let bytes = self.constant((self.program.width(value_ty) * 8) as i64);
+        let pointer = self.runtime_call(self.arena_try_alloc, &[handle, bytes]);
+        let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, pointer, 0);
+        self.try_result(
+            failed,
+            ty,
+            shape,
+            |g| {
+                g.store_words(pointer, payload);
+                vec![pointer]
+            },
+            |_| payload.to_vec(),
+        )
     }
     /// Lower a call to `target` on its lowered argument words; `ty` is the
     /// result type. `site` is the tree path's call expression (its address

@@ -19,6 +19,7 @@ use crate::Span;
 use crate::executable::{Executable, Type};
 use crate::int::{ArithOp, IntKind, IntOp, Shift};
 use crate::lexer::Kind;
+use crate::runtime_types::ResultShape;
 
 pub(crate) use build::build;
 pub(crate) use verify::verify;
@@ -229,6 +230,35 @@ pub(crate) enum AllocOp {
     ArenaBoxRead,
     /// Move the payload out of an arena box and release it.
     ArenaBoxTake,
+    /// Drop the payload of a box (operand 0) and store a new one (1) in
+    /// it, growing the allocation with `grow` when the new one is wider.
+    BoxReuse {
+        grow: bool,
+    },
+    /// Overwrite the payload of the box behind a reference (0) with a
+    /// value (1).
+    BoxWrite,
+    /// A box of a value (0), or the value back in the error variant.
+    BoxTryNew {
+        shape: ResultShape,
+    },
+    /// `BoxReuse` with growth that can fail, handing the box (0) back.
+    BoxTryReuse {
+        shape: ResultShape,
+    },
+    /// A byte buffer of a capacity (0), or the capacity back.
+    BytesTryWithCapacity {
+        shape: ResultShape,
+    },
+    /// `BoxNew` from an allocator (0) that can fail, handing the value (1)
+    /// back.
+    AllocBoxTryNew {
+        shape: ResultShape,
+    },
+    /// `ArenaAlloc` that can fail, handing the value (1) back.
+    ArenaTryAlloc {
+        shape: ResultShape,
+    },
 }
 
 /// A run-time call that manages the handler or continuation stack.

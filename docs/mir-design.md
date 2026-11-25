@@ -255,7 +255,16 @@ FND-MIR-BUILTINS finished the ordinary values:
   I/O handles are one-word values.
 
 What remains outside the MIR, apart from effects, is listed on
-FND-MIR-SHAPES.
+FND-MIR-SHAPES. So far, that node has moved these into the MIR:
+
+- **Allocators and arenas:** an `alloc` rvalue covers allocator values
+  and contexts, arenas, allocator boxes and vectors.
+- **Box reuse and fallible allocation:** the same rvalue covers
+  `Box.reuse`, `Box.reuse_grow`, box writes, `try_new`, `try_reuse`,
+  `Bytes.try_with_capacity` and the fallible allocator and arena
+  forms. These share their native code with the tree path.
+- **Erased arguments:** an erased argument is a zero constant of its
+  type.
 
 FND-MIR-DROP-FLAGS (`mir/drop_flags.rs`) runs on every built body:
 

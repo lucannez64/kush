@@ -122,7 +122,16 @@ impl Generator<'_, '_> {
     fn mir_operand(&mut self, operand: Operand) -> Words {
         match operand {
             Operand::Copy(place) | Operand::Move(place) => self.mir_place(place),
-            Operand::Constant(value, _) => vec![self.constant(value)],
+            // A constant of a wider type (an erased argument) pads with zeros.
+            Operand::Constant(value, ty) => {
+                let mut words = vec![self.constant(value)];
+                let width = self.program.width(ty);
+                if width > 1 {
+                    let zero = self.constant(0);
+                    words.resize(width, zero);
+                }
+                words
+            }
         }
     }
 
@@ -245,6 +254,29 @@ impl Generator<'_, '_> {
                 let values = self.load_words(pointer, 0, width);
                 self.runtime_void(self.arena_box_release, &[pointer]);
                 values
+            }
+            AllocOp::BoxReuse { grow } => {
+                vec![self.box_reuse(words[0][0], types[0], &words[1], types[1], grow)]
+            }
+            AllocOp::BoxWrite => {
+                let pointer = self.load_words(words[0][0], 0, 1)[0];
+                self.store_words(pointer, &words[1]);
+                vec![self.constant(0)]
+            }
+            AllocOp::BoxTryNew { shape } => self.box_try_new(&words[0], types[0], ty, shape),
+            AllocOp::BoxTryReuse { shape } => {
+                self.box_try_reuse(words[0][0], types[0], &words[1], types[1], ty, shape)
+            }
+            AllocOp::BytesTryWithCapacity { shape } => {
+                self.bytes_try_with_capacity(words[0][0], ty, shape)
+            }
+            AllocOp::AllocBoxTryNew { shape } => {
+                let pair = self.mir_allocator(types[0], &words[0]);
+                self.alloc_box_try_new(pair, &words[1], types[1], ty, shape)
+            }
+            AllocOp::ArenaTryAlloc { shape } => {
+                let handle = self.load_words(words[0][0], 0, 1)[0];
+                self.arena_try_alloc(handle, &words[1], types[1], ty, shape)
             }
         })
     }

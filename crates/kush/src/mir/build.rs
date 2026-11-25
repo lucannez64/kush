@@ -983,6 +983,51 @@ impl Builder<'_> {
             ExprKind::ArenaBoxTake(argument) => {
                 return self.alloc_op(expr, AllocOp::ArenaBoxTake, &[(argument, true)]);
             }
+            ExprKind::BoxReuse { owner, payload } | ExprKind::BoxReuseGrow { owner, payload } => {
+                let grow = matches!(expr.kind, ExprKind::BoxReuseGrow { .. });
+                let children = [(&**owner, true), (&**payload, true)];
+                return self.alloc_op(expr, AllocOp::BoxReuse { grow }, &children);
+            }
+            ExprKind::BoxWrite(reference, value) => {
+                let children = [(&**reference, false), (&**value, true)];
+                return self.alloc_op(expr, AllocOp::BoxWrite, &children);
+            }
+            ExprKind::BoxTryNew { value, shape } => {
+                let op = AllocOp::BoxTryNew { shape: *shape };
+                return self.alloc_op(expr, op, &[(value, true)]);
+            }
+            ExprKind::BoxTryReuse {
+                owner,
+                payload,
+                shape,
+            } => {
+                let children = [(&**owner, true), (&**payload, true)];
+                let op = AllocOp::BoxTryReuse { shape: *shape };
+                return self.alloc_op(expr, op, &children);
+            }
+            ExprKind::BytesTryWithCapacity { capacity, shape } => {
+                let op = AllocOp::BytesTryWithCapacity { shape: *shape };
+                return self.alloc_op(expr, op, &[(capacity, true)]);
+            }
+            ExprKind::AllocBoxTryNew {
+                allocator,
+                value,
+                shape,
+            } => {
+                let children = [(&**allocator, true), (&**value, true)];
+                let op = AllocOp::AllocBoxTryNew { shape: *shape };
+                return self.alloc_op(expr, op, &children);
+            }
+            ExprKind::ArenaTryAlloc {
+                arena,
+                value,
+                shape,
+            } => {
+                let children = [(&**arena, true), (&**value, true)];
+                let op = AllocOp::ArenaTryAlloc { shape: *shape };
+                return self.alloc_op(expr, op, &children);
+            }
+            ExprKind::Erased(ty) => Operand::Constant(0, *ty),
             ExprKind::AbortScope {
                 label,
                 body,
