@@ -371,7 +371,7 @@ pub enum Backend {
     Llvm,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodegenOptions {
     pub optimization: Optimization,
     pub inline_scalar_callbacks: bool,
@@ -395,8 +395,17 @@ pub struct CodegenOptions {
     /// it is written.
     pub fuzz: bool,
     /// FND-MIR: lower each function the CFG IR covers from its MIR body
-    /// instead of the checked tree (`KUSH_MIR=1`).
+    /// instead of the checked tree. On by default (FND-MIR-DEFAULT);
+    /// `KUSH_MIR=0` turns it off for every build of a process.
     pub mir: bool,
+}
+impl Default for CodegenOptions {
+    fn default() -> Self {
+        Self {
+            mir: true,
+            ..Self::cranelift(Optimization::None, false)
+        }
+    }
 }
 impl CodegenOptions {
     /// Cranelift with explicit, independent controls.
@@ -409,7 +418,7 @@ impl CodegenOptions {
             native_cpu: false,
             inline_calls: false,
             fuzz: false,
-            mir: false,
+            mir: true,
         }
     }
     pub const fn release() -> Self {
@@ -421,7 +430,7 @@ impl CodegenOptions {
             native_cpu: false,
             inline_calls: true,
             fuzz: false,
-            mir: false,
+            mir: true,
         }
     }
     /// `KUSH_BACKEND=llvm|cranelift` overrides the backend of every native
@@ -444,9 +453,11 @@ impl CodegenOptions {
                 )));
             }
         }
-        // FND-MIR: replay any native build through the CFG IR.
+        // FND-MIR: `KUSH_MIR=0` replays any native build through the tree
+        // path instead of the CFG IR, `1` forces the CFG IR.
         match std::env::var("KUSH_MIR").ok().as_deref() {
-            None | Some("" | "0") => {}
+            None | Some("") => {}
+            Some("0") => self.mir = false,
             Some("1") => self.mir = true,
             Some(other) => {
                 return Err(error(format!("KUSH_MIR must be '0' or '1', not '{other}'")));
@@ -492,7 +503,7 @@ impl CodegenOptions {
             // NATIVE-INLINE is a Cranelift pass; clang inlines for LLVM.
             inline_calls: false,
             fuzz: false,
-            mir: false,
+            mir: true,
         }
     }
 }

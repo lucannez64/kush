@@ -2,8 +2,9 @@
 //!
 //! Every body the builder produces for the example corpus passes the
 //! verifier and reads back from its text form; native code lowered from it
-//! behaves as the tree path does. `KUSH_MIR=1 scripts/test-all.sh` replays
-//! the whole native suite on the MIR path.
+//! behaves as the tree path does. Native builds use the MIR by default;
+//! `KUSH_MIR=0 scripts/test-all.sh` replays the whole native suite on the
+//! tree path.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use kush::{
     executable,

@@ -146,9 +146,10 @@ The first slice (FND-MIR-CORE) is in `crates/kush/src/mir.rs`:
 - `kush mir FILE` prints the text form; `kush mir FILE --stats` prints the
   coverage. The parser reads the text back, and `tests/mir.rs` checks that
   every body built from the examples verifies and round-trips.
-- With `KUSH_MIR=1` (or `CodegenOptions::mir`), native code is lowered
-  from the MIR for every covered function and from the tree for the rest.
-  The leaf operations share the tree path's helpers.
+- With `CodegenOptions::mir`, the default since FND-MIR-DEFAULT (turned
+  off by `KUSH_MIR=0`), native code is lowered from the MIR for every
+  covered function and from the tree for the rest. The leaf operations
+  share the tree path's helpers.
 
 FND-MIR-AGGREGATES added records and enums that own nothing and hold no
 borrow. A record or enum is a run of words, so a place is a local plus at
@@ -336,9 +337,10 @@ expressions and lowers the loop body more than once:
 | Push shadows: a vector's length and capacity in variables across `v = v.push(e)` | `Speed` and LLVM | `lower_while`, `vec_push` |
 | Deferred overflow checks (`native/deferred.rs`) | `defers_overflow()` | `lower_deferred_while` |
 
-All four now exist on the MIR. With `KUSH_MIR=1`, every function the
-builder covers lowers from the MIR in every build mode. FND-MIR-DEFAULT
-makes that the default and deletes the tree lowering.
+All four now exist on the MIR, and every function the builder covers
+lowers from the MIR in every build mode. FND-MIR-DEFAULT made that the
+default; `KUSH_MIR=0` keeps the tree path until the tree lowering is
+deleted.
 
 The MIR versions are passes over a built body, run before native
 lowering. Each writes its result into the body, so the text form shows

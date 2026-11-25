@@ -4,8 +4,8 @@
 //! A [`Body`] is built from one checked function by [`build`]. Its locals
 //! keep the checked function's slot numbers, followed by temporaries; its
 //! blocks end in explicit terminators. Native code generation lowers a body
-//! instead of the tree when `KUSH_MIR=1` is set, and falls back to the tree
-//! for any function [`build`] does not cover yet.
+//! instead of the tree (unless `KUSH_MIR=0` is set), and falls back to the
+//! tree for any function [`build`] does not cover.
 //!
 //! [`text`] gives the stable text form printed by `kush mir FILE`; its
 //! parser reads the same form back, and the tests check that the two agree.
