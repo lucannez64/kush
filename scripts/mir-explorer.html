@@ -43,6 +43,9 @@
   .seg button:focus-visible, .btn:focus-visible, .chip-toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .seg button[aria-selected="true"] { background: var(--background); color: var(--foreground); box-shadow: 0 1px 2px rgb(0 0 0 / .2); }
   .seg .count { font: 11px var(--font-mono); color: var(--muted-foreground); }
+  .seg button.library { font-style: italic; }
+  .seg .lib-toggle { color: var(--primary); font-weight: 600; }
+  .seg .lib-toggle:hover { color: var(--primary); text-decoration: underline; }
   .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
   .status i { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
   .status.busy i { background: var(--warning); animation: pulse 1s ease-in-out infinite; }
@@ -231,7 +234,7 @@
 <script>
 const NS = 'http://www.w3.org/2000/svg';
 const LINE = 16, HEAD = 30, PADX = 12, MAXW = 360, MINW = 170;
-const state = { data: null, stage: 'llvm', fnName: null, selected: null, unwind: false, flags: false, dead: false, scale: null };
+const state = { data: null, stage: 'llvm', fnName: null, selected: null, unwind: false, flags: false, dead: false, library: false, scale: null };
 const $ = id => document.getElementById(id);
 const source = $('source');
 const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } },
@@ -314,18 +317,34 @@ function stats(f, a) {
 }
 
 const fns = () => state.data ? state.data.stages[state.stage] : [];
-const currentFn = () => fns().find(f => f.name === state.fnName) || fns()[0];
+// The program's own functions; imported modules' ones only on request.
+const shownFns = () => {
+  const own = fns().filter(f => f.own !== false);
+  return state.library || !own.length ? fns() : own;
+};
+const currentFn = () => shownFns().find(f => f.name === state.fnName) || shownFns()[0];
 
 function buildTabs() {
   const tabs = $('tabs'); tabs.innerHTML = '';
-  fns().forEach(f => {
+  shownFns().forEach(f => {
     const b = document.createElement('button');
     b.setAttribute('role', 'tab');
+    b.dataset.name = f.name;
     const count = f.blocks.length ? f.blocks.filter(x => analyse(f).group(x.id) !== 'dead').length : '—';
     b.innerHTML = `${escapeHtml(f.name)}<span class="count">${count}</span>`;
+    if (f.own === false) b.classList.add('library');
     b.onclick = () => { state.fnName = f.name; state.selected = null; render(false); };
     tabs.appendChild(b);
   });
+  const library = fns().filter(f => f.own === false).length;
+  if (library && fns().some(f => f.own !== false)) {
+    const b = document.createElement('button');
+    b.className = 'lib-toggle';
+    b.textContent = state.library ? 'hide library' : `+${library} library`;
+    b.title = 'Functions of the modules the program imports';
+    b.onclick = () => { state.library = !state.library; buildTabs(); render(false); };
+    tabs.appendChild(b);
+  }
 }
 
 function render(keepScale) {
@@ -333,7 +352,7 @@ function render(keepScale) {
   $('legend-added').style.display = state.stage === 'built' ? 'none' : '';
   const f = currentFn();
   const scroller = $('scroller');
-  document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', f && b.firstChild.textContent === f.name));
+  document.querySelectorAll('#tabs button[data-name]').forEach(b => b.setAttribute('aria-selected', f && b.dataset.name === f.name));
   if (!f) { scroller.innerHTML = ''; $('empty').style.display = ''; return; }
   state.fnName = f.name;
   fnNames = new Set(fns().map(x => x.name));
@@ -491,13 +510,17 @@ function applyScale() {
 // The selected block's source spans, highlighted behind the editor's text.
 let spans = [];
 function showDetail(f, b) {
-  spans = state.data.source === source.value
-    ? [...b.statements, b.terminator].map(s => s.span).filter(s => s && s[1] > s[0] && s[1] - s[0] < 160) : [];
+  // A library function's spans are in its module's file, not the editor's.
+  spans = f.own !== false && state.data.source === source.value
+    ? [...b.statements, b.terminator].map(s => s.span)
+      // Setup and cleanup carry the whole function's span; skip those.
+      .filter(s => s && s[1] > s[0] && s[1] - s[0] < 160 && !/^fn\b/.test(source.value.slice(s[0], s[0] + 3)))
+    : [];
   paintBackdrop();
   const lines = [...b.statements.map(s => htmlLine(s.text, isFlag(s.text))), htmlLine(b.terminator.text)];
   const head = `<span class="block">bb${b.id}</span>${b.unwind != null ? ` <span class="muted">(unwind </span><span class="block">bb${b.unwind}</span><span class="muted">)</span>` : ''}<span class="muted">: {</span>`;
   $('mir').innerHTML = head + '\n' + lines.map(l => '    ' + l + '<span class="muted">;</span>').join('\n') + '\n<span class="muted">}</span>';
-  $('mir-title').textContent = `bb${b.id} in ${f.name}`;
+  $('mir-title').textContent = `bb${b.id} in ${f.name}${f.own === false ? ' (library)' : ''}`;
 }
 function paintBackdrop() {
   const text = source.value, marks = new Uint8Array(text.length + 1);

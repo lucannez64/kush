@@ -96,69 +96,41 @@ def pretty(text):
     )
 
 
+def builtin_name(target):
+    """A short name for a builtin's serde form: `Vec.Push`, `Bytes.Len`,
+    `Foreign#74`."""
+
+    def label(value):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            return next(iter(value), "?")
+        if isinstance(value, list) and value:
+            return label(value[0])
+        return str(value)
+
+    if isinstance(target, dict) and len(target) == 1:
+        group, value = next(iter(target.items()))
+        if isinstance(value, (int, float)):
+            return f"{group}#{value}"
+        return f"{group}.{label(value)}"
+    return label(target)
+
+
 def parse(text):
-    """The functions of a `kush mir` dump, with each block's edges."""
+    """The functions of a `kush mir` dump, with each block's edges. A
+    function this cannot read is listed with the reason instead."""
     functions = []
     for chunk in re.split(r"^// function \d+\n", text, flags=re.M)[1:]:
-        lines = chunk.rstrip("\n").split("\n")
-        header = lines[0]
-        if header.startswith("// fn "):
-            functions.append(dict(name=header[6:].split(":")[0], uncovered=header[6:], blocks=[]))
-            continue
-        name = re.match(r'fn "([^"]+)"', header).group(1)
-        builtins, locals_, blocks, current = {}, [], [], None
-        for line in lines[1:]:
-            s = line.strip()
-            m = re.match(r'builtin (\d+) = "(.*)";$', s)
-            if m:
-                (group, value), = json.loads(json.loads('"' + m.group(2) + '"')).items()
-                op = value[0] if isinstance(value, list) else value
-                builtins[m.group(1)] = f"{group}.{op if isinstance(op, str) else next(iter(op))}"
-                continue
-            if s.startswith(("let ", "temp ")):
-                locals_.append(s.rstrip(";"))
-                continue
-            m = re.match(r"bb(\d+)(?: \(unwind bb(\d+)\))?: \{$", s)
-            if m:
-                current = dict(
-                    id=int(m.group(1)),
-                    unwind=int(m.group(2)) if m.group(2) else None,
-                    lines=[],
-                )
-                blocks.append(current)
-                continue
-            if s and s != "}" and current is not None:
-                current["lines"].append(s)
-        out = []
-        for block in blocks:
-            parsed = []
-            for s in block["lines"]:
-                m = re.match(r"(.*) @(\d+)\.\.(\d+);$", s)
-                raw, span = (m.group(1), [int(m.group(2)), int(m.group(3))]) if m else (s.rstrip(";"), None)
-                raw = re.sub(r"builtin (\d+)", lambda x: builtins.get(x.group(1), x.group(0)), raw)
-                parsed.append(dict(text=pretty(raw), raw=raw, span=span))
-            *statements, terminator = parsed
-            t = terminator["raw"]
-            edges = []
-            if t.startswith("switch"):
-                cases = re.search(r"\[(.*)\] otherwise bb(\d+)", t)
-                for case in filter(None, cases.group(1).split(", ")):
-                    value, target = re.match(r"(-?\d+) -> bb(\d+)", case).groups()
-                    edges.append(dict(to=int(target), label=value, kind="normal"))
-                edges.append(dict(to=int(cases.group(2)), label="else", kind="normal"))
-            else:
-                for target in re.findall(r"(?:goto|->) bb(\d+)", t):
-                    edges.append(dict(to=int(target), label="", kind="normal"))
-                for target in re.findall(r"unwind bb(\d+)", t):
-                    edges.append(dict(to=int(target), label="unwind", kind="unwind"))
-            kind = t.split()[0]
-            if " = call " in t:
-                kind = "call"
-            out.append(dict(
-                id=block["id"], unwind=block["unwind"], statements=statements,
-                terminator=terminator, edges=edges, kind=kind,
+        header = chunk.split("\n", 1)[0]
+        try:
+            functions.append(parse_function(chunk))
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
+            name = re.match(r'(?:fn "|// fn )([^":]+)', header)
+            functions.append(dict(
+                name=name.group(1) if name else "?", blocks=[],
+                uncovered=f"the explorer could not read its MIR ({error})",
             ))
-        functions.append(dict(name=name, signature=header.rstrip(" {"), locals=locals_, blocks=out))
     names = {str(i): f["name"] for i, f in enumerate(functions)}
     for function in functions:
         for block in function["blocks"]:
@@ -166,6 +138,65 @@ def parse(text):
                 for key in ("text", "raw"):
                     s[key] = re.sub(r"call fn (\d+)", lambda x: "call " + names[x.group(1)], s[key])
     return functions
+
+
+def parse_function(chunk):
+    lines = chunk.rstrip("\n").split("\n")
+    header = lines[0]
+    if header.startswith("// fn "):
+        return dict(name=header[6:].split(":")[0], uncovered=header[6:], blocks=[])
+    name = re.match(r'fn "([^"]+)"', header).group(1)
+    builtins, locals_, blocks, current = {}, [], [], None
+    for line in lines[1:]:
+        s = line.strip()
+        m = re.match(r'builtin (\d+) = "(.*)";$', s)
+        if m:
+            builtins[m.group(1)] = builtin_name(json.loads(json.loads('"' + m.group(2) + '"')))
+            continue
+        if s.startswith(("let ", "temp ")):
+            locals_.append(s.rstrip(";"))
+            continue
+        m = re.match(r"bb(\d+)(?: \(unwind bb(\d+)\))?: \{$", s)
+        if m:
+            current = dict(
+                id=int(m.group(1)),
+                unwind=int(m.group(2)) if m.group(2) else None,
+                lines=[],
+            )
+            blocks.append(current)
+            continue
+        if s and s != "}" and current is not None:
+            current["lines"].append(s)
+    out = []
+    for block in blocks:
+        parsed = []
+        for s in block["lines"]:
+            m = re.match(r"(.*) @(\d+)\.\.(\d+);$", s)
+            raw, span = (m.group(1), [int(m.group(2)), int(m.group(3))]) if m else (s.rstrip(";"), None)
+            raw = re.sub(r"builtin (\d+)", lambda x: builtins.get(x.group(1), x.group(0)), raw)
+            parsed.append(dict(text=pretty(raw), raw=raw, span=span))
+        *statements, terminator = parsed
+        t = terminator["raw"]
+        edges = []
+        if t.startswith("switch"):
+            cases = re.search(r"\[(.*)\] otherwise bb(\d+)", t)
+            for case in filter(None, cases.group(1).split(", ")):
+                value, target = re.match(r"(-?\d+) -> bb(\d+)", case).groups()
+                edges.append(dict(to=int(target), label=value, kind="normal"))
+            edges.append(dict(to=int(cases.group(2)), label="else", kind="normal"))
+        else:
+            for target in re.findall(r"(?:goto|->) bb(\d+)", t):
+                edges.append(dict(to=int(target), label="", kind="normal"))
+            for target in re.findall(r"unwind bb(\d+)", t):
+                edges.append(dict(to=int(target), label="unwind", kind="unwind"))
+        kind = t.split()[0]
+        if " = call " in t:
+            kind = "call"
+        out.append(dict(
+            id=block["id"], unwind=block["unwind"], statements=statements,
+            terminator=terminator, edges=edges, kind=kind,
+        ))
+    return dict(name=name, signature=header.rstrip(" {"), locals=locals_, blocks=out)
 
 
 def passes(function):
@@ -208,10 +239,15 @@ def explore(source, kush):
                  for s in b["statements"] + [b["terminator"]]
                  if s["span"] and s["span"][1] > s["span"][0]]
         return min(spans, default=1 << 60)
+    # The program's own functions, in source order; imported modules' after,
+    # by name. Their spans point into the modules' files, not this one.
+    declared = set(re.findall(r"\bfn\s+([A-Za-z_]\w*)", source))
     order = {f["name"]: start(f) for f in stages["built"]}
     built = {f["name"]: f for f in stages["built"]}
     for stage, functions in stages.items():
-        functions.sort(key=lambda f: order.get(f["name"], 1 << 60))
+        for function in functions:
+            function["own"] = function["name"] in declared
+        functions.sort(key=lambda f: (not f["own"], order.get(f["name"], 1 << 60) if f["own"] else 0, f["name"]))
         for function in functions:
             original = len(built.get(function["name"], function)["blocks"])
             function["original"] = original
