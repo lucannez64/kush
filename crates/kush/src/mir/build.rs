@@ -674,16 +674,23 @@ impl Builder<'_> {
         let mut slots = Vec::new();
         for statement in &block.statements {
             match statement {
-                TreeStatement::Let(slot, expr) => {
+                TreeStatement::Let(slot, expr) if self.erased_local(*slot) => {
                     let Some(value) = self.expr(expr)? else {
                         return Ok(None);
                     };
                     self.consume(expr);
-                    if self.erased_local(*slot) {
-                        self.discard(value, expr.ty, expr.span);
-                        continue;
-                    }
-                    self.assign(*slot, Rvalue::Use(value), expr.span);
+                    self.discard(value, expr.ty, expr.span);
+                }
+                TreeStatement::Let(slot, expr) => {
+                    // FND-MIR-DIRECT-INIT: the binding takes the value as
+                    // soon as it exists, so nothing can panic while only a
+                    // temporary holds it. The temporary needs no resource
+                    // (no cleanup copy, no drop flag), and its definition
+                    // can write the binding itself.
+                    let Some(value) = self.untracked(expr)? else {
+                        return Ok(None);
+                    };
+                    self.initialize(*slot, value, expr.span);
                     self.activate_local(*slot, expr.span);
                     slots.push(*slot);
                 }
@@ -753,14 +760,69 @@ impl Builder<'_> {
     /// Lower an expression; an owned result becomes live, as the tree
     /// path's `expr` tracks it.
     fn expr(&mut self, expr: &Expr) -> Result<Option<Operand>, String> {
-        if !plain(self.program, expr.ty) {
-            return Err(format!("a value of type {:?}", expr.ty));
-        }
-        let value = self.expression(expr)?;
+        let value = self.untracked(expr)?;
         if let Some(value) = value {
             self.track(expr, value);
         }
         Ok(value)
+    }
+
+    /// Lower an expression whose owned result a parent takes at once: its
+    /// resource is never live, so nothing tracks it.
+    fn untracked(&mut self, expr: &Expr) -> Result<Option<Operand>, String> {
+        if !plain(self.program, expr.ty) {
+            return Err(format!("a value of type {:?}", expr.ty));
+        }
+        self.expression(expr)
+    }
+
+    /// `slot = value` for a new binding. When `value` moves a temporary
+    /// defined just before (by the last statement, or by the call that
+    /// ends the previous block), that definition writes `slot` instead.
+    fn initialize(&mut self, slot: LocalId, value: Operand, span: Span) {
+        if let Operand::Move(place) = value
+            && place.field.is_none()
+            && !place.deref
+            && self.locals[place.local].temporary
+            && self.locals[place.local].ty == self.locals[slot].ty
+            && self.retarget(place.local, slot)
+        {
+            return;
+        }
+        self.assign(slot, Rvalue::Use(value), span);
+    }
+
+    /// Make the definition of `temp` that immediately precedes the current
+    /// point write `slot`. Returns whether there was one.
+    fn retarget(&mut self, temp: LocalId, slot: LocalId) -> bool {
+        let Some(current) = self.current else {
+            return false;
+        };
+        if let Some(last) = self.blocks[current].statements.last_mut() {
+            let StatementKind::Assign(place, _) = &mut last.kind;
+            if *place == Place::local(temp) {
+                *place = Place::local(slot);
+                return true;
+            }
+            return false;
+        }
+        // An empty block entered from the call that defines the temporary.
+        for block in &mut self.blocks {
+            if let Some(Terminator {
+                kind:
+                    TerminatorKind::Call {
+                        destination, next, ..
+                    },
+                ..
+            }) = &mut block.terminator
+                && *destination == temp
+                && *next == current
+            {
+                *destination = slot;
+                return true;
+            }
+        }
+        false
     }
 
     fn expression(&mut self, expr: &Expr) -> Result<Option<Operand>, String> {

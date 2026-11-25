@@ -194,6 +194,15 @@ pub(super) fn rvalue_operands(rvalue: &Rvalue) -> Vec<Operand> {
     }
 }
 
+/// Whether a statement can raise a panic: anything but moving words.
+fn may_panic(statement: &Statement) -> bool {
+    let StatementKind::Assign(place, rvalue) = &statement.kind;
+    !(matches!(
+        rvalue,
+        Rvalue::Use(_) | Rvalue::Ref(_) | Rvalue::Aggregate(..)
+    ) && !place.deref)
+}
+
 fn apply(statement: &Statement, state: &mut [Value], index: &impl Fn(LocalId) -> Option<usize>) {
     let StatementKind::Assign(place, rvalue) = &statement.kind;
     if let Some(flag) = index(place.local)
@@ -239,14 +248,16 @@ fn entry_states(
         queued[block] = false;
         let data = &body.blocks[block];
         let mut state = states[block].clone();
-        if let Some(unwind) = data.unwind {
-            flow(&mut states, &mut pending, &mut queued, unwind, &state);
-        }
+        // A statement's panic reaches the unwind target with the flags as
+        // they are before it: a flag assignment cannot panic, and one that
+        // can panic assigns no flag before it does.
         for statement in &data.statements {
-            apply(statement, &mut state, index);
-            if let Some(unwind) = data.unwind {
+            if let Some(unwind) = data.unwind
+                && may_panic(statement)
+            {
                 flow(&mut states, &mut pending, &mut queued, unwind, &state);
             }
+            apply(statement, &mut state, index);
         }
         let mut successors = Vec::new();
         match &data.terminator.kind {
