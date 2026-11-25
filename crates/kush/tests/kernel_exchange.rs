@@ -31,6 +31,7 @@ const CORPUS: &[(&str, &str)] = &[
         "logical-lambdas",
         include_str!("../../../examples/logical-lambdas.kush"),
     ),
+    ("integers", include_str!("../../../examples/integers.kush")),
 ];
 
 fn module(source: &str) -> kush::check::CheckedModule {

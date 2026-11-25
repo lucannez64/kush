@@ -1,0 +1,402 @@
+module examples.integers;
+
+// PROOF-KERNEL-INT (docs/proof-systems.md, option P-A, step 1): integers in
+// the logical kernel, built from the compact `Nat`. `Integer` is ordinary
+// positive logical data, so both kernels check it without new rules.
+//
+// `Pos(n)` is n and `NegSucc(n)` is -(n + 1): every integer has exactly one
+// spelling. Addition steps a number up or down one unit at a time, so
+// `a + 0 = a` holds by computation and the lemmas below are short inductions.
+
+total enum Integer {
+    Pos(Nat): Integer,
+    NegSucc(Nat): Integer,
+}
+
+type ConstInteger<n: Nat> = Integer;
+type IntegerToInteger<a: Integer> = Integer;
+
+// --- Successor and predecessor -------------------------------------------
+
+total fn succ_pos(n: Nat) -> Integer ! {} { Pos(Nat.succ(n)) }
+total fn succ_neg_zero() -> Integer ! {} { Pos(0) }
+total fn succ_neg_step(k: Nat, ih: Integer) -> Integer ! {} { NegSucc(k) }
+total fn succ_neg(n: Nat) -> Integer ! {} {
+    Nat.induct(ConstInteger, succ_neg_zero(), succ_neg_step, n)
+}
+
+/// a + 1.
+total fn succ(a: Integer) -> Integer ! {} {
+    Data.elim::<Integer>(IntegerToInteger, succ_pos, succ_neg, a)
+}
+
+total fn pred_pos_zero() -> Integer ! {} { NegSucc(0) }
+total fn pred_pos_step(k: Nat, ih: Integer) -> Integer ! {} { Pos(k) }
+total fn pred_pos(n: Nat) -> Integer ! {} {
+    Nat.induct(ConstInteger, pred_pos_zero(), pred_pos_step, n)
+}
+total fn pred_neg(n: Nat) -> Integer ! {} { NegSucc(Nat.succ(n)) }
+
+/// a - 1.
+total fn pred(a: Integer) -> Integer ! {} {
+    Data.elim::<Integer>(IntegerToInteger, pred_pos, pred_neg, a)
+}
+
+// --- Addition, negation, subtraction --------------------------------------
+
+total fn up_step(k: Nat, acc: Integer) -> Integer ! {} { succ(acc) }
+total fn down_step(k: Nat, acc: Integer) -> Integer ! {} { pred(acc) }
+
+/// a + n, one unit at a time.
+total fn add_nat(a: Integer, n: Nat) -> Integer ! {} {
+    Nat.induct(ConstInteger, a, up_step, n)
+}
+
+/// a - n, one unit at a time.
+total fn sub_nat(a: Integer, n: Nat) -> Integer ! {} {
+    Nat.induct(ConstInteger, a, down_step, n)
+}
+
+type AddMotive<a: Integer, b: Integer> = Integer;
+
+total fn add_pos<a: Integer>(n: Nat) -> Integer ! {} { add_nat(a, n) }
+total fn add_neg<a: Integer>(n: Nat) -> Integer ! {} { pred(sub_nat(a, n)) }
+
+/// a + b.
+total fn add(a: Integer, b: Integer) -> Integer ! {} {
+    Data.elim::<Integer>(AddMotive::<a>, add_pos::<a>, add_neg::<a>, b)
+}
+
+total fn neg_nat_zero() -> Integer ! {} { Pos(0) }
+total fn neg_nat_step(k: Nat, ih: Integer) -> Integer ! {} { NegSucc(k) }
+
+/// -n for a natural n.
+total fn neg_nat(n: Nat) -> Integer ! {} {
+    Nat.induct(ConstInteger, neg_nat_zero(), neg_nat_step, n)
+}
+total fn neg_neg_succ(n: Nat) -> Integer ! {} { Pos(Nat.succ(n)) }
+
+/// -a.
+total fn neg(a: Integer) -> Integer ! {} {
+    Data.elim::<Integer>(IntegerToInteger, neg_nat, neg_neg_succ, a)
+}
+
+/// a - b.
+total fn sub(a: Integer, b: Integer) -> Integer ! {} { add(a, neg(b)) }
+
+// --- Scalar multiplication --------------------------------------------------
+
+total fn scale_step<a: Integer>(k: Nat, acc: Integer) -> Integer ! {} { add(acc, a) }
+
+/// k * a for a natural k (k additions of a).
+total fn scale_nat(k: Nat, a: Integer) -> Integer ! {} {
+    Nat.induct(ConstInteger, Pos(0), scale_step::<a>, k)
+}
+
+type ScaleMotive<a: Integer, c: Integer> = Integer;
+total fn scale_pos<a: Integer>(k: Nat) -> Integer ! {} { scale_nat(k, a) }
+total fn scale_neg<a: Integer>(k: Nat) -> Integer ! {} { neg(scale_nat(Nat.succ(k), a)) }
+
+/// c * a for an integer constant c, as the facts' linear terms use it.
+total fn scale(c: Integer, a: Integer) -> Integer ! {} {
+    Data.elim::<Integer>(ScaleMotive::<a>, scale_pos::<a>, scale_neg::<a>, c)
+}
+
+// --- Order ------------------------------------------------------------------
+
+/// `NonNeg<a>`: a is 0 or more. The evidence names the natural it is.
+total enum NonNeg<a: Integer> {
+    IsNat<n: Nat>: NonNeg<Pos<n>>,
+}
+
+/// Evidence that the natural n, as an integer, is not negative.
+total fn is_nat<n: Nat>() -> NonNeg<Pos<n>> ! {} {
+    NonNeg.IsNat::<Pos<n>, n>
+}
+
+/// a <= b: the difference b - a is not negative.
+type Le<a: Integer, b: Integer> = NonNeg<sub<b, a>>;
+
+/// a < b: a + 1 <= b.
+type Lt<a: Integer, b: Integer> = Le<succ<a>, b>;
+
+// --- Computation: closed terms reduce, so `refl` proves them ----------------
+
+total fn two_minus_five() -> Eq<Integer, sub<Pos<2>, Pos<5>>, NegSucc<2>> ! {} {
+    refl::<Integer>(NegSucc(2))
+}
+
+total fn negative_sum() -> Eq<Integer, add<NegSucc<2>, NegSucc<0>>, NegSucc<3>> ! {} {
+    refl::<Integer>(NegSucc(3))
+}
+
+total fn three_times_minus_two()
+    -> Eq<Integer, scale<Pos<3>, NegSucc<1>>, NegSucc<5>> ! {} {
+    refl::<Integer>(NegSucc(5))
+}
+
+total fn minus_two_times_four()
+    -> Eq<Integer, scale<NegSucc<1>, Pos<4>>, NegSucc<7>> ! {} {
+    refl::<Integer>(NegSucc(7))
+}
+
+total fn three_le_seven() -> Le<Pos<3>, Pos<7>> ! {} { is_nat::<4>() }
+
+total fn minus_four_lt_one() -> Lt<NegSucc<3>, Pos<1>> ! {} { is_nat::<4>() }
+
+// --- succ and pred are inverses ---------------------------------------------
+
+type SuccPred<a: Integer> = Eq<Integer, succ<pred<a>>, a>;
+type SuccPredPos<n: Nat> = SuccPred<Pos<n>>;
+
+total fn succ_pred_pos_step(k: Nat, ih: SuccPredPos<k>) -> SuccPredPos<Nat.succ<k>> ! {} {
+    refl::<Integer>(Pos(Nat.succ(k)))
+}
+total fn succ_pred_pos(n: Nat) -> SuccPred<Pos<n>> ! {} {
+    Nat.induct(SuccPredPos, refl::<Integer>(Pos(0)), succ_pred_pos_step, n)
+}
+total fn succ_pred_neg(n: Nat) -> SuccPred<NegSucc<n>> ! {} {
+    refl::<Integer>(NegSucc(n))
+}
+
+/// (a - 1) + 1 = a.
+total fn succ_pred(a: Integer) -> SuccPred<a> ! {} {
+    Data.elim::<Integer>(SuccPred, succ_pred_pos, succ_pred_neg, a)
+}
+
+type PredSucc<a: Integer> = Eq<Integer, pred<succ<a>>, a>;
+type PredSuccNeg<n: Nat> = PredSucc<NegSucc<n>>;
+
+total fn pred_succ_pos(n: Nat) -> PredSucc<Pos<n>> ! {} {
+    refl::<Integer>(Pos(n))
+}
+total fn pred_succ_neg_step(k: Nat, ih: PredSuccNeg<k>) -> PredSuccNeg<Nat.succ<k>> ! {} {
+    refl::<Integer>(NegSucc(Nat.succ(k)))
+}
+total fn pred_succ_neg(n: Nat) -> PredSucc<NegSucc<n>> ! {} {
+    Nat.induct(PredSuccNeg, refl::<Integer>(NegSucc(0)), pred_succ_neg_step, n)
+}
+
+/// (a + 1) - 1 = a.
+total fn pred_succ(a: Integer) -> PredSucc<a> ! {} {
+    Data.elim::<Integer>(PredSucc, pred_succ_pos, pred_succ_neg, a)
+}
+
+// --- Identities -------------------------------------------------------------
+
+/// a + 0 = a, by computation.
+total fn add_zero(a: Integer) -> Eq<Integer, add<a, Pos<0>>, a> ! {} {
+    refl::<Integer>(a)
+}
+
+/// -(-a) = a.
+type NegNeg<a: Integer> = Eq<Integer, neg<neg<a>>, a>;
+type NegNegPos<n: Nat> = NegNeg<Pos<n>>;
+
+total fn neg_neg_pos_step(k: Nat, ih: NegNegPos<k>) -> NegNegPos<Nat.succ<k>> ! {} {
+    refl::<Integer>(Pos(Nat.succ(k)))
+}
+total fn neg_neg_pos(n: Nat) -> NegNeg<Pos<n>> ! {} {
+    Nat.induct(NegNegPos, refl::<Integer>(Pos(0)), neg_neg_pos_step, n)
+}
+total fn neg_neg_neg(n: Nat) -> NegNeg<NegSucc<n>> ! {} {
+    refl::<Integer>(NegSucc(n))
+}
+total fn neg_neg(a: Integer) -> NegNeg<a> ! {} {
+    Data.elim::<Integer>(NegNeg, neg_neg_pos, neg_neg_neg, a)
+}
+
+// --- Equality tools ---------------------------------------------------------
+
+type Reverse<T: Type, left: T, right: T> = Eq<T, right, left>;
+type From<T: Type, left: T, right: T> = Eq<T, left, right>;
+
+total fn symmetry<T: Type>(x: T, y: T, proof: Eq<T, x, y>) -> Eq<T, y, x> ! {} {
+    Eq.transport::<T>(x, y, Reverse::<T, x>, proof, refl::<T>(x))
+}
+
+total fn transitivity<T: Type>(x: T, y: T, z: T, first: Eq<T, x, y>, second: Eq<T, y, z>)
+    -> Eq<T, x, z> ! {} {
+    Eq.transport::<T>(y, z, From::<T, x>, second, first)
+}
+
+type SuccCong<x: Integer, z: Integer> = Eq<Integer, succ<x>, succ<z>>;
+type PredCong<x: Integer, z: Integer> = Eq<Integer, pred<x>, pred<z>>;
+
+total fn succ_cong(x: Integer, y: Integer, proof: Eq<Integer, x, y>)
+    -> Eq<Integer, succ<x>, succ<y>> ! {} {
+    Eq.transport::<Integer>(x, y, SuccCong::<x>, proof, refl::<Integer>(succ(x)))
+}
+
+total fn pred_cong(x: Integer, y: Integer, proof: Eq<Integer, x, y>)
+    -> Eq<Integer, pred<x>, pred<y>> ! {} {
+    Eq.transport::<Integer>(x, y, PredCong::<x>, proof, refl::<Integer>(pred(x)))
+}
+
+// --- 0 + a = a ----------------------------------------------------------------
+
+type ZeroAddPos<n: Nat> = Eq<Integer, add_nat<Pos<0>, n>, Pos<n>>;
+
+total fn zero_add_pos_step(k: Nat, ih: ZeroAddPos<k>) -> ZeroAddPos<Nat.succ<k>> ! {} {
+    succ_cong(add_nat(Pos(0), k), Pos(k), ih)
+}
+total fn zero_add_pos(n: Nat) -> Eq<Integer, add<Pos<0>, Pos<n>>, Pos<n>> ! {} {
+    Nat.induct(ZeroAddPos, refl::<Integer>(Pos(0)), zero_add_pos_step, n)
+}
+
+type ZeroAddNeg<n: Nat> = Eq<Integer, pred<sub_nat<Pos<0>, n>>, NegSucc<n>>;
+
+total fn zero_add_neg_step(k: Nat, ih: ZeroAddNeg<k>) -> ZeroAddNeg<Nat.succ<k>> ! {} {
+    pred_cong(pred(sub_nat(Pos(0), k)), NegSucc(k), ih)
+}
+total fn zero_add_neg(n: Nat) -> Eq<Integer, add<Pos<0>, NegSucc<n>>, NegSucc<n>> ! {} {
+    Nat.induct(ZeroAddNeg, refl::<Integer>(NegSucc(0)), zero_add_neg_step, n)
+}
+
+type ZeroAdd<a: Integer> = Eq<Integer, add<Pos<0>, a>, a>;
+
+/// 0 + a = a.
+total fn zero_add(a: Integer) -> ZeroAdd<a> ! {} {
+    Data.elim::<Integer>(ZeroAdd, zero_add_pos, zero_add_neg, a)
+}
+
+// --- succ and pred move through repeated steps ------------------------------
+
+type SubNatSucc<a: Integer, n: Nat> = Eq<Integer, sub_nat<succ<a>, n>, succ<sub_nat<a, n>>>;
+
+total fn sub_nat_succ_step<a: Integer>(k: Nat, ih: SubNatSucc<a, k>)
+    -> SubNatSucc<a, Nat.succ<k>> ! {} {
+    transitivity::<Integer>(
+        pred(sub_nat(succ(a), k)),
+        sub_nat(a, k),
+        succ(pred(sub_nat(a, k))),
+        transitivity::<Integer>(
+            pred(sub_nat(succ(a), k)),
+            pred(succ(sub_nat(a, k))),
+            sub_nat(a, k),
+            pred_cong(sub_nat(succ(a), k), succ(sub_nat(a, k)), ih),
+            pred_succ(sub_nat(a, k)),
+        ),
+        symmetry::<Integer>(succ(pred(sub_nat(a, k))), sub_nat(a, k), succ_pred(sub_nat(a, k))),
+    )
+}
+
+/// (a + 1) - n = (a - n) + 1.
+total fn sub_nat_succ(a: Integer, n: Nat) -> SubNatSucc<a, n> ! {} {
+    Nat.induct(SubNatSucc::<a>, refl::<Integer>(succ(a)), sub_nat_succ_step::<a>, n)
+}
+
+type AddNatPred<a: Integer, n: Nat> = Eq<Integer, add_nat<pred<a>, n>, pred<add_nat<a, n>>>;
+
+total fn add_nat_pred_step<a: Integer>(k: Nat, ih: AddNatPred<a, k>)
+    -> AddNatPred<a, Nat.succ<k>> ! {} {
+    transitivity::<Integer>(
+        succ(add_nat(pred(a), k)),
+        add_nat(a, k),
+        pred(succ(add_nat(a, k))),
+        transitivity::<Integer>(
+            succ(add_nat(pred(a), k)),
+            succ(pred(add_nat(a, k))),
+            add_nat(a, k),
+            succ_cong(add_nat(pred(a), k), pred(add_nat(a, k)), ih),
+            succ_pred(add_nat(a, k)),
+        ),
+        symmetry::<Integer>(pred(succ(add_nat(a, k))), add_nat(a, k), pred_succ(add_nat(a, k))),
+    )
+}
+
+/// (a - 1) + n = (a + n) - 1.
+total fn add_nat_pred(a: Integer, n: Nat) -> AddNatPred<a, n> ! {} {
+    Nat.induct(AddNatPred::<a>, refl::<Integer>(pred(a)), add_nat_pred_step::<a>, n)
+}
+
+// --- a - a = 0 and a <= a -----------------------------------------------------
+
+type SubNatSelf<n: Nat> = Eq<Integer, sub_nat<Pos<n>, n>, Pos<0>>;
+
+total fn sub_nat_self_step(k: Nat, ih: SubNatSelf<k>) -> SubNatSelf<Nat.succ<k>> ! {} {
+    transitivity::<Integer>(
+        pred(sub_nat(succ(Pos(k)), k)),
+        sub_nat(Pos(k), k),
+        Pos(0),
+        transitivity::<Integer>(
+            pred(sub_nat(succ(Pos(k)), k)),
+            pred(succ(sub_nat(Pos(k), k))),
+            sub_nat(Pos(k), k),
+            pred_cong(sub_nat(succ(Pos(k)), k), succ(sub_nat(Pos(k), k)), sub_nat_succ(Pos(k), k)),
+            pred_succ(sub_nat(Pos(k), k)),
+        ),
+        ih,
+    )
+}
+
+/// n - n = 0, one unit at a time.
+total fn sub_nat_self(n: Nat) -> SubNatSelf<n> ! {} {
+    Nat.induct(SubNatSelf, refl::<Integer>(Pos(0)), sub_nat_self_step, n)
+}
+
+type AddNatNegSelf<n: Nat> = Eq<Integer, add_nat<NegSucc<n>, n>, NegSucc<0>>;
+
+total fn add_nat_neg_self_step(k: Nat, ih: AddNatNegSelf<k>) -> AddNatNegSelf<Nat.succ<k>> ! {} {
+    transitivity::<Integer>(
+        succ(add_nat(pred(NegSucc(k)), k)),
+        add_nat(NegSucc(k), k),
+        NegSucc(0),
+        transitivity::<Integer>(
+            succ(add_nat(pred(NegSucc(k)), k)),
+            succ(pred(add_nat(NegSucc(k), k))),
+            add_nat(NegSucc(k), k),
+            succ_cong(add_nat(pred(NegSucc(k)), k), pred(add_nat(NegSucc(k), k)), add_nat_pred(NegSucc(k), k)),
+            succ_pred(add_nat(NegSucc(k), k)),
+        ),
+        ih,
+    )
+}
+
+/// -(n + 1) + n = -1.
+total fn add_nat_neg_self(n: Nat) -> AddNatNegSelf<n> ! {} {
+    Nat.induct(AddNatNegSelf, refl::<Integer>(NegSucc(0)), add_nat_neg_self_step, n)
+}
+
+type SubSelf<a: Integer> = Eq<Integer, add<a, neg<a>>, Pos<0>>;
+type SubSelfPos<n: Nat> = SubSelf<Pos<n>>;
+
+total fn sub_self_pos_step(k: Nat, ih: SubSelfPos<k>) -> SubSelfPos<Nat.succ<k>> ! {} {
+    pred_cong(
+        sub_nat(succ(Pos(k)), k),
+        Pos(1),
+        transitivity::<Integer>(
+            sub_nat(succ(Pos(k)), k),
+            succ(sub_nat(Pos(k), k)),
+            Pos(1),
+            sub_nat_succ(Pos(k), k),
+            succ_cong(sub_nat(Pos(k), k), Pos(0), sub_nat_self(k)),
+        ),
+    )
+}
+total fn sub_self_pos(n: Nat) -> SubSelf<Pos<n>> ! {} {
+    Nat.induct(SubSelfPos, refl::<Integer>(Pos(0)), sub_self_pos_step, n)
+}
+total fn sub_self_neg(n: Nat) -> SubSelf<NegSucc<n>> ! {} {
+    succ_cong(add_nat(NegSucc(n), n), NegSucc(0), add_nat_neg_self(n))
+}
+
+/// a - a = 0.
+total fn sub_self(a: Integer) -> SubSelf<a> ! {} {
+    Data.elim::<Integer>(SubSelf, sub_self_pos, sub_self_neg, a)
+}
+
+type NonNegOf<z: Integer> = NonNeg<z>;
+
+/// a <= a.
+total fn le_refl(a: Integer) -> Le<a, a> ! {} {
+    Eq.transport::<Integer>(
+        Pos(0),
+        add(a, neg(a)),
+        NonNegOf,
+        symmetry::<Integer>(add(a, neg(a)), Pos(0), sub_self(a)),
+        is_nat::<0>(),
+    )
+}
+
+fn main() -> i64 ! {} { 0 }

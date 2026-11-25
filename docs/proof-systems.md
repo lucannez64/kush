@@ -165,6 +165,16 @@ facts are proved and where certificates are checked.
    translate a `{ ... }` proposition over machine values into a kernel
    proposition over `Int`, with each machine variable's range as a
    hypothesis.
+   *Status:* the integers exist as
+   [examples/integers.kush](../examples/integers.kush) (PROOF-KERNEL-INT):
+   `Integer` (`Int` is taken by the builtin conversions) is logical data
+   `Pos(n) | NegSucc(n)` with `succ`, `pred`, `+`, `-`, negation, scaling by
+   a constant, `NonNeg`, `Le` and `Lt`. Closed sums, differences, products
+   and comparisons are proved by computation. Lemmas: `succ` and `pred` are
+   inverses, `a + 0 = a`, `0 + a = a`, `-(-a) = a`, `a - a = 0` and
+   `a <= a`. Both kernels check the file (it is in the exchange and
+   differential corpora). Commutativity, associativity and transitivity of
+   `<=` are left to PROOF-LEMMAS. The translation is PROOF-REFINE-KERNEL.
 2. **Escape hatch**: when the solver fails, the programmer proves a kernel
    lemma (`total fn sq_nonneg(a: Int) -> Le<0, a * a>`) and cites it at the call
    instead of `_`. This fixes the wall in section 2.

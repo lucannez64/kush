@@ -511,6 +511,7 @@ fn corpus_mutants_agree() {
         "finite-proofs",
         "universes",
         "logical-lambdas",
+        "integers",
     ] {
         let text = mutated(name, 12, &mut rng);
         compare(

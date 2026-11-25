@@ -12,6 +12,7 @@ const CORPUS: &[&str] = &[
     "large-naturals",
     "universes",
     "logical-lambdas",
+    "integers",
 ];
 
 fn root() -> PathBuf {

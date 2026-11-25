@@ -630,7 +630,7 @@ fn logical_type(
                 BindingKind::Alias if aliases.contains_key(&id) => {
                     alias_is_logical(resolution, data, aliases, id, cache, active)
                 }
-                BindingKind::Data => data.contains(&id),
+                BindingKind::Data | BindingKind::Function => data.contains(&id),
                 BindingKind::Constructor => {
                     binding.owner.is_some_and(|owner| data.contains(&owner))
                 }
@@ -660,12 +660,16 @@ fn logical_type(
 
 /// Binding IDs of `total enum` declarations: the logical data currently
 /// admitted by the kernel.
+/// Logical data declarations, and total functions: an alias may apply a total
+/// function at the type level (`Eq<Integer, succ<a>, a>`) and stay logical.
 fn logical_data_ids(module: &Module, resolution: &Resolution) -> BTreeSet<BindingId> {
     module
         .items
         .iter()
         .filter_map(|declaration| match &declaration.item.kind {
-            ItemKind::Enum { total: true, .. } | ItemKind::Prop { .. } => resolution
+            ItemKind::Enum { total: true, .. }
+            | ItemKind::Prop { .. }
+            | ItemKind::Function(crate::ast::Function { total: true, .. }) => resolution
                 .declarations
                 .get(&declaration.item.span.start)
                 .copied(),

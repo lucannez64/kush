@@ -284,6 +284,22 @@ fn alias_cycles_and_logical_alias_boundaries_stay_checked() {
     // carriers are admitted logical values now, so this one checks.
     let checked = check("type A = i64; fn main() -> Unit ! {} {}").unwrap();
     assert!(checked.logical_definitions().iter().any(|name| name == "A"));
+    // An alias that applies a total function to logical data is logical, even
+    // in a program with runtime code (PROOF-KERNEL-INT).
+    let checked = check(
+        "total enum Tally { One: Tally, More(Tally): Tally }
+         total fn more(t: Tally) -> Tally ! {} { More(t) }
+         type Twice<t: Tally> = Eq<Tally, more<more<t>>, More<More<t>>>;
+         total fn twice(t: Tally) -> Twice<t> ! {} { refl::<Tally>(More(More(t))) }
+         fn main() -> Unit ! {} {}",
+    )
+    .unwrap();
+    assert!(
+        checked
+            .logical_definitions()
+            .iter()
+            .any(|name| name == "Twice")
+    );
     rejects(
         "type A = Char; fn main() -> Unit ! {} {}",
         "not supported by the logical subset",
