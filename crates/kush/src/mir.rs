@@ -15,6 +15,7 @@ mod build;
 pub(crate) mod deferred;
 mod drop_flags;
 pub(crate) mod loops;
+pub mod machine;
 pub(crate) mod push_shadows;
 pub(crate) mod slice_layout;
 mod text;

@@ -162,6 +162,8 @@ mod llvm_backend;
 mod logical_data;
 #[path = "logical_lambdas.rs"]
 mod logical_lambdas;
+#[path = "machine.rs"]
+mod machine;
 #[path = "memory_completion.rs"]
 mod memory_completion;
 #[path = "methods.rs"]

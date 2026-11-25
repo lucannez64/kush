@@ -480,6 +480,16 @@ evaluator is a checked model of what native code does with it.
 implementation over machine memory, written from the native lowering
 (`call_target` and its helpers) and the `kush.c` function it calls.
 
+**Checking it.**
+- `tests/machine.rs` compares the two evaluators on the examples and on
+  targeted programs.
+- `KUSH_MACHINE_CHECK=1` runs the machine after every tree evaluation in
+  a process. A difference in output, result, panic message or stats is
+  an error, so the whole test suite becomes a differential test.
+  `KUSH_MACHINE_REPORT=FILE` lists the constructs the machine stopped at.
+- Runs limited by a computation budget are not compared: the two
+  evaluators count different steps.
+
 **Plan.** The work lands in steps. Until the last one, the tree evaluator
 stays the default, and tests compare the two on every program the machine
 covers:

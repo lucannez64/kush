@@ -206,7 +206,46 @@ impl Executable {
     ) -> Result<(i64, MemoryStats)> {
         self.evaluate_with_io_limits(&mut io::empty(), output, Some(budget), &Host::empty())
     }
+    /// FND-EVAL: with `KUSH_MACHINE_CHECK=1`, the word-level MIR machine
+    /// (`mir::machine`) runs every program the tree evaluator runs, and a
+    /// difference in output, result, panic message or stats is an error.
+    /// `KUSH_MACHINE_REPORT=FILE` lists what the machine does not cover.
     fn evaluate_with_io_limits(
+        &self,
+        input: &mut dyn Read,
+        output: &mut dyn Write,
+        alloc_budget: Option<usize>,
+        host: &Host,
+    ) -> Result<(i64, MemoryStats)> {
+        if alloc_budget.is_none() && std::env::var_os("KUSH_MACHINE_CHECK").is_some() {
+            // The tree writes through to `output` as usual (so a failing
+            // writer fails where it would), and the bytes it accepted are
+            // kept for the comparison.
+            struct Tee<'a> {
+                output: &'a mut dyn Write,
+                written: Vec<u8>,
+            }
+            impl Write for Tee<'_> {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    let accepted = self.output.write(bytes)?;
+                    self.written.extend_from_slice(&bytes[..accepted]);
+                    Ok(accepted)
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    self.output.flush()
+                }
+            }
+            let mut tee = Tee {
+                output,
+                written: Vec::new(),
+            };
+            let tree = self.tree_evaluate(input, &mut tee, alloc_budget, host);
+            crate::mir::machine::check(self, &tee.written, &tree)?;
+            return tree;
+        }
+        self.tree_evaluate(input, output, alloc_budget, host)
+    }
+    fn tree_evaluate(
         &self,
         input: &mut dyn Read,
         output: &mut dyn Write,
