@@ -6875,79 +6875,7 @@ impl Generator<'_, '_> {
             } => {
                 let values = lower!(self.expr(value));
                 self.consume(value);
-                let width = self.program.width(*to);
-                match coercion {
-                    Coercion::Inject { tag } => {
-                        let mut out = Vec::with_capacity(width);
-                        out.push(self.constant(*tag as i64));
-                        out.extend(values.iter().copied().take(width.saturating_sub(1)));
-                        while out.len() < width {
-                            out.push(self.constant(0));
-                        }
-                        return Some(out);
-                    }
-                    Coercion::Struct {
-                        source,
-                        kept,
-                        drops,
-                    } => {
-                        let target_id = to.layout().expect("checked structural target layout");
-                        let target_fields =
-                            self.program.enums[target_id].variants[0].fields.clone();
-                        let mut out: Vec<Value> = vec![self.constant(0)];
-                        self.struct_coercion_words(
-                            *source,
-                            &target_fields,
-                            kept,
-                            drops,
-                            &values,
-                            &mut out,
-                        );
-                        while out.len() < width {
-                            out.push(self.constant(0));
-                        }
-                        return Some(out);
-                    }
-                    Coercion::Repack { map } => {
-                        let exit = self.join(*to)?;
-                        for (source_tag, target_tag) in map.iter().enumerate() {
-                            let hit = self.builder.create_block();
-                            let next = self.builder.create_block();
-                            let condition = self.builder.ins().icmp_imm_s(
-                                IntCC::Equal,
-                                values[0],
-                                source_tag as i64,
-                            );
-                            self.builder.ins().brif(condition, hit, &[], next, &[]);
-                            self.builder.switch_to_block(hit);
-                            let mut out = Vec::with_capacity(width);
-                            out.push(self.constant(*target_tag as i64));
-                            out.extend(values[1..].iter().copied().take(width.saturating_sub(1)));
-                            while out.len() < width {
-                                out.push(self.constant(0));
-                            }
-                            self.jump(exit, &out);
-                            self.builder.switch_to_block(next);
-                        }
-                        self.builder.ins().trap(TrapCode::unwrap_user(2));
-                        self.builder.switch_to_block(exit);
-                        return Some(self.builder.block_params(exit).to_vec());
-                    }
-                    Coercion::Callable { .. } => {
-                        return Some(self.nested_coercion_words(coercion, *to, &values));
-                    }
-                    Coercion::DynBox {
-                        member,
-                        member_type,
-                        ..
-                    } => {
-                        let pointer = self.allocate_dyn_payload(*member_type, &values);
-                        return Some(vec![self.constant(*member as i64), pointer]);
-                    }
-                    Coercion::DynUpcast { from, to } => {
-                        return Some(self.dyn_upcast(*from, *to, &values));
-                    }
-                }
+                return self.coerce_values(values, *to, coercion);
             }
             ExprKind::DynArrayNew { element, capacity } => {
                 let width = self.program.width(*element);
@@ -10631,6 +10559,74 @@ impl Generator<'_, '_> {
                         vec![self.builder.ins().select(fits, value, bound)]
                     }
                 }
+            }
+        }
+    }
+    /// Apply a representation-changing coercion to lowered words.
+    fn coerce_values(&mut self, values: Words, to: Type, coercion: &Coercion) -> Option<Words> {
+        let to = &to;
+        let width = self.program.width(*to);
+        match coercion {
+            Coercion::Inject { tag } => {
+                let mut out = Vec::with_capacity(width);
+                out.push(self.constant(*tag as i64));
+                out.extend(values.iter().copied().take(width.saturating_sub(1)));
+                while out.len() < width {
+                    out.push(self.constant(0));
+                }
+                Some(out)
+            }
+            Coercion::Struct {
+                source,
+                kept,
+                drops,
+            } => {
+                let target_id = to.layout().expect("checked structural target layout");
+                let target_fields = self.program.enums[target_id].variants[0].fields.clone();
+                let mut out: Vec<Value> = vec![self.constant(0)];
+                self.struct_coercion_words(*source, &target_fields, kept, drops, &values, &mut out);
+                while out.len() < width {
+                    out.push(self.constant(0));
+                }
+                Some(out)
+            }
+            Coercion::Repack { map } => {
+                let exit = self.join(*to)?;
+                for (source_tag, target_tag) in map.iter().enumerate() {
+                    let hit = self.builder.create_block();
+                    let next = self.builder.create_block();
+                    let condition =
+                        self.builder
+                            .ins()
+                            .icmp_imm_s(IntCC::Equal, values[0], source_tag as i64);
+                    self.builder.ins().brif(condition, hit, &[], next, &[]);
+                    self.builder.switch_to_block(hit);
+                    let mut out = Vec::with_capacity(width);
+                    out.push(self.constant(*target_tag as i64));
+                    out.extend(values[1..].iter().copied().take(width.saturating_sub(1)));
+                    while out.len() < width {
+                        out.push(self.constant(0));
+                    }
+                    self.jump(exit, &out);
+                    self.builder.switch_to_block(next);
+                }
+                self.builder.ins().trap(TrapCode::unwrap_user(2));
+                self.builder.switch_to_block(exit);
+                Some(self.builder.block_params(exit).to_vec())
+            }
+            Coercion::Callable { .. } => {
+                Some(self.nested_coercion_words(coercion, *to, &values))
+            }
+            Coercion::DynBox {
+                member,
+                member_type,
+                ..
+            } => {
+                let pointer = self.allocate_dyn_payload(*member_type, &values);
+                Some(vec![self.constant(*member as i64), pointer])
+            }
+            Coercion::DynUpcast { from, to } => {
+                Some(self.dyn_upcast(*from, *to, &values))
             }
         }
     }

@@ -41,7 +41,7 @@ fn every_built_body_verifies_and_reads_back_from_its_text() {
     assert_eq!(checked, built);
     // The corpus exercises the builder; coverage only grows.
     assert!(
-        built >= 190,
+        built >= 260,
         "MIR covers {built} of {total} example functions"
     );
 }
@@ -342,6 +342,60 @@ fn builtins_views_and_arrays_match_the_tree_path() {
     assert_eq!(built, total, "{}", kush::mir::dump(&program));
     let output = same_program_on_both_paths(&program, true);
     assert_eq!(output, "15\n9\n60\n20\n605\n303\n8\n");
+}
+
+#[test]
+fn closures_and_indirect_calls_match_the_tree_path() {
+    let source = "
+        struct Pair { left: i64, right: i64 }
+        fn apply(f: fn(i64) -> i64 ! {}, x: i64) -> i64 { f(x) }
+        fn twice(f: fn(i64) -> i64 ! {}, x: i64) -> i64 { f(f(x)) }
+        fn apply_once(f: once fn(i64) -> i64 ! {}, x: i64) -> i64 { f(x) }
+        fn split(f: once fn(i64) -> Pair ! {}, x: i64) -> i64 { let p = f(x); p.left * 10 + p.right }
+        fn run_once(f: once fn() -> i64 ! {alloc}) -> i64 ! {alloc} { f() }
+        fn inc(x: i64) -> i64 { x + 1 }
+        fn main() -> Unit ! {io, alloc} {
+            print_i64(apply(inc, 4));
+            print_i64(twice(fn(x: i64) -> i64 ! {} { x * 3 }, 2));
+            let offset = 10;
+            print_i64(apply_once(fn(x: i64) -> i64 ! {} { x + offset }, 5));
+            print_i64(split(fn(x: i64) -> Pair ! {} { Pair { left: x, right: x + offset } }, 2));
+            let boxed = Box.new(7);
+            print_i64(run_once(fn() -> i64 ! {alloc} { boxed.take() + 1 }));
+            let mut values: [i64; 2] = [1, 2];
+            let view: &mut [i64] = &mut values[..];
+            let bump = fn(by: i64) -> Unit ! {} { Slice.set(view, 0, Slice.get(view, 0) + by); };
+            bump(5);
+            print_i64(values[0]);
+        }";
+    let program = kush::program::load_source("<mir-closures>", source).unwrap();
+    let program = executable::check_program(&program).unwrap();
+    let (built, total) = kush::mir::coverage(&program);
+    assert_eq!(built, total, "{}", kush::mir::dump(&program));
+    let output = same_program_on_both_paths(&program, true);
+    assert_eq!(output, "5\n18\n15\n32\n8\n6\n");
+}
+
+/// Whole example programs the MIR covers completely: unions, `dyn`
+/// objects, traits, subtyping coercions and borrowed closures.
+#[test]
+fn fully_covered_examples_match_the_tree_path() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    for name in [
+        "functions",
+        "subtyping",
+        "traits",
+        "advanced-traits",
+        "generic_traits",
+        "borrowed-closures",
+    ] {
+        let path = root.join(format!("{name}.kush"));
+        let program = kush::program::load_path(&path).unwrap();
+        let program = executable::check_program(&program).unwrap();
+        let (built, total) = kush::mir::coverage(&program);
+        assert_eq!(built, total, "{name}: MIR covers {built} of {total}");
+        same_program_on_both_paths(&program, true);
+    }
 }
 
 #[test]

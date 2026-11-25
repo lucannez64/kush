@@ -43,6 +43,13 @@ pub(crate) fn print(body: &Body) -> String {
     for (index, target) in body.builtins.0.iter().enumerate() {
         let _ = writeln!(out, "    // builtin {index}: {target:?}");
     }
+    for (index, (ty, coercion)) in body.coercions.0.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "    // coercion {index}: to {}: {coercion:?}",
+            type_name(*ty)
+        );
+    }
     for (local, decl) in body.locals.iter().enumerate().skip(body.parameters) {
         let _ = writeln!(
             out,
@@ -101,6 +108,10 @@ fn type_name(ty: Type) -> String {
         Type::Box(pointee) => format!("box#{pointee}"),
         Type::Vec(pointee) => format!("vec#{pointee}"),
         Type::Bytes => "bytes".into(),
+        Type::Fn(signature) => format!("fn#{signature}"),
+        Type::Union(id) => format!("union#{id}"),
+        Type::DynObj(id) => format!("dyn#{id}"),
+        Type::Once(signature) => format!("once#{signature}"),
         Type::Str => "str".into(),
         Type::StrMut => "strmut".into(),
         Type::Slice(element) => format!("slice#{element}"),
@@ -166,6 +177,18 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
         Rvalue::BoxNew(operand) => format!("box_new({})", operand_text(*operand)),
         Rvalue::BoxTake(operand) => format!("box_take({})", operand_text(*operand)),
         Rvalue::Ref(place) => format!("&{}", place_text(*place)),
+        Rvalue::Coerce(operand, index) => format!("coerce {index}({})", operand_text(*operand)),
+        Rvalue::FnValue { function, captures } => {
+            let captures = captures
+                .iter()
+                .map(|capture| match capture {
+                    Capture::Value(operand) => operand_text(*operand),
+                    Capture::Address(local) => format!("addr _{local}"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("fn_value {function}({captures})")
+        }
         Rvalue::View {
             source,
             start,
@@ -234,6 +257,7 @@ fn terminator_text(kind: &TerminatorKind) -> String {
                 Callee::Function(index) => format!("fn {index}"),
                 Callee::PrintInt(kind) => format!("print_int {}", kind.name()),
                 Callee::Builtin(index) => format!("builtin {index}"),
+                Callee::Indirect(operand) => format!("indirect {}", operand_text(*operand)),
             };
             let args = args
                 .iter()
@@ -416,6 +440,22 @@ impl Parser {
             "bytes" => Type::Bytes,
             "string" => Type::String,
             "str" => Type::Str,
+            "fn" => {
+                self.expect("#")?;
+                Type::Fn(self.number()?)
+            }
+            "union" => {
+                self.expect("#")?;
+                Type::Union(self.number()?)
+            }
+            "dyn" => {
+                self.expect("#")?;
+                Type::DynObj(self.number()?)
+            }
+            "once" => {
+                self.expect("#")?;
+                Type::Once(self.number()?)
+            }
             "strmut" => Type::StrMut,
             "slice" => {
                 self.expect("#")?;
@@ -542,6 +582,7 @@ impl Parser {
             blocks,
             result,
             builtins: Builtins::default(),
+            coercions: Coercions::default(),
         })
     }
     fn declared(&mut self, expected: usize) -> Result<(), String> {
@@ -636,6 +677,31 @@ impl Parser {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| format!("invalid hex bytes '{hex}'"))?;
             return Ok(Rvalue::Bytes(bytes));
+        }
+        if name == "coerce" {
+            self.at += 1;
+            let index = self.number()?;
+            self.expect("(")?;
+            let operand = self.operand()?;
+            self.expect(")")?;
+            return Ok(Rvalue::Coerce(operand, index));
+        }
+        if name == "fn_value" {
+            self.at += 1;
+            let function = self.number()?;
+            self.expect("(")?;
+            let mut captures = Vec::new();
+            while !self.eat(")") {
+                if !captures.is_empty() {
+                    self.expect(",")?;
+                }
+                captures.push(if self.eat("addr") {
+                    Capture::Address(self.local()?)
+                } else {
+                    Capture::Value(self.operand()?)
+                });
+            }
+            return Ok(Rvalue::FnValue { function, captures });
         }
         if name == "view" {
             self.at += 1;
@@ -769,6 +835,7 @@ impl Parser {
                 let callee = match self.next()?.as_str() {
                     "fn" => Callee::Function(self.number()?),
                     "builtin" => Callee::Builtin(self.number()?),
+                    "indirect" => Callee::Indirect(self.operand()?),
                     "print_int" => {
                         let name = self.next()?;
                         Callee::PrintInt(

@@ -7,8 +7,8 @@
 
 use super::*;
 use crate::mir::{
-    BlockId, Body, Callee, Operand, Place, Rvalue, StatementKind, Terminator, TerminatorKind,
-    ViewSource,
+    BlockId, Body, Callee, Capture, Operand, Place, Rvalue, StatementKind, Terminator,
+    TerminatorKind, ViewSource,
 };
 
 impl Generator<'_, '_> {
@@ -131,6 +131,103 @@ impl Generator<'_, '_> {
         self.mir_operand(operand)[0]
     }
 
+    /// A function value, laid out as on the tree path: a code pointer, and
+    /// for a closure an environment `[drop glue, captures...]` it owns.
+    fn mir_fn_value(
+        &mut self,
+        body: &Body,
+        function: usize,
+        captures: &[Capture],
+        ty: Type,
+    ) -> Words {
+        let reference = self
+            .module
+            .declare_func_in_func(self.ids[function], self.builder.func);
+        let code = self.builder.ins().func_addr(I64, reference);
+        if captures.is_empty() {
+            if matches!(ty, Type::Once(_)) {
+                let zero = self.constant(0);
+                return vec![code, zero];
+            }
+            return vec![code];
+        }
+        let types = captures
+            .iter()
+            .map(|capture| match capture {
+                Capture::Value(operand) => body.operand_ty(*operand).full(),
+                Capture::Address(local) => body.locals[*local].ty.full(),
+            })
+            .collect::<Vec<_>>();
+        // An address capture is a call-scoped scalar: one word either way.
+        let bytes = 8 + types
+            .iter()
+            .map(|ty| self.program.width(*ty) * 8)
+            .sum::<usize>();
+        let size = self.constant(bytes as i64);
+        let environment = self.runtime_call(self.allocate, &[size]);
+        let drop = self.closure_drops[&types];
+        let drop = self.module.declare_func_in_func(drop, self.builder.func);
+        let drop = self.builder.ins().func_addr(I64, drop);
+        self.builder
+            .ins()
+            .store(ir::MemFlagsData::new(), drop, environment, 0);
+        let mut offset = 8;
+        for capture in captures {
+            let words = match capture {
+                Capture::Address(local) => vec![self.local_address(*local)],
+                Capture::Value(operand) => self.mir_operand(*operand),
+            };
+            for word in &words {
+                self.builder.ins().store(
+                    ir::MemFlagsData::new(),
+                    *word,
+                    environment,
+                    offset,
+                );
+                offset += 8;
+            }
+        }
+        vec![code, environment]
+    }
+
+    /// A call through a `fn` or `once fn` value, with the tree path's ABI:
+    /// result pointer, environment word, then the non-erased arguments.
+    fn mir_indirect_call(
+        &mut self,
+        callee_ty: Type,
+        callable: &[Value],
+        arguments: Vec<Words>,
+    ) -> Words {
+        let (id, once) = match callee_ty {
+            Type::Fn(id) => (id, false),
+            Type::Once(id) => (id, true),
+            other => unreachable!("an indirect call through a {other:?}"),
+        };
+        let signature = self.program.function_types[id].clone();
+        let result = signature.result;
+        let pointer = if !signature.result_erased() && aggregate_result(self.program, result) {
+            let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                (self.program.width(result) * 8) as u32,
+                STACK_SLOT_ALIGN_SHIFT,
+            ));
+            Some(self.builder.ins().stack_addr(I64, slot, 0))
+        } else {
+            None
+        };
+        let mut values = Vec::new();
+        values.extend(pointer);
+        if once {
+            values.push(callable[1]);
+        }
+        for (index, words) in arguments.into_iter().enumerate() {
+            if !signature.parameter_erased(index) {
+                values.extend(words);
+            }
+        }
+        self.finish_indirect_call(id, callable[0], pointer, values)
+    }
+
     fn mir_operands(&mut self, operands: &[Operand]) -> Words {
         operands
             .iter()
@@ -201,6 +298,14 @@ impl Generator<'_, '_> {
                 Some(values)
             }
             Rvalue::Ref(place) => Some(vec![self.mir_address(*place)]),
+            Rvalue::Coerce(operand, index) => {
+                let (to, coercion) = body.coercions.0[*index].clone();
+                let values = self.mir_operand(*operand);
+                self.coerce_values(values, to, &coercion)
+            }
+            Rvalue::FnValue { function, captures } => {
+                Some(self.mir_fn_value(body, *function, captures, ty))
+            }
             Rvalue::View {
                 source,
                 start,
@@ -297,6 +402,15 @@ impl Generator<'_, '_> {
                             self.print
                         };
                         vec![self.runtime_call(print, &values)]
+                    }
+                    Callee::Indirect(code) => {
+                        let callee_ty = body.operand_ty(*code);
+                        let callable = self.mir_operand(*code);
+                        let arguments = args
+                            .iter()
+                            .map(|arg| self.mir_operand(*arg))
+                            .collect::<Vec<_>>();
+                        self.mir_indirect_call(callee_ty, &callable, arguments)
                     }
                     Callee::Builtin(index) => {
                         let ty = body.locals[*destination].ty;

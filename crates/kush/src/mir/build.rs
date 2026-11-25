@@ -22,6 +22,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
         cleanup: None,
         in_cleanup: false,
         builtins: Vec::new(),
+        coercions: Vec::new(),
         locals: function
             .locals
             .iter()
@@ -70,6 +71,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
         blocks,
         result: function.result,
         builtins: Builtins(builder.builtins),
+        coercions: Coercions(builder.coercions),
     })
 }
 
@@ -93,6 +95,16 @@ fn plain(program: &Executable, ty: Type) -> bool {
     fn go(program: &Executable, ty: Type, depth: usize) -> bool {
         if scalar(ty) || matches!(ty, Type::Bytes | Type::String | Type::Str | Type::StrMut) {
             return true;
+        }
+        if matches!(ty, Type::Fn(_) | Type::Once(_) | Type::DynObj(_)) {
+            return true;
+        }
+        if let Type::Union(id) = ty {
+            return depth < 16
+                && program.unions[id]
+                    .members
+                    .iter()
+                    .all(|member| go(program, *member, depth + 1));
         }
         if let Type::Box(pointee)
         | Type::Vec(pointee)
@@ -126,9 +138,6 @@ fn erased(grade: Option<crate::grades::Grade>) -> bool {
 
 /// The function's frame and calling convention are ones the builder covers.
 fn eligible(program: &Executable, function: &Function) -> Result<(), String> {
-    if function.closure.is_some() || !function.capture_refs.is_empty() {
-        return Err("a closure".into());
-    }
     if function.parameter_slots.is_some() || function.shared_environment {
         return Err("a continuation".into());
     }
@@ -187,7 +196,7 @@ fn supported(pattern: &Pattern) -> Result<(), String> {
                 supported(p)
             }
         }),
-        Pattern::Type { .. } => Err("a union pattern".into()),
+        Pattern::Type { inner, .. } => supported(inner),
         Pattern::DynArray { .. } => Err("an array pattern".into()),
     }
 }
@@ -196,6 +205,7 @@ fn has_alternatives(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Or(_) => true,
         Pattern::Variant { fields, .. } => fields.iter().any(|(_, p)| has_alternatives(p)),
+        Pattern::Type { inner, .. } => has_alternatives(inner),
         _ => false,
     }
 }
@@ -204,6 +214,7 @@ fn binds(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Bind(_) => true,
         Pattern::Variant { fields, .. } => fields.iter().any(|(_, p)| binds(p)),
+        Pattern::Type { inner, .. } => binds(inner),
         Pattern::Or(alternatives) => alternatives.iter().any(binds),
         _ => false,
     }
@@ -260,6 +271,8 @@ struct Builder<'a> {
     in_cleanup: bool,
     /// The builtin targets called so far.
     builtins: Vec<Target>,
+    /// The coercions applied so far.
+    coercions: Vec<(Type, crate::executable::Coercion)>,
     locals: Vec<LocalDecl>,
     blocks: Vec<Partial>,
     /// The block being filled; `None` after a terminator, until the next
@@ -744,6 +757,76 @@ impl Builder<'_> {
                 );
                 Operand::Move(Place::local(temp))
             }
+            ExprKind::Coerce {
+                value,
+                to,
+                coercion,
+            } => {
+                let Some(operand) = self.expr(value)? else {
+                    return Ok(None);
+                };
+                self.consume(value);
+                self.coercions.push((*to, coercion.clone()));
+                let temp = self.temp(expr.ty);
+                self.assign(
+                    temp,
+                    Rvalue::Coerce(operand, self.coercions.len() - 1),
+                    span,
+                );
+                Operand::Move(Place::local(temp))
+            }
+            ExprKind::FnValue { function, captures } => {
+                let by_address = &self.program.functions[*function].capture_refs;
+                let mut values = Vec::new();
+                for (index, capture) in captures.iter().enumerate() {
+                    if !by_address.get(index).copied().unwrap_or(false) {
+                        values.push(capture);
+                    }
+                }
+                let Some(operands) = self.operands(&values)? else {
+                    return Ok(None);
+                };
+                let mut operands = operands.into_iter();
+                let mut lowered = Vec::with_capacity(captures.len());
+                for (index, capture) in captures.iter().enumerate() {
+                    if by_address.get(index).copied().unwrap_or(false) {
+                        let (ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot)) =
+                            capture.kind
+                        else {
+                            return Err("a by-reference capture of a non-local".into());
+                        };
+                        lowered.push(Capture::Address(slot));
+                    } else {
+                        lowered.push(Capture::Value(operands.next().expect("a capture")));
+                    }
+                }
+                for capture in captures {
+                    self.consume(capture);
+                }
+                let temp = self.temp(expr.ty);
+                let function = *function;
+                self.assign(
+                    temp,
+                    Rvalue::FnValue {
+                        function,
+                        captures: lowered,
+                    },
+                    span,
+                );
+                Operand::Move(Place::local(temp))
+            }
+            ExprKind::CallIndirect { callee, arguments } => {
+                let mut exprs = vec![&**callee];
+                exprs.extend(arguments);
+                let Some(mut values) = self.operands(&exprs)? else {
+                    return Ok(None);
+                };
+                for consumed in &exprs {
+                    self.consume(consumed);
+                }
+                let code = values.remove(0);
+                return Ok(self.emit_call(expr, Callee::Indirect(code), values));
+            }
             ExprKind::Borrow(slot) => {
                 let temp = self.temp(expr.ty);
                 self.assign(temp, Rvalue::Ref(Place::local(*slot)), span);
@@ -1159,6 +1242,11 @@ impl Builder<'_> {
                     self.test(subject, offset + field, pattern, fail, span);
                 }
             }
+            Pattern::Type { tag, inner, .. } => {
+                let word = self.word(subject, offset);
+                self.expect_word(word, *tag as i64, true, fail, span);
+                self.test(subject, offset + 1, inner, fail, span);
+            }
             Pattern::Or(alternatives) => {
                 let success = self.new_block();
                 for alternative in alternatives {
@@ -1197,6 +1285,9 @@ impl Builder<'_> {
                 }
             }
             Pattern::Bind(slot) => self.activate_local(*slot, span),
+            Pattern::Type { member, inner, .. } => {
+                self.dispose(subject, offset + 1, inner, *member, span);
+            }
             Pattern::Variant { tag, fields, .. } => {
                 let layout = ty
                     .layout()
@@ -1233,6 +1324,7 @@ impl Builder<'_> {
                     self.bind(subject, offset + field, pattern, span);
                 }
             }
+            Pattern::Type { inner, .. } => self.bind(subject, offset + 1, inner, span),
             _ => {}
         }
     }
@@ -1290,6 +1382,12 @@ impl Builder<'_> {
         for arg in exprs {
             self.consume(arg);
         }
+        Ok(self.emit_call(expr, callee, args))
+    }
+
+    /// A call terminator whose result `expr` continues in a new block.
+    fn emit_call(&mut self, expr: &Expr, callee: Callee, args: Vec<Operand>) -> Option<Operand> {
+        let span = expr.span;
         let destination = self.temp(expr.ty);
         let next = self.new_block();
         self.terminate(
@@ -1305,9 +1403,9 @@ impl Builder<'_> {
         self.enter(next);
         if expr.ty == Type::Never {
             self.terminate(TerminatorKind::Unreachable, span);
-            return Ok(None);
+            return None;
         }
-        Ok(Some(Operand::Move(Place::local(destination))))
+        Some(Operand::Move(Place::local(destination)))
     }
 }
 

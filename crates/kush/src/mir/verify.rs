@@ -153,6 +153,27 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                         other => return Err(here(format!("a view stored in a {other:?}"))),
                     }
                 }
+                Rvalue::Coerce(value, index) => {
+                    operand(*value).map_err(here)?;
+                    let (to, _) = body
+                        .coercions
+                        .0
+                        .get(*index)
+                        .ok_or_else(|| here(format!("coercion {index} does not exist")))?;
+                    *to
+                }
+                Rvalue::FnValue { function, captures } => {
+                    if *function >= program.functions.len() {
+                        return Err(here(format!("function {function} does not exist")));
+                    }
+                    for capture in captures {
+                        match capture {
+                            Capture::Value(value) => operand(*value).map_err(here)?,
+                            Capture::Address(captured) => local(*captured).map_err(here)?,
+                        }
+                    }
+                    target_ty
+                }
                 Rvalue::Ref(source) => {
                     place(*source).map_err(here)?;
                     match target_ty {
@@ -203,12 +224,15 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                 block(*otherwise).map_err(here)?;
             }
             TerminatorKind::Call {
+                callee,
                 args,
                 destination,
                 next,
                 unwind,
-                ..
             } => {
+                if let Callee::Indirect(code) = callee {
+                    operand(*code).map_err(here)?;
+                }
                 for arg in args {
                     operand(*arg).map_err(here)?;
                 }

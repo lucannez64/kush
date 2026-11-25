@@ -207,6 +207,24 @@ The second part added views, inline arrays and builtins:
   MIR path calls builtins without them. Porting them is part of
   FND-MIR-DEFAULT.
 
+FND-MIR-CALLABLES added function values and the values that change
+representation:
+
+- `fn_value F(captures)` builds a code pointer and, for a closure, an
+  owned environment laid out as on the tree path. A by-reference capture
+  stores the local's address.
+- `call indirect` calls a `fn` or `once fn` value with the tree path's
+  ABI.
+- Closure bodies are covered too. The native frame setup already loads
+  their captures into locals.
+- `coerce N(value)` applies the body's Nth coercion: union injection and
+  repacking, structural record coercions, `dyn` boxing and upcasts, and
+  callable adapters. Like builtins, coercions are listed per body and
+  named by index in the text form.
+- Union patterns test the member tag word, then the member's words.
+
+`multi fn` values, continuations and suspension wait for FND-MIR-EFFECTS.
+
 The flags are dynamic everywhere, as on the tree path. Removing the ones
 a dataflow pass can decide statically is FND-MIR-DROP-FLAGS.
 

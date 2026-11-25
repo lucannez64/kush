@@ -36,6 +36,19 @@ pub(crate) struct Body {
     pub result: Type,
     /// The builtin operations the body calls, by `Callee::Builtin` index.
     pub builtins: Builtins,
+    /// The coercions the body applies, by `Rvalue::Coerce` index: the
+    /// target type and the representation change.
+    pub coercions: Coercions,
+}
+
+/// The coercions of a body; like [`Builtins`], named by index in the text.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Coercions(pub Vec<(Type, crate::executable::Coercion)>);
+
+impl PartialEq for Coercions {
+    fn eq(&self, other: &Self) -> bool {
+        format!("{self:?}") == format!("{other:?}")
+    }
 }
 
 /// The builtin call targets of a body. The text form names them by index
@@ -124,6 +137,15 @@ pub(crate) enum Rvalue {
     Bytes(Vec<u8>),
     /// The address of a place: a reference to it.
     Ref(Place),
+    /// Change the representation of a value: inject it into a union, box it
+    /// as a `dyn` object, and so on (the body's coercion at this index).
+    Coerce(Operand, usize),
+    /// A function value: the code of `function`, with an environment
+    /// holding `captures` when there are any.
+    FnValue {
+        function: usize,
+        captures: Vec<Capture>,
+    },
     /// A view of the elements `start..end` (default: all) of `source`, or
     /// with `text`, a text view of its bytes. `check` tests the range (and
     /// for text, that both ends are scalar boundaries) at run time.
@@ -135,6 +157,16 @@ pub(crate) enum Rvalue {
         check: bool,
         text: bool,
     },
+}
+
+/// One captured value of a closure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Capture {
+    /// Moved or copied into the environment.
+    Value(Operand),
+    /// The environment holds the local's address (a call-scoped scalar
+    /// capture the closure may read or write in place).
+    Address(LocalId),
 }
 
 /// What a view looks into.
@@ -221,12 +253,14 @@ pub(crate) enum TerminatorKind {
     Unreachable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Callee {
     Function(usize),
     PrintInt(IntKind),
     /// A builtin operation, by its index in the body's [`Builtins`].
     Builtin(usize),
+    /// A `fn` or `once fn` value.
+    Indirect(Operand),
 }
 
 impl Body {
@@ -452,6 +486,7 @@ pub fn self_check(program: &Executable) -> Result<usize, String> {
         let mut parsed =
             text::parse(&printed).map_err(|e| format!("fn {}: {e}\n{printed}", body.name))?;
         parsed.builtins = body.builtins.clone();
+        parsed.coercions = body.coercions.clone();
         if parsed != body {
             return Err(format!(
                 "fn {}: the text form does not read back\n{printed}",
