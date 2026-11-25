@@ -1005,6 +1005,20 @@ impl Drop for Scratch {
 /// Only HandlerPush changes the local dynamic-handler depth. The exhaustive
 /// child walker includes guards, initializers, conditions and capture operands;
 /// separately compiled callback bodies perform their own analysis.
+/// FND-MIR: with `KUSH_MIR_REPORT=FILE`, append each function a native
+/// build lowers from the tree instead of the MIR, with the reason.
+fn report_fallback(program: &Executable, index: usize, reason: &str) {
+    let Some(path) = std::env::var_os("KUSH_MIR_REPORT") else {
+        return;
+    };
+    let line = format!("{}\t{reason}\n", program.functions[index].name);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
+}
+
 /// Whether a body contains a `while` loop anywhere.
 fn block_has_while(block: &ex::Block) -> bool {
     fn expression(expr: &Expr) -> bool {
@@ -2137,7 +2151,9 @@ fn lower(
                 if loop_optimized && block_has_while(body) {
                     return None;
                 }
-                crate::mir::build(program, index).ok()
+                crate::mir::build(program, index)
+                    .inspect_err(|reason| report_fallback(program, index, reason))
+                    .ok()
             })
             .collect()
     } else {

@@ -464,6 +464,26 @@ impl Builder<'_> {
         );
         self.enter(next);
     }
+    /// Store a temporary owner's value in its declared slot, dropping the
+    /// value an earlier loop iteration left there (the tree path's
+    /// `store_initialized_owner`).
+    fn init_owner(&mut self, slot: LocalId, value: &Expr) -> Result<Option<()>, String> {
+        let Some(operand) = self.expr(value)? else {
+            return Ok(None);
+        };
+        self.consume(value);
+        let previous = self.local_resource(slot);
+        let operand = if self.resource(previous).is_some() {
+            let operand = self.settle(operand, value.ty, value.span);
+            self.cleanup_resource(previous, value.span);
+            operand
+        } else {
+            operand
+        };
+        self.assign(slot, Rvalue::Use(operand), value.span);
+        self.activate_local(slot, value.span);
+        Ok(Some(()))
+    }
     /// A local holding the reference `value`, so places can go through it.
     fn pointer_local(&mut self, value: Operand, ty: Type, span: Span) -> LocalId {
         match value.place() {
@@ -503,6 +523,12 @@ impl Builder<'_> {
                         ty: expr.ty,
                     }),
                 }
+            }
+            ExprKind::InitOwner { slot, value } => {
+                if self.init_owner(*slot, value)?.is_none() {
+                    return Ok(None);
+                }
+                Place::field(*slot, 0, self.locals[*slot].ty)
             }
             other => return Err(format!("a borrow of {}", variant_name(other))),
         }))
@@ -558,7 +584,9 @@ impl Builder<'_> {
                     self.activate_local(*slot, expr.span);
                     slots.push(*slot);
                 }
-                TreeStatement::Declare(_) => return Err("a temporary owner".into()),
+                // A temporary owner's storage: initialized where it is
+                // used (`InitOwner`), cleaned up at the end of this block.
+                TreeStatement::Declare(slot) => slots.push(*slot),
                 TreeStatement::Expr(expr) => {
                     if self.expr(expr)?.is_none() {
                         return Ok(None);
@@ -763,6 +791,20 @@ impl Builder<'_> {
                     },
                     span,
                 );
+                Operand::Move(Place::local(temp))
+            }
+            ExprKind::InitOwner { slot, value } => {
+                if self.init_owner(*slot, value)?.is_none() {
+                    return Ok(None);
+                }
+                Operand::Copy(Place::local(*slot))
+            }
+            ExprKind::BorrowInit { slot, value } => {
+                if self.init_owner(*slot, value)?.is_none() {
+                    return Ok(None);
+                }
+                let temp = self.temp(expr.ty);
+                self.assign(temp, Rvalue::Ref(Place::local(*slot)), span);
                 Operand::Move(Place::local(temp))
             }
             ExprKind::BoxRead(reference) => {
