@@ -169,7 +169,7 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     operand(*index).map_err(here)?;
                     target_ty
                 }
-                Rvalue::Task(_, values) | Rvalue::Runtime(_, values) => {
+                Rvalue::Task(_, values) | Rvalue::Runtime(_, values) | Rvalue::Alloc(_, values) => {
                     for value in values {
                         operand(*value).map_err(here)?;
                     }

@@ -139,6 +139,8 @@ pub(crate) enum Rvalue {
     Task(TaskOp, Vec<Operand>),
     /// A handler- or continuation-stack operation on its operands.
     Runtime(RuntimeOp, Vec<Operand>),
+    /// A user-allocator or arena operation on its operands.
+    Alloc(AllocOp, Vec<Operand>),
     /// The byte at an index of a `Bytes` handle, proved in bounds (no
     /// run-time check).
     ByteAt(Operand, Operand),
@@ -194,6 +196,39 @@ pub(crate) enum TaskOp {
         exit: crate::executable::TaskExitShape,
         parallel: bool,
     },
+}
+
+/// A user-allocator or arena operation (the tree path's constructors).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum AllocOp {
+    /// An allocator from its alloc, free and optional realloc callables.
+    AllocatorNew,
+    /// An allocator context of checked spec `spec` around a state value.
+    ContextNew {
+        spec: usize,
+    },
+    /// Another handle on the context behind a reference.
+    ContextShare,
+    ArenaNew,
+    /// An arena with a strategy code.
+    ArenaNewWith,
+    /// Move a value (operand 1) into the arena behind a reference (0).
+    ArenaAlloc,
+    /// Move a value (operand 1) into a box from an allocator (0).
+    BoxNew,
+    /// Copy the payload of the box behind a reference.
+    BoxRead,
+    /// Move the payload out of a box and release it.
+    BoxTake,
+    /// An empty vector of `element` from an allocator (0), with an
+    /// optional capacity (1).
+    VecNew {
+        element: Type,
+    },
+    /// Copy the payload of the arena box behind a reference.
+    ArenaBoxRead,
+    /// Move the payload out of an arena box and release it.
+    ArenaBoxTake,
 }
 
 /// A run-time call that manages the handler or continuation stack.

@@ -7,8 +7,8 @@
 
 use super::*;
 use crate::mir::{
-    BlockId, Body, Callee, Capture, ElementBase, Operand, Place, RuntimeOp, Rvalue, StatementKind,
-    TaskOp, Terminator, TerminatorKind, ViewSource,
+    AllocOp, BlockId, Body, Callee, Capture, ElementBase, Operand, Place, RuntimeOp, Rvalue,
+    StatementKind, TaskOp, Terminator, TerminatorKind, ViewSource,
 };
 
 impl Generator<'_, '_> {
@@ -129,6 +129,124 @@ impl Generator<'_, '_> {
     /// A one-word operand.
     fn mir_scalar(&mut self, operand: Operand) -> Value {
         self.mir_operand(operand)[0]
+    }
+
+    /// An allocator `(alloc, release, realloc, context)` from an operand of
+    /// type `Allocator` or `AllocatorContext` (the tree path's
+    /// `allocator_words`).
+    fn mir_allocator(&mut self, ty: Type, values: &[Value]) -> [Value; 4] {
+        let zero = self.constant(0);
+        match ty {
+            Type::Allocator => [values[0], values[1], values[2], zero],
+            Type::AllocatorContext => [zero, zero, zero, values[0]],
+            _ => unreachable!("checked allocator operand"),
+        }
+    }
+
+    /// The allocator and arena operations, as the tree path's arms lower
+    /// them; `ty` is the result type. `None` when the operation can only
+    /// fail (an allocator context spec the program does not have).
+    fn mir_alloc(
+        &mut self,
+        op: AllocOp,
+        words: &[Words],
+        types: &[Type],
+        ty: Type,
+    ) -> Option<Words> {
+        let width = self.program.width(ty);
+        Some(match op {
+            AllocOp::AllocatorNew => {
+                let grow = match words.get(2) {
+                    Some(realloc) => realloc[0],
+                    None => self.constant(0),
+                };
+                vec![words[0][0], words[1][0], grow]
+            }
+            AllocOp::ContextNew { spec } => {
+                let spec_index = (spec < self.program.allocator_contexts.len()).then_some(spec)?;
+                let checked = self.program.allocator_contexts[spec_index];
+                let state_bytes =
+                    self.constant((self.program.width(checked.state).max(1) * 8) as i64);
+                let state = self.runtime_call(self.allocate, &[state_bytes]);
+                self.store_words(state, &words[0]);
+                let drop = self
+                    .module
+                    .declare_func_in_func(self.context_drops[spec_index], self.builder.func);
+                let drop = self.builder.ins().func_addr(I64, drop);
+                let function = |g: &mut Self, index: usize| {
+                    let reference = g.module.declare_func_in_func(g.ids[index], g.builder.func);
+                    g.builder.ins().func_addr(I64, reference)
+                };
+                let alloc = function(self, checked.alloc);
+                let release = function(self, checked.free);
+                let grow = function(self, checked.grow);
+                vec![self.runtime_call(
+                    self.alloc_ops.context_new,
+                    &[state, drop, alloc, release, grow],
+                )]
+            }
+            AllocOp::ContextShare => {
+                let handle = self.load_words(words[0][0], 0, 1)[0];
+                vec![self.runtime_call(self.alloc_ops.context_share, &[handle])]
+            }
+            AllocOp::ArenaNew => vec![self.runtime_call(self.arena_new, &[])],
+            AllocOp::ArenaNewWith => {
+                vec![self.runtime_call(self.arena_new_with_strategy, &[words[0][0]])]
+            }
+            AllocOp::ArenaAlloc => {
+                let handle = self.load_words(words[0][0], 0, 1)[0];
+                let bytes = self.constant((self.program.width(types[1]) * 8) as i64);
+                let pointer = self.runtime_call(self.arena_alloc, &[handle, bytes]);
+                self.store_words(pointer, &words[1]);
+                vec![pointer]
+            }
+            AllocOp::BoxNew => {
+                let pair = self.mir_allocator(types[0], &words[0]);
+                let bytes = self.constant((self.program.width(types[1]) * 8) as i64);
+                let block =
+                    self.runtime_call(self.alloc_ops.block, &[pair[0], pair[1], pair[3], bytes]);
+                let data = self.runtime_call(self.alloc_ops.block_data, &[block]);
+                self.store_words(data, &words[1]);
+                vec![self.runtime_call(
+                    self.alloc_ops.box_create,
+                    &[pair[0], pair[1], block, pair[3]],
+                )]
+            }
+            AllocOp::BoxRead => {
+                let handle = self.load_words(words[0][0], 0, 1)[0];
+                let data = self.runtime_call(self.alloc_ops.box_payload, &[handle]);
+                self.load_words(data, 0, width)
+            }
+            AllocOp::BoxTake => {
+                let handle = words[0][0];
+                let data = self.runtime_call(self.alloc_ops.box_payload, &[handle]);
+                let payload = self.load_words(data, 0, width);
+                self.runtime_void(self.alloc_ops.box_release, &[handle]);
+                payload
+            }
+            AllocOp::VecNew { element } => {
+                let pair = self.mir_allocator(types[0], &words[0]);
+                let capacity = match words.get(1) {
+                    Some(capacity) => capacity[0],
+                    None => self.constant(0),
+                };
+                let element_width = self.constant(self.program.width(element) as i64);
+                vec![self.runtime_call(
+                    self.alloc_ops.vec_create,
+                    &[pair[0], pair[1], pair[2], pair[3], capacity, element_width],
+                )]
+            }
+            AllocOp::ArenaBoxRead => {
+                let pointer = self.load_words(words[0][0], 0, 1)[0];
+                self.load_words(pointer, 0, width)
+            }
+            AllocOp::ArenaBoxTake => {
+                let pointer = words[0][0];
+                let values = self.load_words(pointer, 0, width);
+                self.runtime_void(self.arena_box_release, &[pointer]);
+                values
+            }
+        })
     }
 
     /// A function value, laid out as on the tree path: a code pointer, and
@@ -395,6 +513,17 @@ impl Generator<'_, '_> {
                     self.view_source(base_ty, width, location, None, &values);
                 let end = end.map_or(length, |end| self.mir_scalar(end));
                 Some(self.finish_view(pointer, length, stride, bytes, start, end, *check))
+            }
+            Rvalue::Alloc(op, operands) => {
+                let words = operands
+                    .iter()
+                    .map(|operand| self.mir_operand(*operand))
+                    .collect::<Vec<_>>();
+                let types = operands
+                    .iter()
+                    .map(|operand| body.operand_ty(*operand))
+                    .collect::<Vec<_>>();
+                self.mir_alloc(*op, &words, &types, ty)
             }
             Rvalue::Runtime(op, operands) => {
                 let words = operands

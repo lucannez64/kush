@@ -933,6 +933,56 @@ impl Builder<'_> {
                 );
                 Operand::Move(Place::local(temp))
             }
+            ExprKind::AllocatorNew {
+                alloc,
+                free,
+                realloc,
+            } => {
+                let mut children = vec![(&**alloc, false), (&**free, false)];
+                children.extend(realloc.as_deref().map(|realloc| (realloc, false)));
+                return self.alloc_op(expr, AllocOp::AllocatorNew, &children);
+            }
+            ExprKind::AllocatorContextNew { value, spec } => {
+                let op = AllocOp::ContextNew { spec: *spec };
+                return self.alloc_op(expr, op, &[(value, true)]);
+            }
+            ExprKind::AllocatorContextShare(argument) => {
+                return self.alloc_op(expr, AllocOp::ContextShare, &[(argument, false)]);
+            }
+            ExprKind::ArenaNew => return self.alloc_op(expr, AllocOp::ArenaNew, &[]),
+            ExprKind::ArenaNewWith { strategy } => {
+                return self.alloc_op(expr, AllocOp::ArenaNewWith, &[(strategy, true)]);
+            }
+            ExprKind::ArenaAlloc { arena, value } => {
+                let children = [(&**arena, true), (&**value, true)];
+                return self.alloc_op(expr, AllocOp::ArenaAlloc, &children);
+            }
+            ExprKind::AllocBoxNew { allocator, value } => {
+                let children = [(&**allocator, true), (&**value, true)];
+                return self.alloc_op(expr, AllocOp::BoxNew, &children);
+            }
+            ExprKind::AllocBoxRead(argument) => {
+                return self.alloc_op(expr, AllocOp::BoxRead, &[(argument, false)]);
+            }
+            ExprKind::AllocBoxTake(argument) => {
+                return self.alloc_op(expr, AllocOp::BoxTake, &[(argument, true)]);
+            }
+            ExprKind::AllocVecNew {
+                allocator,
+                capacity,
+                element,
+            } => {
+                let mut children = vec![(&**allocator, true)];
+                children.extend(capacity.as_deref().map(|capacity| (capacity, false)));
+                let op = AllocOp::VecNew { element: *element };
+                return self.alloc_op(expr, op, &children);
+            }
+            ExprKind::ArenaBoxRead(argument) => {
+                return self.alloc_op(expr, AllocOp::ArenaBoxRead, &[(argument, false)]);
+            }
+            ExprKind::ArenaBoxTake(argument) => {
+                return self.alloc_op(expr, AllocOp::ArenaBoxTake, &[(argument, true)]);
+            }
             ExprKind::AbortScope {
                 label,
                 body,
@@ -1492,6 +1542,28 @@ impl Builder<'_> {
             ExprKind::Call(target, args) => return self.call(expr, target, args),
             other => return Err(variant_name(other)),
         }))
+    }
+
+    /// An allocator or arena operation on its children, consuming those
+    /// marked `true` (the ones the tree path's arm consumes).
+    fn alloc_op(
+        &mut self,
+        expr: &Expr,
+        op: AllocOp,
+        children: &[(&Expr, bool)],
+    ) -> Result<Option<Operand>, String> {
+        let exprs = children.iter().map(|(child, _)| *child).collect::<Vec<_>>();
+        let Some(values) = self.operands(&exprs)? else {
+            return Ok(None);
+        };
+        for (child, consumed) in children {
+            if *consumed {
+                self.consume(child);
+            }
+        }
+        let temp = self.temp(expr.ty);
+        self.assign(temp, Rvalue::Alloc(op, values), expr.span);
+        Ok(Some(Operand::Move(Place::local(temp))))
     }
 
     /// The innermost enclosing abort scope with `label`.
