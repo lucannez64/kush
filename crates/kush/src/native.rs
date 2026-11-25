@@ -10641,7 +10641,7 @@ impl Generator<'_, '_> {
         let values = self.encode_variant(ty, shape.ok_tag, &result_values);
         self.jump(join, &values);
         self.builder.switch_to_block(join);
-        return Some(self.builder.block_params(join).to_vec());
+        Some(self.builder.block_params(join).to_vec())
     }
     /// Join a task or thread handle. A thread always completes: its join
     /// yields the payload; a task's join yields its `TaskExit`.
