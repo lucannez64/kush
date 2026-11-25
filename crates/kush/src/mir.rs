@@ -12,6 +12,7 @@
 
 pub(crate) mod bounds;
 mod build;
+mod copy_prop;
 pub(crate) mod deferred;
 mod drop_flags;
 pub(crate) mod loops;

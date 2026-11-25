@@ -671,7 +671,7 @@ fn reductions(analysis: &Analysis<'_>, deferred: &BTreeSet<At>) -> BTreeMap<Loca
     }
     let taken = loops::address_taken(body);
     for block in &analysis.lp.blocks {
-        for statement in &body.blocks[*block].statements {
+        for (at, statement) in body.blocks[*block].statements.iter().enumerate() {
             let StatementKind::Assign(place, rvalue) = &statement.kind;
             let local = place.local;
             if body.locals[local].temporary
@@ -682,11 +682,17 @@ fn reductions(analysis: &Analysis<'_>, deferred: &BTreeSet<At>) -> BTreeMap<Loca
             {
                 continue;
             }
-            let Rvalue::Use(Operand::Move(value) | Operand::Copy(value)) = rvalue else {
-                continue;
-            };
-            let Some(Ok(definition)) = analysis.definition(value.local) else {
-                continue;
+            // The update's last operation: the statement itself, or (before
+            // copy propagation folds it) a temporary's definition.
+            let definition = match rvalue {
+                Rvalue::Use(Operand::Move(value) | Operand::Copy(value)) => {
+                    match analysis.definition(value.local) {
+                        Some(Ok(definition)) => definition,
+                        _ => continue,
+                    }
+                }
+                Rvalue::Binary(..) => (*block, at),
+                _ => continue,
             };
             let mut operations = Vec::new();
             let mut terms = Vec::new();

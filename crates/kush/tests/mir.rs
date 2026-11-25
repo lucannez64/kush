@@ -77,8 +77,7 @@ fn \"count\"(_0: i64) -> i64 {
         switch move _2 [0 -> bb3] otherwise bb2 @69..99;
     }
     bb2: {
-        _3 = int unchecked_add i64 i64(copy _1, const 1: i64) @91..96;
-        _1 = move _3 @87..96;
+        _1 = int unchecked_add i64 i64(copy _1, const 1: i64) @91..96;
         goto bb1 @69..99;
     }
     bb3: {

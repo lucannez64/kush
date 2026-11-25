@@ -293,8 +293,8 @@ FND-MIR-DROP-FLAGS (`mir/drop_flags.rs`) runs on every built body:
   flag's value. Drop flags are boolean temporaries that are only assigned
   constants and only tested by `switch`.
 - The dataflow is path-sensitive: a test of a known flag only reaches the
-  branch it takes, and a block's unwind target sees the values at every
-  statement.
+  branch it takes, and a block's unwind target sees the values before
+  each statement that can panic (a flag assignment or a copy cannot).
 - Each test whose outcome is known becomes a `goto`, and flags that are
   no longer tested lose their assignments.
 
@@ -302,6 +302,28 @@ On normal paths a flag test survives only where a value was moved on some
 paths but not others. The shared unwind cleanup is reached from points
 where the flags differ, so it keeps its tests. Specializing the cleanup
 per call site would remove those too; that is not done.
+
+FND-MIR-DIRECT-INIT and FND-MIR-COPY-PROP remove the builder's
+temporaries:
+
+- **Direct init:** a `let` takes its initializer's value as soon as it
+  exists, so the initializer is not tracked as a resource (no cleanup
+  copy, no drop flag). A temporary defined just before (by the last
+  statement, or by the call that enters the block) is retargeted to the
+  binding.
+- **Copy propagation** (`mir/copy_prop.rs`, after the drop flags):
+  - `x = move t` folds into `t`'s definition in the same block, or into
+    the call that enters it, when `t` has no other use and nothing in
+    between touches `x`.
+  - A single-use `t = copy x` becomes a direct read of `x`, when nothing
+    in between assigns `x`.
+  - Jumps through empty `goto` blocks go straight to their target, and
+    blocks the entry does not reach (folded cleanups) are removed.
+- Locals whose address is taken are never involved, and the temporaries
+  cleanup reads have two uses, so drop elaboration and unwinding are
+  unchanged. The loop passes read their patterns through either form.
+- A function with two `let x = Bytes.from(..)` and a print goes from 25
+  blocks to 11.
 
 ## 7. Decisions
 

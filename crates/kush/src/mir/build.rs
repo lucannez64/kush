@@ -77,6 +77,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
         coercions: Coercions(builder.coercions),
     };
     super::drop_flags::eliminate(&mut body);
+    super::copy_prop::propagate(&mut body);
     Ok(body)
 }
 
