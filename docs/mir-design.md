@@ -1,7 +1,7 @@
 # A typed control-flow-graph IR (design draft)
 
-Status: **draft for approval** (plan node FND-MIR-DESIGN). Nothing here is
-implemented. FND-MIR waits for the user's decisions in section 7.
+Status: **approved** (plan node FND-MIR-DESIGN, 2026-11-25). The user took
+every recommendation in section 7. Implementation starts with FND-MIR.
 
 Motivation: [foundations-review.md](foundations-review.md) section 8. The
 checker produces a tree, and five passes walk that tree separately. Every
@@ -130,21 +130,20 @@ until the tree path is deleted:
 5. Suspension lowering moves to the CFG with FND-HANDLERS-ONE, which needs
    `Perform` as a terminator anyway.
 
-## 7. Decisions for the user
+## 7. Decisions
+
+Taken on 2026-11-25:
 
 1. **Unwinding**: explicit `unwind` edges and cleanup blocks in the IR
-   (section 5), *or* keep cleanup implicit in each backend as today.
-   Recommended: explicit edges. They are what makes the evaluator and both
-   backends share one cleanup implementation.
-2. **Drops**: drop elaboration in the MIR with drop flags for values moved
-   on some paths only, *or* keep the checker inserting drops in the tree.
-   Recommended: MIR, since the borrow checker needs the same move paths.
-3. **Representation**: non-SSA places as in Rust MIR, *or* SSA values.
-   Recommended: places. Kush has fields, indices and references to
-   projections, and Cranelift and LLVM build SSA themselves.
-4. **Suspension**: move `suspend::lower` to the CFG with FND-HANDLERS-ONE
-   (recommended), or keep it on the tree and lower `Suspendable` regions
-   before building the MIR.
+   (section 5). They make the evaluator and both backends share one
+   cleanup implementation.
+2. **Drops**: drop elaboration in the MIR, with drop flags for values moved
+   on some paths only. The borrow checker needs the same move paths.
+3. **Representation**: non-SSA places as in Rust MIR. Kush has fields,
+   indices and references to projections, and Cranelift and LLVM build SSA
+   themselves.
+4. **Suspension**: `suspend::lower` moves to the CFG with FND-HANDLERS-ONE.
+   Until then, `Suspendable` regions are lowered on the tree before the MIR
+   is built.
 5. **Text form**: a stable, parseable text form for MIR dumps, used in
-   tests the way the kernel exchange format is (recommended), or a debug
-   print only.
+   tests the way the kernel exchange format is.
