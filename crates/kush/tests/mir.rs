@@ -1,10 +1,8 @@
 //! FND-MIR: the control-flow-graph IR (docs/mir-design.md).
 //!
 //! Every body the builder produces for the example corpus passes the
-//! verifier and reads back from its text form; native code lowered from it
-//! behaves as the tree path does. Native builds use the MIR by default;
-//! `KUSH_MIR=0 scripts/test-all.sh` replays the whole native suite on the
-//! tree path.
+//! verifier and reads back from its text form; native code, always lowered
+//! from it (FND-MIR-DEFAULT), behaves as the reference evaluator does.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use kush::{
     executable,
@@ -91,37 +89,46 @@ fn \"count\"(_0: i64) -> i64 {
     );
 }
 
-/// Build `source` natively on the tree path and on the MIR path; both must
-/// print the same and exit the same way.
-fn same_on_both_paths(source: &str) -> String {
-    same_program_on_both_paths(&executable::check(source).unwrap(), false)
+/// Build `source` natively (from the MIR) and run it; it must print what
+/// the reference evaluator prints, and panic where the evaluator fails.
+fn agrees_with_the_evaluator(source: &str) -> String {
+    program_agrees_with_the_evaluator(&executable::check(source).unwrap(), false)
 }
 
-/// As [`same_program_on_both_paths`], from `base` options instead of the
+/// As [`agrees_with_the_evaluator`], from `base` options instead of the
 /// default ones.
-fn same_on_both_paths_with(source: &str, base: CodegenOptions) -> String {
-    compare_paths(&executable::check(source).unwrap(), false, base)
+fn agrees_with_the_evaluator_in(source: &str, base: CodegenOptions) -> String {
+    compare_with_the_evaluator(&executable::check(source).unwrap(), false, base)
 }
 
-/// As [`same_on_both_paths`]; with `stats`, the programs also report their
-/// allocations, which must agree.
-fn same_program_on_both_paths(program: &executable::Executable, stats: bool) -> String {
-    compare_paths(program, stats, CodegenOptions::default())
+/// As [`agrees_with_the_evaluator`]; with `stats`, the program also reports
+/// its allocations, which must all be released.
+fn program_agrees_with_the_evaluator(program: &executable::Executable, stats: bool) -> String {
+    compare_with_the_evaluator(program, stats, CodegenOptions::default())
 }
 
-fn compare_paths(program: &executable::Executable, stats: bool, base: CodegenOptions) -> String {
+fn compare_with_the_evaluator(
+    program: &executable::Executable,
+    stats: bool,
+    codegen: CodegenOptions,
+) -> String {
+    let mut reference = Vec::new();
+    let evaluated = program.evaluate(&mut reference);
     let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
-    let mut outputs = Vec::new();
-    for mir in [false, true] {
-        let binary = scratch.path().join(format!("program-{mir}"));
-        let codegen = CodegenOptions { mir, ..base };
-        native::build_with_codegen(program, &binary, stats, &LinkSpec::default(), codegen).unwrap();
-        let output = Command::new(&binary).output().unwrap();
-        outputs.push((output.status.code(), output.stdout, output.stderr));
+    let binary = scratch.path().join("program");
+    native::build_with_codegen(program, &binary, stats, &LinkSpec::default(), codegen).unwrap();
+    let output = Command::new(&binary).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&reference),
+        "{evaluated:?}"
+    );
+    match evaluated {
+        Ok(value) => assert_eq!(output.status.code(), Some(i32::from(value as u8))),
+        Err(error) => assert!(!output.status.success(), "{error:?}"),
     }
-    assert_eq!(outputs[0], outputs[1]);
     if stats {
-        let report = String::from_utf8_lossy(&outputs[0].2).into_owned();
+        let report = String::from_utf8_lossy(&output.stderr).into_owned();
         let count = |key: &str| {
             report
                 .split_whitespace()
@@ -131,12 +138,12 @@ fn compare_paths(program: &executable::Executable, stats: bool, base: CodegenOpt
         };
         assert_eq!(count("allocations="), count("deallocations="), "{report}");
     }
-    String::from_utf8(outputs.remove(0).1).unwrap()
+    String::from_utf8(output.stdout).unwrap()
 }
 
 #[test]
-fn scalar_control_flow_matches_the_tree_path() {
-    let output = same_on_both_paths(
+fn scalar_control_flow_matches_the_evaluator() {
+    let output = agrees_with_the_evaluator(
         "fn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
         fn classify(x: i64) -> i64 {
             match x { 0 => 10, 1 | 2 => 20, n if n > 100 => n, _ => 30 }
@@ -167,7 +174,7 @@ fn scalar_control_flow_matches_the_tree_path() {
 }
 
 #[test]
-fn records_and_enums_match_the_tree_path() {
+fn records_and_enums_match_the_evaluator() {
     let source = "
         struct Point { x: i64, y: i64 }
         struct Segment { from: Point, to: Point }
@@ -213,7 +220,7 @@ fn records_and_enums_match_the_tree_path() {
         built + 1 >= total,
         "MIR covers {built} of {total} functions"
     );
-    let output = same_on_both_paths(source);
+    let output = agrees_with_the_evaluator(source);
     assert_eq!(output, "399\n0\n7\n39\n0\n100\n-1\n100\n34\n");
 }
 
@@ -266,7 +273,7 @@ fn owned_values_are_dropped_once_on_return_break_and_unwind() {
             "{name} is not covered\n{text}"
         );
     }
-    let output = same_program_on_both_paths(&program, true);
+    let output = program_agrees_with_the_evaluator(&program, true);
     assert_eq!(output, "10\n5\n12\n-1\n");
 }
 
@@ -312,12 +319,12 @@ fn references_read_and_write_through_places() {
             "{name} is not covered\n{text}"
         );
     }
-    let output = same_program_on_both_paths(&program, true);
+    let output = program_agrees_with_the_evaluator(&program, true);
     assert_eq!(output, "8\n13\n13\n0\n42\n7\n");
 }
 
 #[test]
-fn builtins_views_and_arrays_match_the_tree_path() {
+fn builtins_views_and_arrays_match_the_evaluator() {
     let source = "
         fn total(values: &[i64]) -> i64 {
             let mut sum = 0;
@@ -348,12 +355,12 @@ fn builtins_views_and_arrays_match_the_tree_path() {
     let program = executable::check(source).unwrap();
     let (built, total) = kush::mir::coverage(&program);
     assert_eq!(built, total, "{}", kush::mir::dump(&program));
-    let output = same_program_on_both_paths(&program, true);
+    let output = program_agrees_with_the_evaluator(&program, true);
     assert_eq!(output, "15\n9\n60\n20\n605\n303\n8\n");
 }
 
 #[test]
-fn closures_and_indirect_calls_match_the_tree_path() {
+fn closures_and_indirect_calls_match_the_evaluator() {
     let source = "
         struct Pair { left: i64, right: i64 }
         fn apply(f: fn(i64) -> i64 ! {}, x: i64) -> i64 { f(x) }
@@ -380,7 +387,7 @@ fn closures_and_indirect_calls_match_the_tree_path() {
     let program = executable::check_program(&program).unwrap();
     let (built, total) = kush::mir::coverage(&program);
     assert_eq!(built, total, "{}", kush::mir::dump(&program));
-    let output = same_program_on_both_paths(&program, true);
+    let output = program_agrees_with_the_evaluator(&program, true);
     assert_eq!(output, "5\n18\n15\n32\n8\n6\n");
 }
 
@@ -388,7 +395,7 @@ fn closures_and_indirect_calls_match_the_tree_path() {
 /// input) behaves the same on both paths: output, exit status and balanced
 /// allocations.
 #[test]
-fn fully_covered_examples_match_the_tree_path() {
+fn fully_covered_examples_match_the_evaluator() {
     let mut compared = Vec::new();
     for path in examples() {
         let source = fs::read_to_string(&path).unwrap();
@@ -405,7 +412,7 @@ fn fully_covered_examples_match_the_tree_path() {
         if built != total || total == 0 || !source.contains("fn main(") {
             continue;
         }
-        same_program_on_both_paths(&program, true);
+        program_agrees_with_the_evaluator(&program, true);
         compared.push(path.file_stem().unwrap().to_string_lossy().into_owned());
     }
     // Coverage only grows: these must stay compared.
@@ -426,7 +433,7 @@ fn fully_covered_examples_match_the_tree_path() {
 }
 
 #[test]
-fn alternatives_bind_and_drop_as_on_the_tree_path() {
+fn alternatives_bind_and_drop_as_in_the_evaluator() {
     let source = "
         enum Shape { Square(i64), Wide(i64, i64), Dot }
         enum Held { One(Box<i64>, i64), Two(i64, Box<i64>), Empty }
@@ -444,7 +451,7 @@ fn alternatives_bind_and_drop_as_on_the_tree_path() {
     let program = executable::check(source).unwrap();
     let (built, total) = kush::mir::coverage(&program);
     assert_eq!(built, total, "{}", kush::mir::dump(&program));
-    let output = same_program_on_both_paths(&program, true);
+    let output = program_agrees_with_the_evaluator(&program, true);
     assert_eq!(output, "7\n30\n-1\n");
 }
 
@@ -494,17 +501,17 @@ fn drop_flags_are_tested_only_where_paths_disagree() {
         }
     }
     assert!(conditional > 0, "the moves in `pick` need a dynamic flag");
-    let output = same_program_on_both_paths(&program, true);
+    let output = program_agrees_with_the_evaluator(&program, true);
     assert_eq!(output, "9\n");
 }
 
 #[test]
-fn checked_arithmetic_panics_on_the_mir_path_as_on_the_tree() {
-    same_on_both_paths(
+fn checked_arithmetic_panics_as_in_the_evaluator() {
+    agrees_with_the_evaluator(
         "fn grow(x: i64) -> i64 { x * 1000000000000 }
         fn main() -> Unit ! {io} { print_i64(1); print_i64(grow(grow(3))); }",
     );
-    same_on_both_paths(
+    agrees_with_the_evaluator(
         "fn half(x: i64, y: i64) -> i64 { x / y }
         fn main() -> Unit ! {io} { print_i64(half(4, 2)); print_i64(half(1, 0)); }",
     );
@@ -514,7 +521,7 @@ fn checked_arithmetic_panics_on_the_mir_path_as_on_the_tree() {
 fn proved_upper_bounds_keep_the_sign_check() {
     // FND-MIR-BOUNDS: under `i < xs.len()` a release build drops the upper
     // bound check of `xs[i]`, but a negative index must still panic.
-    let output = same_on_both_paths_with(
+    let output = agrees_with_the_evaluator_in(
         "fn sum(xs: &[i64], start: i64) -> i64 {
             let mut i = start;
             let mut total = 0;
@@ -536,7 +543,7 @@ fn proved_upper_bounds_keep_the_sign_check() {
 fn versioned_slice_loops_compute_as_before() {
     // FND-MIR-SLICE-VERSION: release builds run loops over views in a copy
     // specialized to whole consecutive elements.
-    let output = same_on_both_paths_with(
+    let output = agrees_with_the_evaluator_in(
         "fn scale(xs: &mut [i64], k: i64) -> Unit {
             let mut i = 0;
             while i < xs.len() { xs[i] = xs[i] * k; i = i + 1; }
@@ -567,7 +574,7 @@ fn shadowed_push_loops_compute_as_before() {
     if Command::new(clang).arg("--version").output().is_err() {
         return;
     }
-    let output = same_on_both_paths_with(
+    let output = agrees_with_the_evaluator_in(
         "fn fill(n: i64) -> Vec<i64> ! {alloc} {
             let mut v: Vec<i64> = Vec.with_capacity(0);
             let mut i = 0;
@@ -593,8 +600,8 @@ fn shadowed_push_loops_compute_as_before() {
 }
 
 #[test]
-fn functions_outside_the_ir_fall_back_to_the_tree() {
-    let output = same_on_both_paths(
+fn a_vector_passed_by_value_is_summed_and_dropped() {
+    let output = agrees_with_the_evaluator(
         "fn total(values: Vec<i64>) -> i64 {
             let mut sum = 0;
             let mut i = 0;

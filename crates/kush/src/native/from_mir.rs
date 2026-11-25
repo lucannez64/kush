@@ -619,7 +619,7 @@ impl Generator<'_, '_> {
             Rvalue::Unary(op, operand) => {
                 let ty = body.operand_ty(*operand);
                 let value = self.mir_scalar(*operand);
-                self.unary_value(span, &op.kind(), ty, value, None, 0)
+                self.unary_value(span, &op.kind(), ty, value, None)
                     .map(|value| vec![value])
             }
             Rvalue::Binary(op, left, right) => {
@@ -702,7 +702,7 @@ impl Generator<'_, '_> {
                             Some(mode),
                         ))
                     }
-                    None => self.unary_value(span, &Kind::Minus, ty, values[0], Some(mode), 0),
+                    None => self.unary_value(span, &Kind::Minus, ty, values[0], Some(mode)),
                 };
                 self.mir_sticky = None;
                 value.map(|value| vec![value])
@@ -1072,7 +1072,7 @@ impl Generator<'_, '_> {
                                 ));
                             }
                         }
-                        let words = self.call_target(&target, values, ty, terminator.span, None);
+                        let words = self.call_target(&target, values, ty, terminator.span);
                         self.index_below = false;
                         self.access_proved = false;
                         self.push_shadow = None;

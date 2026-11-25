@@ -99,7 +99,6 @@ impl Checker<'_, '_> {
                 let value = Expr {
                     kind: ExprKind::TaskScope {
                         body: Box::new(body),
-                        result,
                         obligation,
                         failure,
                         catch,

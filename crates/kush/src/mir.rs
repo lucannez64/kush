@@ -3,9 +3,9 @@
 //!
 //! A [`Body`] is built from one checked function by [`build`]. Its locals
 //! keep the checked function's slot numbers, followed by temporaries; its
-//! blocks end in explicit terminators. Native code generation lowers a body
-//! instead of the tree (unless `KUSH_MIR=0` is set), and falls back to the
-//! tree for any function [`build`] does not cover.
+//! blocks end in explicit terminators. Native code generation lowers every
+//! function from its body, after the loop passes of [`optimize`]; a
+//! function [`build`] does not cover is a build error.
 //!
 //! [`text`] gives the stable text form printed by `kush mir FILE`; its
 //! parser reads the same form back, and the tests check that the two agree.
@@ -839,12 +839,8 @@ pub(crate) fn optimize(
     use crate::native::{Backend, Optimization};
     let speed = codegen.optimization == Optimization::Speed;
     let llvm = codegen.backend == Backend::Llvm;
-    // As `CodegenOptions::defers_overflow` and `wide_multiply`.
-    let defers_overflow = !codegen.fuzz && codegen.deferred_overflow.unwrap_or(llvm);
-    #[cfg(target_arch = "x86_64")]
-    let wide_multiply = codegen.native_cpu && std::arch::is_x86_feature_detected!("avx512dq");
-    #[cfg(not(target_arch = "x86_64"))]
-    let wide_multiply = false;
+    let defers_overflow = codegen.defers_overflow();
+    let wide_multiply = codegen.wide_multiply();
     if speed && llvm {
         let trace = std::env::var_os("KUSH_TRACE_SHADOWS").is_some();
         push_shadows::shadow(body, trace);

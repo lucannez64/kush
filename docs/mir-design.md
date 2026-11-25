@@ -146,10 +146,10 @@ The first slice (FND-MIR-CORE) is in `crates/kush/src/mir.rs`:
 - `kush mir FILE` prints the text form; `kush mir FILE --stats` prints the
   coverage. The parser reads the text back, and `tests/mir.rs` checks that
   every body built from the examples verifies and round-trips.
-- With `CodegenOptions::mir`, the default since FND-MIR-DEFAULT (turned
-  off by `KUSH_MIR=0`), native code is lowered from the MIR for every
-  covered function and from the tree for the rest. The leaf operations
-  share the tree path's helpers.
+- Native code is lowered from the MIR only (FND-MIR-DEFAULT deleted the
+  tree lowering). A function the builder does not cover is a build error
+  when a build reaches it. The leaf operations are the helpers the tree
+  path used.
 
 FND-MIR-AGGREGATES added records and enums that own nothing and hold no
 borrow. A record or enum is a run of words, so a place is a local plus at
@@ -284,10 +284,8 @@ FND-MIR-SHAPES. So far, that node has moved these into the MIR:
 - **Staging calls:** `StageCompile` and `StageEntry` are now ordinary
   builtin calls like the rest.
 
-Every function in the test suite now builds a MIR body. Functions
-whose loops the tree path optimizes (deferred overflow checks, and
-release builds with the LLVM backend) still lower from the tree; that
-is FND-MIR-DEFAULT.
+Every function in the test suite builds a MIR body. The loops the tree
+path optimized are covered by the passes of section 8.
 
 FND-MIR-DROP-FLAGS (`mir/drop_flags.rs`) runs on every built body:
 
@@ -337,10 +335,10 @@ expressions and lowers the loop body more than once:
 | Push shadows: a vector's length and capacity in variables across `v = v.push(e)` | `Speed` and LLVM | `lower_while`, `vec_push` |
 | Deferred overflow checks (`native/deferred.rs`) | `defers_overflow()` | `lower_deferred_while` |
 
-All four now exist on the MIR, and every function the builder covers
-lowers from the MIR in every build mode. FND-MIR-DEFAULT made that the
-default; `KUSH_MIR=0` keeps the tree path until the tree lowering is
-deleted.
+All four now exist on the MIR. `mir::optimize` runs them in that order
+on every body a build lowers, and `kush mir FILE` with build flags prints
+the result. FND-MIR-DEFAULT then deleted the tree lowering:
+`native/deferred.rs` keeps only the deferral modes and constants.
 
 The MIR versions are passes over a built body, run before native
 lowering. Each writes its result into the body, so the text form shows
@@ -433,3 +431,7 @@ it and tests can check it without compiling.
   - Native code reuses the tree path's helpers: `deferred_i64`,
     `chunk_limit`, `ranges_outside` (split out of `accesses_outside`) and
     `magnitude_bound`.
+  - In the chunk copy, proved (unchecked) narrow arithmetic becomes
+    wrapping arithmetic. Its proof may rest on a deferred operation whose
+    overflow is not reported yet, and narrow values must stay canonical,
+    as the tree path ensured inside a deferred loop.

@@ -8,7 +8,7 @@ use crate::{
     Diagnostic, Span,
     executable::{
         self as ex, AllocVecOp, BytesOp, Coercion, DynArrayOp, Executable, Expr, ExprKind, HostOp,
-        IoOp, Pattern, ReceiverMode, SliceOp, StrOp, StringOp, Target, Type, VecOp,
+        IoOp, ReceiverMode, SliceOp, StrOp, StringOp, Target, Type, VecOp,
     },
     lexer::Kind,
 };
@@ -59,101 +59,6 @@ fn error(message: impl std::fmt::Display) -> Diagnostic {
 /// The C runtime linked into every native executable (FND-RUNTIME-C).
 const RUNTIME: &str = include_str!("../runtime/kush.c");
 
-/// The vector locals a loop touches through `v = Vec.push(v, e)` and
-/// read-only length or element reads alone, so that nothing else in the loop
-/// can change their length or capacity. Loops containing an expression kind
-/// this does not know the shape of yield nothing.
-fn push_only_vectors(condition: &Expr, body: &ex::Block) -> Vec<usize> {
-    #[derive(Default)]
-    struct Uses {
-        pushed: std::collections::BTreeSet<usize>,
-        /// Mentioned some other way, or declared inside the loop.
-        other: std::collections::BTreeSet<usize>,
-        unknown: bool,
-    }
-    fn slot_of(expr: &Expr) -> Option<usize> {
-        match expr.kind {
-            ExprKind::Local(slot)
-            | ExprKind::Move(slot)
-            | ExprKind::Borrow(slot)
-            | ExprKind::Peek(slot) => Some(slot),
-            _ => None,
-        }
-    }
-    fn block(block: &ex::Block, uses: &mut Uses) {
-        for statement in &block.statements {
-            match statement {
-                ex::Statement::Let(slot, value) => {
-                    uses.other.insert(*slot);
-                    expr(value, uses);
-                }
-                ex::Statement::Expr(value) => expr(value, uses),
-                ex::Statement::Declare(slot) => {
-                    uses.other.insert(*slot);
-                }
-            }
-        }
-        if let Some(tail) = &block.tail {
-            expr(tail, uses);
-        }
-    }
-    fn expr(e: &Expr, uses: &mut Uses) {
-        match &e.kind {
-            ExprKind::Constant(_) => {}
-            ExprKind::Local(slot)
-            | ExprKind::Move(slot)
-            | ExprKind::Borrow(slot)
-            | ExprKind::Peek(slot) => {
-                uses.other.insert(*slot);
-            }
-            ExprKind::Assign(slot, value) => {
-                if let ExprKind::Call(Target::Vec(VecOp::Push, _), arguments) = &value.kind
-                    && let [vector, item] = arguments.as_slice()
-                    && matches!(vector.kind, ExprKind::Move(moved) | ExprKind::Local(moved) if moved == *slot)
-                {
-                    uses.pushed.insert(*slot);
-                    expr(item, uses);
-                } else {
-                    uses.other.insert(*slot);
-                    expr(value, uses);
-                }
-            }
-            ExprKind::Call(target, arguments) => {
-                let reads = matches!(target, Target::Vec(VecOp::Len | VecOp::Get, _));
-                for (index, argument) in arguments.iter().enumerate() {
-                    if reads && index == 0 && slot_of(argument).is_some() {
-                        continue;
-                    }
-                    expr(argument, uses);
-                }
-            }
-            ExprKind::Unary(_, operand) => expr(operand, uses),
-            ExprKind::Binary(_, left, right) => {
-                expr(left, uses);
-                expr(right, uses);
-            }
-            ExprKind::If(test, then_block, else_block) => {
-                expr(test, uses);
-                block(then_block, uses);
-                block(else_block, uses);
-            }
-            ExprKind::Block(inner) => block(inner, uses),
-            ExprKind::While(test, inner) => {
-                expr(test, uses);
-                block(inner, uses);
-            }
-            ExprKind::Break(None, _) | ExprKind::Continue(_) => {}
-            _ => uses.unknown = true,
-        }
-    }
-    let mut uses = Uses::default();
-    expr(condition, &mut uses);
-    block(body, &mut uses);
-    if uses.unknown {
-        return Vec::new();
-    }
-    uses.pushed.difference(&uses.other).copied().collect()
-}
 
 /// Extra inputs for the native link step. Every path is passed to `cc` as one
 /// argument (no shell interpolation); library names are validated identifiers
@@ -371,7 +276,7 @@ pub enum Backend {
     Llvm,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CodegenOptions {
     pub optimization: Optimization,
     pub inline_scalar_callbacks: bool,
@@ -394,18 +299,6 @@ pub struct CodegenOptions {
     /// Cranelift only. Turns deferred overflow off, so a check fails where
     /// it is written.
     pub fuzz: bool,
-    /// FND-MIR: lower each function the CFG IR covers from its MIR body
-    /// instead of the checked tree. On by default (FND-MIR-DEFAULT);
-    /// `KUSH_MIR=0` turns it off for every build of a process.
-    pub mir: bool,
-}
-impl Default for CodegenOptions {
-    fn default() -> Self {
-        Self {
-            mir: true,
-            ..Self::cranelift(Optimization::None, false)
-        }
-    }
 }
 impl CodegenOptions {
     /// Cranelift with explicit, independent controls.
@@ -418,7 +311,6 @@ impl CodegenOptions {
             native_cpu: false,
             inline_calls: false,
             fuzz: false,
-            mir: true,
         }
     }
     pub const fn release() -> Self {
@@ -430,7 +322,6 @@ impl CodegenOptions {
             native_cpu: false,
             inline_calls: true,
             fuzz: false,
-            mir: true,
         }
     }
     /// `KUSH_BACKEND=llvm|cranelift` overrides the backend of every native
@@ -453,20 +344,10 @@ impl CodegenOptions {
                 )));
             }
         }
-        // FND-MIR: `KUSH_MIR=0` replays any native build through the tree
-        // path instead of the CFG IR, `1` forces the CFG IR.
-        match std::env::var("KUSH_MIR").ok().as_deref() {
-            None | Some("") => {}
-            Some("0") => self.mir = false,
-            Some("1") => self.mir = true,
-            Some(other) => {
-                return Err(error(format!("KUSH_MIR must be '0' or '1', not '{other}'")));
-            }
-        }
         Ok(self)
     }
     /// Whether loops are lowered with deferred overflow checks.
-    fn defers_overflow(self) -> bool {
+    pub(crate) fn defers_overflow(self) -> bool {
         !self.fuzz
             && self
                 .deferred_overflow
@@ -482,7 +363,7 @@ impl CodegenOptions {
     }
     /// Whether generated code may assume a native 64-bit vector multiply:
     /// only when tuning for this machine and it has AVX-512DQ.
-    fn wide_multiply(self) -> bool {
+    pub(crate) fn wide_multiply(self) -> bool {
         #[cfg(target_arch = "x86_64")]
         {
             self.native_cpu && std::arch::is_x86_feature_detected!("avx512dq")
@@ -503,7 +384,6 @@ impl CodegenOptions {
             // NATIVE-INLINE is a Cranelift pass; clang inlines for LLVM.
             inline_calls: false,
             fuzz: false,
-            mir: true,
         }
     }
 }
@@ -1016,20 +896,6 @@ impl Drop for Scratch {
 /// Only HandlerPush changes the local dynamic-handler depth. The exhaustive
 /// child walker includes guards, initializers, conditions and capture operands;
 /// separately compiled callback bodies perform their own analysis.
-/// FND-MIR: with `KUSH_MIR_REPORT=FILE`, append each function a native
-/// build lowers from the tree instead of the MIR, with the reason.
-fn report_fallback(program: &Executable, index: usize, reason: &str) {
-    let Some(path) = std::env::var_os("KUSH_MIR_REPORT") else {
-        return;
-    };
-    let line = format!("{}\t{reason}\n", program.functions[index].name);
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
-}
-
 pub(crate) fn block_installs_handler(block: &ex::Block) -> bool {
     fn expression(expr: &Expr) -> bool {
         if matches!(
@@ -2136,42 +2002,19 @@ fn lower(
     // NATIVE-INLINE: bodies are built first and defined after, so a
     // caller can absorb any small reachable callee.
     let mut bodies: Vec<Option<ir::Function>> = vec![None; program.functions.len()];
-    // FND-MIR: the functions the CFG IR covers are lowered from it, after
-    // the loop passes of docs/mir-design.md section 8, in the tree path's
-    // order: push shadows, then deferred overflow checks or else
-    // slice-layout versioning, then upper-bound facts.
-    let trace_shadows = std::env::var_os("KUSH_TRACE_SHADOWS").is_some();
-    let deferral = crate::mir::deferred::Options {
-        wide_multiply: codegen.wide_multiply(),
-        wide_vectors: codegen.native_cpu,
-        speed: codegen.optimization == Optimization::Speed,
-        trace: std::env::var_os("KUSH_TRACE_DEFERRED").is_some(),
-    };
-    let mir_bodies: Vec<Option<crate::mir::Body>> = if codegen.mir {
-        (0..program.functions.len())
-            .map(|index| {
-                let mut body = crate::mir::build(program, index)
-                    .inspect_err(|reason| report_fallback(program, index, reason))
-                    .ok()?;
-                let speed = codegen.optimization == Optimization::Speed;
-                if speed && codegen.backend == Backend::Llvm {
-                    crate::mir::push_shadows::shadow(&mut body, trace_shadows);
-                }
-                let deferred = if codegen.defers_overflow() {
-                    crate::mir::deferred::defer(program, &mut body, deferral)
-                } else {
-                    Default::default()
-                };
-                if speed {
-                    crate::mir::slice_layout::version(program, &mut body, &deferred);
-                    crate::mir::bounds::mark(&mut body);
-                }
-                Some(body)
+    // FND-MIR: every function is lowered from its MIR body, after the loop
+    // passes of docs/mir-design.md section 8 (`mir::optimize`). A function
+    // the builder does not cover is an error only if a build reaches it.
+    let mir_bodies: Vec<std::result::Result<crate::mir::Body, String>> = (0..program
+        .functions
+        .len())
+        .map(|index| {
+            crate::mir::build(program, index).map(|mut body| {
+                crate::mir::optimize(program, &mut body, codegen);
+                body
             })
-            .collect()
-    } else {
-        Vec::new()
-    };
+        })
+        .collect();
     loop {
         for id in std::mem::take(&mut module.referenced) {
             if let Some(index) = index_of.get(&id)
@@ -2251,7 +2094,6 @@ fn lower(
             fuzz_depth: 0,
             variables: Vec::new(),
             locations: Vec::new(),
-            result: f.result,
             return_pointer: None,
             allocate,
             try_allocate,
@@ -2271,7 +2113,6 @@ fn lower(
             context_drops: &context_drops,
             tracked: vec![],
             function_index: index,
-            deferred: None,
             bytes_from,
             read_all,
             read_line,
@@ -2320,18 +2161,10 @@ fn lower(
             handler_base: None,
             task_wrappers: &task_wrappers,
             task_pointer_drops: &task_pointer_drops,
-            loops: Vec::new(),
-            regions: Vec::new(),
-            aborts: Vec::new(),
-            slice_layouts: BTreeMap::new(),
-            proved_accesses: std::collections::BTreeSet::new(),
             store_proved: false,
-            upper_bounds: Vec::new(),
             index_below: false,
             access_proved: false,
             mir_sticky: None,
-            vec_shadows: BTreeMap::new(),
-            pending_pushes: Vec::new(),
             push_shadow: None,
             mir_unwind: None,
         };
@@ -2499,17 +2332,16 @@ fn lower(
             g.activate_local(i);
             offset += width;
         }
-        if let Some(body) = mir_bodies.get(index).and_then(Option::as_ref) {
-            g.mir_body(body);
-        } else if let Some(value) = g.block(&f.body) {
-            g.cleanup_all();
-            if erased_result {
-                // Preserve actual cleanup for a copyable erased result, then
-                // return without an ABI payload.
-                g.drop_value(f.result, &value);
-                g.return_value(&[]);
-            } else {
-                g.return_value(&value);
+        match &mir_bodies[index] {
+            Ok(body) => g.mir_body(body),
+            Err(reason) => {
+                return Err(Diagnostic::new(
+                    f.span,
+                    format!(
+                        "native code generation does not support function {} yet: {reason}",
+                        f.name
+                    ),
+                ));
             }
         }
         g.builder.seal_all_blocks();
@@ -4171,15 +4003,6 @@ impl ScalarCallback {
             _ => None,
         }
     }
-    fn callback(program: &Executable, callback: &Expr) -> Option<Self> {
-        let ExprKind::FnValue { function, captures } = &callback.kind else {
-            return None;
-        };
-        if !captures.is_empty() {
-            return None;
-        }
-        Self::function(program, *function, callback.ty)
-    }
     /// The plan of a function value of type `ty` with no captures that
     /// calls `function`.
     fn function(program: &Executable, function: usize, ty: Type) -> Option<Self> {
@@ -4260,17 +4083,9 @@ struct Generator<'a, 'b> {
     foreign_ids: &'b [Option<FuncId>],
     program: &'b Executable,
     codegen: CodegenOptions,
-    // Runtime-guarded descriptor facts, scoped to one versioned loop.
-    /// Slice locals whose layout a specialized copy of a loop assumes:
-    /// slot to (stride in bytes, byte flag).
-    slice_layouts: BTreeMap<usize, (i64, i64)>,
-    /// Element accesses (by [`deferred::key`]) a deferred chunk has proved
-    /// in range; they are emitted without checks.
-    proved_accesses: std::collections::BTreeSet<usize>,
-    /// The `Slice.set` being lowered is one of `proved_accesses`.
+    /// The `Slice.set` being lowered was proved in range by a deferred
+    /// chunk.
     store_proved: bool,
-    // Dominating signed `index < length` tests, identified by SSA value.
-    upper_bounds: Vec<(Value, Value)>,
     /// The MIR call being lowered has its index proved below its slice's
     /// length (`CallHint::Below`, FND-MIR-BOUNDS).
     index_below: bool,
@@ -4279,12 +4094,8 @@ struct Generator<'a, 'b> {
     access_proved: bool,
     /// The sticky word of the MIR deferred operation being lowered.
     mir_sticky: Option<Variable>,
-    /// Vector locals whose length and capacity a loop keeps in variables:
-    /// slot to (length, capacity). See [`Generator::lower_while`].
-    vec_shadows: BTreeMap<usize, (Variable, Variable)>,
-    /// Push expressions (by address) registered for a shadowed slot, and the
-    /// shadow of the push being lowered right now.
-    pending_pushes: Vec<(usize, usize)>,
+    /// The length and capacity variables of the `Vec.push` being lowered,
+    /// when a loop keeps them (`CallHint::Shadow`, FND-MIR-PUSH-SHADOWS).
     push_shadow: Option<(Variable, Variable)>,
     print: FuncId,
     stage_compile: FuncId,
@@ -4318,7 +4129,6 @@ struct Generator<'a, 'b> {
     /// Stack storage for inline-array locals so slice views can alias the real
     /// local storage (needed for `&mut [T]` write-back).
     locations: Vec<Option<Value>>,
-    result: Type,
     return_pointer: Option<Value>,
     bytes_from: FuncId,
     read_all: FuncId,
@@ -4338,16 +4148,6 @@ struct Generator<'a, 'b> {
     str_writes: [FuncId; 3],
     vec_ops: &'b BTreeMap<VecOp, FuncId>,
     vec_element: FuncId,
-    /// (continue target, break target, break carries a value, handler depth at
-    /// loop entry). Break/continue restore the handler depth so a dynamic
-    /// handler frame inside the body cannot survive an early loop exit.
-    loops: Vec<(ir::Block, ir::Block, bool, Option<Variable>)>,
-    /// (exit join, finish block, handler depth at entry) of each enclosing
-    /// lowered suspendable region; `RegionExit` leaves the innermost one.
-    regions: Vec<(Option<ir::Block>, Option<ir::Block>, Option<Variable>)>,
-    /// Enclosing `AbortScope`s: label, the block receiving the payload, and
-    /// the handler-stack depth at entry.
-    aborts: Vec<AbortTarget>,
     /// The runtime's `kush_abort_word`.
     abort_word: DataId,
     allocate: FuncId,
@@ -4402,43 +4202,9 @@ struct Generator<'a, 'b> {
     task_pointer_drops: &'b BTreeMap<Type, FuncId>,
     tracked: Vec<Tracked>,
     function_index: usize,
-    /// The innermost loop whose overflow panics are deferred to its exit.
-    deferred: Option<DeferredLoop>,
     /// FND-MIR: the cleanup block a panic at the current MIR statement or
     /// terminator unwinds to; `None` leaves the function directly.
     mir_unwind: Option<ir::Block>,
-}
-/// State of one loop lowered with deferred overflow checks; see
-/// [`deferred`] for the conditions and the argument that this is unobservable.
-struct DeferredLoop {
-    plan: deferred::Plan,
-    /// Sign bit set once any `Exact` operation has overflowed.
-    sticky: Variable,
-    /// OR of the magnitude words of each tracked operand.
-    leaves: BTreeMap<usize, Variable>,
-    /// The chunk's loop test: counter slot, comparison, limit.
-    limit: (usize, IntCC, Value),
-}
-/// An enclosing `AbortScope` during code generation.
-#[derive(Clone, Copy)]
-struct AbortTarget {
-    label: usize,
-    /// Receives the payload words and runs the handler.
-    aborted: ir::Block,
-    /// Handler-stack depth before the scope pushed anything.
-    depth: Option<Variable>,
-    /// Payload buffer of a declared operation's activation; its address is
-    /// the activation's abort word.
-    buffer: Option<Value>,
-    width: usize,
-}
-macro_rules! lower {
-    ($e:expr) => {
-        match $e {
-            Some(v) => v,
-            None => return None,
-        }
-    };
 }
 impl Generator<'_, '_> {
     fn track(&mut self, id: Option<usize>, values: &[Value]) {
@@ -4455,17 +4221,6 @@ impl Generator<'_, '_> {
             let zero = self.builder.ins().iconst(ir::types::I8, 0);
             self.builder.def_var(self.tracked[id].active, zero);
         }
-    }
-    fn consume(&mut self, expr: &Expr) {
-        self.deactivate(expr.resource);
-    }
-    /// A grade-zero binding is not materialized at runtime. Its initializer is
-    /// still evaluated for strict effects, but no store, local resource, or
-    /// read is emitted for the binding.
-    fn erased_local(&self, slot: usize) -> bool {
-        self.program.functions[self.function_index].locals[slot]
-            .grade
-            .is_some_and(Grade::is_zero)
     }
     fn activate_local(&mut self, slot: usize) {
         let location = self.locations[slot];
@@ -4519,14 +4274,6 @@ impl Generator<'_, '_> {
             self.builder.switch_to_block(no);
         }
     }
-    fn abort_target(&self, label: usize) -> AbortTarget {
-        *self
-            .aborts
-            .iter()
-            .rev()
-            .find(|target| target.label == label)
-            .expect("an abort exit is inside its scope")
-    }
     fn abort_word_address(&mut self) -> Value {
         if self.program.uses_threads {
             return self.runtime_call(self.abort_word_local, &[]);
@@ -4554,9 +4301,6 @@ impl Generator<'_, '_> {
     }
     fn constant(&mut self, n: i64) -> Value {
         self.builder.ins().iconst(I64, n)
-    }
-    fn scalar(&mut self, expr: &Expr) -> Option<Value> {
-        self.expr(expr).map(|values| values[0])
     }
     /// Interpret a one-word float representation as a hardware float value.
     fn float_value(&mut self, kind: FloatKind, bits: Value) -> Value {
@@ -4779,15 +4523,6 @@ impl Generator<'_, '_> {
                 );
             }
         }
-    }
-    /// Callees restore their own local frames. If this function never installs
-    /// a handler, neither its returns nor loop exits can strand a local frame.
-    fn capture_handler_depth(&mut self) -> Option<Variable> {
-        self.handler_base?;
-        let depth = self.builder.declare_var(I64);
-        let value = self.runtime_call(self.handler_depth, &[]);
-        self.builder.def_var(depth, value);
-        Some(depth)
     }
     fn restore_handler_depth(&mut self, depth: Option<Variable>) {
         if let Some(depth) = depth {
@@ -5418,1605 +5153,6 @@ impl Generator<'_, '_> {
         self.abort();
         self.builder.switch_to_block(good);
     }
-    fn block(&mut self, block: &ex::Block) -> Option<Words> {
-        let mut slots = Vec::new();
-        for statement in &block.statements {
-            match statement {
-                ex::Statement::Declare(slot) => {
-                    // Backing storage for a temporary owner. The initializer
-                    // runs at its source position; cleanup is guarded by the
-                    // resource's activation flag.
-                    slots.push(*slot);
-                }
-                ex::Statement::Let(slot, expr) => {
-                    let value = lower!(self.expr(expr));
-                    self.consume(expr);
-                    if self.erased_local(*slot) {
-                        if self.program.owns(expr.ty) {
-                            self.drop_value(expr.ty, &value);
-                        }
-                        continue;
-                    }
-                    self.assign(*slot, &value);
-                    self.activate_local(*slot);
-                    slots.push(*slot);
-                }
-                ex::Statement::Expr(expr) => {
-                    lower!(self.expr(expr));
-                    self.cleanup(expr.resource);
-                }
-            }
-        }
-        let value = if let Some(tail) = &block.tail {
-            let value = lower!(self.expr(tail));
-            self.consume(tail);
-            value
-        } else {
-            vec![self.constant(0)]
-        };
-        for slot in slots.into_iter().rev() {
-            self.cleanup(self.program.functions[self.function_index].local_resources[slot]);
-        }
-        Some(value)
-    }
-    fn expr(&mut self, expr: &Expr) -> Option<Words> {
-        let depth = self.fuzz_depth;
-        let values = self.expression(expr);
-        if self.fuzz_depth > depth {
-            self.fuzz_depth = depth;
-            if values.is_some()
-                && let Some(leave) = self.fuzz.as_ref().map(|f| f.leave)
-            {
-                self.runtime_void(leave, &[]);
-            }
-        }
-        let values = values?;
-        self.track(expr.resource, &values);
-        Some(values)
-    }
-    fn expression(&mut self, expr: &Expr) -> Option<Words> {
-        let scalar = match &expr.kind {
-            ExprKind::Constant(n) => self.constant(*n),
-            // Synthesized adapter placeholder for a physically erased
-            // parameter position. The call's ABI drops these words.
-            ExprKind::Erased(ty) => {
-                let width = self.program.width(*ty);
-                return Some(vec![self.constant(0); width]);
-            }
-            ExprKind::FnValue { function, captures } => {
-                let reference = self
-                    .module
-                    .declare_func_in_func(self.ids[*function], self.builder.func);
-                let code = self.builder.ins().func_addr(I64, reference);
-                if captures.is_empty() {
-                    if matches!(expr.ty, Type::Once(_) | Type::Multi(_)) {
-                        let zero = self.constant(0);
-                        return Some(vec![code, zero]);
-                    }
-                    code
-                } else if matches!(expr.ty, Type::Multi(_)) {
-                    // A multishot token: the captures go on the continuation
-                    // stack, after a word holding the environment size.
-                    let bytes = 8 + captures
-                        .iter()
-                        .map(|capture| self.program.width(capture.ty) * 8)
-                        .sum::<usize>();
-                    let size = self.constant(bytes as i64);
-                    let environment = self.runtime_call(self.kstack_push, &[size]);
-                    self.builder
-                        .ins()
-                        .store(ir::MemFlagsData::new(), size, environment, 0);
-                    let mut offset: i32 = 8;
-                    for capture in captures {
-                        let values = lower!(self.expr(capture));
-                        self.consume(capture);
-                        for value in values.iter().take(self.program.width(capture.ty)) {
-                            self.builder.ins().store(
-                                ir::MemFlagsData::new(),
-                                *value,
-                                environment,
-                                offset,
-                            );
-                            offset += 8;
-                        }
-                    }
-                    return Some(vec![code, environment]);
-                } else {
-                    let types = captures
-                        .iter()
-                        .map(|capture| capture.ty.full())
-                        .collect::<Vec<_>>();
-                    let bytes = 8 + types
-                        .iter()
-                        .map(|ty| self.program.width(*ty) * 8)
-                        .sum::<usize>();
-                    let size = self.constant(bytes as i64);
-                    let environment = self.runtime_call(self.allocate, &[size]);
-                    let drop = self.closure_drops[&types];
-                    let drop = self.module.declare_func_in_func(drop, self.builder.func);
-                    let drop = self.builder.ins().func_addr(I64, drop);
-                    self.builder
-                        .ins()
-                        .store(ir::MemFlagsData::new(), drop, environment, 0);
-                    let capture_refs = self.program.functions[*function].capture_refs.clone();
-                    let mut offset = 8;
-                    for (index, capture) in captures.iter().enumerate() {
-                        if capture_refs.get(index).copied().unwrap_or(false) {
-                            let slot = match &capture.kind {
-                                ExprKind::Local(slot)
-                                | ExprKind::Peek(slot)
-                                | ExprKind::Move(slot) => *slot,
-                                _ => unreachable!("checked by-reference scalar capture"),
-                            };
-                            let pointer = self.local_address(slot);
-                            self.builder.ins().store(
-                                ir::MemFlagsData::new(),
-                                pointer,
-                                environment,
-                                offset as i32,
-                            );
-                            self.consume(capture);
-                            offset += 8;
-                            continue;
-                        }
-                        let values = lower!(self.expr(capture));
-                        self.consume(capture);
-                        let width = self.program.width(capture.ty);
-                        let mut position = offset;
-                        for value in values.iter().take(width) {
-                            self.builder.ins().store(
-                                ir::MemFlagsData::new(),
-                                *value,
-                                environment,
-                                position as i32,
-                            );
-                            position += 8;
-                        }
-                        offset += width * 8;
-                    }
-                    return Some(vec![code, environment]);
-                }
-            }
-            ExprKind::CallIndirect { callee, arguments } => {
-                let callable = lower!(self.expr(callee));
-                let Some((id, once)) = (match callee.ty {
-                    Type::Fn(id) => Some((id, false)),
-                    Type::Once(id) | Type::Multi(id) => Some((id, true)),
-                    _ => None,
-                }) else {
-                    unreachable!("checked indirect callee")
-                };
-                let multi = matches!(callee.ty, Type::Multi(_));
-                let signature = self.program.function_types[id].clone();
-                let result = signature.result;
-                let result_erased = signature.result_erased();
-                let pointer = if !result_erased && aggregate_result(self.program, result) {
-                    let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                        ir::StackSlotKind::ExplicitSlot,
-                        (self.program.width(result) * 8) as u32,
-                        STACK_SLOT_ALIGN_SHIFT,
-                    ));
-                    let pointer = self.builder.ins().stack_addr(I64, slot, 0);
-                    Some(pointer)
-                } else {
-                    None
-                };
-                let mut values = Vec::new();
-                if let Some(pointer) = pointer {
-                    values.push(pointer);
-                }
-                if once {
-                    values.push(callable[1]);
-                }
-                for (index, argument) in arguments.iter().enumerate() {
-                    let words = lower!(self.expr(argument));
-                    if !signature.parameter_erased(index) {
-                        values.extend(words);
-                    }
-                }
-                self.consume(callee);
-                for argument in arguments {
-                    self.consume(argument);
-                }
-                if multi {
-                    // Everything the token call pushes is released when it
-                    // returns (docs/multishot-capabilities.md section 5).
-                    let mark = self.runtime_call(self.kstack_mark, &[]);
-                    let words =
-                        self.finish_indirect_call_mode(id, callable[0], pointer, values, true);
-                    self.runtime_void(self.kstack_restore, &[mark]);
-                    return Some(words);
-                }
-                return Some(self.finish_indirect_call(id, callable[0], pointer, values));
-            }
-            ExprKind::Region { body, finish, .. } => {
-                let exit = self.join(expr.ty);
-                // The finish block receives the finish callable's argument:
-                // the body value on completion, or a returned value from a
-                // `RegionExit`/`TryExit`, even when the body itself never
-                // completes (type Never).
-                let finish_block = match finish {
-                    Some(finish) => {
-                        let input = match finish.ty {
-                            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
-                                self.program.function_types[id].parameters[0]
-                            }
-                            _ => unreachable!("checked region finish callable"),
-                        };
-                        let block = self.builder.create_block();
-                        for _ in 0..self.program.width(input) {
-                            self.builder.append_block_param(block, I64);
-                        }
-                        Some(block)
-                    }
-                    None => None,
-                };
-                let depth = self.capture_handler_depth();
-                self.regions.push((exit, finish_block, depth));
-                let finished = self.block(body);
-                self.regions.pop();
-                if let Some(values) = finished {
-                    match (finish_block, exit) {
-                        (Some(block), _) => self.jump(block, &values),
-                        (None, Some(exit)) => self.jump(exit, &values),
-                        (None, None) => unreachable!("a completing region has a value"),
-                    }
-                }
-                if let (Some(block), Some(finish)) = (finish_block, finish) {
-                    self.builder.switch_to_block(block);
-                    let arguments = self.builder.block_params(block).to_vec();
-                    if let Some(callable) = self.expr(finish) {
-                        self.consume(finish);
-                        let Some((id, once)) = (match finish.ty {
-                            Type::Fn(id) => Some((id, false)),
-                            Type::Once(id) | Type::Multi(id) => Some((id, true)),
-                            _ => None,
-                        }) else {
-                            unreachable!("checked region finish callable")
-                        };
-                        let multi = matches!(finish.ty, Type::Multi(_));
-                        let result = self.program.function_types[id].result;
-                        let pointer = aggregate_result(self.program, result).then(|| {
-                            let slot =
-                                self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                                    ir::StackSlotKind::ExplicitSlot,
-                                    (self.program.width(result) * 8) as u32,
-                                    STACK_SLOT_ALIGN_SHIFT,
-                                ));
-                            self.builder.ins().stack_addr(I64, slot, 0)
-                        });
-                        let mut values = Vec::new();
-                        if let Some(pointer) = pointer {
-                            values.push(pointer);
-                        }
-                        if once {
-                            values.push(callable[1]);
-                        }
-                        values.extend(arguments);
-                        let words = if multi {
-                            let mark = self.runtime_call(self.kstack_mark, &[]);
-                            let words = self.finish_indirect_call_mode(
-                                id,
-                                callable[0],
-                                pointer,
-                                values,
-                                true,
-                            );
-                            self.runtime_void(self.kstack_restore, &[mark]);
-                            words
-                        } else {
-                            self.finish_indirect_call(id, callable[0], pointer, values)
-                        };
-                        match exit {
-                            Some(exit) => self.jump(exit, &words),
-                            None => {
-                                self.builder.ins().trap(ir::TrapCode::user(1).unwrap());
-                            }
-                        }
-                    }
-                }
-                let exit = exit?;
-                self.builder.switch_to_block(exit);
-                return Some(self.builder.block_params(exit).to_vec());
-            }
-            ExprKind::AbortScope {
-                label,
-                body,
-                handler,
-                operation,
-            } => {
-                let exit = self.join(expr.ty);
-                let Some((id, once)) = (match handler.ty {
-                    Type::Fn(id) => Some((id, false)),
-                    Type::Once(id) => Some((id, true)),
-                    _ => None,
-                }) else {
-                    unreachable!("checked abortive handler callable")
-                };
-                let payload = self.program.function_types[id].parameters[0];
-                let aborted = self.builder.create_block();
-                for _ in 0..self.program.width(payload) {
-                    self.builder.append_block_param(aborted, I64);
-                }
-                let depth = self.capture_handler_depth();
-                // An abort can leave a multishot `handle` without its
-                // continuation-stack restore; the landing restores instead.
-                let kstack_mark = self
-                    .program
-                    .functions
-                    .iter()
-                    .any(|function| function.shared_environment)
-                    .then(|| self.runtime_call(self.kstack_mark, &[]));
-                let width = self.program.width(payload);
-                let buffer = operation.map(|operation| {
-                    let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                        ir::StackSlotKind::ExplicitSlot,
-                        (width.max(1) * 8) as u32,
-                        STACK_SLOT_ALIGN_SHIFT,
-                    ));
-                    let buffer = self.builder.ins().stack_addr(I64, slot, 0);
-                    let op = self.constant(operation as i64);
-                    let zero = self.constant(0);
-                    self.runtime_void(self.handler_push, &[op, buffer, zero, zero]);
-                    buffer
-                });
-                self.aborts.push(AbortTarget {
-                    label: *label,
-                    aborted,
-                    depth,
-                    buffer,
-                    width,
-                });
-                let finished = self.block(body);
-                self.aborts.pop();
-                if let (Some(values), Some(exit)) = (finished, exit) {
-                    if buffer.is_some() {
-                        self.runtime_void(self.handler_pop, &[]);
-                    }
-                    self.jump(exit, &values);
-                }
-                self.builder.switch_to_block(aborted);
-                let arguments = self.builder.block_params(aborted).to_vec();
-                if let Some(mark) = kstack_mark {
-                    self.runtime_void(self.kstack_restore, &[mark]);
-                }
-                if let Some(callable) = self.expr(handler) {
-                    self.consume(handler);
-                    let result = self.program.function_types[id].result;
-                    let pointer = aggregate_result(self.program, result).then(|| {
-                        let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                            ir::StackSlotKind::ExplicitSlot,
-                            (self.program.width(result) * 8) as u32,
-                            STACK_SLOT_ALIGN_SHIFT,
-                        ));
-                        self.builder.ins().stack_addr(I64, slot, 0)
-                    });
-                    let mut values = Vec::new();
-                    if let Some(pointer) = pointer {
-                        values.push(pointer);
-                    }
-                    if once {
-                        values.push(callable[1]);
-                    }
-                    values.extend(arguments);
-                    let words = self.finish_indirect_call(id, callable[0], pointer, values);
-                    match exit {
-                        Some(exit) => self.jump(exit, &words),
-                        None => {
-                            self.builder.ins().trap(ir::TrapCode::user(1).unwrap());
-                        }
-                    }
-                }
-                let exit = exit?;
-                self.builder.switch_to_block(exit);
-                return Some(self.builder.block_params(exit).to_vec());
-            }
-            ExprKind::AbortExit {
-                label,
-                value,
-                cleanup,
-                ..
-            } => {
-                let values = lower!(self.expr(value));
-                self.consume(value);
-                for id in cleanup {
-                    self.cleanup(Some(*id));
-                }
-                let target = self.abort_target(*label);
-                self.restore_handler_depth(target.depth);
-                self.jump(target.aborted, &values);
-                return None;
-            }
-            ExprKind::AbortPerform { operation, value } => {
-                let values = lower!(self.expr(value));
-                self.consume(value);
-                let out = self.stack_words(3);
-                let op = self.constant(*operation as i64);
-                let found = self.runtime_call(self.handler_lookup, &[op, out]);
-                let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
-                self.guard(missing);
-                let buffer = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), out, 0);
-                for (index, word) in values.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        buffer,
-                        (index * 8) as i32,
-                    );
-                }
-                let word = self.abort_word_address();
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), buffer, word, 0);
-                self.cleanup_all();
-                self.return_dummy();
-                return None;
-            }
-            ExprKind::AbortCall {
-                call,
-                exits,
-                propagates,
-            } => {
-                let values = lower!(self.expr(call));
-                let address = self.abort_word_address();
-                let word = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), address, 0);
-                let dispatch = self.builder.create_block();
-                let normal = self.builder.create_block();
-                self.builder.ins().brif(word, dispatch, &[], normal, &[]);
-                self.builder.switch_to_block(dispatch);
-                // The call's result words are meaningless on this path.
-                self.consume(call);
-                for (label, cleanup) in exits {
-                    let target = self.abort_target(*label);
-                    let Some(buffer) = target.buffer else {
-                        continue;
-                    };
-                    let hit = self.builder.create_block();
-                    let miss = self.builder.create_block();
-                    let same = self.builder.ins().icmp(IntCC::Equal, word, buffer);
-                    self.builder.ins().brif(same, hit, &[], miss, &[]);
-                    self.builder.switch_to_block(hit);
-                    let zero = self.constant(0);
-                    let address = self.abort_word_address();
-                    self.builder
-                        .ins()
-                        .store(ir::MemFlagsData::new(), zero, address, 0);
-                    for id in cleanup {
-                        self.cleanup(Some(*id));
-                    }
-                    self.restore_handler_depth(target.depth);
-                    let payload = self.load_words(buffer, 0, target.width);
-                    self.jump(target.aborted, &payload);
-                    self.builder.switch_to_block(miss);
-                }
-                if *propagates || self.program.uses_unwinding {
-                    // A foreign abort, or a panic unwinding through.
-                    self.cleanup_all();
-                    self.return_dummy();
-                } else {
-                    self.builder.ins().trap(ir::TrapCode::user(1).unwrap());
-                }
-                self.builder.switch_to_block(normal);
-                return Some(values);
-            }
-            ExprKind::RegionExit {
-                value,
-                finish,
-                cleanup,
-            } => {
-                let values = lower!(self.expr(value));
-                self.consume(value);
-                for id in cleanup {
-                    self.cleanup(Some(*id));
-                }
-                let (exit, finish_block, depth) = *self.regions.last().unwrap();
-                self.restore_handler_depth(depth);
-                let target = if *finish { finish_block } else { exit };
-                match target {
-                    Some(target) => self.jump(target, &values),
-                    None => {
-                        self.builder.ins().trap(ir::TrapCode::user(1).unwrap());
-                    }
-                }
-                return None;
-            }
-            ExprKind::TryExit {
-                value,
-                input,
-                output,
-                cleanup,
-            } => {
-                let values = lower!(self.expr(value));
-                self.consume(value);
-                let condition =
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, values[0], input.ok_tag as i64);
-                let success = self.builder.create_block();
-                let failure = self.builder.create_block();
-                self.builder
-                    .ins()
-                    .brif(condition, success, &[], failure, &[]);
-                self.builder.switch_to_block(failure);
-                let (_, finish_block, depth) = *self.regions.last().unwrap();
-                let finish_block = finish_block.expect("a resumable entry region has a finish");
-                let width = self.builder.block_params(finish_block).len();
-                let mut error = vec![self.constant(output.err_tag as i64)];
-                error.extend_from_slice(&values[1..1 + self.program.width(input.error)]);
-                while error.len() < width {
-                    error.push(self.constant(0));
-                }
-                for id in cleanup {
-                    self.cleanup(Some(*id));
-                }
-                self.restore_handler_depth(depth);
-                self.jump(finish_block, &error);
-                self.builder.switch_to_block(success);
-                return Some(values[1..1 + self.program.width(input.ok)].to_vec());
-            }
-            ExprKind::HandlerDepth => self.runtime_call(self.handler_depth, &[]),
-            ExprKind::ContinuationScope { body } => {
-                let mark = self.runtime_call(self.kstack_mark, &[]);
-                let values = self.block(body)?;
-                self.runtime_void(self.kstack_restore, &[mark]);
-                return Some(values);
-            }
-            ExprKind::HandlerRedirect { depth, body } => {
-                let target = lower!(self.scalar(depth));
-                let before = self.runtime_call(self.handler_redirect, &[target]);
-                let values = self.block(body)?;
-                self.runtime_void(self.handler_restore, &[before]);
-                return Some(values);
-            }
-            ExprKind::Suspendable(_) | ExprKind::Suspend { .. } => {
-                unreachable!("suspendable bodies are lowered before code generation")
-            }
-            ExprKind::HandlerPush {
-                operation,
-                handler,
-                body,
-                reusable,
-            } => {
-                let values = lower!(self.expr(handler));
-                let code = values[0];
-                let (environment, once) = if matches!(handler.ty, Type::Once(_)) {
-                    let environment = values.get(1).copied().unwrap_or_else(|| self.constant(0));
-                    (environment, self.constant(if *reusable { 2 } else { 1 }))
-                } else {
-                    (self.constant(0), self.constant(0))
-                };
-                self.consume(handler);
-                let op = self.constant(*operation as i64);
-                self.runtime_void(self.handler_push, &[op, code, environment, once]);
-                if let Some(values) = self.block(body) {
-                    self.runtime_void(self.handler_pop, &[]);
-                    return Some(values);
-                }
-                return None;
-            }
-            ExprKind::DynamicPerform {
-                operation,
-                payload,
-                resume,
-                handler,
-            } => {
-                let payload_values = lower!(self.expr(payload));
-                let resume_values = lower!(self.expr(resume));
-                self.consume(payload);
-                self.consume(resume);
-                return Some(self.dynamic_perform(
-                    *operation,
-                    *handler,
-                    &payload_values,
-                    &resume_values,
-                ));
-            }
-            ExprKind::BytesLiteral(bytes) => {
-                let id = match self.module.literal(bytes) {
-                    Ok(id) => id,
-                    Err(diagnostic) => {
-                        self.module.failure.get_or_insert(diagnostic);
-                        self.abort();
-                        return None;
-                    }
-                };
-                let gv = self.module.declare_data_in_func(id, self.builder.func);
-                let address = self.builder.ins().symbol_value(I64, gv);
-                let length = self.constant(bytes.len() as i64);
-                self.runtime_call(self.bytes_from, &[address, length])
-            }
-            ExprKind::Move(slot) => {
-                self.deactivate(self.program.functions[self.function_index].local_resources[*slot]);
-                if let Some(pointer) = self.locations[*slot] {
-                    let width = self.variables[*slot].len();
-                    return Some(self.load_words(pointer, 0, width));
-                }
-                return Some(
-                    self.variables[*slot]
-                        .iter()
-                        .map(|v| self.builder.use_var(*v))
-                        .collect(),
-                );
-            }
-            ExprKind::Borrow(slot) => return Some(self.borrow_local_value(*slot)),
-            ExprKind::InitOwner { slot, value: init } => {
-                let values = lower!(self.expr(init));
-                self.consume(init);
-                self.store_initialized_owner(*slot, &values);
-                return Some(self.local_words(*slot));
-            }
-            ExprKind::BorrowInit { slot, value: init } => {
-                let values = lower!(self.expr(init));
-                self.consume(init);
-                self.store_initialized_owner(*slot, &values);
-                return Some(self.borrow_local_value(*slot));
-            }
-            ExprKind::BorrowPlace(place) => {
-                return Some(vec![lower!(self.place_address(place))]);
-            }
-            ExprKind::PlaceIndex { .. } => {
-                unreachable!("a checked place index appears only inside a borrow")
-            }
-            ExprKind::DerefWrite(reference, replacement) => {
-                let pointer = lower!(self.scalar(reference));
-                let value = lower!(self.expr(replacement));
-                let pointer_ty = reference
-                    .ty
-                    .ref_pointee()
-                    .expect("checked dereference write");
-                let pointee = self.program.pointees[pointer_ty];
-                if self.program.owns(pointee) {
-                    let width = self.program.width(pointee);
-                    let old = self.load_words(pointer, 0, width);
-                    self.drop_value(pointee, &old);
-                }
-                for (index, word) in value.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        pointer,
-                        (index * 8) as i32,
-                    );
-                }
-                self.consume(replacement);
-                self.constant(0)
-            }
-            ExprKind::BoxNew(arg) => {
-                let values = lower!(self.expr(arg));
-                let bytes = self.constant((self.program.width(arg.ty) * 8) as i64);
-                let pointer = self.runtime_call(self.allocate, &[bytes]);
-                self.consume(arg);
-                for (i, value) in values.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *value,
-                        pointer,
-                        (i * 8) as i32,
-                    );
-                }
-                pointer
-            }
-            ExprKind::BoxTake(arg) => {
-                let pointer = lower!(self.scalar(arg));
-                let values = (0..self.program.width(expr.ty))
-                    .map(|i| {
-                        self.builder.ins().load(
-                            I64,
-                            ir::MemFlagsData::new(),
-                            pointer,
-                            (i * 8) as i32,
-                        )
-                    })
-                    .collect();
-                self.consume(arg);
-                emit_drop(&mut self.builder, self.module, self.free, &[pointer]);
-                return Some(values);
-            }
-            ExprKind::BoxRead(arg) => {
-                let reference = lower!(self.scalar(arg));
-                let pointer = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), reference, 0);
-                return Some(
-                    (0..self.program.width(expr.ty))
-                        .map(|i| {
-                            self.builder.ins().load(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                pointer,
-                                (i * 8) as i32,
-                            )
-                        })
-                        .collect(),
-                );
-            }
-            ExprKind::BoxWrite(reference, value) => {
-                let reference = lower!(self.scalar(reference));
-                let pointer = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), reference, 0);
-                let words = lower!(self.expr(value));
-                for (index, word) in words.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        pointer,
-                        (index * 8) as i32,
-                    );
-                }
-                self.consume(value);
-                return Some(vec![self.constant(0)]);
-            }
-            ExprKind::AllocatorNew {
-                alloc,
-                free,
-                realloc,
-            } => {
-                let allocator = lower!(self.expr(alloc));
-                let release = lower!(self.expr(free));
-                let grow = match realloc {
-                    Some(realloc) => {
-                        let realloc = lower!(self.expr(realloc));
-                        realloc[0]
-                    }
-                    None => self.constant(0),
-                };
-                return Some(vec![allocator[0], release[0], grow]);
-            }
-            ExprKind::AllocatorContextNew { value, spec } => {
-                let spec_index =
-                    (*spec < self.program.allocator_contexts.len()).then_some(*spec)?;
-                let checked = self.program.allocator_contexts[spec_index];
-                let instance = lower!(self.expr(value));
-                self.consume(value);
-                let state_bytes =
-                    self.constant((self.program.width(checked.state).max(1) * 8) as i64);
-                let state = self.runtime_call(self.allocate, &[state_bytes]);
-                for (index, word) in instance.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        state,
-                        (index * 8) as i32,
-                    );
-                }
-                let drop = self
-                    .module
-                    .declare_func_in_func(self.context_drops[spec_index], self.builder.func);
-                let drop = self.builder.ins().func_addr(I64, drop);
-                let alloc = self
-                    .module
-                    .declare_func_in_func(self.ids[checked.alloc], self.builder.func);
-                let alloc = self.builder.ins().func_addr(I64, alloc);
-                let release = self
-                    .module
-                    .declare_func_in_func(self.ids[checked.free], self.builder.func);
-                let release = self.builder.ins().func_addr(I64, release);
-                let grow = self
-                    .module
-                    .declare_func_in_func(self.ids[checked.grow], self.builder.func);
-                let grow = self.builder.ins().func_addr(I64, grow);
-                let context = self.runtime_call(
-                    self.alloc_ops.context_new,
-                    &[state, drop, alloc, release, grow],
-                );
-                return Some(vec![context]);
-            }
-            ExprKind::AllocatorContextShare(argument) => {
-                let reference = lower!(self.scalar(argument));
-                let handle = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), reference, 0);
-                let shared = self.runtime_call(self.alloc_ops.context_share, &[handle]);
-                return Some(vec![shared]);
-            }
-            ExprKind::AllocBoxNew { allocator, value } => {
-                let pair = self.allocator_words(allocator)?;
-                let payload = lower!(self.expr(value));
-                self.consume(allocator);
-                let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
-                self.consume(value);
-                let block =
-                    self.runtime_call(self.alloc_ops.block, &[pair[0], pair[1], pair[3], bytes]);
-                let data = self.runtime_call(self.alloc_ops.block_data, &[block]);
-                for (index, word) in payload.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        data,
-                        (index * 8) as i32,
-                    );
-                }
-                let handle = self.runtime_call(
-                    self.alloc_ops.box_create,
-                    &[pair[0], pair[1], block, pair[3]],
-                );
-                return Some(vec![handle]);
-            }
-            ExprKind::AllocBoxTryNew {
-                allocator,
-                value,
-                shape,
-            } => {
-                let pair = self.allocator_words(allocator)?;
-                let payload = lower!(self.expr(value));
-                self.consume(allocator);
-                self.consume(value);
-                return Some(self.alloc_box_try_new(pair, &payload, value.ty, expr.ty, *shape));
-            }
-            ExprKind::AllocBoxRead(argument) => {
-                let reference = lower!(self.scalar(argument));
-                let handle = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), reference, 0);
-                let data = self.runtime_call(self.alloc_ops.box_payload, &[handle]);
-                return Some(
-                    (0..self.program.width(expr.ty))
-                        .map(|index| {
-                            self.builder.ins().load(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                data,
-                                (index * 8) as i32,
-                            )
-                        })
-                        .collect(),
-                );
-            }
-            ExprKind::AllocBoxTake(argument) => {
-                let handle = lower!(self.scalar(argument));
-                let data = self.runtime_call(self.alloc_ops.box_payload, &[handle]);
-                let payload = (0..self.program.width(expr.ty))
-                    .map(|index| {
-                        self.builder.ins().load(
-                            I64,
-                            ir::MemFlagsData::new(),
-                            data,
-                            (index * 8) as i32,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                self.consume(argument);
-                self.runtime_void(self.alloc_ops.box_release, &[handle]);
-                return Some(payload);
-            }
-            ExprKind::AllocVecNew {
-                allocator,
-                capacity,
-                element,
-            } => {
-                let pair = self.allocator_words(allocator)?;
-                let capacity = match capacity {
-                    Some(capacity) => lower!(self.scalar(capacity)),
-                    None => self.constant(0),
-                };
-                self.consume(allocator);
-                let width = self.constant(self.program.width(*element) as i64);
-                let handle = self.runtime_call(
-                    self.alloc_ops.vec_create,
-                    &[pair[0], pair[1], pair[2], pair[3], capacity, width],
-                );
-                return Some(vec![handle]);
-            }
-            ExprKind::BoxReuse { owner, payload } | ExprKind::BoxReuseGrow { owner, payload } => {
-                let pointer = lower!(self.scalar(owner));
-                // Both arguments are evaluated before the old payload is
-                // destroyed. If the payload diverges, the owner's tracked
-                // resource is still live and cleanup reclaims the box.
-                let new = lower!(self.expr(payload));
-                self.consume(owner);
-                self.consume(payload);
-                let grow = matches!(expr.kind, ExprKind::BoxReuseGrow { .. });
-                self.box_reuse(pointer, owner.ty, &new, payload.ty, grow)
-            }
-            ExprKind::ArenaNew => self.runtime_call(self.arena_new, &[]),
-            ExprKind::ArenaNewWith { strategy } => {
-                let code = lower!(self.scalar(strategy));
-                self.consume(strategy);
-                self.runtime_call(self.arena_new_with_strategy, &[code])
-            }
-            ExprKind::ArenaAlloc { arena, value } => {
-                let reference = lower!(self.scalar(arena));
-                let handle = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), reference, 0);
-                let payload = lower!(self.expr(value));
-                self.consume(arena);
-                self.consume(value);
-                let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
-                let pointer = self.runtime_call(self.arena_alloc, &[handle, bytes]);
-                for (index, word) in payload.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        pointer,
-                        (index * 8) as i32,
-                    );
-                }
-                pointer
-            }
-            ExprKind::ArenaTryAlloc {
-                arena,
-                value,
-                shape,
-            } => {
-                let reference = lower!(self.scalar(arena));
-                let handle = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), reference, 0);
-                let payload = lower!(self.expr(value));
-                self.consume(arena);
-                self.consume(value);
-                return Some(self.arena_try_alloc(handle, &payload, value.ty, expr.ty, *shape));
-            }
-            ExprKind::ArenaBoxRead(argument) => {
-                let reference = lower!(self.scalar(argument));
-                let pointer = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), reference, 0);
-                return Some(
-                    (0..self.program.width(expr.ty))
-                        .map(|index| {
-                            self.builder.ins().load(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                pointer,
-                                (index * 8) as i32,
-                            )
-                        })
-                        .collect(),
-                );
-            }
-            ExprKind::ArenaBoxTake(argument) => {
-                let pointer = lower!(self.scalar(argument));
-                self.consume(argument);
-                let values = (0..self.program.width(expr.ty))
-                    .map(|index| {
-                        self.builder.ins().load(
-                            I64,
-                            ir::MemFlagsData::new(),
-                            pointer,
-                            (index * 8) as i32,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                self.runtime_void(self.arena_box_release, &[pointer]);
-                return Some(values);
-            }
-            ExprKind::BoxTryNew { value, shape } => {
-                let payload = lower!(self.expr(value));
-                self.consume(value);
-                return Some(self.box_try_new(&payload, value.ty, expr.ty, *shape));
-            }
-            ExprKind::BoxTryReuse {
-                owner,
-                payload,
-                shape,
-            } => {
-                let pointer = lower!(self.scalar(owner));
-                let new = lower!(self.expr(payload));
-                self.consume(owner);
-                self.consume(payload);
-                return Some(self.box_try_reuse(pointer, owner.ty, &new, payload.ty, expr.ty, *shape));
-            }
-            ExprKind::BytesTryWithCapacity { capacity, shape } => {
-                let requested = lower!(self.scalar(capacity));
-                self.consume(capacity);
-                return Some(self.bytes_try_with_capacity(requested, expr.ty, *shape));
-            }
-            ExprKind::Drop(arg) => {
-                let value = lower!(self.expr(arg));
-                self.consume(arg);
-                self.drop_value(arg.ty, &value);
-                self.constant(0)
-            }
-            ExprKind::Coerce {
-                value,
-                to,
-                coercion,
-            } => {
-                let values = lower!(self.expr(value));
-                self.consume(value);
-                return self.coerce_values(values, *to, coercion);
-            }
-            ExprKind::DynArrayNew { element, capacity } => {
-                let width = self.program.width(*element);
-                return Some(vec![self.constant(0); 1 + width * capacity]);
-            }
-            ExprKind::DynArrayPush {
-                array,
-                value,
-                element,
-                capacity,
-            } => {
-                let values = lower!(self.expr(array));
-                self.consume(array);
-                let item = lower!(self.expr(value));
-                self.consume(value);
-                return Some(self.dyn_array_push(values, &item, *element, *capacity));
-            }
-            ExprKind::DynArrayFill {
-                length: length_expr,
-                value,
-                element,
-                capacity,
-                ..
-            } => {
-                let length = lower!(self.scalar(length_expr));
-                self.consume(length_expr);
-                let item = lower!(self.expr(value));
-                self.consume(value);
-                return Some(self.dyn_array_fill(length, &item, *element, *capacity));
-            }
-            ExprKind::DynArraySet {
-                array,
-                index,
-                value,
-                element,
-                capacity,
-            } => {
-                let values = lower!(self.expr(array));
-                self.consume(array);
-                let position = lower!(self.scalar(index));
-                self.consume(index);
-                let item = lower!(self.expr(value));
-                self.consume(value);
-                return Some(self.dyn_array_set(values, position, &item, *element, *capacity));
-            }
-            ExprKind::DynArrayPop {
-                array,
-                element,
-                capacity,
-            } => {
-                let values = lower!(self.expr(array));
-                self.consume(array);
-                return Some(self.dyn_array_pop(values, *element, *capacity));
-            }
-            ExprKind::DynArrayEqual {
-                left,
-                right,
-                element,
-                capacity,
-                negate,
-            } => {
-                let left = lower!(self.expr(left));
-                let right = lower!(self.expr(right));
-                self.dyn_array_equal(&left, &right, *element, *capacity, *negate)
-            }
-            ExprKind::Project(base, offset) => {
-                let values = lower!(self.expr(base));
-                let width = self.program.width(expr.ty);
-                if base.ty.is_ref() {
-                    let pointer = values[0];
-                    return Some(self.load_words(pointer, (*offset * 8) as i32, width));
-                }
-                return Some(values[*offset..*offset + width].to_vec());
-            }
-            ExprKind::BytesAt(bytes, index) => {
-                let reference = lower!(self.scalar(bytes));
-                let index = lower!(self.scalar(index));
-                let handle = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), reference, 0);
-                // Proved in bounds: no check. Data follows the 16-byte header.
-                let address = self.builder.ins().iadd(handle, index);
-                self.builder
-                    .ins()
-                    .uload8(I64, ir::MemFlagsData::new(), address, 16)
-            }
-            ExprKind::Slice {
-                base,
-                start,
-                end,
-                element,
-                check,
-                split: _,
-                text,
-                field,
-            } => {
-                if *text {
-                    let base_values = lower!(self.expr(base));
-                    let (pointer, length) = self.text_view_source(base.ty, &base_values);
-                    let start = match start {
-                        Some(start) => lower!(self.scalar(start)),
-                        None => self.constant(0),
-                    };
-                    let end = match end {
-                        Some(end) => lower!(self.scalar(end)),
-                        None => length,
-                    };
-                    return Some(self.finish_text_view(pointer, length, start, end, *check));
-                }
-                let element_width = self.program.width(*element);
-                let array_location = match &base.kind {
-                    ExprKind::Local(slot) | ExprKind::Peek(slot)
-                        if base
-                            .ty
-                            .layout()
-                            .is_some_and(|id| self.program.enums[id].array.is_some()) =>
-                    {
-                        self.locations[*slot]
-                    }
-                    _ => None,
-                };
-                // A checked DynArray view borrows the pinned record storage, so
-                // the descriptor points at the live inline slots. The length is
-                // the runtime length word, and the capacity is the static bound.
-                // A view over a record field points at the field's word offset
-                // inside the pinned record storage.
-                let dynamic_array_location = match &base.kind {
-                    ExprKind::Borrow(slot)
-                        if base
-                            .ty
-                            .ref_pointee()
-                            .and_then(|pointee| self.program.pointees.get(pointee).copied())
-                            .and_then(|pointee| pointee.layout())
-                            .is_some_and(|id| self.program.enums[id].dynamic_array.is_some()) =>
-                    {
-                        self.locations[*slot].map(|location| (location, 0))
-                    }
-                    _ if field.is_some() => {
-                        let (slot, offset) = projection_offset(base)
-                            .expect("checked record-field DynArray view root");
-                        let mut root = base.as_ref();
-                        while let ExprKind::Project(inner, _) = &root.kind {
-                            root = inner;
-                        }
-                        if root.ty.is_ref() {
-                            // Through a record reference: the record lives at
-                            // the reference's pointer, not in this frame.
-                            let pointer = self.local_words(slot)[0];
-                            Some((pointer, offset))
-                        } else {
-                            if let Some((slot, init)) = projection_root_init(base) {
-                                // A temporary record root is initialized at the
-                                // view's source position into its hidden slot.
-                                let values = lower!(self.expr(init));
-                                self.consume(init);
-                                self.store_initialized_owner(slot, &values);
-                            }
-                            self.locations[slot].map(|location| (location, offset))
-                        }
-                    }
-                    _ => None,
-                };
-                let base_values = if array_location.is_some() || dynamic_array_location.is_some() {
-                    Vec::new()
-                } else {
-                    lower!(self.expr(base))
-                };
-                let (pointer, length, stride, bytes) = self.view_source(
-                    base.ty,
-                    element_width,
-                    array_location,
-                    dynamic_array_location,
-                    &base_values,
-                );
-                let start = match start {
-                    Some(start) => lower!(self.scalar(start)),
-                    None => self.constant(0),
-                };
-                let end = match end {
-                    Some(end) => lower!(self.scalar(end)),
-                    None => length,
-                };
-                return Some(self.finish_view(pointer, length, stride, bytes, start, end, *check));
-            }
-            ExprKind::While(condition, body) => {
-                self.lower_while(condition, body);
-                self.constant(0)
-            }
-            ExprKind::Loop(body) => {
-                let head = self.builder.create_block();
-                let exit = self.join(expr.ty);
-                let depth = self.capture_handler_depth();
-                self.jump(head, &[]);
-                self.builder.switch_to_block(head);
-                // A loop without break has type Never; its exit is never targeted.
-                let target = exit.unwrap_or(head);
-                self.loops.push((head, target, true, depth));
-                let finished = self.block(body);
-                self.loops.pop();
-                if finished.is_some() {
-                    self.jump(head, &[]);
-                }
-                let exit = exit?;
-                self.builder.switch_to_block(exit);
-                return Some(self.builder.block_params(exit).to_vec());
-            }
-            ExprKind::Break(value, cleanup) => {
-                let (_, exit, carries, depth) = *self.loops.last().unwrap();
-                let values = match value {
-                    Some(value) => {
-                        let values = lower!(self.expr(value));
-                        self.consume(value);
-                        values
-                    }
-                    None if carries => vec![self.constant(0)],
-                    None => vec![],
-                };
-                for id in cleanup {
-                    self.cleanup(Some(*id));
-                }
-                self.restore_handler_depth(depth);
-                self.jump(exit, &values);
-                return None;
-            }
-            ExprKind::Continue(cleanup) => {
-                let (head, _, _, depth) = *self.loops.last().unwrap();
-                for id in cleanup {
-                    self.cleanup(Some(*id));
-                }
-                self.restore_handler_depth(depth);
-                self.jump(head, &[]);
-                return None;
-            }
-            ExprKind::Local(slot) | ExprKind::Peek(slot) => {
-                return Some(self.local_words(*slot));
-            }
-            ExprKind::Block(block) => return self.block(block),
-            ExprKind::Construct {
-                enum_id,
-                tag,
-                fields,
-            } => {
-                let mut payload = Vec::new();
-                for field in fields {
-                    payload.extend(lower!(self.expr(field)));
-                }
-                for field in fields {
-                    self.consume(field);
-                }
-                return Some(self.encode_variant(Type::Enum(*enum_id), *tag, &payload));
-            }
-            ExprKind::Try {
-                value,
-                input,
-                output,
-            } => {
-                let values = lower!(self.expr(value));
-                self.consume(value);
-                let condition =
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, values[0], input.ok_tag as i64);
-                let success = self.builder.create_block();
-                let failure = self.builder.create_block();
-                self.builder
-                    .ins()
-                    .brif(condition, success, &[], failure, &[]);
-                self.builder.switch_to_block(failure);
-                let mut error = vec![self.constant(output.err_tag as i64)];
-                error.extend_from_slice(&values[1..1 + self.program.width(input.error)]);
-                while error.len() < self.program.width(self.result) {
-                    error.push(self.constant(0));
-                }
-                self.cleanup_all();
-                self.return_value(&error);
-                self.builder.switch_to_block(success);
-                return Some(values[1..1 + self.program.width(input.ok)].to_vec());
-            }
-            ExprKind::Unary(op, operand) => {
-                let value = lower!(self.scalar(operand));
-                let deferral = self.deferral(expr);
-                return self
-                    .unary_value(
-                        expr.span,
-                        op,
-                        operand.ty,
-                        value,
-                        deferral,
-                        deferred::key(operand),
-                    )
-                    .map(|value| vec![value]);
-            }
-            ExprKind::Assign(slot, replacement) => {
-                if self.vec_shadows.contains_key(slot) {
-                    // By construction of the shadow, this is `v = push(v, e)`.
-                    self.pending_pushes
-                        .push((std::ptr::from_ref::<Expr>(replacement) as usize, *slot));
-                }
-                let value = lower!(self.expr(replacement));
-                self.consume(replacement);
-                if !self.erased_local(*slot) {
-                    self.cleanup(
-                        self.program.functions[self.function_index].local_resources[*slot],
-                    );
-                    self.assign(*slot, &value);
-                    self.activate_local(*slot);
-                } else if self.program.owns(replacement.ty) {
-                    self.drop_value(replacement.ty, &value);
-                }
-                self.constant(0)
-            }
-            ExprKind::RefRead(reference) => {
-                let pointer = lower!(self.scalar(reference));
-                return Some(self.load_words(pointer, 0, self.program.width(expr.ty)));
-            }
-            ExprKind::RefAssign(reference, offset, replacement) => {
-                let pointer = lower!(self.scalar(reference));
-                let value = lower!(self.expr(replacement));
-                for (index, word) in value.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        pointer,
-                        ((offset + index) * 8) as i32,
-                    );
-                }
-                self.consume(replacement);
-                self.constant(0)
-            }
-            ExprKind::StructEq {
-                left,
-                right,
-                negated,
-            } => {
-                let ty = left.ty;
-                let left = lower!(self.expr(left));
-                let right = lower!(self.expr(right));
-                let equal = self.struct_eq_words(ty, &left, &right);
-                let value = if *negated {
-                    self.builder.ins().bxor_imm_s(equal, 1)
-                } else {
-                    equal
-                };
-                return Some(vec![self.builder.ins().uextend(I64, value)]);
-            }
-            ExprKind::Binary(op, left, right_expr) => {
-                let left_ty = left.ty;
-                let left_kind = left.ty.int_kind();
-                let left_key = deferred::key(left);
-                let left = lower!(self.scalar(left));
-                if matches!(op, Kind::AmpAmp | Kind::PipePipe) {
-                    return self.short_circuit(op, left, right_expr);
-                }
-                let right_kind = right_expr.ty.int_kind();
-                let right = lower!(self.scalar(right_expr));
-                self.fuzz_arith(expr.span, op, left_kind, right_kind, left, right);
-                if let Some(kind) = left_ty.float_kind() {
-                    let left = self.float_value(kind, left);
-                    let right = self.float_value(kind, right);
-                    return Some(vec![self.float_binary(kind, op, left, right)]);
-                }
-                let deferral = self.deferral(expr);
-                if matches!(
-                    deferral,
-                    Some(deferred::Mode::Certified | deferred::Mode::Accumulate)
-                ) {
-                    self.track_leaf(left_key, left);
-                    self.track_leaf(deferred::key(right_expr), right);
-                }
-                return Some(vec![
-                    self.scalar_binary(op, left_kind, right_kind, left, right, deferral),
-                ]);
-            }
-            ExprKind::VecMap {
-                vector,
-                callbacks,
-                source,
-                target,
-                grow,
-            } => {
-                let handle = lower!(self.scalar(vector));
-                let plans = callbacks
-                    .iter()
-                    .map(|callback| {
-                        self.codegen
-                            .inline_scalar_callbacks
-                            .then(|| ScalarCallback::callback(self.program, callback))
-                            .flatten()
-                    })
-                    .collect::<Vec<_>>();
-                let mut codes = Vec::with_capacity(callbacks.len());
-                for callback in callbacks {
-                    codes.push(lower!(self.scalar(callback)));
-                }
-                self.consume(vector);
-                for callback in callbacks {
-                    self.consume(callback);
-                }
-                let types = callbacks.iter().map(|callback| callback.ty).collect::<Vec<_>>();
-                self.vec_map(handle, &codes, &types, &plans, *source, *target, *grow)
-            }
-            ExprKind::TaskSpawn {
-                body,
-                result,
-                obligation,
-                parallel,
-            } => {
-                let values = lower!(self.expr(body));
-                self.consume(body);
-                self.task_spawn(&values, body.ty, *result, *obligation, *parallel)
-            }
-            ExprKind::TaskScope {
-                body,
-                result,
-                failure,
-                catch,
-                parallel,
-                ..
-            } => {
-                let values = lower!(self.expr(body));
-                self.consume(body);
-                let _ = result;
-                return self.task_scope(&values, body.ty, expr.ty, *failure, *catch, *parallel);
-            }
-            ExprKind::TaskYield => self.runtime_call(self.task_yield, &[]),
-            ExprKind::TaskCheckCancel => self.runtime_call(self.task_check_cancel, &[]),
-            ExprKind::TaskCancel(reference) => {
-                let pointer = lower!(self.scalar(reference));
-                self.runtime_void(self.task_cancel, &[pointer]);
-                self.constant(0)
-            }
-            ExprKind::TaskJoin {
-                task,
-                exit,
-                parallel,
-                ..
-            } => {
-                let handle = lower!(self.scalar(task));
-                self.consume(task);
-                return Some(self.task_join(handle, *exit, *parallel));
-            }
-            ExprKind::Call(target, args) => {
-                let erased_parameters = match target {
-                    Target::Function(index) => {
-                        let function = &self.program.functions[*index];
-                        (0..args.len())
-                            .map(|position| {
-                                function
-                                    .parameter_grades
-                                    .get(position)
-                                    .copied()
-                                    .flatten()
-                                    .is_some_and(Grade::is_zero)
-                            })
-                            .collect::<Vec<_>>()
-                    }
-                    _ => Vec::new(),
-                };
-                let mut values = Vec::new();
-                for (position, arg) in args.iter().enumerate() {
-                    let words = lower!(self.expr(arg));
-                    if erased_parameters.get(position).copied() != Some(true) {
-                        values.extend(words);
-                    }
-                }
-                for arg in args {
-                    self.consume(arg);
-                }
-                let site = (std::ptr::from_ref(expr) as usize, deferred::key(expr));
-                return self.call_target(target, values, expr.ty, expr.span, Some(site));
-            }
-            ExprKind::Return(arg) => {
-                let value = lower!(self.expr(arg));
-                self.consume(arg);
-                self.cleanup_all();
-                let erased_result = self.program.functions[self.function_index]
-                    .result_grade
-                    .is_some_and(Grade::is_zero);
-                if erased_result {
-                    self.drop_value(arg.ty, &value);
-                    self.return_value(&[]);
-                } else {
-                    self.return_value(&value);
-                }
-                return None;
-            }
-            ExprKind::If(condition, yes, no) => {
-                let condition = lower!(self.scalar(condition));
-                let hit = self.builder.create_block();
-                let miss = self.builder.create_block();
-                let join = self.join(expr.ty);
-                self.builder.ins().brif(condition, hit, &[], miss, &[]);
-                self.builder.switch_to_block(hit);
-                if let Some(values) = self.block(yes) {
-                    self.jump(join.unwrap(), &values);
-                }
-                self.builder.switch_to_block(miss);
-                if let Some(values) = self.block(no) {
-                    self.jump(join.unwrap(), &values);
-                }
-                let join = join?;
-                self.builder.switch_to_block(join);
-                return Some(self.builder.block_params(join).to_vec());
-            }
-            ExprKind::Match(value, arms) => {
-                let input = value;
-                let value = lower!(self.expr(input));
-                // A borrowed DynArray scrutinee is a pointer: patterns test the
-                // loaded words, and element names bind slot addresses.
-                let borrowed = match input.ty {
-                    Type::Ref(pointer) | Type::RefMut(pointer) => {
-                        let pointee = self.program.pointees[pointer];
-                        let words = self.program.width(pointee);
-                        Some((value[0], self.load_words(value[0], 0, words)))
-                    }
-                    _ => None,
-                };
-                let tested = borrowed
-                    .as_ref()
-                    .map(|(_, words)| words.clone())
-                    .unwrap_or_else(|| value.clone());
-                let join = self.join(expr.ty);
-                for arm in arms {
-                    let hit = self.builder.create_block();
-                    let next = self.builder.create_block();
-                    let condition = self.pattern(&arm.pattern, &tested);
-                    self.builder.ins().brif(condition, hit, &[], next, &[]);
-                    self.builder.switch_to_block(hit);
-                    match &borrowed {
-                        Some((pointer, words)) => {
-                            self.bind_borrowed_dyn(&arm.pattern, *pointer, words)
-                        }
-                        None => self.bind_pattern(&arm.pattern, &value),
-                    }
-                    let mut body_reachable = true;
-                    if let Some(guard) = &arm.guard {
-                        if let Some(guard) = self.scalar(guard) {
-                            let body = self.builder.create_block();
-                            self.builder.ins().brif(guard, body, &[], next, &[]);
-                            self.builder.switch_to_block(body);
-                        } else {
-                            body_reachable = false;
-                        }
-                    }
-                    if body_reachable {
-                        self.consume(input);
-                        if borrowed.is_none() {
-                            self.dispose_pattern(&arm.pattern, input.ty, &value);
-                        }
-                        if let Some(body) = self.expr(&arm.body) {
-                            self.consume(&arm.body);
-                            let mut slots = std::collections::BTreeSet::new();
-                            crate::ownership::pattern_bindings(&arm.pattern, &mut slots);
-                            for slot in slots.into_iter().rev() {
-                                self.cleanup(
-                                    self.program.functions[self.function_index].local_resources
-                                        [slot],
-                                );
-                            }
-                            self.jump(join.unwrap(), &body);
-                        }
-                    }
-                    self.builder.switch_to_block(next);
-                }
-                self.builder.ins().trap(TrapCode::unwrap_user(2));
-                let join = join?;
-                self.builder.switch_to_block(join);
-                return Some(self.builder.block_params(join).to_vec());
-            }
-        };
-        Some(vec![scalar])
-    }
-    /// Evaluate one allocator operand into `(alloc, release, realloc,
-    /// context)`. The legacy value supplies three code pointers and no
-    /// context; an instance context supplies one retained handle and selects
-    /// its thunks inside the runtime helpers.
-    fn allocator_words(&mut self, allocator: &Expr) -> Option<[Value; 4]> {
-        let values = self.expr(allocator)?;
-        let zero = self.constant(0);
-        match allocator.ty {
-            Type::Allocator => Some([values[0], values[1], values[2], zero]),
-            Type::AllocatorContext => Some([zero, zero, zero, values[0]]),
-            _ => unreachable!("checked allocator operand"),
-        }
-    }
     /// Allocate one owned dynamic-object payload and copy the concrete member
     /// words into it. The corresponding `free` happens in `drop_value` for an
     /// owned object or immediately before an owning method consumes it.
@@ -7044,24 +5180,10 @@ impl Generator<'_, '_> {
             let width = self.variables[slot].len();
             return self.load_words(pointer, 0, width);
         }
-        let mut words: Words = self.variables[slot]
+        self.variables[slot]
             .iter()
             .map(|v| self.builder.use_var(*v))
-            .collect();
-        if let Some((stride, bytes)) = self.slice_layouts.get(&slot).copied() {
-            words[2] = self.constant(stride);
-            words[3] = self.constant(bytes);
-        }
-        words
-    }
-    /// Store a temporary-owner initializer in its already-declared hidden
-    /// slot, releasing any previous value from an earlier loop evaluation.
-    #[inline(never)]
-    fn store_initialized_owner(&mut self, slot: usize, values: &[Value]) {
-        let id = self.program.functions[self.function_index].local_resources[slot];
-        self.cleanup(id);
-        self.assign(slot, values);
-        self.activate_local(slot);
+            .collect()
     }
     /// Borrow one direct local binding, giving inline aggregates and owning
     /// handles their pinned address.
@@ -7118,52 +5240,6 @@ impl Generator<'_, '_> {
             .ins()
             .store(ir::MemFlagsData::new(), variable, pointer, 0);
         pointer
-    }
-    /// Address of a checked place expression: a pinned local or a chain of
-    /// aggregate field projections over one. Only read-only projected dispatch
-    /// uses this, so no relocation or ownership transfer happens here.
-    /// `None` means evaluating a temporary initializer transferred control, so
-    /// the surrounding expression lowering must stop emitting straight-line
-    /// code.
-    fn place_address(&mut self, expr: &Expr) -> Option<Value> {
-        match &expr.kind {
-            ExprKind::Local(slot) | ExprKind::Peek(slot) => Some(self.local_address(*slot)),
-            ExprKind::InitOwner { slot, value: init } => {
-                // Initialize temporary backing storage at the place's source
-                // position, then address that stable slot.
-                let values = lower!(self.expr(init));
-                self.consume(init);
-                self.store_initialized_owner(*slot, &values);
-                Some(self.local_address(*slot))
-            }
-            ExprKind::Project(base, offset) => {
-                let base_pointer = if base.ty.is_ref() {
-                    lower!(self.expr(base))[0]
-                } else {
-                    lower!(self.place_address(base))
-                };
-                Some(
-                    self.builder
-                        .ins()
-                        .iadd_imm_s(base_pointer, (*offset * 8) as i64),
-                )
-            }
-            ExprKind::PlaceIndex { base, index, .. } if base.ty.is_slice() => {
-                // A slice view is a `(data, length, stride, byte)` descriptor.
-                // The element address is `data + index * stride` after the
-                // bound check; a byte-backed view has no word-sized element
-                // and traps instead.
-                let descriptor = lower!(self.expr(base));
-                let index = lower!(self.scalar(index));
-                Some(self.slice_element_address(&descriptor, index))
-            }
-            ExprKind::PlaceIndex { base, index, .. } => {
-                let location = lower!(self.place_address(base));
-                let index = lower!(self.scalar(index));
-                Some(self.element_address(base.ty, location, index))
-            }
-            _ => unreachable!("checked projected borrow has a place expression"),
-        }
     }
     /// The address of a slice view's element after the bound check; a
     /// byte-backed view has no word-sized element and traps instead.
@@ -7764,18 +5840,11 @@ impl Generator<'_, '_> {
     }
 
     fn slice_out_of_bounds(&mut self, index: Value, length: Value) -> Value {
-        if self.index_below
-            || self.codegen.optimization == Optimization::Speed
-                && self.upper_bounds.iter().any(|(known_index, known_length)| {
-                self.builder.func.dfg.resolve_aliases(*known_index)
-                    == self.builder.func.dfg.resolve_aliases(index)
-                    && self.builder.func.dfg.resolve_aliases(*known_length)
-                        == self.builder.func.dfg.resolve_aliases(length)
-            })
-        {
-            // The exact SSA pair already passed `index < length`. A negative
-            // index can still pass a signed loop condition, so retain its check
-            // at the original access site, after all preceding effects.
+        if self.index_below {
+            // A dominating test already established `index < length`
+            // (FND-MIR-BOUNDS). A negative index can still pass a signed
+            // test, so retain its check at the access, after all preceding
+            // effects.
             self.builder
                 .ins()
                 .icmp_imm_s(IntCC::SignedLessThan, index, 0)
@@ -7787,197 +5856,6 @@ impl Generator<'_, '_> {
                 .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length)
         }
     }
-
-    fn loop_slice(&self, condition: &Expr) -> Option<(usize, usize, usize)> {
-        let ExprKind::Binary(Kind::Lt, index, length) = &condition.kind else {
-            return None;
-        };
-        let (ExprKind::Local(index_slot) | ExprKind::Peek(index_slot)) = index.kind else {
-            return None;
-        };
-        let ExprKind::Call(Target::Slice(SliceOp::Len, element), arguments) = &length.kind else {
-            return None;
-        };
-        let [view] = arguments.as_slice() else {
-            return None;
-        };
-        let (ExprKind::Local(view_slot) | ExprKind::Peek(view_slot)) = view.kind else {
-            return None;
-        };
-        let locals = &self.program.functions[self.function_index].locals;
-        if locals[index_slot].ty != Type::I64
-            || locals[index_slot].pinned
-            || locals[view_slot].mutable
-            || locals[view_slot].pinned
-        {
-            return None;
-        }
-        Some((index_slot, view_slot, self.program.width(*element)))
-    }
-
-    fn lower_while(&mut self, condition: &Expr, body: &ex::Block) {
-        // A loop that appends to a vector reloads its length and capacity
-        // from the heap block on every `Vec.push`, and decodes the capacity,
-        // because the growth call in the same loop may have changed both.
-        // Where the loop touches the vector's header through nothing but
-        // those pushes, keep the two in variables instead: load them once,
-        // update them at each push (the length is still stored, so memory
-        // is never stale), and reload the capacity only after a growth.
-        // Only for LLVM: Cranelift's code for the same loop measured 15 to
-        // 20% slower with the two extra loop-carried values than with the
-        // reloads.
-        let shadowed: Vec<usize> = if self.codegen.optimization == Optimization::Speed
-            && self.codegen.backend == Backend::Llvm
-        {
-            push_only_vectors(condition, body)
-                .into_iter()
-                .filter(|slot| {
-                    !self.vec_shadows.contains_key(slot)
-                        && !self.erased_local(*slot)
-                        && self.variables[*slot].len() == 1
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if !shadowed.is_empty() && std::env::var_os("KUSH_TRACE_SHADOWS").is_some() {
-            eprintln!(
-                "vector shadows: a loop in {} keeps {} vector(s) in variables",
-                self.program.functions[self.function_index].name,
-                shadowed.len()
-            );
-        }
-        for slot in &shadowed {
-            let handle = self.local_words(*slot)[0];
-            let length = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
-                g.builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), handle, 0)
-            });
-            let capacity = self.buffer_capacity(handle);
-            let length_var = self.builder.declare_var(I64);
-            let capacity_var = self.builder.declare_var(I64);
-            self.builder.def_var(length_var, length);
-            self.builder.def_var(capacity_var, capacity);
-            self.vec_shadows.insert(*slot, (length_var, capacity_var));
-        }
-        self.lower_while_checks(condition, body);
-        for slot in &shadowed {
-            self.vec_shadows.remove(slot);
-        }
-        if self.vec_shadows.is_empty() {
-            self.pending_pushes.clear();
-        }
-    }
-    fn lower_while_checks(&mut self, condition: &Expr, body: &ex::Block) {
-        if self.codegen.defers_overflow()
-            && self.deferred.is_none()
-            && let Some((plan, accesses)) = deferred::plan(
-                &self.program.functions[self.function_index],
-                condition,
-                body,
-                self.codegen.wide_multiply(),
-                self.codegen.native_cpu,
-            )
-        {
-            self.lower_deferred_while(plan, &accesses, condition, body);
-        } else {
-            self.lower_checked_while(condition, body);
-        }
-    }
-    fn lower_checked_while(&mut self, condition: &Expr, body: &ex::Block) {
-        let candidate = self.loop_slice(condition);
-        // Bound code growth and avoid recursively duplicating nested loops.
-        fn eligible(expr: &Expr, budget: &mut usize) -> bool {
-            if *budget == 0 || matches!(expr.kind, ExprKind::While(..) | ExprKind::Loop(..)) {
-                return false;
-            }
-            *budget -= 1;
-            let mut safe = true;
-            expr.for_each_child(&mut |child| safe &= eligible(child, budget));
-            safe
-        }
-        let mut budget = 96;
-        let small = body.statements.iter().all(|statement| match statement {
-            ex::Statement::Let(_, expr) | ex::Statement::Expr(expr) => eligible(expr, &mut budget),
-            ex::Statement::Declare(_) => false,
-        }) && body
-            .tail
-            .as_ref()
-            .is_none_or(|expr| eligible(expr, &mut budget));
-        if self.codegen.optimization == Optimization::Speed
-            && self.slice_layouts.is_empty()
-            && small
-            && let Some((_, slot, width)) = candidate
-        {
-            let words = self.local_words(slot);
-            let stride = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::Equal, words[2], (width * 8) as i64);
-            let normal = self.builder.ins().icmp_imm_s(IntCC::Equal, words[3], 0);
-            let matches = self.builder.ins().band(stride, normal);
-            let fast = self.builder.create_block();
-            let generic = self.builder.create_block();
-            let join = self.builder.create_block();
-            self.builder.ins().brif(matches, fast, &[], generic, &[]);
-            self.builder.switch_to_block(fast);
-            self.slice_layouts.insert(slot, ((width * 8) as i64, 0));
-            self.while_body(condition, body, candidate);
-            self.slice_layouts.remove(&slot);
-            self.jump(join, &[]);
-            self.builder.switch_to_block(generic);
-            self.while_body(condition, body, candidate);
-            self.jump(join, &[]);
-            self.builder.switch_to_block(join);
-        } else {
-            self.while_body(condition, body, candidate);
-        }
-    }
-
-    fn while_body(
-        &mut self,
-        condition: &Expr,
-        body: &ex::Block,
-        candidate: Option<(usize, usize, usize)>,
-    ) {
-        let head = self.builder.create_block();
-        let enter = self.builder.create_block();
-        let exit = self.builder.create_block();
-        let depth = self.capture_handler_depth();
-        self.jump(head, &[]);
-        self.builder.switch_to_block(head);
-        // A deferred chunk runs to its own limit, which implies the
-        // condition (see `lower_deferred_while`).
-        let chunk_test =
-            self.deferred
-                .as_ref()
-                .map(|state| state.limit)
-                .map(|(counter, compare, limit)| {
-                    let value = self.local_words(counter)[0];
-                    self.builder.ins().icmp(compare, value, limit)
-                });
-        if let Some(test) = chunk_test.or_else(|| self.scalar(condition)) {
-            let fact = candidate
-                .map(|(index, view, _)| (self.local_words(index)[0], self.local_words(view)[1]));
-            self.builder.ins().brif(test, enter, &[], exit, &[]);
-            self.builder.seal_block(enter);
-            self.builder.switch_to_block(enter);
-            let saved = self.upper_bounds.len();
-            if let Some(fact) = fact {
-                self.upper_bounds.push(fact);
-            }
-            self.loops.push((head, exit, false, depth));
-            let finished = self.block(body);
-            self.loops.pop();
-            self.upper_bounds.truncate(saved);
-            if finished.is_some() {
-                self.jump(head, &[]);
-            }
-        }
-        self.builder.switch_to_block(exit);
-    }
-
     fn slice_call(&mut self, op: SliceOp, element: Type, values: Words) -> Words {
         let element_width = self.program.width(element);
         let (pointer, length, stride, bytes) = (values[0], values[1], values[2], values[3]);
@@ -8834,26 +6712,9 @@ impl Generator<'_, '_> {
             }
         }
     }
-    /// Panic unless `value` (a 64-bit result) is in range for `kind`.
-    /// How this checked operation is lowered inside a deferred loop.
-    fn deferral(&self, expr: &Expr) -> Option<deferred::Mode> {
-        self.deferred
-            .as_ref()?
-            .plan
-            .modes
-            .get(&deferred::key(expr))
-            .copied()
-    }
-    /// Whether a deferred chunk proved the element access being lowered in
-    /// range: the tree path's call at `site`, or a MIR call marked proved.
-    fn proved(&self, site: Option<(usize, usize)>) -> bool {
-        self.access_proved || site.is_some_and(|(_, key)| self.proved_accesses.contains(&key))
-    }
     /// Record a deferred overflow whose indicator is the word's sign bit.
     fn defer_sign(&mut self, word: Value) {
-        let sticky = self
-            .mir_sticky
-            .unwrap_or_else(|| self.deferred.as_ref().expect("deferred loop").sticky);
+        let sticky = self.mir_sticky.expect("a deferred operation's sticky word");
         let previous = self.builder.use_var(sticky);
         let merged = self.builder.ins().bor(previous, word);
         self.builder.def_var(sticky, merged);
@@ -8872,20 +6733,6 @@ impl Generator<'_, '_> {
         // relies on narrow values being in canonical form (for instance, a
         // narrow signed division has no `MIN / -1` guard).
         canonical
-    }
-    /// OR an operand's magnitude word into its tracker, if it has one.
-    fn track_leaf(&mut self, key: usize, value: Value) {
-        let Some(tracker) = self
-            .deferred
-            .as_ref()
-            .and_then(|state| state.leaves.get(&key).copied())
-        else {
-            return;
-        };
-        let folded = self.magnitude(value);
-        let previous = self.builder.use_var(tracker);
-        let merged = self.builder.ins().bor(previous, folded);
-        self.builder.def_var(tracker, merged);
     }
     /// Wrapping signed 64-bit `+`, `-`, `*` with its check deferred. Exact
     /// add/sub tests are plain bit operations so the loop stays vectorizable;
@@ -8955,307 +6802,6 @@ impl Generator<'_, '_> {
         let one = self.constant(1);
         let floor = self.builder.ins().umax(bits, one);
         self.builder.ins().iadd_imm_s(floor, -1)
-    }
-    /// Evaluate a certificate bound after the loop.
-    fn bound_value(
-        &mut self,
-        bound: &deferred::Bound,
-        leaves: &BTreeMap<usize, Variable>,
-        entry: &BTreeMap<usize, Value>,
-        count: Variable,
-    ) -> Value {
-        use deferred::Bound;
-        match bound {
-            Bound::Constant(bits) => self.constant(i64::from(*bits)),
-            Bound::Leaf(key) => {
-                let word = self.builder.use_var(leaves[key]);
-                self.magnitude_bound(word)
-            }
-            Bound::Sum(left, right) => {
-                let left = self.bound_value(left, leaves, entry, count);
-                let right = self.bound_value(right, leaves, entry, count);
-                let larger = self.builder.ins().umax(left, right);
-                self.builder.ins().iadd_imm_s(larger, 1)
-            }
-            Bound::Product(left, right) => {
-                let left = self.bound_value(left, leaves, entry, count);
-                let right = self.bound_value(right, leaves, entry, count);
-                self.builder.ins().iadd(left, right)
-            }
-            Bound::Accumulated { local, operands } => {
-                let mut largest = self.magnitude_bound(entry[local]);
-                for operand in operands {
-                    let operand = self.bound_value(operand, leaves, entry, count);
-                    largest = self.builder.ins().umax(largest, operand);
-                }
-                // At least one: the loop has an accumulating operation.
-                let steps = self.builder.use_var(count);
-                let zeros = self.leading_zeros(steps);
-                let sixty_four = self.constant(64);
-                let bits = self.builder.ins().isub(sixty_four, zeros);
-                self.builder.ins().iadd(largest, bits)
-            }
-        }
-    }
-    /// Lower an innermost counted loop with its overflow panics deferred to
-    /// the exit. `deferred` documents why the result is indistinguishable
-    /// from checking every operation.
-    /// The loop body is lowered twice, as an ordinary loop over a slice is:
-    /// once as the deferred chunk, specialized to the plain layout of the
-    /// slices it touches and with its element accesses proved in range, and
-    /// once as the rest of the loop with ordinary checks. The second serves
-    /// everything rare: views that overlap or a slice with another layout
-    /// (the whole loop), accesses not provably in range (from that chunk
-    /// on), and a chunk whose certificate failed (from its entry state).
-    /// After one of those the loop does not go back to chunks: data large
-    /// enough to fail a certificate is usually large throughout, and
-    /// replaying every chunk would do the work twice. Every further copy
-    /// measured about 5 ms of LLVM time per loop.
-    fn lower_deferred_while(
-        &mut self,
-        plan: deferred::Plan,
-        accesses: &[deferred::Access<'_>],
-        condition: &Expr,
-        body: &ex::Block,
-    ) {
-        let zero = self.constant(0);
-        let sticky = self.builder.declare_var(I64);
-        let count = self.builder.declare_var(I64);
-        let mut leaves = BTreeMap::new();
-        for key in &plan.leaves {
-            leaves.insert(*key, self.builder.declare_var(I64));
-        }
-        let done = self.builder.create_block();
-        // The loop runs in chunks of at most `CHUNK` iterations, each checked
-        // on its own, so an overflow is reported after a bounded amount of
-        // further work no matter how long the loop would have run, or what
-        // the wrapped values do to it in the meantime.
-        let chunk = self.builder.create_block();
-        // The rest of the loop with ordinary checks; see the doc comment.
-        let checked = self.builder.create_block();
-        let mut unsuitable = self.constant(0);
-        // A replay re-reads what the first attempt read, so nothing the loop
-        // reads may be something it wrote. The borrow rules already say so
-        // of two distinct views; compare the address ranges anyway, once.
-        for (stored, loaded) in &plan.disjoint {
-            let (stored_start, stored_end) = self.view_range(*stored);
-            let (loaded_start, loaded_end) = self.view_range(*loaded);
-            let before = self
-                .builder
-                .ins()
-                .icmp(IntCC::UnsignedLessThan, stored_start, loaded_end);
-            let after = self
-                .builder
-                .ins()
-                .icmp(IntCC::UnsignedLessThan, loaded_start, stored_end);
-            let both = self.builder.ins().band(before, after);
-            let both = self.builder.ins().uextend(I64, both);
-            unsuitable = self.builder.ins().bor(unsuitable, both);
-        }
-        // The deferred chunk is specialized to every slice the loop reads or
-        // writes being consecutive whole elements; nothing else would
-        // vectorize. (A byte buffer viewed as `&[i64]` is not.)
-        let candidate = self.loop_slice(condition);
-        let mut layouts: BTreeMap<usize, (i64, i64)> = BTreeMap::new();
-        if self.codegen.optimization == Optimization::Speed && self.slice_layouts.is_empty() {
-            if let Some((_, slot, width)) = candidate {
-                layouts.insert(slot, ((width * 8) as i64, 0));
-            }
-            for access in accesses {
-                if let deferred::Container::Slice(element) = access.container
-                    && let ExprKind::Local(slot) | ExprKind::Peek(slot) = access.receiver.kind
-                {
-                    let width = self.program.width(element);
-                    layouts.insert(slot, ((width * 8) as i64, 0));
-                }
-            }
-        }
-        for (slot, (stride, bytes)) in &layouts {
-            let words = self.local_words(*slot);
-            let stride = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::NotEqual, words[2], *stride);
-            let stride = self.builder.ins().uextend(I64, stride);
-            let flag = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::NotEqual, words[3], *bytes);
-            let flag = self.builder.ins().uextend(I64, flag);
-            unsuitable = self.builder.ins().bor(unsuitable, stride);
-            unsuitable = self.builder.ins().bor(unsuitable, flag);
-        }
-        self.builder
-            .ins()
-            .brif(unsuitable, checked, &[], chunk, &[]);
-        self.builder.switch_to_block(chunk);
-        self.builder.def_var(sticky, zero);
-        self.builder.def_var(count, zero);
-        for tracker in leaves.values() {
-            self.builder.def_var(*tracker, zero);
-        }
-        let ExprKind::Binary(comparison, _, bound) = &condition.kind else {
-            unreachable!("a counted loop compares its counter");
-        };
-        let comparison = comparison.clone();
-        let unsigned = self.program.functions[self.function_index].locals[plan.counter]
-            .ty
-            .int_kind()
-            .is_some_and(|kind| !kind.signed());
-        let start = self.local_words(plan.counter)[0];
-        // The planner's bound has no effects and cannot change in the loop;
-        // evaluating it here makes the checks the condition would make on
-        // its next test, at the same point.
-        let bound = self
-            .scalar(bound)
-            .expect("a loop bound always produces a value");
-        // Prove every element access of this chunk in range, so the chunk
-        // needs no per-element checks: every index is the counter plus a
-        // constant, and the counter, the bound and the lengths are exact
-        // (none of them is ever deferred). A chunk where that fails runs the
-        // rest of the loop with ordinary checks, which panic where they
-        // should.
-        if !accesses.is_empty() {
-            let outside = self.accesses_outside(accesses, &comparison, start, bound);
-            let proved = self.builder.create_block();
-            self.builder.ins().brif(outside, checked, &[], proved, &[]);
-            self.builder.switch_to_block(proved);
-        }
-        // The chunk runs while the counter is short of a limit: the bound,
-        // or `CHUNK` steps from here if that comes first. One counted exit,
-        // which is what LLVM vectorizes most cheaply.
-        let limit = self.chunk_limit(&comparison, unsigned, start, bound, plan.step);
-        let compare = self.counter_comparison(&comparison, unsigned);
-        let mut entry_magnitudes = BTreeMap::new();
-        for slot in &plan.accumulators {
-            let value = self.local_words(*slot)[0];
-            let word = self.magnitude(value);
-            entry_magnitudes.insert(*slot, word);
-        }
-        let entry: Vec<(usize, Words)> = plan
-            .replay
-            .iter()
-            .map(|slot| (*slot, self.local_words(*slot)))
-            .collect();
-        let counter = plan.counter;
-        let step = plan.step;
-        self.deferred = Some(DeferredLoop {
-            plan,
-            sticky,
-            leaves,
-            limit: (counter, compare, limit),
-        });
-        self.slice_layouts
-            .extend(layouts.iter().map(|(slot, layout)| (*slot, *layout)));
-        self.proved_accesses = accesses.iter().map(|access| access.call).collect();
-        self.while_body(condition, body, candidate);
-        self.proved_accesses.clear();
-        for slot in layouts.keys() {
-            self.slice_layouts.remove(slot);
-        }
-        let state = self.deferred.take().expect("deferred loop");
-        let end = self.local_words(counter)[0];
-        if !state.plan.obligations.is_empty() {
-            // How many terms the reductions took in, at most: each
-            // accumulating operation runs at most once per iteration, and
-            // the counter moved by its step once per iteration (a deferred
-            // loop has no `break`, and a panic ends the process). One more
-            // is a margin. Counting in the loop would be exact but costs a
-            // vector reduction of its own.
-            let accumulating = state
-                .plan
-                .modes
-                .values()
-                .filter(|mode| **mode == deferred::Mode::Accumulate)
-                .count() as i64;
-            let distance = match comparison {
-                Kind::Lt | Kind::Le => self.builder.ins().isub(end, start),
-                _ => self.builder.ins().isub(start, end),
-            };
-            let iterations = if step == 1 {
-                distance
-            } else {
-                let step = self.constant(step);
-                self.builder.ins().udiv(distance, step)
-            };
-            let started = self.builder.ins().iadd_imm_s(iterations, 1);
-            let terms = self.builder.ins().imul_imm_s(started, accumulating);
-            self.builder.def_var(count, terms);
-            // The certificate: every bound is within the limit.
-            let mut worst = self.constant(0);
-            for obligation in &state.plan.obligations {
-                let value = self.bound_value(obligation, &state.leaves, &entry_magnitudes, count);
-                worst = self.builder.ins().umax(worst, value);
-            }
-            let proved = self.builder.ins().icmp_imm_u(
-                IntCC::UnsignedLessThanOrEqual,
-                worst,
-                deferred::LIMIT,
-            );
-            let certified = self.builder.create_block();
-            let replay = self.builder.create_block();
-            self.builder.ins().brif(proved, certified, &[], replay, &[]);
-            // Without it nothing is known: go back to this chunk's entry
-            // state and run the rest of the loop with ordinary checks.
-            self.builder.switch_to_block(replay);
-            for (slot, words) in entry {
-                self.assign(slot, &words);
-            }
-            self.jump(checked, &[]);
-            // With it, every value was exact, so the sticky word of the
-            // remaining exact tests is exact too.
-            self.builder.switch_to_block(certified);
-        }
-        let overflowed = self.builder.use_var(sticky);
-        let overflowed = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::SignedLessThan, overflowed, 0);
-        self.guard(overflowed);
-        // The chunk stopped at its limit or at the loop's own end; the
-        // condition, with the bound evaluated at the chunk's start, says
-        // which.
-        let more = self.builder.ins().icmp(compare, end, bound);
-        self.builder.ins().brif(more, chunk, &[], done, &[]);
-        // The rest of the loop with ordinary checks. Every way in arrives
-        // with the locals of a checked execution: untouched, or a chunk's
-        // entry state restored, or the result of chunks that passed.
-        self.builder.switch_to_block(checked);
-        self.while_body(condition, body, candidate);
-        self.jump(done, &[]);
-        self.builder.switch_to_block(done);
-    }
-    /// Whether some element access of a chunk starting at the counter's
-    /// current value could fall outside its container. Every iteration of
-    /// the chunk has its counter between the current value and the bound
-    /// (the loop condition holds at the top of each), so each index lies in
-    /// a range computed here; an overflow while computing one counts as
-    /// outside.
-    fn accesses_outside(
-        &mut self,
-        accesses: &[deferred::Access<'_>],
-        comparison: &Kind,
-        start: Value,
-        bound: Value,
-    ) -> Value {
-        // Every access to one receiver lies between its smallest and largest
-        // offset, so those two bound all the others.
-        let mut ranges: Vec<(usize, &deferred::Access<'_>, i64, i64)> = Vec::new();
-        for access in accesses {
-            let receiver = deferred::key(access.receiver);
-            match ranges.iter_mut().find(|(known, ..)| *known == receiver) {
-                Some((_, _, least, most)) => {
-                    *least = (*least).min(access.offset);
-                    *most = (*most).max(access.offset);
-                }
-                None => ranges.push((receiver, access, access.offset, access.offset)),
-            }
-        }
-        let ranges = ranges
-            .into_iter()
-            .map(|(_, access, least, most)| (self.container_length(access), least, most))
-            .collect::<Vec<_>>();
-        self.ranges_outside(comparison, start, bound, &ranges)
     }
     /// Whether an index `counter + offset` with `offset` in one of the
     /// `(length, least, most)` ranges could fall outside `0..length` while
@@ -9366,48 +6912,6 @@ impl Generator<'_, '_> {
             (false, false) => self.builder.ins().smax(bound, far),
             (false, true) => self.builder.ins().umax(bound, far),
         }
-    }
-    /// The comparison a loop condition makes on its counter.
-    fn counter_comparison(&self, comparison: &Kind, unsigned: bool) -> IntCC {
-        match (comparison, unsigned) {
-            (Kind::Lt, false) => IntCC::SignedLessThan,
-            (Kind::Lt, true) => IntCC::UnsignedLessThan,
-            (Kind::Le, false) => IntCC::SignedLessThanOrEqual,
-            (Kind::Le, true) => IntCC::UnsignedLessThanOrEqual,
-            (Kind::Gt, false) => IntCC::SignedGreaterThan,
-            (Kind::Gt, true) => IntCC::UnsignedGreaterThan,
-            (Kind::Ge, false) => IntCC::SignedGreaterThanOrEqual,
-            (_, true) => IntCC::UnsignedGreaterThanOrEqual,
-            (_, false) => IntCC::SignedGreaterThanOrEqual,
-        }
-    }
-    /// The element count of an access's container, read without effects.
-    fn container_length(&mut self, access: &deferred::Access<'_>) -> Value {
-        let values = self
-            .expr(access.receiver)
-            .expect("a container operand always produces a value");
-        match access.container {
-            deferred::Container::Slice(_) => values[1],
-            deferred::Container::Vec(element) => self.vec_call(VecOp::Len, element, values)[0],
-            deferred::Container::Bytes => {
-                let handle = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
-                    g.builder
-                        .ins()
-                        .load(I64, ir::MemFlagsData::new(), handle, 0)
-                })
-            }
-        }
-    }
-    /// The address range `[start, end)` of a slice local's elements.
-    fn view_range(&mut self, slot: usize) -> (Value, Value) {
-        let words = self.local_words(slot);
-        let bytes = self.builder.ins().imul(words[1], words[2]);
-        let end = self.builder.ins().iadd(words[0], bytes);
-        (words[0], end)
     }
     fn check_int_range(&mut self, kind: IntKind, value: Value) -> Value {
         if kind.bits() == 64 {
@@ -9661,14 +7165,10 @@ impl Generator<'_, '_> {
                     ArithOp::Sub => self.builder.ins().isub(a, b),
                     ArithOp::Mul => self.builder.ins().imul(a, b),
                 };
-                // The proof may rest on an operation whose overflow panic a
-                // deferred loop has not reported yet. Until it is, keep the
-                // value in canonical form like every other narrow value.
-                vec![if self.deferred.is_some() && source.bits() < 64 {
-                    self.canonical(source, value)
-                } else {
-                    value
-                }]
+                // In a deferred chunk the proof may rest on an operation
+                // whose overflow panic is not reported yet; there the MIR
+                // pass makes a narrow operation wrapping instead.
+                vec![value]
             }
             // Amount proved in 0..bits (SHIFT-ELIDE).
             IntOp::UncheckedShift(shift) => {
@@ -10414,16 +7914,14 @@ impl Generator<'_, '_> {
         )
     }
     /// Lower a call to `target` on its lowered argument words; `ty` is the
-    /// result type. `site` is the tree path's call expression (its address
-    /// and deferred key), which the loop optimizations of the tree path key
-    /// their facts on; the MIR path has none.
+    /// result type. The MIR call's hint is in `index_below`,
+    /// `access_proved` and `push_shadow`.
     fn call_target(
         &mut self,
         target: &Target,
         mut values: Words,
         ty: Type,
         span: crate::Span,
-        site: Option<(usize, usize)>,
     ) -> Option<Words> {
         if matches!(
             target,
@@ -10501,7 +7999,7 @@ impl Generator<'_, '_> {
                         .ins()
                         .load(I64, ir::MemFlagsData::new(), values[0], 0);
                 }
-                if *op == BytesOp::Get && self.proved(site) {
+                if *op == BytesOp::Get && self.access_proved {
                     // A deferred chunk proved it in range. Data
                     // follows the 16-byte header.
                     let address = self.builder.ins().iadd(values[0], values[1]);
@@ -10582,29 +8080,12 @@ impl Generator<'_, '_> {
                 return Some(self.union_borrow_call(*spec, values));
             }
             Target::Vec(op, element) => {
-                // The push a loop registered for one of its
-                // shadowed vectors is this very expression.
-                let address = site.map(|(address, _)| address);
-                self.push_shadow = match self
-                    .pending_pushes
-                    .iter()
-                    .position(|(pending, _)| Some(*pending) == address)
-                {
-                    Some(at) if *op == VecOp::Push => {
-                        let (_, slot) = self.pending_pushes.remove(at);
-                        self.vec_shadows.get(&slot).copied()
-                    }
-                    // The MIR path sets the shadow of a push marked with
-                    // `CallHint::Shadow` before the call.
-                    _ if *op == VecOp::Push => self.push_shadow.take(),
-                    _ => None,
-                };
+                // A push marked `CallHint::Shadow` has its shadow set.
+                if *op != VecOp::Push {
+                    self.push_shadow = None;
+                }
                 let op = match op {
-                    VecOp::Get
-                        if self.proved(site) =>
-                    {
-                        VecOp::At
-                    }
+                    VecOp::Get if self.access_proved => VecOp::At,
                     other => *other,
                 };
                 let result = self.vec_call(op, *element, values);
@@ -10616,7 +8097,7 @@ impl Generator<'_, '_> {
             }
             Target::Slice(op, element) => {
                 // A deferred chunk proved this access in range.
-                let proved = self.proved(site);
+                let proved = self.access_proved;
                 let op = match op {
                     SliceOp::Get if proved => SliceOp::At,
                     other => *other,
@@ -10926,7 +8407,6 @@ impl Generator<'_, '_> {
         operand_ty: Type,
         value: Value,
         deferral: Option<deferred::Mode>,
-        leaf: usize,
     ) -> Option<Value> {
         if *op == Kind::Minus && operand_ty.float_kind().is_none() {
             let zero = self.constant(0);
@@ -10965,13 +8445,12 @@ impl Generator<'_, '_> {
             let zero = self.constant(0);
             if let Some(mode) = deferral {
                 let negated = self.builder.ins().isub(zero, value);
+                // A certified negation has its operand tracked by the
+                // MIR pass. `0 - v` overflows exactly when `v` and the
+                // result are both negative (`v == i64::MIN`).
                 if mode == deferred::Mode::Exact {
-                    // `0 - v` overflows exactly when `v` and the
-                    // result are both negative (`v == i64::MIN`).
                     let overflow = self.builder.ins().band(value, negated);
                     self.defer_sign(overflow);
-                } else {
-                    self.track_leaf(leaf, value);
                 }
                 negated
             } else {
@@ -10984,162 +8463,6 @@ impl Generator<'_, '_> {
             self.builder.ins().uextend(I64, comparison)
         };
         Some(value)
-    }
-    fn short_circuit(&mut self, op: &Kind, left: Value, right: &Expr) -> Option<Words> {
-        let rhs = self.builder.create_block();
-        let shortcut = self.builder.create_block();
-        let join = self.join(Type::Bool).unwrap();
-        if *op == Kind::AmpAmp {
-            self.builder.ins().brif(left, rhs, &[], shortcut, &[]);
-        } else {
-            self.builder.ins().brif(left, shortcut, &[], rhs, &[]);
-        }
-        self.builder.switch_to_block(shortcut);
-        let value = self.constant(i64::from(*op == Kind::PipePipe));
-        self.jump(join, &[value]);
-        self.builder.switch_to_block(rhs);
-        if let Some(value) = self.scalar(right) {
-            self.jump(join, &[value]);
-        }
-        self.builder.switch_to_block(join);
-        Some(self.builder.block_params(join).to_vec())
-    }
-    fn pattern(&mut self, pattern: &Pattern, values: &[Value]) -> Value {
-        match pattern {
-            Pattern::Any | Pattern::Bind(_) => self.builder.ins().iconst(ir::types::I8, 1),
-            Pattern::Literal(n) => self.builder.ins().icmp_imm_s(IntCC::Equal, values[0], *n),
-            Pattern::Variant {
-                tag,
-                fields,
-                tagged,
-                niche,
-            } => {
-                let mut result = if let Some(niche) = niche {
-                    let (cc, constant) = decoder_test(niche.decoder(*tag));
-                    self.builder.ins().icmp_imm_s(cc, values[0], constant)
-                } else if *tagged {
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, values[0], *tag as i64)
-                } else {
-                    self.builder.ins().iconst(ir::types::I8, 1)
-                };
-                for (offset, p) in fields {
-                    let field = self.pattern(p, &values[*offset..]);
-                    result = self.builder.ins().band(result, field);
-                }
-                result
-            }
-            Pattern::Type { tag, inner, .. } => {
-                let result = self
-                    .builder
-                    .ins()
-                    .icmp_imm_s(IntCC::Equal, values[0], *tag as i64);
-                let narrowed = self.pattern(inner, &values[1..]);
-                self.builder.ins().band(result, narrowed)
-            }
-            Pattern::Or(ps) => {
-                let mut result = self.builder.ins().iconst(ir::types::I8, 0);
-                for p in ps {
-                    let p = self.pattern(p, values);
-                    result = self.builder.ins().bor(result, p);
-                }
-                result
-            }
-            Pattern::DynArray {
-                element,
-                capacity,
-                prefix,
-                suffix,
-                rest,
-                ..
-            } => {
-                let width = self.program.width(*element);
-                let length = values[0];
-                let required = (prefix.len() + suffix.len()) as i64;
-                let mut result = if *rest {
-                    self.builder.ins().icmp_imm_s(
-                        IntCC::UnsignedGreaterThanOrEqual,
-                        length,
-                        required,
-                    )
-                } else {
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, length, required)
-                };
-                for (index, pattern) in prefix.iter().enumerate() {
-                    let field = self.pattern(pattern, &values[1 + index * width..]);
-                    result = self.builder.ins().band(result, field);
-                }
-                for (index, pattern) in suffix.iter().enumerate() {
-                    let words = self.dyn_suffix_element(
-                        values,
-                        width,
-                        *capacity,
-                        prefix.len(),
-                        suffix.len(),
-                        index,
-                    );
-                    let field = self.pattern(pattern, &words);
-                    result = self.builder.ins().band(result, field);
-                }
-                result
-            }
-        }
-    }
-    /// Bind a borrowed DynArray pattern over the array at `pointer`. Element
-    /// names receive slot addresses, the rest a `&[T]` descriptor, and
-    /// by-value element patterns bind copies from the loaded `words`.
-    fn bind_borrowed_dyn(&mut self, pattern: &Pattern, pointer: Value, words: &[Value]) {
-        let Pattern::DynArray {
-            element,
-            capacity,
-            prefix,
-            suffix,
-            rest_binding,
-            ..
-        } = pattern
-        else {
-            return;
-        };
-        let width = self.program.width(*element);
-        let stride = (width * 8) as i64;
-        let length = words[0];
-        let data = self.builder.ins().iadd_imm_s(pointer, 8);
-        for (index, pattern) in prefix.iter().enumerate() {
-            match pattern {
-                Pattern::Bind(slot) => {
-                    let address = self.builder.ins().iadd_imm_s(data, index as i64 * stride);
-                    self.assign(*slot, &[address]);
-                }
-                pattern => self.bind_pattern(pattern, &words[1 + index * width..]),
-            }
-        }
-        for (index, pattern) in suffix.iter().enumerate() {
-            match pattern {
-                Pattern::Bind(slot) => {
-                    let address =
-                        self.dyn_suffix_address(pointer, length, width, suffix.len(), index);
-                    self.assign(*slot, &[address]);
-                }
-                pattern => {
-                    let element_words = self.dyn_suffix_element(
-                        words,
-                        width,
-                        *capacity,
-                        prefix.len(),
-                        suffix.len(),
-                        index,
-                    );
-                    self.bind_pattern(pattern, &element_words);
-                }
-            }
-        }
-        if let Some(slot) = rest_binding {
-            let view = self.dyn_rest_view(pointer, length, width, prefix.len(), suffix.len());
-            self.assign(*slot, &view);
-        }
     }
     /// The words of suffix element `index` of a DynArray pattern: the slot at
     /// `length - suffix + index`, selected over the SSA slots it may occupy
@@ -11410,152 +8733,6 @@ impl Generator<'_, '_> {
             equal
         }
     }
-    fn dispose_pattern(&mut self, pattern: &Pattern, ty: Type, values: &[Value]) {
-        match pattern {
-            Pattern::Any => self.drop_value(ty, values),
-            Pattern::Bind(slot) => self.activate_local(*slot),
-            Pattern::Variant { tag, fields, .. } => {
-                let Some(id) = ty.layout() else {
-                    unreachable!()
-                };
-                for ((offset, p), ty) in fields
-                    .iter()
-                    .zip(self.program.enums[id].variants[*tag].fields.clone())
-                    .rev()
-                {
-                    self.dispose_pattern(p, ty, &values[*offset..]);
-                }
-            }
-            Pattern::Type { member, inner, .. } => {
-                self.dispose_pattern(inner, *member, &values[1..]);
-            }
-            Pattern::DynArray { .. } => {}
-            Pattern::Or(ps) => {
-                let join = self.builder.create_block();
-                for p in ps {
-                    let condition = self.pattern(p, values);
-                    let hit = self.builder.create_block();
-                    let next = self.builder.create_block();
-                    self.builder.ins().brif(condition, hit, &[], next, &[]);
-                    self.builder.switch_to_block(hit);
-                    self.dispose_pattern(p, ty, values);
-                    self.jump(join, &[]);
-                    self.builder.switch_to_block(next);
-                }
-                self.builder.ins().trap(TrapCode::unwrap_user(2));
-                self.builder.switch_to_block(join);
-            }
-            _ => {}
-        }
-    }
-    fn bind_pattern(&mut self, pattern: &Pattern, values: &[Value]) {
-        match pattern {
-            Pattern::Bind(slot) => {
-                let width = self.variables[*slot].len();
-                self.assign(*slot, &values[..width]);
-            }
-            Pattern::Variant { fields, .. } => {
-                for (offset, p) in fields {
-                    self.bind_pattern(p, &values[*offset..]);
-                }
-            }
-            Pattern::Type { inner, .. } => self.bind_pattern(inner, &values[1..]),
-            Pattern::DynArray {
-                element,
-                capacity,
-                prefix,
-                suffix,
-                rest_binding,
-                ..
-            } => {
-                let width = self.program.width(*element);
-                for (index, pattern) in prefix.iter().enumerate() {
-                    self.bind_pattern(pattern, &values[1 + index * width..]);
-                }
-                for (index, pattern) in suffix.iter().enumerate() {
-                    let words = self.dyn_suffix_element(
-                        values,
-                        width,
-                        *capacity,
-                        prefix.len(),
-                        suffix.len(),
-                        index,
-                    );
-                    self.bind_pattern(pattern, &words);
-                }
-                if let Some(slot) = rest_binding {
-                    let tail = self.dyn_rest(values, width, *capacity, prefix.len(), suffix.len());
-                    self.assign(*slot, &tail);
-                }
-            }
-            Pattern::Or(ps) if ps.iter().any(has_bindings) => {
-                let join = self.builder.create_block();
-                for p in ps {
-                    let condition = self.pattern(p, values);
-                    let hit = self.builder.create_block();
-                    let next = self.builder.create_block();
-                    self.builder.ins().brif(condition, hit, &[], next, &[]);
-                    self.builder.switch_to_block(hit);
-                    self.bind_pattern(p, values);
-                    self.jump(join, &[]);
-                    self.builder.switch_to_block(next);
-                }
-                self.builder.ins().trap(TrapCode::unwrap_user(2));
-                self.builder.switch_to_block(join);
-            }
-            _ => {}
-        }
-    }
-}
-/// Root local and total word offset of a record-field projection chain.
-fn projection_offset(expr: &Expr) -> Option<(usize, usize)> {
-    let mut offset = 0usize;
-    let mut current = expr;
-    loop {
-        match &current.kind {
-            ExprKind::Project(base, field) => {
-                offset += field;
-                current = base;
-            }
-            ExprKind::Peek(slot)
-            | ExprKind::Local(slot)
-            | ExprKind::Move(slot)
-            | ExprKind::InitOwner { slot, .. } => {
-                return Some((*slot, offset));
-            }
-            _ => return None,
-        }
-    }
-}
-/// The temporary-owner initializer at the root of a field projection chain.
-fn projection_root_init(expr: &Expr) -> Option<(usize, &Expr)> {
-    let mut current = expr;
-    loop {
-        match &current.kind {
-            ExprKind::Project(base, _) => current = base,
-            ExprKind::InitOwner { slot, value } => return Some((*slot, value)),
-            _ => return None,
-        }
-    }
-}
-fn has_bindings(p: &Pattern) -> bool {
-    match p {
-        Pattern::Bind(_) => true,
-        Pattern::Variant { fields, .. } => fields.iter().any(|(_, p)| has_bindings(p)),
-        Pattern::Type { inner, .. } => has_bindings(inner),
-        Pattern::Or(ps) => ps.iter().any(has_bindings),
-        Pattern::DynArray {
-            prefix,
-            suffix,
-            rest_binding,
-            ..
-        } => {
-            rest_binding.is_some()
-                || prefix.iter().any(has_bindings)
-                || suffix.iter().any(has_bindings)
-        }
-        _ => false,
-    }
 }
 
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
@@ -11676,18 +8853,20 @@ mod allocator_runtime_tests {
     /// created with the contract alignment, never a literal.
     #[test]
     fn every_stack_slot_uses_the_pointer_alignment_contract() {
-        let source = include_str!("native.rs");
         let marker = ["StackSlotData", "::new("].concat();
         let mut slots = 0;
-        for (start, _) in source.match_indices(&marker) {
-            let call = &source[start..start + source[start..].find("));").unwrap()];
-            assert!(
-                call.contains("STACK_SLOT_ALIGN_SHIFT"),
-                "stack slot without the alignment contract: {call}"
-            );
-            slots += 1;
+        for source in [include_str!("native.rs"), include_str!("native/from_mir.rs")] {
+            for (start, _) in source.match_indices(&marker) {
+                let call = &source[start..start + source[start..].find("));").unwrap()];
+                assert!(
+                    call.contains("STACK_SLOT_ALIGN_SHIFT"),
+                    "stack slot without the alignment contract: {call}"
+                );
+                slots += 1;
+            }
         }
-        assert!(slots >= 17, "{slots}");
+        // The count only guards against the scan finding nothing.
+        assert!(slots >= 14, "{slots}");
         assert_eq!(1u64 << STACK_SLOT_ALIGN_SHIFT, POINTER_ALIGN);
     }
 

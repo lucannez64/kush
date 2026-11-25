@@ -2655,12 +2655,7 @@ impl Builder<'_> {
             Target::Print => Callee::PrintInt(IntKind::I64),
             Target::PrintInt(kind) => Callee::PrintInt(*kind),
             Target::Panic => {
-                // The message is not part of a native panic.
-                if !args.iter().all(|arg| {
-                    matches!(arg.kind, ExprKind::Constant(_) | ExprKind::BytesLiteral(_))
-                }) {
-                    return Err("a panic with a computed message".into());
-                }
+                debug_assert!(args.is_empty(), "panic() takes no arguments");
                 self.terminate(
                     TerminatorKind::Panic {
                         unwind: self.unwind(),

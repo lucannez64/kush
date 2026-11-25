@@ -1317,7 +1317,6 @@ pub(crate) enum ExprKind {
     /// frame. The epilogue joins every unjoined child before returning.
     TaskScope {
         body: Box<Expr>,
-        result: Type,
         /// The scope body result carries an owning/linear obligation.
         obligation: bool,
         /// When the scope lambda returns the conventional `Result<T,E>`, an

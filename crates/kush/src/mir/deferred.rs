@@ -1439,6 +1439,21 @@ fn transform(body: &mut Body, lp: &Loop, plan: Plan) {
             *hint = CallHint::Proved;
         }
     }
+    // A proved (unchecked) narrow operation may owe its proof to a deferred
+    // operation whose overflow the chunk has not reported yet. In the chunk
+    // it wraps, so every narrow value stays in the canonical form the rest
+    // of the lowering assumes (the tree path canonicalized it the same way).
+    for copy in copies.values() {
+        for statement in &mut body.blocks[*copy].statements {
+            let StatementKind::Assign(_, rvalue) = &mut statement.kind;
+            if let Rvalue::Int(op @ IntOp::Unchecked(_), source, _, _) = rvalue
+                && source.bits() < 64
+                && let IntOp::Unchecked(arith) = *op
+            {
+                *op = IntOp::Wrapping(arith);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
