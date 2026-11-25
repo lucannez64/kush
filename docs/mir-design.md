@@ -130,6 +130,30 @@ until the tree path is deleted:
 5. Suspension lowering moves to the CFG with FND-HANDLERS-ONE, which needs
    `Perform` as a terminator anyway.
 
+### Where FND-MIR stands
+
+The first slice (FND-MIR-CORE) is in `crates/kush/src/mir.rs`:
+
+- `mir::build` covers functions whose locals and values are one-word
+  scalars (integers, floats, `char`, `bool`, `()`): arithmetic, the
+  integer builtins with a one-word result (including arithmetic the
+  checker proved in range, which carries no check), assignments, `if`,
+  `match` on literals with guards, `while`, `loop` with `break` values,
+  `continue`, `return`, direct calls, `print_i64` and `panic`. Any other
+  function is reported with the first construct the builder does not
+  cover.
+- `mir::verify` checks blocks, locals and operand types.
+- `kush mir FILE` prints the text form; `kush mir FILE --stats` prints the
+  coverage. The parser reads the text back, and `tests/mir.rs` checks that
+  every body built from the examples verifies and round-trips.
+- With `KUSH_MIR=1` (or `CodegenOptions::mir`), native code is lowered
+  from the MIR for every covered function and from the tree for the rest.
+  The leaf operations share the tree path's helpers.
+
+Nothing in this slice needs drops or cleanup blocks, so every `unwind` is
+`continue`. Records, enums, references and owned values come next, with
+drop elaboration (decision 2) and cleanup blocks (decision 1).
+
 ## 7. Decisions
 
 Taken on 2026-11-25:

@@ -31,6 +31,7 @@ use std::{
 };
 
 mod deferred;
+mod from_mir;
 mod llvm;
 mod runtime_cache;
 mod staging;
@@ -393,6 +394,9 @@ pub struct CodegenOptions {
     /// Cranelift only. Turns deferred overflow off, so a check fails where
     /// it is written.
     pub fuzz: bool,
+    /// FND-MIR: lower each function the CFG IR covers from its MIR body
+    /// instead of the checked tree (`KUSH_MIR=1`).
+    pub mir: bool,
 }
 impl CodegenOptions {
     /// Cranelift with explicit, independent controls.
@@ -405,6 +409,7 @@ impl CodegenOptions {
             native_cpu: false,
             inline_calls: false,
             fuzz: false,
+            mir: false,
         }
     }
     pub const fn release() -> Self {
@@ -416,6 +421,7 @@ impl CodegenOptions {
             native_cpu: false,
             inline_calls: true,
             fuzz: false,
+            mir: false,
         }
     }
     /// `KUSH_BACKEND=llvm|cranelift` overrides the backend of every native
@@ -436,6 +442,14 @@ impl CodegenOptions {
                 return Err(error(format!(
                     "KUSH_BACKEND must be 'cranelift', 'llvm' or 'llvm-release', not '{other}'"
                 )));
+            }
+        }
+        // FND-MIR: replay any native build through the CFG IR.
+        match std::env::var("KUSH_MIR").ok().as_deref() {
+            None | Some("" | "0") => {}
+            Some("1") => self.mir = true,
+            Some(other) => {
+                return Err(error(format!("KUSH_MIR must be '0' or '1', not '{other}'")));
             }
         }
         Ok(self)
@@ -478,6 +492,7 @@ impl CodegenOptions {
             // NATIVE-INLINE is a Cranelift pass; clang inlines for LLVM.
             inline_calls: false,
             fuzz: false,
+            mir: false,
         }
     }
 }
@@ -2096,6 +2111,14 @@ fn lower(
     // NATIVE-INLINE: bodies are built first and defined after, so a
     // caller can absorb any small reachable callee.
     let mut bodies: Vec<Option<ir::Function>> = vec![None; program.functions.len()];
+    // FND-MIR: the functions the CFG IR covers are lowered from it.
+    let mir_bodies: Vec<Option<crate::mir::Body>> = if codegen.mir {
+        (0..program.functions.len())
+            .map(|index| crate::mir::build(program, index).ok())
+            .collect()
+    } else {
+        Vec::new()
+    };
     loop {
         for id in std::mem::take(&mut module.referenced) {
             if let Some(index) = index_of.get(&id)
@@ -2419,7 +2442,9 @@ fn lower(
             g.activate_local(i);
             offset += width;
         }
-        if let Some(value) = g.block(&f.body) {
+        if let Some(body) = mir_bodies.get(index).and_then(Option::as_ref) {
+            g.mir_body(body);
+        } else if let Some(value) = g.block(&f.body) {
             g.cleanup_all();
             if erased_result {
                 // Preserve actual cleanup for a copyable erased result, then
@@ -5274,7 +5299,7 @@ impl Generator<'_, '_> {
     /// unary minus (`left` is the operand).
     fn fuzz_arith(
         &mut self,
-        expr: &Expr,
+        span: crate::Span,
         op: &Kind,
         left: Option<IntKind>,
         right: Option<IntKind>,
@@ -5292,7 +5317,7 @@ impl Generator<'_, '_> {
             Kind::Bang => (7, 1),
             _ => return,
         };
-        let Some((_, arith, id)) = self.fuzz_site(expr.span, kind) else {
+        let Some((_, arith, id)) = self.fuzz_site(span, kind) else {
             return;
         };
         let left = left.unwrap_or(IntKind::I64);
@@ -7422,61 +7447,10 @@ impl Generator<'_, '_> {
             }
             ExprKind::Unary(op, operand) => {
                 let value = lower!(self.scalar(operand));
-                if *op == Kind::Minus && operand.ty.float_kind().is_none() {
-                    let zero = self.constant(0);
-                    self.fuzz_arith(expr, &Kind::Bang, operand.ty.int_kind(), None, value, zero);
-                }
-                if let Some(kind) = operand.ty.float_kind() {
-                    if *op != Kind::Minus {
-                        self.abort();
-                        return None;
-                    }
-                    let mask = match kind {
-                        FloatKind::F32 => 1i64 << 31,
-                        FloatKind::F64 => i64::MIN,
-                    };
-                    let mask = self.constant(mask);
-                    self.builder.ins().bxor(value, mask)
-                } else if let Some(kind) = operand.ty.int_kind().filter(|k| *k != IntKind::I64) {
-                    if *op == Kind::Minus {
-                        let zero = self.constant(0);
-                        if self.deferral(expr).is_some() {
-                            // A narrow value negates exactly in 64 bits.
-                            let negated = self.builder.ins().isub(zero, value);
-                            self.defer_int_range(kind, negated)
-                        } else {
-                            let (negated, overflow) = self.builder.ins().ssub_overflow(zero, value);
-                            self.guard(overflow);
-                            self.check_int_range(kind, negated)
-                        }
-                    } else {
-                        let inverted = self.builder.ins().bnot(value);
-                        self.canonical(kind, inverted)
-                    }
-                } else if *op == Kind::Bang && operand.ty == Type::I64 {
-                    self.builder.ins().bnot(value)
-                } else if *op == Kind::Minus {
-                    let zero = self.constant(0);
-                    if let Some(mode) = self.deferral(expr) {
-                        let negated = self.builder.ins().isub(zero, value);
-                        if mode == deferred::Mode::Exact {
-                            // `0 - v` overflows exactly when `v` and the
-                            // result are both negative (`v == i64::MIN`).
-                            let overflow = self.builder.ins().band(value, negated);
-                            self.defer_sign(overflow);
-                        } else {
-                            self.track_leaf(deferred::key(operand), value);
-                        }
-                        negated
-                    } else {
-                        let (value, overflow) = self.builder.ins().ssub_overflow(zero, value);
-                        self.guard(overflow);
-                        value
-                    }
-                } else {
-                    let comparison = self.builder.ins().icmp_imm_s(IntCC::Equal, value, 0);
-                    self.builder.ins().uextend(I64, comparison)
-                }
+                let deferral = self.deferral(expr);
+                return self
+                    .unary_value(expr.span, op, operand.ty, value, deferral, deferred::key(operand))
+                    .map(|value| vec![value]);
             }
             ExprKind::Assign(slot, replacement) => {
                 if self.vec_shadows.contains_key(slot) {
@@ -7541,7 +7515,7 @@ impl Generator<'_, '_> {
                 }
                 let right_kind = right_expr.ty.int_kind();
                 let right = lower!(self.scalar(right_expr));
-                self.fuzz_arith(expr, op, left_kind, right_kind, left, right);
+                self.fuzz_arith(expr.span, op, left_kind, right_kind, left, right);
                 if let Some(kind) = left_ty.float_kind() {
                     let left = self.float_value(kind, left);
                     let right = self.float_value(kind, right);
@@ -7555,52 +7529,9 @@ impl Generator<'_, '_> {
                     self.track_leaf(left_key, left);
                     self.track_leaf(deferred::key(right_expr), right);
                 }
-                if let Some(kind) = left_kind {
-                    return Some(vec![
-                        self.int_binary(kind, op, left, right, right_kind, deferral),
-                    ]);
-                }
-                match op {
-                    Kind::Plus | Kind::Minus | Kind::Star if deferral.is_some() => {
-                        self.deferred_i64(op, left, right, deferral.unwrap())
-                    }
-                    Kind::Plus | Kind::Minus | Kind::Star => {
-                        let (value, overflow) = match op {
-                            Kind::Plus => self.builder.ins().sadd_overflow(left, right),
-                            Kind::Minus => self.builder.ins().ssub_overflow(left, right),
-                            Kind::Star => self.builder.ins().smul_overflow(left, right),
-                            _ => unreachable!(),
-                        };
-                        self.guard(overflow);
-                        value
-                    }
-                    Kind::Slash | Kind::Percent => {
-                        let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, right, 0);
-                        self.guard(zero);
-                        let min = self.builder.ins().icmp_imm_s(IntCC::Equal, left, i64::MIN);
-                        let neg = self.builder.ins().icmp_imm_s(IntCC::Equal, right, -1);
-                        let invalid = self.builder.ins().band(min, neg);
-                        self.guard(invalid);
-                        if *op == Kind::Slash {
-                            self.builder.ins().sdiv(left, right)
-                        } else {
-                            self.builder.ins().srem(left, right)
-                        }
-                    }
-                    _ => {
-                        let condition = match op {
-                            Kind::Lt => IntCC::SignedLessThan,
-                            Kind::Le => IntCC::SignedLessThanOrEqual,
-                            Kind::Gt => IntCC::SignedGreaterThan,
-                            Kind::Ge => IntCC::SignedGreaterThanOrEqual,
-                            Kind::EqEq => IntCC::Equal,
-                            Kind::Ne => IntCC::NotEqual,
-                            _ => unreachable!(),
-                        };
-                        let value = self.builder.ins().icmp(condition, left, right);
-                        self.builder.ins().uextend(I64, value)
-                    }
-                }
+                return Some(vec![self.scalar_binary(
+                    op, left_kind, right_kind, left, right, deferral,
+                )]);
             }
             ExprKind::VecMap {
                 vector,
@@ -11073,6 +11004,130 @@ impl Generator<'_, '_> {
                 }
             }
         }
+    }
+    /// A binary operation (not `&&`/`||`) on lowered non-float scalars.
+    fn scalar_binary(
+        &mut self,
+        op: &Kind,
+        left_kind: Option<IntKind>,
+        right_kind: Option<IntKind>,
+        left: Value,
+        right: Value,
+        deferral: Option<deferred::Mode>,
+    ) -> Value {
+        if let Some(kind) = left_kind {
+            return self.int_binary(kind, op, left, right, right_kind, deferral);
+        }
+        match op {
+            Kind::Plus | Kind::Minus | Kind::Star if deferral.is_some() => {
+                self.deferred_i64(op, left, right, deferral.unwrap())
+            }
+            Kind::Plus | Kind::Minus | Kind::Star => {
+                let (value, overflow) = match op {
+                    Kind::Plus => self.builder.ins().sadd_overflow(left, right),
+                    Kind::Minus => self.builder.ins().ssub_overflow(left, right),
+                    Kind::Star => self.builder.ins().smul_overflow(left, right),
+                    _ => unreachable!(),
+                };
+                self.guard(overflow);
+                value
+            }
+            Kind::Slash | Kind::Percent => {
+                let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, right, 0);
+                self.guard(zero);
+                let min = self.builder.ins().icmp_imm_s(IntCC::Equal, left, i64::MIN);
+                let neg = self.builder.ins().icmp_imm_s(IntCC::Equal, right, -1);
+                let invalid = self.builder.ins().band(min, neg);
+                self.guard(invalid);
+                if *op == Kind::Slash {
+                    self.builder.ins().sdiv(left, right)
+                } else {
+                    self.builder.ins().srem(left, right)
+                }
+            }
+            _ => {
+                let condition = match op {
+                    Kind::Lt => IntCC::SignedLessThan,
+                    Kind::Le => IntCC::SignedLessThanOrEqual,
+                    Kind::Gt => IntCC::SignedGreaterThan,
+                    Kind::Ge => IntCC::SignedGreaterThanOrEqual,
+                    Kind::EqEq => IntCC::Equal,
+                    Kind::Ne => IntCC::NotEqual,
+                    _ => unreachable!(),
+                };
+                let value = self.builder.ins().icmp(condition, left, right);
+                self.builder.ins().uextend(I64, value)
+            }
+        }
+    }
+    /// A unary operation on a lowered scalar operand. `None` when it always
+    /// panics (`!` on a float). `leaf` identifies the operand for deferred
+    /// overflow tracking.
+    fn unary_value(
+        &mut self,
+        span: crate::Span,
+        op: &Kind,
+        operand_ty: Type,
+        value: Value,
+        deferral: Option<deferred::Mode>,
+        leaf: usize,
+    ) -> Option<Value> {
+        if *op == Kind::Minus && operand_ty.float_kind().is_none() {
+            let zero = self.constant(0);
+            self.fuzz_arith(span, &Kind::Bang, operand_ty.int_kind(), None, value, zero);
+        }
+        let value = if let Some(kind) = operand_ty.float_kind() {
+            if *op != Kind::Minus {
+                self.abort();
+                return None;
+            }
+            let mask = match kind {
+                FloatKind::F32 => 1i64 << 31,
+                FloatKind::F64 => i64::MIN,
+            };
+            let mask = self.constant(mask);
+            self.builder.ins().bxor(value, mask)
+        } else if let Some(kind) = operand_ty.int_kind().filter(|k| *k != IntKind::I64) {
+            if *op == Kind::Minus {
+                let zero = self.constant(0);
+                if deferral.is_some() {
+                    // A narrow value negates exactly in 64 bits.
+                    let negated = self.builder.ins().isub(zero, value);
+                    self.defer_int_range(kind, negated)
+                } else {
+                    let (negated, overflow) = self.builder.ins().ssub_overflow(zero, value);
+                    self.guard(overflow);
+                    self.check_int_range(kind, negated)
+                }
+            } else {
+                let inverted = self.builder.ins().bnot(value);
+                self.canonical(kind, inverted)
+            }
+        } else if *op == Kind::Bang && operand_ty == Type::I64 {
+            self.builder.ins().bnot(value)
+        } else if *op == Kind::Minus {
+            let zero = self.constant(0);
+            if let Some(mode) = deferral {
+                let negated = self.builder.ins().isub(zero, value);
+                if mode == deferred::Mode::Exact {
+                    // `0 - v` overflows exactly when `v` and the
+                    // result are both negative (`v == i64::MIN`).
+                    let overflow = self.builder.ins().band(value, negated);
+                    self.defer_sign(overflow);
+                } else {
+                    self.track_leaf(leaf, value);
+                }
+                negated
+            } else {
+                let (value, overflow) = self.builder.ins().ssub_overflow(zero, value);
+                self.guard(overflow);
+                value
+            }
+        } else {
+            let comparison = self.builder.ins().icmp_imm_s(IntCC::Equal, value, 0);
+            self.builder.ins().uextend(I64, comparison)
+        };
+        Some(value)
     }
     fn short_circuit(&mut self, op: &Kind, left: Value, right: &Expr) -> Option<Words> {
         let rhs = self.builder.create_block();
