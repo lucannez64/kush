@@ -94,34 +94,90 @@ fn span(span: Span) -> String {
     format!("@{}..{}", span.start, span.end)
 }
 
+/// Types without a payload, by text name.
+const PLAIN_TYPES: [(&str, Type); 15] = [
+    ("i64", Type::I64),
+    ("char", Type::Char),
+    ("bool", Type::Bool),
+    ("unit", Type::Unit),
+    ("never", Type::Never),
+    ("bytes", Type::Bytes),
+    ("string", Type::String),
+    ("str", Type::Str),
+    ("strmut", Type::StrMut),
+    ("stdin", Type::Stdin),
+    ("stdout", Type::Stdout),
+    ("atomic", Type::Atomic),
+    ("arena", Type::Arena),
+    ("allocator", Type::Allocator),
+    ("allocator_context", Type::AllocatorContext),
+];
+
+/// Types with one table index (a layout, pointee or signature), written
+/// `name#index`. [`indexed_type`] is the inverse.
+fn type_index(ty: Type) -> Option<(&'static str, usize)> {
+    Some(match ty {
+        Type::Enum(id) => ("enum", id),
+        Type::Union(id) => ("union", id),
+        Type::DynObj(id) => ("dyn", id),
+        Type::Box(id) => ("box", id),
+        Type::Vec(id) => ("vec", id),
+        Type::Ref(id) => ("ref", id),
+        Type::RefMut(id) => ("refmut", id),
+        Type::Slice(id) => ("slice", id),
+        Type::SliceMut(id) => ("slicemut", id),
+        Type::Fn(id) => ("fn", id),
+        Type::Once(id) => ("once", id),
+        Type::Multi(id) => ("multi", id),
+        Type::Task(id) => ("task", id),
+        Type::Channel(id) => ("channel", id),
+        Type::Thread(id) => ("thread", id),
+        Type::ArenaBox(id) => ("arena_box", id),
+        Type::AllocBox(id) => ("alloc_box", id),
+        Type::AllocVec(id) => ("alloc_vec", id),
+        Type::GpuBuf(id) => ("gpu_buf", id),
+        _ => return None,
+    })
+}
+
+fn indexed_type(name: &str, id: usize) -> Option<Type> {
+    Some(match name {
+        "enum" => Type::Enum(id),
+        "union" => Type::Union(id),
+        "dyn" => Type::DynObj(id),
+        "box" => Type::Box(id),
+        "vec" => Type::Vec(id),
+        "ref" => Type::Ref(id),
+        "refmut" => Type::RefMut(id),
+        "slice" => Type::Slice(id),
+        "slicemut" => Type::SliceMut(id),
+        "fn" => Type::Fn(id),
+        "once" => Type::Once(id),
+        "multi" => Type::Multi(id),
+        "task" => Type::Task(id),
+        "channel" => Type::Channel(id),
+        "thread" => Type::Thread(id),
+        "arena_box" => Type::ArenaBox(id),
+        "alloc_box" => Type::AllocBox(id),
+        "alloc_vec" => Type::AllocVec(id),
+        "gpu_buf" => Type::GpuBuf(id),
+        _ => return None,
+    })
+}
+
 fn type_name(ty: Type) -> String {
+    if let Some((name, _)) = PLAIN_TYPES.iter().find(|(_, plain)| *plain == ty) {
+        return (*name).into();
+    }
+    if let Some((name, id)) = type_index(ty) {
+        return format!("{name}#{id}");
+    }
     match ty {
-        Type::I64 => "i64".into(),
         Type::Int(kind) => kind.name().into(),
         Type::Float(kind) => kind.name().into(),
-        Type::Char => "char".into(),
-        Type::Bool => "bool".into(),
-        Type::Unit => "unit".into(),
-        Type::Never => "never".into(),
-        Type::Enum(id) => format!("enum#{id}"),
         Type::Variants(id, mask) => format!("variants#{id}#{mask}"),
-        Type::Box(pointee) => format!("box#{pointee}"),
-        Type::Vec(pointee) => format!("vec#{pointee}"),
-        Type::Bytes => "bytes".into(),
-        Type::Stdin => "stdin".into(),
-        Type::Stdout => "stdout".into(),
-        Type::Fn(signature) => format!("fn#{signature}"),
-        Type::Union(id) => format!("union#{id}"),
-        Type::DynObj(id) => format!("dyn#{id}"),
-        Type::Once(signature) => format!("once#{signature}"),
-        Type::Str => "str".into(),
-        Type::StrMut => "strmut".into(),
-        Type::Slice(element) => format!("slice#{element}"),
-        Type::SliceMut(element) => format!("slicemut#{element}"),
-        Type::Ref(pointee) => format!("ref#{pointee}"),
-        Type::RefMut(pointee) => format!("refmut#{pointee}"),
-        Type::String => "string".into(),
-        other => format!("?{other:?}"),
+        Type::Annotated(pointee, annotation) => format!("annotated#{pointee}#{annotation}"),
+        other => unreachable!("every type has a text name: {other:?}"),
     }
 }
 
@@ -179,6 +235,22 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
         Rvalue::BoxNew(operand) => format!("box_new({})", operand_text(*operand)),
         Rvalue::BoxTake(operand) => format!("box_take({})", operand_text(*operand)),
         Rvalue::Ref(place) => format!("&{}", place_text(*place)),
+        Rvalue::ElementAddress(base, index) => match base {
+            ElementBase::Slice(view) => {
+                format!(
+                    "element slice {}[{}]",
+                    operand_text(*view),
+                    operand_text(*index)
+                )
+            }
+            ElementBase::Stored(place) => {
+                format!(
+                    "element stored {}[{}]",
+                    place_text(*place),
+                    operand_text(*index)
+                )
+            }
+        },
         Rvalue::ByteAt(handle, index) => format!(
             "byte_at({}, {})",
             operand_text(*handle),
@@ -424,75 +496,35 @@ impl Parser {
     }
     fn ty(&mut self) -> Result<Type, String> {
         let name = self.next()?;
-        Ok(match name.as_str() {
-            "i64" => Type::I64,
-            "f32" => Type::Float(FloatKind::F32),
-            "f64" => Type::Float(FloatKind::F64),
-            "char" => Type::Char,
-            "bool" => Type::Bool,
-            "unit" => Type::Unit,
-            "never" => Type::Never,
-            "enum" => {
-                self.expect("#")?;
-                Type::Enum(self.number()?)
-            }
-            "box" => {
-                self.expect("#")?;
-                Type::Box(self.number()?)
-            }
-            "vec" => {
-                self.expect("#")?;
-                Type::Vec(self.number()?)
-            }
-            "bytes" => Type::Bytes,
-            "string" => Type::String,
-            "str" => Type::Str,
-            "stdin" => Type::Stdin,
-            "stdout" => Type::Stdout,
-            "fn" => {
-                self.expect("#")?;
-                Type::Fn(self.number()?)
-            }
-            "union" => {
-                self.expect("#")?;
-                Type::Union(self.number()?)
-            }
-            "dyn" => {
-                self.expect("#")?;
-                Type::DynObj(self.number()?)
-            }
-            "once" => {
-                self.expect("#")?;
-                Type::Once(self.number()?)
-            }
-            "strmut" => Type::StrMut,
-            "slice" => {
-                self.expect("#")?;
-                Type::Slice(self.number()?)
-            }
-            "slicemut" => {
-                self.expect("#")?;
-                Type::SliceMut(self.number()?)
-            }
-            "ref" => {
-                self.expect("#")?;
-                Type::Ref(self.number()?)
-            }
-            "refmut" => {
-                self.expect("#")?;
-                Type::RefMut(self.number()?)
-            }
+        if let Some((_, ty)) = PLAIN_TYPES.iter().find(|(plain, _)| *plain == name) {
+            return Ok(*ty);
+        }
+        if name == "f32" || name == "f64" {
+            let kind = if name == "f32" {
+                FloatKind::F32
+            } else {
+                FloatKind::F64
+            };
+            return Ok(Type::Float(kind));
+        }
+        if let Some(kind) = IntKind::named(&name) {
+            return Ok(Type::int(kind));
+        }
+        if !self.eat("#") {
+            return Err(format!("unknown type '{name}'"));
+        }
+        let id = self.number()?;
+        match name.as_str() {
             "variants" => {
                 self.expect("#")?;
-                let id = self.number()?;
-                self.expect("#")?;
-                Type::Variants(id, self.number()?)
+                Ok(Type::Variants(id, self.number()?))
             }
-            other => match IntKind::named(other) {
-                Some(kind) => Type::int(kind),
-                None => return Err(format!("unknown type '{other}'")),
-            },
-        })
+            "annotated" => {
+                self.expect("#")?;
+                Ok(Type::Annotated(id, self.number()?))
+            }
+            other => indexed_type(other, id).ok_or_else(|| format!("unknown type '{other}'")),
+        }
     }
     fn int_kind(&mut self) -> Result<IntKind, String> {
         let name = self.next()?;
@@ -686,6 +718,18 @@ impl Parser {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| format!("invalid hex bytes '{hex}'"))?;
             return Ok(Rvalue::Bytes(bytes));
+        }
+        if name == "element" {
+            self.at += 1;
+            let base = match self.next()?.as_str() {
+                "slice" => ElementBase::Slice(self.operand()?),
+                "stored" => ElementBase::Stored(self.place()?),
+                other => return Err(format!("expected an element base, found '{other}'")),
+            };
+            self.expect("[")?;
+            let index = self.operand()?;
+            self.expect("]")?;
+            return Ok(Rvalue::ElementAddress(base, index));
         }
         if name == "byte_at" {
             self.at += 1;
@@ -909,4 +953,53 @@ fn unescape(text: &str) -> Result<String, String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_type_kind_reads_back_from_its_name() {
+        let mut types = PLAIN_TYPES.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
+        types.extend([
+            Type::int(IntKind::U8),
+            Type::Float(FloatKind::F32),
+            Type::Variants(3, 5),
+            Type::Annotated(2, 7),
+        ]);
+        for name in [
+            "enum",
+            "union",
+            "dyn",
+            "box",
+            "vec",
+            "ref",
+            "refmut",
+            "slice",
+            "slicemut",
+            "fn",
+            "once",
+            "multi",
+            "task",
+            "channel",
+            "thread",
+            "arena_box",
+            "alloc_box",
+            "alloc_vec",
+            "gpu_buf",
+        ] {
+            let ty = indexed_type(name, 4).unwrap();
+            assert_eq!(type_index(ty), Some((name, 4)));
+            types.push(ty);
+        }
+        for ty in types {
+            let text = type_name(ty);
+            let mut parser = Parser {
+                tokens: tokens(&text).unwrap(),
+                at: 0,
+            };
+            assert_eq!(parser.ty(), Ok(ty), "{text}");
+        }
+    }
 }

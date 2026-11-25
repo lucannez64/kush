@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::mir::{
-    BlockId, Body, Callee, Capture, Operand, Place, Rvalue, StatementKind, Terminator,
+    BlockId, Body, Callee, Capture, ElementBase, Operand, Place, Rvalue, StatementKind, Terminator,
     TerminatorKind, ViewSource,
 };
 
@@ -295,6 +295,18 @@ impl Generator<'_, '_> {
                 Some(values)
             }
             Rvalue::Ref(place) => Some(vec![self.mir_address(*place)]),
+            Rvalue::ElementAddress(base, index) => Some(vec![match base {
+                ElementBase::Slice(view) => {
+                    let descriptor = self.mir_operand(*view);
+                    let index = self.mir_scalar(*index);
+                    self.slice_element_address(&descriptor, index)
+                }
+                ElementBase::Stored(place) => {
+                    let location = self.mir_address(*place);
+                    let index = self.mir_scalar(*index);
+                    self.element_address(body.place_ty(*place), location, index)
+                }
+            }]),
             Rvalue::ByteAt(handle, index) => {
                 let handle = self.mir_scalar(*handle);
                 let index = self.mir_scalar(*index);
@@ -403,7 +415,22 @@ impl Generator<'_, '_> {
                 self.mir_unwind = Self::unwind_block(blocks, *unwind);
                 let values = self.mir_operands(args);
                 let result = match callee {
-                    Callee::Function(index) => self.function_call(*index, values),
+                    Callee::Function(index) => {
+                        // Erased parameters have no words in the call.
+                        let grades = &self.program.functions[*index].parameter_grades;
+                        let mut kept = Vec::new();
+                        for (position, arg) in args.iter().enumerate() {
+                            let erased = grades
+                                .get(position)
+                                .copied()
+                                .flatten()
+                                .is_some_and(Grade::is_zero);
+                            if !erased {
+                                kept.extend(self.mir_operand(*arg));
+                            }
+                        }
+                        self.function_call(*index, kept)
+                    }
                     Callee::PrintInt(kind) => {
                         let print = if *kind == IntKind::U64 {
                             self.print_u64
@@ -439,7 +466,15 @@ impl Generator<'_, '_> {
             TerminatorKind::Return(value) => {
                 let words = self.mir_operand(*value);
                 self.cleanup_all();
-                self.return_value(&words);
+                let function = &self.program.functions[self.function_index];
+                if function.result_grade.is_some_and(Grade::is_zero) {
+                    // An erased result has no words; a copyable value
+                    // still gets its (empty) cleanup, as on the tree path.
+                    self.drop_value(body.operand_ty(*value), &words);
+                    self.return_value(&[]);
+                } else {
+                    self.return_value(&words);
+                }
             }
             TerminatorKind::Panic { unwind } => {
                 self.mir_unwind = Self::unwind_block(blocks, *unwind);

@@ -418,6 +418,29 @@ fn fully_covered_examples_match_the_tree_path() {
 }
 
 #[test]
+fn alternatives_bind_and_drop_as_on_the_tree_path() {
+    let source = "
+        enum Shape { Square(i64), Wide(i64, i64), Dot }
+        enum Held { One(Box<i64>, i64), Two(i64, Box<i64>), Empty }
+        fn side(s: Shape) -> i64 {
+            match s { Shape.Square(n) | Shape.Wide(n, _) => n, Shape.Dot => 0 }
+        }
+        fn count(h: Held) -> i64 {
+            match h { Held.One(_, n) | Held.Two(n, _) => n, Held.Empty => -1 }
+        }
+        fn main() -> Unit ! {io, alloc} {
+            print_i64(side(Shape.Square(3)) + side(Shape.Wide(4, 9)) + side(Shape.Dot));
+            print_i64(count(Held.One(Box.new(1), 10)) + count(Held.Two(20, Box.new(2))));
+            print_i64(count(Held.Empty));
+        }";
+    let program = executable::check(source).unwrap();
+    let (built, total) = kush::mir::coverage(&program);
+    assert_eq!(built, total, "{}", kush::mir::dump(&program));
+    let output = same_program_on_both_paths(&program, true);
+    assert_eq!(output, "7\n30\n-1\n");
+}
+
+#[test]
 fn checked_arithmetic_panics_on_the_mir_path_as_on_the_tree() {
     same_on_both_paths(
         "fn grow(x: i64) -> i64 { x * 1000000000000 }

@@ -8031,46 +8031,54 @@ impl Generator<'_, '_> {
                 // and traps instead.
                 let descriptor = lower!(self.expr(base));
                 let index = lower!(self.scalar(index));
-                let negative = self
-                    .builder
-                    .ins()
-                    .icmp_imm_s(IntCC::SignedLessThan, index, 0);
-                let beyond =
-                    self.builder
-                        .ins()
-                        .icmp(IntCC::SignedGreaterThanOrEqual, index, descriptor[1]);
-                let bytes = self
-                    .builder
-                    .ins()
-                    .icmp_imm_s(IntCC::NotEqual, descriptor[3], 0);
-                let invalid = self.builder.ins().bor(negative, beyond);
-                let invalid = self.builder.ins().bor(invalid, bytes);
-                self.guard(invalid);
-                let offset = self.builder.ins().imul(index, descriptor[2]);
-                Some(self.builder.ins().iadd(descriptor[0], offset))
+                Some(self.slice_element_address(&descriptor, index))
             }
             ExprKind::PlaceIndex { base, index, .. } => {
                 let location = lower!(self.place_address(base));
                 let index = lower!(self.scalar(index));
-                if let Type::Vec(element) = base.ty {
-                    let handle = self.load_words(location, 0, 1)[0];
-                    let width =
-                        self.constant(self.program.width(self.program.pointees[element]) as i64);
-                    return Some(self.runtime_call(self.vec_element, &[handle, index, width]));
-                }
-                let (element, length) = base
-                    .ty
-                    .layout()
-                    .and_then(|id| self.program.enums[id].array)
-                    .expect("checked array index place");
-                self.check_index(index, length as i64);
-                let stride = (self.program.width(element) * 8) as i64;
-                let offset = self.builder.ins().imul_imm_s(index, stride);
-                let data = self.builder.ins().iadd_imm_s(location, 8);
-                Some(self.builder.ins().iadd(data, offset))
+                Some(self.element_address(base.ty, location, index))
             }
             _ => unreachable!("checked projected borrow has a place expression"),
         }
+    }
+    /// The address of a slice view's element after the bound check; a
+    /// byte-backed view has no word-sized element and traps instead.
+    fn slice_element_address(&mut self, descriptor: &[Value], index: Value) -> Value {
+        let negative = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::SignedLessThan, index, 0);
+        let beyond = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThanOrEqual, index, descriptor[1]);
+        let bytes = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::NotEqual, descriptor[3], 0);
+        let invalid = self.builder.ins().bor(negative, beyond);
+        let invalid = self.builder.ins().bor(invalid, bytes);
+        self.guard(invalid);
+        let offset = self.builder.ins().imul(index, descriptor[2]);
+        self.builder.ins().iadd(descriptor[0], offset)
+    }
+    /// The address of an element of the vector or inline array stored at
+    /// `location`, after the bound check.
+    fn element_address(&mut self, base_ty: Type, location: Value, index: Value) -> Value {
+        if let Type::Vec(element) = base_ty {
+            let handle = self.load_words(location, 0, 1)[0];
+            let width = self.constant(self.program.width(self.program.pointees[element]) as i64);
+            return self.runtime_call(self.vec_element, &[handle, index, width]);
+        }
+        let (element, length) = base_ty
+            .layout()
+            .and_then(|id| self.program.enums[id].array)
+            .expect("checked array index place");
+        self.check_index(index, length as i64);
+        let stride = (self.program.width(element) * 8) as i64;
+        let offset = self.builder.ins().imul_imm_s(index, stride);
+        let data = self.builder.ins().iadd_imm_s(location, 8);
+        self.builder.ins().iadd(data, offset)
     }
     fn store_words(&mut self, pointer: Value, values: &[Value]) {
         for (i, v) in values.iter().enumerate() {

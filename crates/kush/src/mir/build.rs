@@ -103,7 +103,25 @@ fn plain(program: &Executable, ty: Type) -> bool {
         {
             return true;
         }
-        if matches!(ty, Type::Fn(_) | Type::Once(_) | Type::DynObj(_)) {
+        // Function values, objects and opaque handles: words whose
+        // operations are builtins or coercions.
+        if matches!(
+            ty,
+            Type::Fn(_)
+                | Type::Once(_)
+                | Type::DynObj(_)
+                | Type::Atomic
+                | Type::Arena
+                | Type::Allocator
+                | Type::AllocatorContext
+                | Type::Task(_)
+                | Type::Thread(_)
+                | Type::Channel(_)
+                | Type::ArenaBox(_)
+                | Type::AllocBox(_)
+                | Type::AllocVec(_)
+                | Type::GpuBuf(_)
+        ) {
             return true;
         }
         let ty = ty.full();
@@ -118,6 +136,7 @@ fn plain(program: &Executable, ty: Type) -> bool {
                 .all(|member| go(program, *member, visiting)),
             Type::Box(pointee)
             | Type::Vec(pointee)
+            | Type::Annotated(pointee, _)
             | Type::Ref(pointee)
             | Type::RefMut(pointee)
             | Type::Slice(pointee)
@@ -152,18 +171,12 @@ fn eligible(program: &Executable, function: &Function) -> Result<(), String> {
     if !function.capability_parameters.is_empty() {
         return Err("a capability parameter".into());
     }
-    if erased(function.result_grade) || function.parameter_grades.iter().any(|g| erased(*g)) {
-        return Err("an erased parameter or result".into());
-    }
     if !plain(program, function.result) {
         return Err(format!("a {:?} result", function.result));
     }
     for local in &function.locals {
         if !plain(program, local.ty) {
             return Err(format!("a local of type {:?}", local.ty));
-        }
-        if erased(local.grade) {
-            return Err("an erased local".into());
         }
     }
     Ok(())
@@ -175,9 +188,6 @@ fn callable(program: &Executable, index: usize) -> Result<(), String> {
     let callee = &program.functions[index];
     if callee.closure.is_some() || callee.parameter_slots.is_some() {
         return Err("a call to a closure or continuation".into());
-    }
-    if erased(callee.result_grade) || callee.parameter_grades.iter().any(|g| erased(*g)) {
-        return Err("a call with an erased parameter or result".into());
     }
     if !plain(program, callee.result) {
         return Err(format!("a call returning {:?}", callee.result));
@@ -197,24 +207,9 @@ fn supported(pattern: &Pattern) -> Result<(), String> {
     match pattern {
         Pattern::Any | Pattern::Bind(_) | Pattern::Literal(_) => Ok(()),
         Pattern::Variant { fields, .. } => fields.iter().try_for_each(|(_, p)| supported(p)),
-        Pattern::Or(alternatives) => alternatives.iter().try_for_each(|p| {
-            if binds(p) {
-                Err("alternatives with bindings".into())
-            } else {
-                supported(p)
-            }
-        }),
+        Pattern::Or(alternatives) => alternatives.iter().try_for_each(supported),
         Pattern::Type { inner, .. } => supported(inner),
         Pattern::DynArray { .. } => Err("an array pattern".into()),
-    }
-}
-
-fn has_alternatives(pattern: &Pattern) -> bool {
-    match pattern {
-        Pattern::Or(_) => true,
-        Pattern::Variant { fields, .. } => fields.iter().any(|(_, p)| has_alternatives(p)),
-        Pattern::Type { inner, .. } => has_alternatives(inner),
-        _ => false,
     }
 }
 
@@ -381,7 +376,26 @@ impl Builder<'_> {
             self.in_cleanup = false;
         }
         for slot in 0..self.function.parameters {
-            self.activate_local(slot, span);
+            // An erased parameter has no words and owns nothing.
+            if !self.erased_local(slot) {
+                self.activate_local(slot, span);
+            }
+        }
+    }
+    /// A grade-zero binding: no storage, so its value is dropped at once.
+    fn erased_local(&self, slot: LocalId) -> bool {
+        self.function
+            .locals
+            .get(slot)
+            .is_some_and(|local| erased(local.grade))
+    }
+    /// Drop a value nothing keeps (the initializer of an erased binding).
+    fn discard(&mut self, value: Operand, ty: Type, span: Span) {
+        if !self.program.owns(ty) {
+            return;
+        }
+        if let Some(place) = value.place() {
+            self.drop_place(place, span);
         }
     }
     fn resource(&self, id: Option<usize>) -> Option<(LocalId, LocalId)> {
@@ -530,6 +544,39 @@ impl Builder<'_> {
                 }
                 Place::field(*slot, 0, self.locals[*slot].ty)
             }
+            // An element: its checked address in a pointer local, then the
+            // element behind it.
+            ExprKind::PlaceIndex { base, index, .. } => {
+                let element_base = if base.ty.is_slice() {
+                    let Some(view) = self.expr(base)? else {
+                        return Ok(None);
+                    };
+                    let view = self.settle(view, base.ty, expr.span);
+                    ElementBase::Slice(view)
+                } else {
+                    let Some(place) = self.place_of(base)? else {
+                        return Ok(None);
+                    };
+                    ElementBase::Stored(place)
+                };
+                let Some(index) = self.expr(index)? else {
+                    return Ok(None);
+                };
+                let pointer = self.temp(Type::I64);
+                self.assign(
+                    pointer,
+                    Rvalue::ElementAddress(element_base, index),
+                    expr.span,
+                );
+                Place {
+                    local: pointer,
+                    deref: true,
+                    field: Some(Field {
+                        offset: 0,
+                        ty: expr.ty,
+                    }),
+                }
+            }
             other => return Err(format!("a borrow of {}", variant_name(other))),
         }))
     }
@@ -580,6 +627,10 @@ impl Builder<'_> {
                         return Ok(None);
                     };
                     self.consume(expr);
+                    if self.erased_local(*slot) {
+                        self.discard(value, expr.ty, expr.span);
+                        continue;
+                    }
                     self.assign(*slot, Rvalue::Use(value), expr.span);
                     self.activate_local(*slot, expr.span);
                     slots.push(*slot);
@@ -1028,6 +1079,10 @@ impl Builder<'_> {
                     return Ok(None);
                 };
                 self.consume(replacement);
+                if self.erased_local(*slot) {
+                    self.discard(value, replacement.ty, span);
+                    return Ok(Some(Self::no_value(expr.ty)));
+                }
                 let old = self.local_resource(*slot);
                 let value = if self.resource(old).is_some() {
                     let value = self.settle(value, replacement.ty, span);
@@ -1223,12 +1278,8 @@ impl Builder<'_> {
         self.assign(subject, Rvalue::Use(value), scrutinee.span);
         let temp = self.result_temp(expr.ty);
         let mut join = None;
-        let owned = self.program.owns(scrutinee.ty);
         for arm in arms {
             supported(&arm.pattern)?;
-            if owned && has_alternatives(&arm.pattern) {
-                return Err("alternatives over an owned value".into());
-            }
             // An arm without a test or guard matches everything left.
             let irrefutable = !refutable(&arm.pattern) && arm.guard.is_none();
             let next = if irrefutable {
@@ -1387,6 +1438,29 @@ impl Builder<'_> {
         }
     }
 
+    /// Run `action` for the first alternative that matches the subject (the
+    /// whole pattern matched, so one does), as the tree path does when it
+    /// binds or disposes through an or-pattern.
+    fn each_alternative(
+        &mut self,
+        subject: LocalId,
+        offset: usize,
+        alternatives: &[Pattern],
+        span: Span,
+        action: impl Fn(&mut Self, &Pattern),
+    ) {
+        let join = self.new_block();
+        for alternative in alternatives {
+            let next = self.new_block();
+            self.test(subject, offset, alternative, next, span);
+            action(self, alternative);
+            self.goto(join, span);
+            self.enter(next);
+        }
+        self.terminate(TerminatorKind::Unreachable, span);
+        self.enter(join);
+    }
+
     /// The tree path's `dispose_pattern`: after a match, each binding owns
     /// its part of the subject, and each owned part under `_` is dropped.
     fn dispose(
@@ -1405,6 +1479,11 @@ impl Builder<'_> {
                 }
             }
             Pattern::Bind(slot) => self.activate_local(*slot, span),
+            Pattern::Or(alternatives) if self.program.owns(ty) || binds(pattern) => {
+                self.each_alternative(subject, offset, alternatives, span, |builder, p| {
+                    builder.dispose(subject, offset, p, ty, span);
+                });
+            }
             Pattern::Type { member, inner, .. } => {
                 self.dispose(subject, offset + 1, inner, *member, span);
             }
@@ -1445,6 +1524,11 @@ impl Builder<'_> {
                 }
             }
             Pattern::Type { inner, .. } => self.bind(subject, offset + 1, inner, span),
+            Pattern::Or(alternatives) if binds(pattern) => {
+                self.each_alternative(subject, offset, alternatives, span, |builder, p| {
+                    builder.bind(subject, offset, p, span);
+                });
+            }
             _ => {}
         }
     }

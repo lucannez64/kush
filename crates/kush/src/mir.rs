@@ -140,6 +140,9 @@ pub(crate) enum Rvalue {
     ByteAt(Operand, Operand),
     /// The address of a place: a reference to it.
     Ref(Place),
+    /// The address of an element after its bound check: of a slice view
+    /// (the operand), or of the vector or inline array at a place.
+    ElementAddress(ElementBase, Operand),
     /// Change the representation of a value: inject it into a union, box it
     /// as a `dyn` object, and so on (the body's coercion at this index).
     Coerce(Operand, usize),
@@ -170,6 +173,14 @@ pub(crate) enum Capture {
     /// The environment holds the local's address (a call-scoped scalar
     /// capture the closure may read or write in place).
     Address(LocalId),
+}
+
+/// What an element address indexes into.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ElementBase {
+    Slice(Operand),
+    /// A vector or inline array, by the place holding it.
+    Stored(Place),
 }
 
 /// What a view looks into.

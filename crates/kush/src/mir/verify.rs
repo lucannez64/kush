@@ -35,15 +35,20 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
         local(place.local)?;
         let base = body.locals[place.local].ty;
         let base = if place.deref {
+            let Some(field) = place.field else {
+                return Err(format!("*_{} names no field", place.local));
+            };
+            if base == Type::I64 {
+                // A computed element address: the field names what is there.
+                return Ok(());
+            }
             // A reference, or a box: both point at their pointee.
             let pointee = match base {
                 Type::Box(pointee) => Some(pointee),
                 other => other.ref_pointee(),
             }
             .ok_or_else(|| format!("*_{} dereferences a {base:?}", place.local))?;
-            if place.field.is_none() {
-                return Err(format!("*_{} names no field", place.local));
-            }
+            let _ = field;
             program.pointees[pointee]
         } else {
             base
@@ -155,6 +160,14 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                         Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::StrMut => target_ty,
                         other => return Err(here(format!("a view stored in a {other:?}"))),
                     }
+                }
+                Rvalue::ElementAddress(base, index) => {
+                    match base {
+                        ElementBase::Slice(view) => operand(*view).map_err(here)?,
+                        ElementBase::Stored(stored) => place(*stored).map_err(here)?,
+                    }
+                    operand(*index).map_err(here)?;
+                    target_ty
                 }
                 Rvalue::ByteAt(handle, index) => {
                     operand(*handle).map_err(here)?;
