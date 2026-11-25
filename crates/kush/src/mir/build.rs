@@ -35,6 +35,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
         blocks: Vec::new(),
         current: None,
         loops: Vec::new(),
+        regions: Vec::new(),
     };
     let entry = builder.new_block();
     builder.current = Some(entry);
@@ -183,16 +184,18 @@ fn eligible(program: &Executable, function: &Function) -> Result<(), String> {
 /// passed as plain words.
 fn callable(program: &Executable, index: usize) -> Result<(), String> {
     let callee = &program.functions[index];
-    if callee.closure.is_some() || callee.parameter_slots.is_some() {
-        return Err("a call to a closure or continuation".into());
-    }
     if !plain(program, callee.result) {
         return Err(format!("a call returning {:?}", callee.result));
     }
-    if callee.locals[..callee.parameters]
-        .iter()
-        .any(|local| !plain(program, local.ty))
-    {
+    // A continuation receives its parameters at the slots it names; the
+    // arguments are already in its physical order, as on the tree path.
+    let slot = |position: usize| {
+        callee
+            .parameter_slots
+            .as_ref()
+            .map_or(position, |slots| slots[position])
+    };
+    if (0..callee.parameters).any(|position| !plain(program, callee.locals[slot(position)].ty)) {
         return Err("a call with a parameter the IR does not cover".into());
     }
     Ok(())
@@ -250,6 +253,16 @@ struct Partial {
     cleanup: bool,
 }
 
+/// A lowered `Region`: what `RegionExit` and `TryExit` leave to.
+struct Region {
+    /// Created by the first jump to it.
+    exit: Option<BlockId>,
+    /// The finish block and the local holding its input.
+    finish: Option<(BlockId, LocalId)>,
+    /// Receives the region's value.
+    result: Option<LocalId>,
+}
+
 struct Loop {
     head: BlockId,
     /// Created by the first `break`.
@@ -279,6 +292,7 @@ struct Builder<'a> {
     /// block is entered (code after `return` or `break` is unreachable).
     current: Option<BlockId>,
     loops: Vec<Loop>,
+    regions: Vec<Region>,
 }
 
 impl Builder<'_> {
@@ -893,6 +907,69 @@ impl Builder<'_> {
                 );
                 Operand::Move(Place::local(temp))
             }
+            ExprKind::Region { body, finish } => return self.region(expr, body, finish.as_deref()),
+            ExprKind::RegionExit {
+                value,
+                finish,
+                cleanup,
+            } => {
+                let Some(operand) = self.expr(value)? else {
+                    return Ok(None);
+                };
+                self.consume(value);
+                for id in cleanup {
+                    self.cleanup_resource(Some(*id), span);
+                }
+                self.leave_region(operand, *finish, span)?;
+                return Ok(None);
+            }
+            ExprKind::TryExit {
+                value,
+                input,
+                output,
+                cleanup,
+            } => {
+                let Some(operand) = self.expr(value)? else {
+                    return Ok(None);
+                };
+                self.consume(value);
+                let subject = self.temp(value.ty);
+                self.assign(subject, Rvalue::Use(operand), span);
+                let (_, input_local) = self
+                    .regions
+                    .last()
+                    .and_then(|region| region.finish)
+                    .ok_or("a `?` exit outside a region with a finish")?;
+                let finish_ty = self.locals[input_local].ty;
+                let layout = finish_ty
+                    .layout()
+                    .ok_or("a `?` exit to a non-enum finish")?;
+                let ok = self.new_block();
+                let failed = self.new_block();
+                self.terminate(
+                    TerminatorKind::Switch {
+                        value: self.word(subject, 0),
+                        targets: vec![(input.ok_tag as i64, ok)],
+                        otherwise: failed,
+                    },
+                    span,
+                );
+                // The error goes to the caller's continuation (the finish).
+                self.enter(failed);
+                let error = Operand::Copy(Place::field(subject, 1, input.error));
+                let returned = self.temp(finish_ty);
+                self.assign(
+                    returned,
+                    Rvalue::Aggregate(Type::Enum(layout), output.err_tag, vec![error]),
+                    span,
+                );
+                for id in cleanup {
+                    self.cleanup_resource(Some(*id), span);
+                }
+                self.leave_region(Operand::Move(Place::local(returned)), true, span)?;
+                self.enter(ok);
+                Operand::Copy(Place::field(subject, 1, input.ok))
+            }
             ExprKind::Try {
                 value,
                 input,
@@ -1225,6 +1302,108 @@ impl Builder<'_> {
             ExprKind::Call(target, args) => return self.call(expr, target, args),
             other => return Err(variant_name(other)),
         }))
+    }
+
+    /// A `Region`: its body may leave early through `RegionExit` and
+    /// `TryExit`; a value that reaches the finish is passed to the finish
+    /// callable, whose result is the region's.
+    fn region(
+        &mut self,
+        expr: &Expr,
+        body: &crate::executable::Block,
+        finish: Option<&Expr>,
+    ) -> Result<Option<Operand>, String> {
+        let span = expr.span;
+        let finish_input = match finish {
+            Some(finish) => {
+                let (Type::Fn(id) | Type::Once(id) | Type::Multi(id)) = finish.ty else {
+                    return Err("a region finish that is not a function value".into());
+                };
+                let input = self.program.function_types[id].parameters[0];
+                if !plain(self.program, input) {
+                    return Err(format!("a region finish taking {input:?}"));
+                }
+                let block = self.new_block();
+                Some((block, self.temp(input)))
+            }
+            None => None,
+        };
+        let result = self.result_temp(expr.ty);
+        self.regions.push(Region {
+            exit: None,
+            finish: finish_input,
+            result,
+        });
+        let finished = self.block(body);
+        let finished = match finished {
+            Ok(value) => value,
+            Err(error) => {
+                self.regions.pop();
+                return Err(error);
+            }
+        };
+        if let Some(value) = finished {
+            let into_finish = finish_input.is_some();
+            if let Err(error) = self.leave_region(value, into_finish, span) {
+                self.regions.pop();
+                return Err(error);
+            }
+        }
+        let region = self.regions.pop().expect("the region's scope");
+        let mut exit = region.exit;
+        if let (Some((block, input)), Some(finish)) = (finish_input, finish) {
+            self.enter(block);
+            let Some(callable) = self.expr(finish)? else {
+                return Ok(exit.map(|exit| {
+                    self.enter(exit);
+                    Self::result(result, expr.ty)
+                }));
+            };
+            self.consume(finish);
+            let call = Expr {
+                kind: ExprKind::Constant(0),
+                ty: expr.ty,
+                span,
+                resource: None,
+            };
+            let input = Operand::Move(Place::local(input));
+            if let Some(value) = self.emit_call(&call, Callee::Indirect(callable), vec![input]) {
+                if let Some(result) = result {
+                    self.assign(result, Rvalue::Use(value), span);
+                }
+                self.goto_join(&mut exit, span);
+            }
+        }
+        let Some(exit) = exit else {
+            return Ok(None);
+        };
+        self.enter(exit);
+        Ok(Some(Self::result(result, expr.ty)))
+    }
+
+    /// Leave the innermost region with `value`: to its finish, or to its
+    /// exit with the value as the region's result.
+    fn leave_region(&mut self, value: Operand, finish: bool, span: Span) -> Result<(), String> {
+        let depth = self
+            .regions
+            .len()
+            .checked_sub(1)
+            .ok_or("a region exit outside a region")?;
+        if finish {
+            let (block, input) = self.regions[depth]
+                .finish
+                .ok_or("a finish exit without a finish")?;
+            self.assign(input, Rvalue::Use(value), span);
+            self.goto(block, span);
+            return Ok(());
+        }
+        if let Some(result) = self.regions[depth].result {
+            self.assign(result, Rvalue::Use(value), span);
+        }
+        let mut exit = self.regions[depth].exit;
+        self.goto_join(&mut exit, span);
+        self.regions[depth].exit = exit;
+        Ok(())
     }
 
     fn short_circuit(
