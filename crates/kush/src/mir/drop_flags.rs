@@ -143,10 +143,13 @@ fn flag_locals(body: &Body) -> Vec<LocalId> {
 }
 
 /// Every operand an rvalue reads, including places used by address.
-fn rvalue_operands(rvalue: &Rvalue) -> Vec<Operand> {
+pub(super) fn rvalue_operands(rvalue: &Rvalue) -> Vec<Operand> {
     match rvalue {
         Rvalue::Use(operand) | Rvalue::Unary(_, operand) => vec![*operand],
-        Rvalue::BoxNew(operand) | Rvalue::BoxTake(operand) | Rvalue::Coerce(operand, _) => {
+        Rvalue::BoxNew(operand)
+        | Rvalue::BoxTake(operand)
+        | Rvalue::Coerce(operand, _)
+        | Rvalue::Buffer(operand, _) => {
             vec![*operand]
         }
         Rvalue::Binary(_, left, right)

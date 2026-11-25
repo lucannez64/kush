@@ -2138,12 +2138,12 @@ fn lower(
     // NATIVE-INLINE: bodies are built first and defined after, so a
     // caller can absorb any small reachable callee.
     let mut bodies: Vec<Option<ir::Function>> = vec![None; program.functions.len()];
-    // FND-MIR: the functions the CFG IR covers are lowered from it.
-    // The tree path's loop optimizations (deferred overflow checks, vector
-    // push shadows) are not ported yet (FND-MIR-DEFAULT): when one is on, a
+    // FND-MIR: the functions the CFG IR covers are lowered from it, after
+    // the loop passes of docs/mir-design.md section 8. Deferred overflow
+    // checks are not ported yet (FND-MIR-DEFERRED): when they are on, a
     // function with a `while` loop keeps the tree path.
-    let loop_optimized = codegen.defers_overflow()
-        || (codegen.optimization == Optimization::Speed && codegen.backend == Backend::Llvm);
+    let loop_optimized = codegen.defers_overflow();
+    let trace_shadows = std::env::var_os("KUSH_TRACE_SHADOWS").is_some();
     let mir_bodies: Vec<Option<crate::mir::Body>> = if codegen.mir {
         (0..program.functions.len())
             .map(|index| {
@@ -2155,6 +2155,10 @@ fn lower(
                     .inspect_err(|reason| report_fallback(program, index, reason))
                     .ok()?;
                 if codegen.optimization == Optimization::Speed {
+                    if codegen.backend == Backend::Llvm {
+                        crate::mir::push_shadows::shadow(&mut body, trace_shadows);
+                    }
+                    crate::mir::slice_layout::version(program, &mut body);
                     crate::mir::bounds::mark(&mut body);
                 }
                 Some(body)
@@ -10558,6 +10562,9 @@ impl Generator<'_, '_> {
                         let (_, slot) = self.pending_pushes.remove(at);
                         self.vec_shadows.get(&slot).copied()
                     }
+                    // The MIR path sets the shadow of a push marked with
+                    // `CallHint::Shadow` before the call.
+                    _ if *op == VecOp::Push => self.push_shadow.take(),
                     _ => None,
                 };
                 let op = match op {

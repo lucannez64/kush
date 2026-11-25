@@ -194,10 +194,15 @@ pub(crate) fn loops(body: &Body) -> Vec<Loop> {
                 latches: Vec::new(),
             });
             entry.latches.push(block);
+            // Blocks the entry does not reach (a drop whose flag test was
+            // folded away, say) may jump into the loop; they are not in it.
             let mut work = vec![block];
             while let Some(member) = work.pop() {
                 if entry.blocks.insert(member) {
-                    work.extend(predecessors[member].iter().copied());
+                    let reached = predecessors[member]
+                        .iter()
+                        .filter(|predecessor| idom[**predecessor].is_some());
+                    work.extend(reached);
                 }
             }
         }
@@ -379,8 +384,20 @@ pub(crate) fn assigned(body: &Body, blocks: &BTreeSet<BlockId>) -> BTreeSet<Loca
                 out.insert(place.local);
             }
         }
-        if let TerminatorKind::Call { destination, .. } = &data.terminator.kind {
+        if let TerminatorKind::Call {
+            destination,
+            callee,
+            ..
+        } = &data.terminator.kind
+        {
             out.insert(*destination);
+            if let Callee::Builtin {
+                hint: CallHint::Shadow(length, capacity),
+                ..
+            } = callee
+            {
+                out.extend([*length, *capacity]);
+            }
         }
     }
     out
@@ -509,8 +526,22 @@ fn update_step(body: &Body, block: BlockId, at: usize, counter: LocalId) -> Opti
     }
 }
 
-/// The loop's counted shape, if it has one.
-pub(crate) fn counted(body: &Body, lp: &Loop) -> Option<Counted> {
+/// A loop's test: `left <comparison> right` at the end of a chain of
+/// blocks from the header, staying in the loop when it holds. The locals
+/// the two terms read are not address-taken and not assigned by the
+/// chain, so the terms are their values at the switch.
+#[derive(Debug, Clone)]
+pub(crate) struct Test {
+    pub condition: Vec<BlockId>,
+    pub comparison: BinOp,
+    pub left: Term,
+    pub right: Term,
+    pub body: BlockId,
+    pub exit: BlockId,
+}
+
+/// The loop's test, if its header starts one.
+pub(crate) fn test(body: &Body, lp: &Loop) -> Option<Test> {
     // The condition: a chain of blocks from the header, each with one
     // successor, up to the one that switches.
     let mut condition = vec![lp.header];
@@ -550,27 +581,52 @@ pub(crate) fn counted(body: &Body, lp: &Loop) -> Option<Counted> {
         _ => return None,
     };
     let Some(Definition::Statement(Rvalue::Binary(
-        comparison @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
+        comparison @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne),
         left,
         right,
     ))) = definition(body, &condition, tested)
     else {
         return None;
     };
-    let Term::Local(counter) = term(body, &condition, *left)? else {
+    let left = term(body, &condition, *left)?;
+    let right = term(body, &condition, *right)?;
+    // The terms' locals change only where seen: not through a reference,
+    // and not in the condition itself.
+    let taken = address_taken(body);
+    let mut read = BTreeSet::new();
+    left.locals(&mut read);
+    right.locals(&mut read);
+    let in_condition = assigned(body, &condition.iter().copied().collect());
+    if read.iter().any(|local| taken.contains(local) || in_condition.contains(local)) {
+        return None;
+    }
+    Some(Test {
+        condition,
+        comparison: *comparison,
+        left,
+        right,
+        body: *otherwise,
+        exit: *exit,
+    })
+}
+
+/// The loop's counted shape, if it has one.
+pub(crate) fn counted(body: &Body, lp: &Loop) -> Option<Counted> {
+    let Test {
+        condition,
+        comparison,
+        left,
+        right: bound,
+        body: inside,
+        exit,
+    } = test(body, lp)?;
+    if !matches!(comparison, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+        return None;
+    }
+    let Term::Local(counter) = left else {
         return None;
     };
     if !matches!(body.locals[counter].ty, Type::I64 | Type::Int(_)) {
-        return None;
-    }
-    let bound = term(body, &condition, *right)?;
-    // The counter and the bound's locals change only where seen: not
-    // through a reference, and not in the condition itself.
-    let taken = address_taken(body);
-    let mut read = BTreeSet::from([counter]);
-    bound.locals(&mut read);
-    let in_condition = assigned(body, &condition.iter().copied().collect());
-    if read.iter().any(|local| taken.contains(local) || in_condition.contains(local)) {
         return None;
     }
     // The bound does not change in the loop.
@@ -609,12 +665,12 @@ pub(crate) fn counted(body: &Body, lp: &Loop) -> Option<Counted> {
     }
     Some(Counted {
         counter,
-        comparison: *comparison,
+        comparison,
         bound,
         step,
         condition,
-        body: *otherwise,
-        exit: *exit,
+        body: inside,
+        exit,
         update: (*block, *at),
     })
 }

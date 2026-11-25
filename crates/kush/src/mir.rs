@@ -16,6 +16,8 @@ mod drop_flags;
 // The loop passes of docs/mir-design.md section 8 use it as they land.
 #[allow(dead_code)]
 pub(crate) mod loops;
+pub(crate) mod push_shadows;
+pub(crate) mod slice_layout;
 mod text;
 mod verify;
 
@@ -151,6 +153,8 @@ pub(crate) enum Rvalue {
     /// Whether two records or enums are (with `true`, are not) equal,
     /// field by field.
     StructEq(Operand, Operand, bool),
+    /// A word of the buffer header of the vector (operand).
+    Buffer(Operand, BufferWord),
     /// `Vec.map` in place on the vector (operand 0) with the callbacks
     /// (the other operands) applied in order.
     Map(MapOp, Vec<Operand>),
@@ -502,12 +506,31 @@ pub(crate) enum TerminatorKind {
 pub(crate) enum Callee {
     Function(usize),
     PrintInt(IntKind),
-    /// A builtin operation, by its index in the body's [`Builtins`]. With
-    /// `below`, the call's index operand is known to be below its slice's
-    /// length (FND-MIR-BOUNDS), so native code only checks its sign.
-    Builtin { index: usize, below: bool },
+    /// A builtin operation, by its index in the body's [`Builtins`], with
+    /// what a loop pass knows about the call.
+    Builtin { index: usize, hint: CallHint },
     /// A `fn` or `once fn` value.
     Indirect(Operand),
+}
+
+/// What a loop pass knows about a builtin call.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CallHint {
+    None,
+    /// The call's index operand is below its slice's length
+    /// (FND-MIR-BOUNDS), so native code only checks its sign.
+    Below,
+    /// A `Vec.push` whose vector's length and capacity the two locals hold
+    /// (FND-MIR-PUSH-SHADOWS). The call reads them instead of the buffer
+    /// header and updates them.
+    Shadow(LocalId, LocalId),
+}
+
+/// A word of a vector's buffer header.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum BufferWord {
+    Length,
+    Capacity,
 }
 
 impl Body {

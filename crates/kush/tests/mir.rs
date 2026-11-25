@@ -532,6 +532,66 @@ fn proved_upper_bounds_keep_the_sign_check() {
 }
 
 #[test]
+fn versioned_slice_loops_compute_as_before() {
+    // FND-MIR-SLICE-VERSION: release builds run loops over views in a copy
+    // specialized to whole consecutive elements.
+    let output = same_on_both_paths_with(
+        "fn scale(xs: &mut [i64], k: i64) -> Unit {
+            let mut i = 0;
+            while i < xs.len() { xs[i] = xs[i] * k; i = i + 1; }
+        }
+        fn sum(xs: &[i64]) -> i64 {
+            let mut i = 0;
+            let mut total = 0;
+            while i < xs.len() { total = total + xs[i]; i = i + 1; }
+            total
+        }
+        fn main() -> Unit ! {io, alloc} {
+            let mut v = [1, 2, 3, 4, 5];
+            scale(&mut v[1..4], 10);
+            print_i64(sum(v[..]));
+            print_i64(sum(v[2..]));
+        }",
+        CodegenOptions::release(),
+    );
+    assert_eq!(output, "96\n75\n");
+}
+
+#[test]
+fn shadowed_push_loops_compute_as_before() {
+    // FND-MIR-PUSH-SHADOWS: LLVM release builds keep a pushed vector's
+    // length and capacity in locals across the loop. Deferred overflow
+    // checks stay off, so the loops take the MIR path.
+    let clang = std::env::var("KUSH_CLANG").unwrap_or_else(|_| "clang".into());
+    if Command::new(clang).arg("--version").output().is_err() {
+        return;
+    }
+    let output = same_on_both_paths_with(
+        "fn fill(n: i64) -> Vec<i64> ! {alloc} {
+            let mut v: Vec<i64> = Vec.with_capacity(0);
+            let mut i = 0;
+            while i < n {
+                v = Vec.push(v, i * 3);
+                if Vec.len(&v) % 7 == 0 { let first = Vec.get(&v, 0); v = Vec.push(v, first); }
+                i = i + 1;
+            }
+            v
+        }
+        fn main() -> Unit ! {io, alloc} {
+            let v = fill(5000);
+            print_i64(Vec.len(&v));
+            print_i64(Vec.get(&v, 4999));
+        }",
+        CodegenOptions {
+            backend: native::Backend::Llvm,
+            deferred_overflow: Some(false),
+            ..CodegenOptions::release()
+        },
+    );
+    assert_eq!(output.lines().count(), 2, "{output}");
+}
+
+#[test]
 fn functions_outside_the_ir_fall_back_to_the_tree() {
     let output = same_on_both_paths(
         "fn total(values: Vec<i64>) -> i64 {

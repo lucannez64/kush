@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::mir::{
-    AllocOp, ArrayOp, BlockId, Body, Callee, Capture, ElementBase, Operand, Place, RuntimeOp, Rvalue,
+    AllocOp, ArrayOp, BlockId, BufferWord, CallHint, Body, Callee, Capture, ElementBase, Operand, Place, RuntimeOp, Rvalue,
     StatementKind, TaskOp, Terminator, TerminatorKind, ViewSource,
 };
 
@@ -557,6 +557,17 @@ impl Generator<'_, '_> {
                     self.element_address(body.place_ty(*place), location, index)
                 }
             }]),
+            Rvalue::Buffer(vector, word) => {
+                let handle = self.mir_scalar(*vector);
+                Some(vec![match word {
+                    BufferWord::Length => self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+                        g.builder
+                            .ins()
+                            .load(I64, ir::MemFlagsData::new(), handle, 0)
+                    }),
+                    BufferWord::Capacity => self.buffer_capacity(handle),
+                }])
+            }
             Rvalue::StructEq(left, right, negated) => {
                 let ty = body.operand_ty(*left);
                 let left = self.mir_operand(*left);
@@ -890,12 +901,22 @@ impl Generator<'_, '_> {
                             .collect::<Vec<_>>();
                         self.mir_indirect_call(callee_ty, &callable, arguments)
                     }
-                    Callee::Builtin { index, below } => {
+                    Callee::Builtin { index, hint } => {
                         let ty = body.locals[*destination].ty;
                         let target = body.builtins.0[*index];
-                        self.index_below = *below;
+                        match hint {
+                            CallHint::None => {}
+                            CallHint::Below => self.index_below = true,
+                            CallHint::Shadow(length, capacity) => {
+                                self.push_shadow = Some((
+                                    self.variables[*length][0],
+                                    self.variables[*capacity][0],
+                                ));
+                            }
+                        }
                         let words = self.call_target(&target, values, ty, terminator.span, None);
                         self.index_below = false;
+                        self.push_shadow = None;
                         let Some(words) = words else {
                             // The builtin always panics; the block has ended.
                             return;

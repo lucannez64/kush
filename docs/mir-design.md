@@ -381,6 +381,9 @@ it and tests can check it without compiling.
   entry assigns those two words their constant values. That is a no-op
   at run time, but it lets the code generator treat them as constants in
   the loop.
+- Status: `mir/slice_layout.rs` versions loops in `Speed` builds. The
+  guard is two chained switches, and the copy's entry is a block that
+  stores the constants.
 
 **Push shadows (FND-MIR-PUSH-SHADOWS).**
 - Applies to vector locals that a loop touches only as
@@ -388,6 +391,13 @@ it and tests can check it without compiling.
 - Native code loads the length and capacity once at the preheader. At
   each push in the loop it updates them, and it reloads the capacity
   after a growth, as the tree path does.
+- Status: `mir/push_shadows.rs` runs in LLVM `Speed` builds. The
+  preheader assigns two `i64` locals from the new `buffer length` and
+  `buffer capacity` rvalues. Each push is a
+  `call builtin N shadow _len _cap(...)`, which reads and updates those
+  locals. The pass prints the tree path's `KUSH_TRACE_SHADOWS` report.
+  With this port, only deferred overflow checks still send functions with
+  `while` loops to the tree path.
 
 **Deferred overflow (FND-MIR-DEFERRED).**
 - The analysis of `native/deferred.rs` moves to the MIR:

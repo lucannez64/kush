@@ -218,7 +218,11 @@ pub(crate) fn mark(body: &mut Body) -> usize {
             continue;
         };
         let TerminatorKind::Call {
-            callee: Callee::Builtin { index, below: false },
+            callee:
+                Callee::Builtin {
+                    index,
+                    hint: CallHint::None,
+                },
             args,
             ..
         } = &body.blocks[block].terminator.kind
@@ -244,11 +248,11 @@ pub(crate) fn mark(body: &mut Body) -> usize {
     }
     for block in &marks {
         if let TerminatorKind::Call {
-            callee: Callee::Builtin { below, .. },
+            callee: Callee::Builtin { hint, .. },
             ..
         } = &mut body.blocks[*block].terminator.kind
         {
-            *below = true;
+            *hint = CallHint::Below;
         }
     }
     marks.len()

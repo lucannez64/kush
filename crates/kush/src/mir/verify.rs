@@ -185,6 +185,10 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     operand(*index).map_err(here)?;
                     target_ty
                 }
+                Rvalue::Buffer(vector, _) => {
+                    operand(*vector).map_err(here)?;
+                    Type::I64
+                }
                 Rvalue::StructEq(left, right, _) => {
                     operand(*left).map_err(here)?;
                     operand(*right).map_err(here)?;
@@ -269,6 +273,18 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
             } => {
                 if let Callee::Indirect(code) = callee {
                     operand(*code).map_err(here)?;
+                }
+                if let Callee::Builtin {
+                    hint: CallHint::Shadow(length, capacity),
+                    ..
+                } = callee
+                {
+                    for word in [length, capacity] {
+                        local(*word).map_err(here)?;
+                        if body.locals[*word].ty != Type::I64 {
+                            return Err(here(format!("a shadow word _{word} that is not an i64")));
+                        }
+                    }
                 }
                 for arg in args {
                     operand(*arg).map_err(here)?;

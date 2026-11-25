@@ -2673,7 +2673,7 @@ impl Builder<'_> {
                 self.builtins.push(*other);
                 Callee::Builtin {
                     index: self.builtins.len() - 1,
-                    below: false,
+                    hint: CallHint::None,
                 }
             }
         };

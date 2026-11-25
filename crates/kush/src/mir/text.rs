@@ -256,6 +256,14 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
             operand_text(*handle),
             operand_text(*index)
         ),
+        Rvalue::Buffer(vector, word) => format!(
+            "buffer {}({})",
+            match word {
+                BufferWord::Length => "length",
+                BufferWord::Capacity => "capacity",
+            },
+            operand_text(*vector)
+        ),
         Rvalue::StructEq(left, right, negated) => format!(
             "{}({}, {})",
             if *negated { "struct_ne" } else { "struct_eq" },
@@ -362,8 +370,15 @@ fn terminator_text(kind: &TerminatorKind) -> String {
             let callee = match callee {
                 Callee::Function(index) => format!("fn {index}"),
                 Callee::PrintInt(kind) => format!("print_int {}", kind.name()),
-                Callee::Builtin { index, below } => {
-                    format!("builtin {index}{}", if *below { " below" } else { "" })
+                Callee::Builtin { index, hint } => {
+                    let hint = match hint {
+                        CallHint::None => String::new(),
+                        CallHint::Below => " below".into(),
+                        CallHint::Shadow(length, capacity) => {
+                            format!(" shadow _{length} _{capacity}")
+                        }
+                    };
+                    format!("builtin {index}{hint}")
                 }
                 Callee::Indirect(operand) => format!("indirect {}", operand_text(*operand)),
             };
@@ -836,6 +851,18 @@ impl Parser {
             self.expect(")")?;
             return Ok(Rvalue::ByteAt(handle, index));
         }
+        if name == "buffer" {
+            self.at += 1;
+            let word = match self.next()?.as_str() {
+                "length" => BufferWord::Length,
+                "capacity" => BufferWord::Capacity,
+                other => return Err(format!("expected a buffer word, found '{other}'")),
+            };
+            self.expect("(")?;
+            let vector = self.operand()?;
+            self.expect(")")?;
+            return Ok(Rvalue::Buffer(vector, word));
+        }
         if name == "struct_eq" || name == "struct_ne" {
             let negated = name == "struct_ne";
             self.at += 1;
@@ -1009,7 +1036,13 @@ impl Parser {
                     "fn" => Callee::Function(self.number()?),
                     "builtin" => Callee::Builtin {
                         index: self.number()?,
-                        below: self.eat("below"),
+                        hint: if self.eat("below") {
+                            CallHint::Below
+                        } else if self.eat("shadow") {
+                            CallHint::Shadow(self.local()?, self.local()?)
+                        } else {
+                            CallHint::None
+                        },
                     },
                     "indirect" => Callee::Indirect(self.operand()?),
                     "print_int" => {
