@@ -10614,9 +10614,7 @@ impl Generator<'_, '_> {
                 self.builder.switch_to_block(exit);
                 Some(self.builder.block_params(exit).to_vec())
             }
-            Coercion::Callable { .. } => {
-                Some(self.nested_coercion_words(coercion, *to, &values))
-            }
+            Coercion::Callable { .. } => Some(self.nested_coercion_words(coercion, *to, &values)),
             Coercion::DynBox {
                 member,
                 member_type,
@@ -10625,9 +10623,7 @@ impl Generator<'_, '_> {
                 let pointer = self.allocate_dyn_payload(*member_type, &values);
                 Some(vec![self.constant(*member as i64), pointer])
             }
-            Coercion::DynUpcast { from, to } => {
-                Some(self.dyn_upcast(*from, *to, &values))
-            }
+            Coercion::DynUpcast { from, to } => Some(self.dyn_upcast(*from, *to, &values)),
         }
     }
     /// Lower a call to `target` on its lowered argument words; `ty` is the
