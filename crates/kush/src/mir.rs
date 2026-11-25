@@ -137,6 +137,8 @@ pub(crate) enum Rvalue {
     Bytes(Vec<u8>),
     /// A task operation on its operands; it may suspend or run other tasks.
     Task(TaskOp, Vec<Operand>),
+    /// A handler- or continuation-stack operation on its operands.
+    Runtime(RuntimeOp, Vec<Operand>),
     /// The byte at an index of a `Bytes` handle, proved in bounds (no
     /// run-time check).
     ByteAt(Operand, Operand),
@@ -192,6 +194,27 @@ pub(crate) enum TaskOp {
         exit: crate::executable::TaskExitShape,
         parallel: bool,
     },
+}
+
+/// A run-time call that manages the handler or continuation stack.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum RuntimeOp {
+    /// The current handler-stack depth.
+    HandlerDepth,
+    /// Pop handler frames back to a depth (operand 0).
+    HandlerRestore,
+    /// Install the handler callable (operand 0) for `operation`.
+    HandlerPush {
+        operation: usize,
+        reusable: bool,
+    },
+    HandlerPop,
+    /// Perform as if at a depth (operand 0); yields the previous depth.
+    HandlerRedirect,
+    /// The current continuation-stack mark.
+    ContinuationMark,
+    /// Release the continuation stack back to a mark (operand 0).
+    ContinuationRestore,
 }
 
 /// One captured value of a closure.

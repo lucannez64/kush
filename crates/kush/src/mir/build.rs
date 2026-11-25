@@ -36,6 +36,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
         current: None,
         loops: Vec::new(),
         regions: Vec::new(),
+        installs_handlers: crate::native::block_installs_handler(&function.body),
     };
     let entry = builder.new_block();
     builder.current = Some(entry);
@@ -255,6 +256,9 @@ struct Partial {
 
 /// A lowered `Region`: what `RegionExit` and `TryExit` leave to.
 struct Region {
+    /// The handler-stack depth on entry, when the function installs
+    /// handlers: an exit pops the frames installed inside.
+    depth: Option<LocalId>,
     /// Created by the first jump to it.
     exit: Option<BlockId>,
     /// The finish block and the local holding its input.
@@ -265,6 +269,8 @@ struct Region {
 
 struct Loop {
     head: BlockId,
+    /// The handler-stack depth on entry (see [`Region::depth`]).
+    depth: Option<LocalId>,
     /// Created by the first `break`.
     exit: Option<BlockId>,
     /// Receives the value of `break value`.
@@ -293,6 +299,9 @@ struct Builder<'a> {
     current: Option<BlockId>,
     loops: Vec<Loop>,
     regions: Vec<Region>,
+    /// The function installs dynamic handler frames (the native frame
+    /// setup then restores the entry depth on every return).
+    installs_handlers: bool,
 }
 
 impl Builder<'_> {
@@ -907,6 +916,57 @@ impl Builder<'_> {
                 );
                 Operand::Move(Place::local(temp))
             }
+            ExprKind::HandlerDepth => {
+                let temp = self.temp(expr.ty);
+                self.assign(temp, Rvalue::Runtime(RuntimeOp::HandlerDepth, vec![]), span);
+                Operand::Move(Place::local(temp))
+            }
+            ExprKind::ContinuationScope { body } => {
+                let mark = self.runtime(RuntimeOp::ContinuationMark, vec![], Type::I64, span);
+                let Some(value) = self.block(body)? else {
+                    return Ok(None);
+                };
+                let value = self.settle(value, expr.ty, span);
+                let mark = Operand::Copy(Place::local(mark));
+                self.runtime(RuntimeOp::ContinuationRestore, vec![mark], Type::Unit, span);
+                value
+            }
+            ExprKind::HandlerRedirect { depth, body } => {
+                let Some(target) = self.expr(depth)? else {
+                    return Ok(None);
+                };
+                let before =
+                    self.runtime(RuntimeOp::HandlerRedirect, vec![target], Type::I64, span);
+                let Some(value) = self.block(body)? else {
+                    return Ok(None);
+                };
+                let value = self.settle(value, expr.ty, span);
+                let before = Operand::Copy(Place::local(before));
+                self.runtime(RuntimeOp::HandlerRestore, vec![before], Type::Unit, span);
+                value
+            }
+            ExprKind::HandlerPush {
+                operation,
+                handler,
+                body,
+                reusable,
+            } => {
+                let Some(callable) = self.expr(handler)? else {
+                    return Ok(None);
+                };
+                self.consume(handler);
+                let op = RuntimeOp::HandlerPush {
+                    operation: *operation,
+                    reusable: *reusable,
+                };
+                self.runtime(op, vec![callable], Type::Unit, span);
+                let Some(value) = self.block(body)? else {
+                    return Ok(None);
+                };
+                let value = self.settle(value, expr.ty, span);
+                self.runtime(RuntimeOp::HandlerPop, vec![], Type::Unit, span);
+                value
+            }
             ExprKind::TaskSpawn {
                 body,
                 result,
@@ -1253,6 +1313,7 @@ impl Builder<'_> {
             }
             ExprKind::Match(scrutinee, arms) => return self.matching(expr, scrutinee, arms),
             ExprKind::While(condition, body) => {
+                let depth = self.save_depth(span);
                 let head = self.new_block();
                 self.goto(head, span);
                 self.enter(head);
@@ -1271,6 +1332,7 @@ impl Builder<'_> {
                 );
                 self.loops.push(Loop {
                     head,
+                    depth,
                     exit: Some(exit),
                     result: None,
                 });
@@ -1284,12 +1346,14 @@ impl Builder<'_> {
                 Self::no_value(expr.ty)
             }
             ExprKind::Loop(body) => {
+                let depth = self.save_depth(span);
                 let head = self.new_block();
                 self.goto(head, span);
                 self.enter(head);
                 let result = self.result_temp(expr.ty);
                 self.loops.push(Loop {
                     head,
+                    depth,
                     exit: None,
                     result,
                 });
@@ -1322,6 +1386,7 @@ impl Builder<'_> {
                     .len()
                     .checked_sub(1)
                     .ok_or("a break outside a loop")?;
+                self.restore_depth(self.loops[scope].depth, span);
                 let mut exit = self.loops[scope].exit;
                 self.goto_join(&mut exit, span);
                 self.loops[scope].exit = exit;
@@ -1331,7 +1396,9 @@ impl Builder<'_> {
                 for id in cleanup {
                     self.cleanup_resource(Some(*id), span);
                 }
-                let head = self.loops.last().ok_or("a continue outside a loop")?.head;
+                let scope = self.loops.last().ok_or("a continue outside a loop")?;
+                let (head, depth) = (scope.head, scope.depth);
+                self.restore_depth(depth, span);
                 self.goto(head, span);
                 return Ok(None);
             }
@@ -1346,6 +1413,27 @@ impl Builder<'_> {
             ExprKind::Call(target, args) => return self.call(expr, target, args),
             other => return Err(variant_name(other)),
         }))
+    }
+
+    /// A handler- or continuation-stack operation; the local holding its
+    /// result.
+    fn runtime(&mut self, op: RuntimeOp, operands: Vec<Operand>, ty: Type, span: Span) -> LocalId {
+        let temp = self.temp(ty);
+        self.assign(temp, Rvalue::Runtime(op, operands), span);
+        temp
+    }
+    /// The handler-stack depth on entry to a loop or region, when the
+    /// function installs handlers.
+    fn save_depth(&mut self, span: Span) -> Option<LocalId> {
+        self.installs_handlers
+            .then(|| self.runtime(RuntimeOp::HandlerDepth, vec![], Type::I64, span))
+    }
+    /// Pop the handler frames installed since `depth` was saved.
+    fn restore_depth(&mut self, depth: Option<LocalId>, span: Span) {
+        if let Some(depth) = depth {
+            let depth = Operand::Copy(Place::local(depth));
+            self.runtime(RuntimeOp::HandlerRestore, vec![depth], Type::Unit, span);
+        }
     }
 
     /// A task operation on at most one operand, which it consumes when
@@ -1401,7 +1489,9 @@ impl Builder<'_> {
             None => None,
         };
         let result = self.result_temp(expr.ty);
+        let depth = self.save_depth(span);
         self.regions.push(Region {
+            depth,
             exit: None,
             finish: finish_input,
             result,
@@ -1461,6 +1551,7 @@ impl Builder<'_> {
             .len()
             .checked_sub(1)
             .ok_or("a region exit outside a region")?;
+        self.restore_depth(self.regions[depth].depth, span);
         if finish {
             let (block, input) = self.regions[depth]
                 .finish

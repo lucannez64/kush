@@ -7,8 +7,8 @@
 
 use super::*;
 use crate::mir::{
-    BlockId, Body, Callee, Capture, ElementBase, Operand, Place, Rvalue, StatementKind, TaskOp,
-    Terminator, TerminatorKind, ViewSource,
+    BlockId, Body, Callee, Capture, ElementBase, Operand, Place, Rvalue, RuntimeOp, StatementKind,
+    TaskOp, Terminator, TerminatorKind, ViewSource,
 };
 
 impl Generator<'_, '_> {
@@ -395,6 +395,50 @@ impl Generator<'_, '_> {
                     self.view_source(base_ty, width, location, None, &values);
                 let end = end.map_or(length, |end| self.mir_scalar(end));
                 Some(self.finish_view(pointer, length, stride, bytes, start, end, *check))
+            }
+            Rvalue::Runtime(op, operands) => {
+                let words = operands
+                    .iter()
+                    .map(|operand| self.mir_operand(*operand))
+                    .collect::<Vec<_>>();
+                let unit = |g: &mut Self| vec![g.constant(0)];
+                Some(match *op {
+                    RuntimeOp::HandlerDepth => vec![self.runtime_call(self.handler_depth, &[])],
+                    RuntimeOp::HandlerRestore => {
+                        self.runtime_void(self.handler_restore, &[words[0][0]]);
+                        unit(self)
+                    }
+                    RuntimeOp::HandlerPush {
+                        operation,
+                        reusable,
+                    } => {
+                        let values = &words[0];
+                        let code = values[0];
+                        let (environment, once) =
+                            if matches!(body.operand_ty(operands[0]), Type::Once(_)) {
+                                let environment =
+                                    values.get(1).copied().unwrap_or_else(|| self.constant(0));
+                                (environment, self.constant(if reusable { 2 } else { 1 }))
+                            } else {
+                                (self.constant(0), self.constant(0))
+                            };
+                        let op = self.constant(operation as i64);
+                        self.runtime_void(self.handler_push, &[op, code, environment, once]);
+                        unit(self)
+                    }
+                    RuntimeOp::HandlerPop => {
+                        self.runtime_void(self.handler_pop, &[]);
+                        unit(self)
+                    }
+                    RuntimeOp::HandlerRedirect => {
+                        vec![self.runtime_call(self.handler_redirect, &[words[0][0]])]
+                    }
+                    RuntimeOp::ContinuationMark => vec![self.runtime_call(self.kstack_mark, &[])],
+                    RuntimeOp::ContinuationRestore => {
+                        self.runtime_void(self.kstack_restore, &[words[0][0]]);
+                        unit(self)
+                    }
+                })
             }
             Rvalue::Task(op, operands) => {
                 let words = operands

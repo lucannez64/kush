@@ -1032,7 +1032,7 @@ fn block_has_while(block: &ex::Block) -> bool {
     }) || block.tail.as_deref().is_some_and(expression)
 }
 
-fn block_installs_handler(block: &ex::Block) -> bool {
+pub(crate) fn block_installs_handler(block: &ex::Block) -> bool {
     fn expression(expr: &Expr) -> bool {
         if matches!(
             expr.kind,
