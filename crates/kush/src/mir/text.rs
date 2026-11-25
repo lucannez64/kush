@@ -40,15 +40,15 @@ pub(crate) fn print(body: &Body) -> String {
         body.name,
         type_name(body.result)
     );
+    // Builtins and coercions are data with many shapes; their JSON form
+    // is exact and stable, written as one string.
     for (index, target) in body.builtins.0.iter().enumerate() {
-        let _ = writeln!(out, "    // builtin {index}: {target:?}");
+        let json = serde_json::to_string(target).expect("a builtin serializes");
+        let _ = writeln!(out, "    builtin {index} = {json:?};");
     }
-    for (index, (ty, coercion)) in body.coercions.0.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "    // coercion {index}: to {}: {coercion:?}",
-            type_name(*ty)
-        );
+    for (index, coercion) in body.coercions.0.iter().enumerate() {
+        let json = serde_json::to_string(coercion).expect("a coercion serializes");
+        let _ = writeln!(out, "    coercion {index} = {json:?};");
     }
     for (local, decl) in body.locals.iter().enumerate().skip(body.parameters) {
         let _ = writeln!(
@@ -565,6 +565,32 @@ impl Parser {
         self.expect("->")?;
         let result = self.ty()?;
         self.expect("{")?;
+        let mut builtins = Vec::new();
+        let mut coercions = Vec::new();
+        while matches!(self.peek(), Some("builtin" | "coercion")) {
+            let builtin = self.next()? == "builtin";
+            let index = self.number::<usize>()?;
+            let expected = if builtin {
+                builtins.len()
+            } else {
+                coercions.len()
+            };
+            if index != expected {
+                return Err(format!("expected entry {expected}, found {index}"));
+            }
+            self.expect("=")?;
+            let json = self.string()?;
+            if builtin {
+                builtins.push(
+                    serde_json::from_str(&json).map_err(|e| format!("builtin {index}: {e}"))?,
+                );
+            } else {
+                coercions.push(
+                    serde_json::from_str(&json).map_err(|e| format!("coercion {index}: {e}"))?,
+                );
+            }
+            self.expect(";")?;
+        }
         while matches!(self.peek(), Some("let" | "temp")) {
             let temporary = self.next()? == "temp";
             let mutable = self.eat("mut");
@@ -622,9 +648,18 @@ impl Parser {
             locals,
             blocks,
             result,
-            builtins: Builtins::default(),
-            coercions: Coercions::default(),
+            builtins: Builtins(builtins),
+            coercions: Coercions(coercions),
         })
+    }
+    /// A quoted string token, unescaped.
+    fn string(&mut self) -> Result<String, String> {
+        let token = self.next()?;
+        let inner = token
+            .strip_prefix('"')
+            .and_then(|token| token.strip_suffix('"'))
+            .ok_or_else(|| format!("expected a string, found '{token}'"))?;
+        unescape(inner)
     }
     fn declared(&mut self, expected: usize) -> Result<(), String> {
         let local = self.local()?;

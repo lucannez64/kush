@@ -198,10 +198,9 @@ The second part added views, inline arrays and builtins:
   an array value or another view, with an optional range check.
 - Every builtin call target except staging is a `call builtin N`
   terminator. Native code lowers it through the same `call_target`
-  dispatch as the tree path. Each body lists its builtins, and the text
-  form prints their definitions as comments. Reading the text back takes
-  the table from the program. Printing builtins in full is
-  FND-MIR-TEXT-BUILTINS.
+  dispatch as the tree path. Each body lists its builtins. The text form
+  declares each one as `builtin N = "<json>";`, which is their exact
+  serde form, and reads it back (FND-MIR-TEXT-BUILTINS).
 - The tree path's loop optimizations (vector push shadows, deferred
   proofs of element accesses) key their facts on tree expressions, so the
   MIR path calls builtins without them. Porting them is part of
@@ -220,7 +219,7 @@ representation:
 - `coerce N(value)` applies the body's Nth coercion: union injection and
   repacking, structural record coercions, `dyn` boxing and upcasts, and
   callable adapters. Like builtins, coercions are listed per body and
-  named by index in the text form.
+  declared in the text form as `coercion N = "<json>";`.
 - Union patterns test the member tag word, then the member's words.
 
 `multi fn` values, continuations and suspension wait for FND-MIR-EFFECTS.

@@ -41,7 +41,7 @@ pub(crate) struct Body {
     pub coercions: Coercions,
 }
 
-/// The coercions of a body; like [`Builtins`], named by index in the text.
+/// The coercions of a body, by index; the text form declares each one.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Coercions(pub Vec<(Type, crate::executable::Coercion)>);
 
@@ -51,9 +51,8 @@ impl PartialEq for Coercions {
     }
 }
 
-/// The builtin call targets of a body. The text form names them by index
-/// and shows each one in a comment; reading the text back takes them from
-/// the program (see [`self_check`]).
+/// The builtin call targets of a body, by index. The text form declares
+/// each one as `builtin N = "<json>";` and reads it back.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Builtins(pub Vec<crate::executable::Target>);
 
@@ -497,10 +496,8 @@ pub fn self_check(program: &Executable) -> Result<usize, String> {
     for body in bodies(program).into_iter().flatten() {
         verify(program, &body).map_err(|e| format!("fn {}: {e}", body.name))?;
         let printed = text::print(&body);
-        let mut parsed =
+        let parsed =
             text::parse(&printed).map_err(|e| format!("fn {}: {e}\n{printed}", body.name))?;
-        parsed.builtins = body.builtins.clone();
-        parsed.coercions = body.coercions.clone();
         if parsed != body {
             return Err(format!(
                 "fn {}: the text form does not read back\n{printed}",

@@ -5,7 +5,7 @@
 //! conversions are separate builtins.
 use crate::lexer::Kind;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) enum IntKind {
     I8,
     I16,
@@ -175,7 +175,7 @@ pub(crate) fn not(kind: IntKind, a: i64) -> i64 {
     kind.wrap(!kind.decode(a))
 }
 /// Arithmetic forms of the explicit integer builtins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub(crate) enum IntOp {
     /// Lossless widening (checked statically).
     Convert,
@@ -201,12 +201,12 @@ pub(crate) enum IntOp {
         none_tag: usize,
     },
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Shift {
     Left,
     Right,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ArithOp {
     Add,
     Sub,

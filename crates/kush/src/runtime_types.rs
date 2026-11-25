@@ -466,7 +466,7 @@ impl FunctionType {
         grade_erases(self.result_grade)
     }
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ResultShape {
     pub ok_tag: usize,
     pub err_tag: usize,
