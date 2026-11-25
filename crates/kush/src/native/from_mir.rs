@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::mir::{
-    AllocOp, BlockId, Body, Callee, Capture, ElementBase, Operand, Place, RuntimeOp, Rvalue,
+    AllocOp, ArrayOp, BlockId, Body, Callee, Capture, ElementBase, Operand, Place, RuntimeOp, Rvalue,
     StatementKind, TaskOp, Terminator, TerminatorKind, ViewSource,
 };
 
@@ -281,6 +281,73 @@ impl Generator<'_, '_> {
         })
     }
 
+    /// The runtime-length array operations, through the tree path's
+    /// helpers.
+    fn mir_array(&mut self, op: ArrayOp, words: &[Words]) -> Words {
+        match op {
+            ArrayOp::New { element, capacity } => {
+                let width = self.program.width(element);
+                vec![self.constant(0); 1 + width * capacity]
+            }
+            ArrayOp::Push { element, capacity } => {
+                self.dyn_array_push(words[0].clone(), &words[1], element, capacity)
+            }
+            ArrayOp::Fill { element, capacity } => {
+                self.dyn_array_fill(words[0][0], &words[1], element, capacity)
+            }
+            ArrayOp::Set { element, capacity } => {
+                self.dyn_array_set(words[0].clone(), words[1][0], &words[2], element, capacity)
+            }
+            ArrayOp::Pop { element, capacity } => {
+                self.dyn_array_pop(words[0].clone(), element, capacity)
+            }
+            ArrayOp::Equal {
+                element,
+                capacity,
+                negate,
+            } => vec![self.dyn_array_equal(&words[0], &words[1], element, capacity, negate)],
+            ArrayOp::Suffix {
+                element,
+                capacity,
+                prefix,
+                suffix,
+                index,
+            } => {
+                let width = self.program.width(element);
+                self.dyn_suffix_element(&words[0], width, capacity, prefix, suffix, index)
+            }
+            ArrayOp::Rest {
+                element,
+                capacity,
+                prefix,
+                suffix,
+            } => {
+                let width = self.program.width(element);
+                self.dyn_rest(&words[0], width, capacity, prefix, suffix)
+            }
+            ArrayOp::SuffixAddress {
+                element,
+                suffix,
+                index,
+            } => {
+                let pointer = words[0][0];
+                let length = self.load_words(pointer, 0, 1)[0];
+                let width = self.program.width(element);
+                vec![self.dyn_suffix_address(pointer, length, width, suffix, index)]
+            }
+            ArrayOp::RestView {
+                element,
+                prefix,
+                suffix,
+            } => {
+                let pointer = words[0][0];
+                let length = self.load_words(pointer, 0, 1)[0];
+                let width = self.program.width(element);
+                self.dyn_rest_view(pointer, length, width, prefix, suffix)
+            }
+        }
+    }
+
     /// A function value, laid out as on the tree path: a code pointer, and
     /// for a closure an environment `[drop glue, captures...]` it owns.
     fn mir_fn_value(
@@ -490,6 +557,18 @@ impl Generator<'_, '_> {
                     self.element_address(body.place_ty(*place), location, index)
                 }
             }]),
+            Rvalue::StructEq(left, right, negated) => {
+                let ty = body.operand_ty(*left);
+                let left = self.mir_operand(*left);
+                let right = self.mir_operand(*right);
+                let equal = self.struct_eq_words(ty, &left, &right);
+                let value = if *negated {
+                    self.builder.ins().bxor_imm_s(equal, 1)
+                } else {
+                    equal
+                };
+                Some(vec![self.builder.ins().uextend(I64, value)])
+            }
             Rvalue::ByteAt(handle, index) => {
                 let handle = self.mir_scalar(*handle);
                 let index = self.mir_scalar(*index);
@@ -519,6 +598,19 @@ impl Generator<'_, '_> {
                 text,
             } => {
                 let base_ty = source.ty(body);
+                let start_value = |g: &mut Self| match start {
+                    Some(start) => g.mir_scalar(*start),
+                    None => g.constant(0),
+                };
+                if let ViewSource::DynArray(place) = source {
+                    let location = self.mir_address(*place);
+                    let start = start_value(self);
+                    let width = self.program.width(*element);
+                    let (pointer, length, stride, bytes) =
+                        self.view_source(base_ty, width, None, Some((location, 0)), &[]);
+                    let end = end.map_or(length, |end| self.mir_scalar(end));
+                    return Some(self.finish_view(pointer, length, stride, bytes, start, end, *check));
+                }
                 let (location, values) = match source {
                     ViewSource::Array(local) => {
                         let location = self.locations[*local];
@@ -530,11 +622,9 @@ impl Generator<'_, '_> {
                         (location, values)
                     }
                     ViewSource::Value(operand) => (None, self.mir_operand(*operand)),
+                    ViewSource::DynArray(_) => unreachable!("lowered above"),
                 };
-                let start = match start {
-                    Some(start) => self.mir_scalar(*start),
-                    None => self.constant(0),
-                };
+                let start = start_value(self);
                 if *text {
                     let (pointer, length) = self.text_view_source(base_ty, &values);
                     let end = end.map_or(length, |end| self.mir_scalar(end));
@@ -556,6 +646,40 @@ impl Generator<'_, '_> {
                     .map(|operand| body.operand_ty(*operand))
                     .collect::<Vec<_>>();
                 self.mir_alloc(*op, &words, &types, ty)
+            }
+            Rvalue::Array(op, operands) => {
+                let words = operands
+                    .iter()
+                    .map(|operand| self.mir_operand(*operand))
+                    .collect::<Vec<_>>();
+                Some(self.mir_array(*op, &words))
+            }
+            Rvalue::Map(op, operands) => {
+                let handle = self.mir_scalar(operands[0]);
+                let callbacks = &operands[1..];
+                let codes = callbacks
+                    .iter()
+                    .map(|callback| self.mir_scalar(*callback))
+                    .collect::<Vec<_>>();
+                let types = callbacks
+                    .iter()
+                    .map(|callback| body.operand_ty(*callback))
+                    .collect::<Vec<_>>();
+                let plans = op
+                    .functions
+                    .iter()
+                    .zip(&types)
+                    .map(|(function, ty)| {
+                        let function = (*function)?;
+                        self.codegen
+                            .inline_scalar_callbacks
+                            .then(|| ScalarCallback::function(self.program, function, *ty))
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>();
+                Some(vec![self.vec_map(
+                    handle, &codes, &types, &plans, op.source, op.target, op.grow,
+                )])
             }
             Rvalue::Runtime(op, operands) => {
                 let words = operands

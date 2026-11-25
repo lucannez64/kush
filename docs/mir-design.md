@@ -196,8 +196,7 @@ The second part added views, inline arrays and builtins:
 - `view` builds a slice or text view of an array local (aliasing its
   storage when it has a stable address), a `&Vec`, `&Bytes`, `&String`,
   an array value or another view, with an optional range check.
-- Every builtin call target except staging is a `call builtin N`
-  terminator. Native code lowers it through the same `call_target`
+- Every builtin call target is a `call builtin N` terminator. Native code lowers it through the same `call_target`
   dispatch as the tree path. Each body lists its builtins. The text form
   declares each one as `builtin N = "<json>";`, which is their exact
   serde form, and reads it back (FND-MIR-TEXT-BUILTINS).
@@ -265,6 +264,29 @@ FND-MIR-SHAPES. So far, that node has moved these into the MIR:
   forms. These share their native code with the tree path.
 - **Erased arguments:** an erased argument is a zero constant of its
   type.
+- **Runtime-length arrays:** an `array` rvalue covers `DynArray` and
+  `[T; n <= C]` operations (new, push, fill, set, pop, equality).
+  - Array patterns test the array's words in the subject, at any depth.
+    Suffix elements and the rest come from `array` operations on the
+    array.
+  - In a match through a reference, element names bind slot addresses
+    and the rest binds a view.
+  - A view of a stored array (a borrowed local or a record field) is a
+    `dynarray` view source that aliases its storage.
+- **In-place maps:** a `map` rvalue runs `Vec.map` with the tree path's
+  loop. For each callback, it records the function a capture-free
+  function value calls, so native code can still inline it.
+
+- **Structural equality:** `struct_eq` and `struct_ne` compare two
+  records or enums field by field.
+
+- **Staging calls:** `StageCompile` and `StageEntry` are now ordinary
+  builtin calls like the rest.
+
+Every function in the test suite now builds a MIR body. Functions
+whose loops the tree path optimizes (deferred overflow checks, and
+release builds with the LLVM backend) still lower from the tree; that
+is FND-MIR-DEFAULT.
 
 FND-MIR-DROP-FLAGS (`mir/drop_flags.rs`) runs on every built body:
 

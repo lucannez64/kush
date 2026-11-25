@@ -4159,13 +4159,20 @@ impl ScalarCallback {
         let ExprKind::FnValue { function, captures } = &callback.kind else {
             return None;
         };
-        let Type::Fn(signature) = callback.ty else {
+        if !captures.is_empty() {
+            return None;
+        }
+        Self::function(program, *function, callback.ty)
+    }
+    /// The plan of a function value of type `ty` with no captures that
+    /// calls `function`.
+    fn function(program: &Executable, function: usize, ty: Type) -> Option<Self> {
+        let Type::Fn(signature) = ty else {
             return None;
         };
         let signature = &program.function_types[signature];
-        let function = &program.functions[*function];
-        if !captures.is_empty()
-            || signature.effects != 0
+        let function = &program.functions[function];
+        if signature.effects != 0
             || signature.parameters != [Type::I64]
             || signature.result != Type::I64
             || signature.once
@@ -6415,31 +6422,7 @@ impl Generator<'_, '_> {
                 self.consume(array);
                 let item = lower!(self.expr(value));
                 self.consume(value);
-                let element_width = self.program.width(*element);
-                let length = values[0];
-                let full = self.builder.ins().icmp_imm_s(
-                    IntCC::UnsignedGreaterThanOrEqual,
-                    length,
-                    *capacity as i64,
-                );
-                self.guard(full);
-                let mut out = values.clone();
-                let next = self.builder.ins().iadd_imm_s(length, 1);
-                out[0] = next;
-                // The inline storage is represented as SSA words, not memory.
-                // Select the active capacity slot without a runtime index into
-                // the value vector: each slot compares the length once.
-                for slot in 0..*capacity {
-                    let active = self
-                        .builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, length, slot as i64);
-                    for (word, value) in item.iter().take(element_width).enumerate() {
-                        let index = 1 + slot * element_width + word;
-                        out[index] = self.builder.ins().select(active, *value, out[index]);
-                    }
-                }
-                return Some(out);
+                return Some(self.dyn_array_push(values, &item, *element, *capacity));
             }
             ExprKind::DynArrayFill {
                 length: length_expr,
@@ -6452,31 +6435,7 @@ impl Generator<'_, '_> {
                 self.consume(length_expr);
                 let item = lower!(self.expr(value));
                 self.consume(value);
-                // A checked fill traps on a length outside 0..=capacity. A
-                // proved fill keeps the same trap as a defensive check that
-                // cannot fire (the unsigned compare also rejects negatives).
-                let bad = self.builder.ins().icmp_imm_s(
-                    IntCC::UnsignedGreaterThan,
-                    length,
-                    *capacity as i64,
-                );
-                self.guard(bad);
-                let element_width = self.program.width(*element);
-                let zero = self.constant(0);
-                let mut out = vec![zero; 1 + element_width * capacity];
-                out[0] = length;
-                for slot in 0..*capacity {
-                    let active = self.builder.ins().icmp_imm_s(
-                        IntCC::SignedGreaterThan,
-                        length,
-                        slot as i64,
-                    );
-                    for (word, value) in item.iter().take(element_width).enumerate() {
-                        let index = 1 + slot * element_width + word;
-                        out[index] = self.builder.ins().select(active, *value, zero);
-                    }
-                }
-                return Some(out);
+                return Some(self.dyn_array_fill(length, &item, *element, *capacity));
             }
             ExprKind::DynArraySet {
                 array,
@@ -6485,62 +6444,22 @@ impl Generator<'_, '_> {
                 element,
                 capacity,
             } => {
-                let mut values = lower!(self.expr(array));
+                let values = lower!(self.expr(array));
                 self.consume(array);
                 let position = lower!(self.scalar(index));
                 self.consume(index);
                 let item = lower!(self.expr(value));
                 self.consume(value);
-                let length = values[0];
-                let bad =
-                    self.builder
-                        .ins()
-                        .icmp(IntCC::UnsignedGreaterThanOrEqual, position, length);
-                self.guard(bad);
-                let element_width = self.program.width(*element);
-                for slot in 0..*capacity {
-                    let active = self
-                        .builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, position, slot as i64);
-                    for (word, value) in item.iter().take(element_width).enumerate() {
-                        let index = 1 + slot * element_width + word;
-                        values[index] = self.builder.ins().select(active, *value, values[index]);
-                    }
-                }
-                return Some(values);
+                return Some(self.dyn_array_set(values, position, &item, *element, *capacity));
             }
             ExprKind::DynArrayPop {
                 array,
                 element,
                 capacity,
             } => {
-                let mut values = lower!(self.expr(array));
+                let values = lower!(self.expr(array));
                 self.consume(array);
-                let length = values[0];
-                let empty = self.builder.ins().icmp_imm_s(IntCC::Equal, length, 0);
-                self.guard(empty);
-                let next = self.builder.ins().iadd_imm_s(length, -1);
-                let zero = self.constant(0);
-                // The result type is the checked tuple layout, whose first
-                // word is the single (always zero) constructor tag.
-                values.insert(0, zero);
-                values[1] = next;
-                let element_width = self.program.width(*element);
-                let mut item = vec![zero; element_width];
-                for slot in 0..*capacity {
-                    let active = self
-                        .builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, next, slot as i64);
-                    for (word, item_word) in item.iter_mut().enumerate() {
-                        let index = 2 + slot * element_width + word;
-                        *item_word = self.builder.ins().select(active, values[index], *item_word);
-                        values[index] = self.builder.ins().select(active, zero, values[index]);
-                    }
-                }
-                values.extend(item);
-                return Some(values);
+                return Some(self.dyn_array_pop(values, *element, *capacity));
             }
             ExprKind::DynArrayEqual {
                 left,
@@ -6551,42 +6470,7 @@ impl Generator<'_, '_> {
             } => {
                 let left = lower!(self.expr(left));
                 let right = lower!(self.expr(right));
-                let width = self.program.width(*element);
-                let one = self.constant(1);
-                let length_equal = self.builder.ins().icmp(IntCC::Equal, left[0], right[0]);
-                let mut equal = self.builder.ins().uextend(I64, length_equal);
-                for slot in 0..*capacity {
-                    // A slot participates only while it is inside the live
-                    // length of both arrays; equal lengths make one test enough.
-                    let active = self.builder.ins().icmp_imm_s(
-                        IntCC::UnsignedGreaterThan,
-                        left[0],
-                        slot as i64,
-                    );
-                    let mut slot_equal = one;
-                    for word in 0..width {
-                        let a = left[1 + slot * width + word];
-                        let b = right[1 + slot * width + word];
-                        let comparison = if let Some(kind) = element.float_kind() {
-                            let a = self.float_value(kind, a);
-                            let b = self.float_value(kind, b);
-                            self.float_binary(kind, &crate::lexer::Kind::EqEq, a, b)
-                        } else {
-                            let value = self.builder.ins().icmp(IntCC::Equal, a, b);
-                            self.builder.ins().uextend(I64, value)
-                        };
-                        slot_equal = self.builder.ins().band(slot_equal, comparison);
-                    }
-                    let contribution = self.builder.ins().select(active, slot_equal, one);
-                    equal = self.builder.ins().band(equal, contribution);
-                }
-                let result = if *negate {
-                    let value = self.builder.ins().icmp_imm_s(IntCC::Equal, equal, 0);
-                    self.builder.ins().uextend(I64, value)
-                } else {
-                    equal
-                };
-                return Some(vec![result]);
+                self.dyn_array_equal(&left, &right, *element, *capacity, *negate)
             }
             ExprKind::Project(base, offset) => {
                 let values = lower!(self.expr(base));
@@ -6904,7 +6788,7 @@ impl Generator<'_, '_> {
                 target,
                 grow,
             } => {
-                let mut handle = lower!(self.scalar(vector));
+                let handle = lower!(self.scalar(vector));
                 let plans = callbacks
                     .iter()
                     .map(|callback| {
@@ -6922,104 +6806,8 @@ impl Generator<'_, '_> {
                 for callback in callbacks {
                     self.consume(callback);
                 }
-                let source_width = self.program.width(*source);
-                let target_width = self.program.width(*target);
-                let element_width = if *grow {
-                    // Grow or compact storage once, move elements safely, and
-                    // update the header before any callback runs. The loop then
-                    // reads and writes at the final stride in source order.
-                    let source_words = self.constant(source_width as i64);
-                    let target_words = self.constant(target_width as i64);
-                    handle =
-                        self.runtime_call(self.vec_restride, &[handle, source_words, target_words]);
-                    target_width
-                } else {
-                    source_width
-                };
-                let length = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), handle, 0);
-                let head = self.builder.create_block();
-                let body = self.builder.create_block();
-                let done = self.builder.create_block();
-                self.builder.append_block_param(head, I64);
-                let zero = self.constant(0);
-                self.jump(head, &[zero]);
-                self.builder.switch_to_block(head);
-                let index = self.builder.block_params(head)[0];
-                let more = self
-                    .builder
-                    .ins()
-                    .icmp(IntCC::UnsignedLessThan, index, length);
-                self.builder.ins().brif(more, body, &[], done, &[]);
-                self.builder.switch_to_block(body);
-                // Elements are transferred to the callback by value; storage is
-                // overwritten only with the callback's result.
-                let stride = self
-                    .builder
-                    .ins()
-                    .imul_imm_s(index, (element_width * 8) as i64);
-                let address = self.builder.ins().iadd(handle, stride);
-                // The destination stride is the final width, but the value
-                // currently in the slot still has the source width until the
-                // first callback consumes it.
-                let mut current = self.load_words(address, 16, source_width);
-                for ((code, callback), plan) in codes.iter().zip(callbacks.iter()).zip(&plans) {
-                    if let Some(plan) = plan
-                        && current.len() == 1
-                    {
-                        current = vec![plan.emit(&mut self.builder, current[0])];
-                        continue;
-                    }
-                    let Type::Fn(id) = callback.ty else {
-                        unreachable!("checked map callback")
-                    };
-                    let signature = self.program.function_types[id].clone();
-                    let result = signature.result;
-                    let pointer = if aggregate_result(self.program, result) {
-                        let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                            ir::StackSlotKind::ExplicitSlot,
-                            (self.program.width(result) * 8).max(1) as u32,
-                            STACK_SLOT_ALIGN_SHIFT,
-                        ));
-                        Some(self.builder.ins().stack_addr(I64, slot, 0))
-                    } else {
-                        None
-                    };
-                    let mut values = Vec::new();
-                    if let Some(pointer) = pointer {
-                        values.push(pointer);
-                    }
-                    values.extend(current.iter().copied());
-                    let signature = self.indirect_signature(id);
-                    let signature = self.builder.import_signature(signature);
-                    let call = self.builder.ins().call_indirect(signature, *code, &values);
-                    self.test_panic();
-                    current = if let Some(pointer) = pointer {
-                        self.load_words(pointer, 0, self.program.width(result))
-                    } else {
-                        self.builder.inst_results(call).to_vec()
-                    };
-                }
-                let destination_stride = self
-                    .builder
-                    .ins()
-                    .imul_imm_s(index, (target_width * 8) as i64);
-                let destination = self.builder.ins().iadd(handle, destination_stride);
-                for (word, value) in current.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *value,
-                        destination,
-                        (16 + word * 8) as i32,
-                    );
-                }
-                let next = self.builder.ins().iadd_imm_s(index, 1);
-                self.jump(head, &[next]);
-                self.builder.switch_to_block(done);
-                // Subsequent monomorphized operations use the result's static width.
-                handle
+                let types = callbacks.iter().map(|callback| callback.ty).collect::<Vec<_>>();
+                self.vec_map(handle, &codes, &types, &plans, *source, *target, *grow)
             }
             ExprKind::TaskSpawn {
                 body,
@@ -10267,6 +10055,118 @@ impl Generator<'_, '_> {
         self.builder.switch_to_block(join);
         self.builder.block_params(join).to_vec()
     }
+    /// `Vec.map` in place: apply the callbacks `codes` (of function types
+    /// `types`, inlined where `plans` has a plan) in order to every element
+    /// of the vector `handle`, turning its `source` elements into `target`
+    /// ones. The result is the vector's handle.
+    #[allow(clippy::too_many_arguments)]
+    fn vec_map(
+        &mut self,
+        mut handle: Value,
+        codes: &[Value],
+        types: &[Type],
+        plans: &[Option<ScalarCallback>],
+        source: Type,
+        target: Type,
+        grow: bool,
+    ) -> Value {
+        let source_width = self.program.width(source);
+        let target_width = self.program.width(target);
+        let element_width = if grow {
+            // Grow or compact storage once, move elements safely, and
+            // update the header before any callback runs. The loop then
+            // reads and writes at the final stride in source order.
+            let source_words = self.constant(source_width as i64);
+            let target_words = self.constant(target_width as i64);
+            handle = self.runtime_call(self.vec_restride, &[handle, source_words, target_words]);
+            target_width
+        } else {
+            source_width
+        };
+        let length = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), handle, 0);
+        let head = self.builder.create_block();
+        let body = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.append_block_param(head, I64);
+        let zero = self.constant(0);
+        self.jump(head, &[zero]);
+        self.builder.switch_to_block(head);
+        let index = self.builder.block_params(head)[0];
+        let more = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, index, length);
+        self.builder.ins().brif(more, body, &[], done, &[]);
+        self.builder.switch_to_block(body);
+        // Elements are transferred to the callback by value; storage is
+        // overwritten only with the callback's result.
+        let stride = self
+            .builder
+            .ins()
+            .imul_imm_s(index, (element_width * 8) as i64);
+        let address = self.builder.ins().iadd(handle, stride);
+        // The destination stride is the final width, but the value
+        // currently in the slot still has the source width until the
+        // first callback consumes it.
+        let mut current = self.load_words(address, 16, source_width);
+        for ((code, ty), plan) in codes.iter().zip(types).zip(plans) {
+            if let Some(plan) = plan
+                && current.len() == 1
+            {
+                current = vec![plan.emit(&mut self.builder, current[0])];
+                continue;
+            }
+            let Type::Fn(id) = *ty else {
+                unreachable!("checked map callback")
+            };
+            let result = self.program.function_types[id].result;
+            let pointer = if aggregate_result(self.program, result) {
+                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    (self.program.width(result) * 8).max(1) as u32,
+                    STACK_SLOT_ALIGN_SHIFT,
+                ));
+                Some(self.builder.ins().stack_addr(I64, slot, 0))
+            } else {
+                None
+            };
+            let mut values = Vec::new();
+            if let Some(pointer) = pointer {
+                values.push(pointer);
+            }
+            values.extend(current.iter().copied());
+            let signature = self.indirect_signature(id);
+            let signature = self.builder.import_signature(signature);
+            let call = self.builder.ins().call_indirect(signature, *code, &values);
+            self.test_panic();
+            current = if let Some(pointer) = pointer {
+                self.load_words(pointer, 0, self.program.width(result))
+            } else {
+                self.builder.inst_results(call).to_vec()
+            };
+        }
+        let destination_stride = self
+            .builder
+            .ins()
+            .imul_imm_s(index, (target_width * 8) as i64);
+        let destination = self.builder.ins().iadd(handle, destination_stride);
+        for (word, value) in current.iter().enumerate() {
+            self.builder.ins().store(
+                ir::MemFlagsData::new(),
+                *value,
+                destination,
+                (16 + word * 8) as i32,
+            );
+        }
+        let next = self.builder.ins().iadd_imm_s(index, 1);
+        self.jump(head, &[next]);
+        self.builder.switch_to_block(done);
+        // Subsequent monomorphized operations use the result's static width.
+        handle
+    }
     /// A fallible operation's result, of type `ty` in `shape`: the error
     /// variant holding the words `error` emits when `failed` is set, else
     /// the ok variant holding the words `ok` emits. Unused words are zero.
@@ -11171,13 +11071,8 @@ impl Generator<'_, '_> {
         for (index, pattern) in suffix.iter().enumerate() {
             match pattern {
                 Pattern::Bind(slot) => {
-                    // Slot `length - suffix + index`, computed at run time.
-                    let position = self
-                        .builder
-                        .ins()
-                        .iadd_imm_s(length, index as i64 - suffix.len() as i64);
-                    let offset = self.builder.ins().imul_imm_s(position, stride);
-                    let address = self.builder.ins().iadd(data, offset);
+                    let address =
+                        self.dyn_suffix_address(pointer, length, width, suffix.len(), index);
                     self.assign(*slot, &[address]);
                 }
                 pattern => {
@@ -11194,17 +11089,8 @@ impl Generator<'_, '_> {
             }
         }
         if let Some(slot) = rest_binding {
-            let start = self
-                .builder
-                .ins()
-                .iadd_imm_s(data, prefix.len() as i64 * stride);
-            let middle = self
-                .builder
-                .ins()
-                .iadd_imm_s(length, -((prefix.len() + suffix.len()) as i64));
-            let stride = self.constant(stride);
-            let bytes = self.constant(0);
-            self.assign(*slot, &[start, middle, stride, bytes]);
+            let view = self.dyn_rest_view(pointer, length, width, prefix.len(), suffix.len());
+            self.assign(*slot, &view);
         }
     }
     /// The words of suffix element `index` of a DynArray pattern: the slot at
@@ -11235,6 +11121,246 @@ impl Generator<'_, '_> {
             }
         }
         words
+    }
+    /// The middle of a DynArray matched with `prefix` leading and `suffix`
+    /// trailing element patterns, as a DynArray of the same capacity.
+    fn dyn_rest(
+        &mut self,
+        values: &[Value],
+        width: usize,
+        capacity: usize,
+        prefix: usize,
+        suffix: usize,
+    ) -> Words {
+        let zero = self.constant(0);
+        let length = values[0];
+        let mut tail = vec![zero; 1 + width * capacity];
+        tail[0] = self
+            .builder
+            .ins()
+            .iadd_imm_s(length, -((prefix + suffix) as i64));
+        for position in 0..capacity.saturating_sub(prefix + suffix) {
+            let source = prefix + position;
+            // The middle slot `source` is live when it is before the
+            // suffix: `length > source + suffix`.
+            let active = self.builder.ins().icmp_imm_s(
+                IntCC::UnsignedGreaterThan,
+                length,
+                (source + suffix) as i64,
+            );
+            for word in 0..width {
+                let value = values[1 + source * width + word];
+                tail[1 + position * width + word] = self.builder.ins().select(active, value, zero);
+            }
+        }
+        tail
+    }
+    /// The address of suffix element `index` (of `suffix`) of the DynArray
+    /// at `pointer` whose length is `length`: slot `length - suffix + index`.
+    fn dyn_suffix_address(
+        &mut self,
+        pointer: Value,
+        length: Value,
+        width: usize,
+        suffix: usize,
+        index: usize,
+    ) -> Value {
+        let stride = (width * 8) as i64;
+        let data = self.builder.ins().iadd_imm_s(pointer, 8);
+        let position = self
+            .builder
+            .ins()
+            .iadd_imm_s(length, index as i64 - suffix as i64);
+        let offset = self.builder.ins().imul_imm_s(position, stride);
+        self.builder.ins().iadd(data, offset)
+    }
+    /// A `&[T]` view of the middle of the DynArray at `pointer`, without its
+    /// `prefix` first and `suffix` last elements.
+    fn dyn_rest_view(
+        &mut self,
+        pointer: Value,
+        length: Value,
+        width: usize,
+        prefix: usize,
+        suffix: usize,
+    ) -> Words {
+        let stride = (width * 8) as i64;
+        let data = self.builder.ins().iadd_imm_s(pointer, 8);
+        let start = self.builder.ins().iadd_imm_s(data, prefix as i64 * stride);
+        let middle = self
+            .builder
+            .ins()
+            .iadd_imm_s(length, -((prefix + suffix) as i64));
+        let stride = self.constant(stride);
+        let bytes = self.constant(0);
+        vec![start, middle, stride, bytes]
+    }
+    /// `DynArray.push`: the array words with `item` in the slot at the
+    /// current length; panics when the array is full.
+    fn dyn_array_push(
+        &mut self,
+        values: Words,
+        item: &[Value],
+        element: Type,
+        capacity: usize,
+    ) -> Words {
+        let element_width = self.program.width(element);
+        let length = values[0];
+        let full =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::UnsignedGreaterThanOrEqual, length, capacity as i64);
+        self.guard(full);
+        let mut out = values;
+        out[0] = self.builder.ins().iadd_imm_s(length, 1);
+        // The inline storage is represented as SSA words, not memory.
+        // Select the active capacity slot without a runtime index into
+        // the value vector: each slot compares the length once.
+        for slot in 0..capacity {
+            let active = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, length, slot as i64);
+            for (word, value) in item.iter().take(element_width).enumerate() {
+                let index = 1 + slot * element_width + word;
+                out[index] = self.builder.ins().select(active, *value, out[index]);
+            }
+        }
+        out
+    }
+    /// A runtime-length array of `length` copies of `item`.
+    fn dyn_array_fill(
+        &mut self,
+        length: Value,
+        item: &[Value],
+        element: Type,
+        capacity: usize,
+    ) -> Words {
+        // A checked fill traps on a length outside 0..=capacity. A proved
+        // fill keeps the same trap as a defensive check that cannot fire
+        // (the unsigned compare also rejects negatives).
+        let bad = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedGreaterThan, length, capacity as i64);
+        self.guard(bad);
+        let element_width = self.program.width(element);
+        let zero = self.constant(0);
+        let mut out = vec![zero; 1 + element_width * capacity];
+        out[0] = length;
+        for slot in 0..capacity {
+            let active = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedGreaterThan, length, slot as i64);
+            for (word, value) in item.iter().take(element_width).enumerate() {
+                let index = 1 + slot * element_width + word;
+                out[index] = self.builder.ins().select(active, *value, zero);
+            }
+        }
+        out
+    }
+    /// `DynArray.set`: the array words with slot `position` replaced by
+    /// `item`; panics when the position is not below the length.
+    fn dyn_array_set(
+        &mut self,
+        mut values: Words,
+        position: Value,
+        item: &[Value],
+        element: Type,
+        capacity: usize,
+    ) -> Words {
+        let length = values[0];
+        let bad = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, position, length);
+        self.guard(bad);
+        let element_width = self.program.width(element);
+        for slot in 0..capacity {
+            let active = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, position, slot as i64);
+            for (word, value) in item.iter().take(element_width).enumerate() {
+                let index = 1 + slot * element_width + word;
+                values[index] = self.builder.ins().select(active, *value, values[index]);
+            }
+        }
+        values
+    }
+    /// `DynArray.pop`: the tuple `(array, element)` of the array without its
+    /// last element; panics when it is empty.
+    fn dyn_array_pop(&mut self, mut values: Words, element: Type, capacity: usize) -> Words {
+        let length = values[0];
+        let empty = self.builder.ins().icmp_imm_s(IntCC::Equal, length, 0);
+        self.guard(empty);
+        let next = self.builder.ins().iadd_imm_s(length, -1);
+        let zero = self.constant(0);
+        // The result type is the checked tuple layout, whose first word is
+        // the single (always zero) constructor tag.
+        values.insert(0, zero);
+        values[1] = next;
+        let element_width = self.program.width(element);
+        let mut item = vec![zero; element_width];
+        for slot in 0..capacity {
+            let active = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, next, slot as i64);
+            for (word, item_word) in item.iter_mut().enumerate() {
+                let index = 2 + slot * element_width + word;
+                *item_word = self.builder.ins().select(active, values[index], *item_word);
+                values[index] = self.builder.ins().select(active, zero, values[index]);
+            }
+        }
+        values.extend(item);
+        values
+    }
+    /// Elementwise equality (or with `negate`, inequality) of two
+    /// runtime-length arrays.
+    fn dyn_array_equal(
+        &mut self,
+        left: &[Value],
+        right: &[Value],
+        element: Type,
+        capacity: usize,
+        negate: bool,
+    ) -> Value {
+        let width = self.program.width(element);
+        let one = self.constant(1);
+        let length_equal = self.builder.ins().icmp(IntCC::Equal, left[0], right[0]);
+        let mut equal = self.builder.ins().uextend(I64, length_equal);
+        for slot in 0..capacity {
+            // A slot participates only while it is inside the live length
+            // of both arrays; equal lengths make one test enough.
+            let active =
+                self.builder
+                    .ins()
+                    .icmp_imm_s(IntCC::UnsignedGreaterThan, left[0], slot as i64);
+            let mut slot_equal = one;
+            for word in 0..width {
+                let a = left[1 + slot * width + word];
+                let b = right[1 + slot * width + word];
+                let comparison = if let Some(kind) = element.float_kind() {
+                    let a = self.float_value(kind, a);
+                    let b = self.float_value(kind, b);
+                    self.float_binary(kind, &crate::lexer::Kind::EqEq, a, b)
+                } else {
+                    let value = self.builder.ins().icmp(IntCC::Equal, a, b);
+                    self.builder.ins().uextend(I64, value)
+                };
+                slot_equal = self.builder.ins().band(slot_equal, comparison);
+            }
+            let contribution = self.builder.ins().select(active, slot_equal, one);
+            equal = self.builder.ins().band(equal, contribution);
+        }
+        if negate {
+            let value = self.builder.ins().icmp_imm_s(IntCC::Equal, equal, 0);
+            self.builder.ins().uextend(I64, value)
+        } else {
+            equal
+        }
     }
     fn dispose_pattern(&mut self, pattern: &Pattern, ty: Type, values: &[Value]) {
         match pattern {
@@ -11310,29 +11436,7 @@ impl Generator<'_, '_> {
                     self.bind_pattern(pattern, &words);
                 }
                 if let Some(slot) = rest_binding {
-                    let zero = self.constant(0);
-                    let length = values[0];
-                    let mut tail = vec![zero; 1 + width * *capacity];
-                    let rest_length = self
-                        .builder
-                        .ins()
-                        .iadd_imm_s(length, -((prefix.len() + suffix.len()) as i64));
-                    tail[0] = rest_length;
-                    for position in 0..capacity.saturating_sub(prefix.len() + suffix.len()) {
-                        let source = prefix.len() + position;
-                        // The middle slot `source` is live when it is before
-                        // the suffix: `length > source + suffix`.
-                        let active = self.builder.ins().icmp_imm_s(
-                            IntCC::UnsignedGreaterThan,
-                            length,
-                            (source + suffix.len()) as i64,
-                        );
-                        for word in 0..width {
-                            let value = values[1 + source * width + word];
-                            tail[1 + position * width + word] =
-                                self.builder.ins().select(active, value, zero);
-                        }
-                    }
+                    let tail = self.dyn_rest(values, width, *capacity, prefix.len(), suffix.len());
                     self.assign(*slot, &tail);
                 }
             }

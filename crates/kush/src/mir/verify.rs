@@ -152,6 +152,7 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     match source {
                         ViewSource::Array(array) => local(*array).map_err(here)?,
                         ViewSource::Value(value) => operand(*value).map_err(here)?,
+                        ViewSource::DynArray(stored) => place(*stored).map_err(here)?,
                     }
                     for bound in start.iter().chain(end) {
                         operand(*bound).map_err(here)?;
@@ -169,7 +170,11 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     operand(*index).map_err(here)?;
                     target_ty
                 }
-                Rvalue::Task(_, values) | Rvalue::Runtime(_, values) | Rvalue::Alloc(_, values) => {
+                Rvalue::Task(_, values)
+                | Rvalue::Runtime(_, values)
+                | Rvalue::Alloc(_, values)
+                | Rvalue::Array(_, values)
+                | Rvalue::Map(_, values) => {
                     for value in values {
                         operand(*value).map_err(here)?;
                     }
@@ -179,6 +184,11 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     operand(*handle).map_err(here)?;
                     operand(*index).map_err(here)?;
                     target_ty
+                }
+                Rvalue::StructEq(left, right, _) => {
+                    operand(*left).map_err(here)?;
+                    operand(*right).map_err(here)?;
+                    Type::Bool
                 }
                 Rvalue::Coerce(value, index) => {
                     operand(*value).map_err(here)?;

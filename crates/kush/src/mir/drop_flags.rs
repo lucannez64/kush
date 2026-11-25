@@ -149,12 +149,16 @@ fn rvalue_operands(rvalue: &Rvalue) -> Vec<Operand> {
         Rvalue::BoxNew(operand) | Rvalue::BoxTake(operand) | Rvalue::Coerce(operand, _) => {
             vec![*operand]
         }
-        Rvalue::Binary(_, left, right) | Rvalue::ByteAt(left, right) => vec![*left, *right],
+        Rvalue::Binary(_, left, right)
+        | Rvalue::ByteAt(left, right)
+        | Rvalue::StructEq(left, right, _) => vec![*left, *right],
         Rvalue::Int(_, _, _, operands)
         | Rvalue::Aggregate(_, _, operands)
         | Rvalue::Task(_, operands)
         | Rvalue::Runtime(_, operands)
-        | Rvalue::Alloc(_, operands) => operands.clone(),
+        | Rvalue::Alloc(_, operands)
+        | Rvalue::Array(_, operands)
+        | Rvalue::Map(_, operands) => operands.clone(),
         Rvalue::Bytes(_) => Vec::new(),
         Rvalue::Ref(place) => vec![Operand::Copy(*place)],
         Rvalue::ElementAddress(base, index) => {
@@ -177,6 +181,7 @@ fn rvalue_operands(rvalue: &Rvalue) -> Vec<Operand> {
             let mut operands = vec![match source {
                 ViewSource::Array(local) => Operand::Copy(Place::local(*local)),
                 ViewSource::Value(operand) => *operand,
+                ViewSource::DynArray(place) => Operand::Copy(*place),
             }];
             operands.extend(start.iter().chain(end));
             operands

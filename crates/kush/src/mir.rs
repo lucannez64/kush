@@ -142,6 +142,14 @@ pub(crate) enum Rvalue {
     Runtime(RuntimeOp, Vec<Operand>),
     /// A user-allocator or arena operation on its operands.
     Alloc(AllocOp, Vec<Operand>),
+    /// A runtime-length inline array operation on its operands.
+    Array(ArrayOp, Vec<Operand>),
+    /// Whether two records or enums are (with `true`, are not) equal,
+    /// field by field.
+    StructEq(Operand, Operand, bool),
+    /// `Vec.map` in place on the vector (operand 0) with the callbacks
+    /// (the other operands) applied in order.
+    Map(MapOp, Vec<Operand>),
     /// The byte at an index of a `Bytes` handle, proved in bounds (no
     /// run-time check).
     ByteAt(Operand, Operand),
@@ -261,6 +269,74 @@ pub(crate) enum AllocOp {
     },
 }
 
+/// An operation on a runtime-length inline array (`DynArray<T, C>` or
+/// `[T; n <= C]`): word 0 is the length, then `capacity` element slots.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ArrayOp {
+    /// An empty array.
+    New { element: Type, capacity: usize },
+    /// The array (operand 0) with a value (1) appended; panics when full.
+    Push { element: Type, capacity: usize },
+    /// An array of a length (0) whose slots hold a copy of a value (1);
+    /// panics when the length is out of `0..=capacity`.
+    Fill { element: Type, capacity: usize },
+    /// The array (0) with the slot at an index (1) set to a value (2);
+    /// panics when the index is out of bounds.
+    Set { element: Type, capacity: usize },
+    /// The pair `(array, element)` of the array (0) without its last
+    /// element; panics when empty.
+    Pop { element: Type, capacity: usize },
+    /// Whether two arrays (0, 1) are (or with `negate`, are not) equal.
+    Equal {
+        element: Type,
+        capacity: usize,
+        negate: bool,
+    },
+    /// Element `index` of the `suffix` last ones of an array (0) of
+    /// patterns with `prefix` leading elements.
+    Suffix {
+        element: Type,
+        capacity: usize,
+        prefix: usize,
+        suffix: usize,
+        index: usize,
+    },
+    /// The middle of an array (0) without its `prefix` first and `suffix`
+    /// last elements, as an array of the same capacity.
+    Rest {
+        element: Type,
+        capacity: usize,
+        prefix: usize,
+        suffix: usize,
+    },
+    /// The address of element `index` of the `suffix` last ones of the
+    /// array behind a reference (0).
+    SuffixAddress {
+        element: Type,
+        suffix: usize,
+        index: usize,
+    },
+    /// A view of the middle of the array behind a reference (0), without
+    /// its `prefix` first and `suffix` last elements.
+    RestView {
+        element: Type,
+        prefix: usize,
+        suffix: usize,
+    },
+}
+
+/// An in-place vector map from `source` elements to `target` ones.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct MapOp {
+    pub(crate) source: Type,
+    pub(crate) target: Type,
+    /// The allocation may grow or move for wider elements.
+    pub(crate) grow: bool,
+    /// For each callback, the function it calls when it is a function
+    /// value without captures (native code may inline it).
+    pub(crate) functions: Vec<Option<usize>>,
+}
+
 /// A run-time call that manages the handler or continuation stack.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum RuntimeOp {
@@ -335,6 +411,9 @@ pub(crate) enum ViewSource {
     Array(LocalId),
     /// A `&Bytes`, `&Vec`, `&String`, array value or another view.
     Value(Operand),
+    /// The runtime-length array stored at a place: the view aliases its
+    /// storage (word 0 is the length, the elements follow).
+    DynArray(Place),
 }
 
 impl ViewSource {
@@ -342,6 +421,7 @@ impl ViewSource {
         match self {
             ViewSource::Array(local) => body.locals[local].ty,
             ViewSource::Value(operand) => body.operand_ty(operand),
+            ViewSource::DynArray(place) => body.place_ty(place),
         }
     }
 }

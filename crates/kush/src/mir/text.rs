@@ -256,6 +256,12 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
             operand_text(*handle),
             operand_text(*index)
         ),
+        Rvalue::StructEq(left, right, negated) => format!(
+            "{}({}, {})",
+            if *negated { "struct_ne" } else { "struct_eq" },
+            operand_text(*left),
+            operand_text(*right)
+        ),
         Rvalue::Coerce(operand, index) => format!("coerce {index}({})", operand_text(*operand)),
         Rvalue::FnValue { function, captures } => {
             let captures = captures
@@ -280,6 +286,7 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
             let source = match source {
                 ViewSource::Array(local) => format!("array _{local}"),
                 ViewSource::Value(operand) => format!("value {}", operand_text(*operand)),
+                ViewSource::DynArray(place) => format!("dynarray {}", place_text(*place)),
             };
             format!(
                 "view{}{} {source} [{} .. {}] of {}",
@@ -293,6 +300,14 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
         Rvalue::Alloc(op, operands) => {
             let json = serde_json::to_string(op).expect("an allocator operation serializes");
             format!("alloc {json:?}({})", operands_text(operands))
+        }
+        Rvalue::Array(op, operands) => {
+            let json = serde_json::to_string(op).expect("an array operation serializes");
+            format!("array {json:?}({})", operands_text(operands))
+        }
+        Rvalue::Map(op, operands) => {
+            let json = serde_json::to_string(op).expect("a map operation serializes");
+            format!("map {json:?}({})", operands_text(operands))
         }
         Rvalue::Runtime(op, operands) => {
             let json = serde_json::to_string(op).expect("a runtime operation serializes");
@@ -786,6 +801,18 @@ impl Parser {
                 serde_json::from_str(&json).map_err(|e| format!("allocator operation: {e}"))?;
             return Ok(Rvalue::Alloc(op, self.operands()?));
         }
+        if name == "array" {
+            self.at += 1;
+            let json = self.string()?;
+            let op = serde_json::from_str(&json).map_err(|e| format!("array operation: {e}"))?;
+            return Ok(Rvalue::Array(op, self.operands()?));
+        }
+        if name == "map" {
+            self.at += 1;
+            let json = self.string()?;
+            let op = serde_json::from_str(&json).map_err(|e| format!("map operation: {e}"))?;
+            return Ok(Rvalue::Map(op, self.operands()?));
+        }
         if name == "runtime" {
             self.at += 1;
             let json = self.string()?;
@@ -806,6 +833,16 @@ impl Parser {
             let index = self.operand()?;
             self.expect(")")?;
             return Ok(Rvalue::ByteAt(handle, index));
+        }
+        if name == "struct_eq" || name == "struct_ne" {
+            let negated = name == "struct_ne";
+            self.at += 1;
+            self.expect("(")?;
+            let left = self.operand()?;
+            self.expect(",")?;
+            let right = self.operand()?;
+            self.expect(")")?;
+            return Ok(Rvalue::StructEq(left, right, negated));
         }
         if name == "coerce" {
             self.at += 1;
@@ -839,6 +876,7 @@ impl Parser {
             let source = match self.next()?.as_str() {
                 "array" => ViewSource::Array(self.local()?),
                 "value" => ViewSource::Value(self.operand()?),
+                "dynarray" => ViewSource::DynArray(self.place()?),
                 other => return Err(format!("expected a view source, found '{other}'")),
             };
             self.expect("[")?;

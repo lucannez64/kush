@@ -149,14 +149,14 @@ fn plain(program: &Executable, ty: Type) -> bool {
             | Type::SliceMut(pointee) => go(program, program.pointees[pointee], visiting),
             _ => ty.layout().is_some_and(|id| {
                 let definition = &program.enums[id];
-                definition.dynamic_array.is_none()
-                    && definition.runtime_length.is_none()
-                    && definition.variants.iter().all(|variant| {
-                        variant
-                            .fields
-                            .iter()
-                            .all(|field| go(program, *field, visiting))
-                    })
+                // A runtime-length array's elements are its first variant's
+                // fields, as for any record.
+                definition.variants.iter().all(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .all(|field| go(program, *field, visiting))
+                })
             }),
         };
         visiting.pop();
@@ -211,7 +211,9 @@ fn supported(pattern: &Pattern) -> Result<(), String> {
         Pattern::Variant { fields, .. } => fields.iter().try_for_each(|(_, p)| supported(p)),
         Pattern::Or(alternatives) => alternatives.iter().try_for_each(supported),
         Pattern::Type { inner, .. } => supported(inner),
-        Pattern::DynArray { .. } => Err("an array pattern".into()),
+        Pattern::DynArray { prefix, suffix, .. } => {
+            prefix.iter().chain(suffix).try_for_each(supported)
+        }
     }
 }
 
@@ -221,6 +223,12 @@ fn binds(pattern: &Pattern) -> bool {
         Pattern::Variant { fields, .. } => fields.iter().any(|(_, p)| binds(p)),
         Pattern::Type { inner, .. } => binds(inner),
         Pattern::Or(alternatives) => alternatives.iter().any(binds),
+        Pattern::DynArray {
+            prefix,
+            suffix,
+            rest_binding,
+            ..
+        } => rest_binding.is_some() || prefix.iter().chain(suffix).any(binds),
         _ => false,
     }
 }
@@ -842,8 +850,48 @@ impl Builder<'_> {
                 text,
                 field,
             } => {
-                if field.is_some() {
-                    return Err("a view of a record field".into());
+                // A view of a runtime-length array aliases its storage: a
+                // borrowed local, or a record field (as on the tree path).
+                let stored = match &base.kind {
+                    _ if field.is_some() => Some(base),
+                    ExprKind::Borrow(_)
+                        if base
+                            .ty
+                            .ref_pointee()
+                            .map(|pointee| self.program.pointees[pointee])
+                            .and_then(|pointee| pointee.layout())
+                            .is_some_and(|id| self.program.enums[id].dynamic_array.is_some()) =>
+                    {
+                        Some(base)
+                    }
+                    _ => None,
+                };
+                if let Some(base) = stored {
+                    let place = match &base.kind {
+                        ExprKind::Borrow(slot) => Place::field(*slot, 0, self.locals[*slot].ty),
+                        _ => match self.place_of(base)? {
+                            Some(place) => place,
+                            None => return Ok(None),
+                        },
+                    };
+                    let bounds = start.iter().chain(end).map(|bound| &**bound).collect::<Vec<_>>();
+                    let Some(values) = self.operands(&bounds)? else {
+                        return Ok(None);
+                    };
+                    let mut values = values.into_iter();
+                    let start = start.as_ref().map(|_| values.next().expect("start"));
+                    let end = end.as_ref().map(|_| values.next().expect("end"));
+                    let temp = self.temp(expr.ty);
+                    let view = Rvalue::View {
+                        source: ViewSource::DynArray(place),
+                        start,
+                        end,
+                        element: *element,
+                        check: *check,
+                        text: false,
+                    };
+                    self.assign(temp, view, span);
+                    return Ok(Some(Operand::Move(Place::local(temp))));
                 }
                 let array = match &base.kind {
                     ExprKind::Local(slot) | ExprKind::Peek(slot)
@@ -1028,6 +1076,114 @@ impl Builder<'_> {
                 return self.alloc_op(expr, op, &children);
             }
             ExprKind::Erased(ty) => Operand::Constant(0, *ty),
+            ExprKind::StructEq {
+                left,
+                right,
+                negated,
+            } => {
+                let negated = *negated;
+                let children = [(&**left, false), (&**right, false)];
+                return self.operation(expr, &children, |values| {
+                    Rvalue::StructEq(values[0], values[1], negated)
+                });
+            }
+            ExprKind::VecMap {
+                vector,
+                callbacks,
+                source,
+                target,
+                grow,
+            } => {
+                let functions = callbacks
+                    .iter()
+                    .map(|callback| match &callback.kind {
+                        ExprKind::FnValue { function, captures } if captures.is_empty() => {
+                            Some(*function)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let op = MapOp {
+                    source: *source,
+                    target: *target,
+                    grow: *grow,
+                    functions,
+                };
+                let mut children = vec![(&**vector, true)];
+                children.extend(callbacks.iter().map(|callback| (callback, true)));
+                return self.operation(expr, &children, |values| Rvalue::Map(op, values));
+            }
+            ExprKind::DynArrayNew { element, capacity } => {
+                let op = ArrayOp::New {
+                    element: *element,
+                    capacity: *capacity,
+                };
+                return self.array_op(expr, op, &[]);
+            }
+            ExprKind::DynArrayPush {
+                array,
+                value,
+                element,
+                capacity,
+            } => {
+                let op = ArrayOp::Push {
+                    element: *element,
+                    capacity: *capacity,
+                };
+                return self.array_op(expr, op, &[(array, true), (value, true)]);
+            }
+            ExprKind::DynArrayFill {
+                length,
+                value,
+                element,
+                capacity,
+                ..
+            } => {
+                let op = ArrayOp::Fill {
+                    element: *element,
+                    capacity: *capacity,
+                };
+                return self.array_op(expr, op, &[(length, true), (value, true)]);
+            }
+            ExprKind::DynArraySet {
+                array,
+                index,
+                value,
+                element,
+                capacity,
+            } => {
+                let op = ArrayOp::Set {
+                    element: *element,
+                    capacity: *capacity,
+                };
+                let children = [(&**array, true), (&**index, true), (&**value, true)];
+                return self.array_op(expr, op, &children);
+            }
+            ExprKind::DynArrayPop {
+                array,
+                element,
+                capacity,
+            } => {
+                let op = ArrayOp::Pop {
+                    element: *element,
+                    capacity: *capacity,
+                };
+                return self.array_op(expr, op, &[(array, true)]);
+            }
+            ExprKind::DynArrayEqual {
+                left,
+                right,
+                element,
+                capacity,
+                negate,
+            } => {
+                let op = ArrayOp::Equal {
+                    element: *element,
+                    capacity: *capacity,
+                    negate: *negate,
+                };
+                return self.array_op(expr, op, &[(left, false), (right, false)]);
+            }
             ExprKind::AbortScope {
                 label,
                 body,
@@ -1597,6 +1753,27 @@ impl Builder<'_> {
         op: AllocOp,
         children: &[(&Expr, bool)],
     ) -> Result<Option<Operand>, String> {
+        self.operation(expr, children, |values| Rvalue::Alloc(op, values))
+    }
+
+    /// A runtime-length array operation, as `alloc_op`.
+    fn array_op(
+        &mut self,
+        expr: &Expr,
+        op: ArrayOp,
+        children: &[(&Expr, bool)],
+    ) -> Result<Option<Operand>, String> {
+        self.operation(expr, children, |values| Rvalue::Array(op, values))
+    }
+
+    /// The rvalue `rvalue` makes of the values of `children` into a
+    /// temporary, consuming the children marked `true`.
+    fn operation(
+        &mut self,
+        expr: &Expr,
+        children: &[(&Expr, bool)],
+        rvalue: impl FnOnce(Vec<Operand>) -> Rvalue,
+    ) -> Result<Option<Operand>, String> {
         let exprs = children.iter().map(|(child, _)| *child).collect::<Vec<_>>();
         let Some(values) = self.operands(&exprs)? else {
             return Ok(None);
@@ -1607,7 +1784,7 @@ impl Builder<'_> {
             }
         }
         let temp = self.temp(expr.ty);
-        self.assign(temp, Rvalue::Alloc(op, values), expr.span);
+        self.assign(temp, rvalue(values), expr.span);
         Ok(Some(Operand::Move(Place::local(temp))))
     }
 
@@ -1994,9 +2171,30 @@ impl Builder<'_> {
         let Some(value) = self.expr(scrutinee)? else {
             return Ok(None);
         };
+        // A borrowed scrutinee (a `&DynArray` under an array pattern): the
+        // patterns test a copy of the array, and element names bind
+        // addresses in it, as on the tree path.
+        let borrowed = match scrutinee.ty {
+            Type::Ref(pointee) | Type::RefMut(pointee) => {
+                let reference = self.pointer_local(value, scrutinee.ty, scrutinee.span);
+                Some((reference, self.program.pointees[pointee]))
+            }
+            _ => None,
+        };
         // Arms may assign the scrutinee's local; test a copy.
-        let subject = self.temp(scrutinee.ty);
-        self.assign(subject, Rvalue::Use(value), scrutinee.span);
+        let subject = match borrowed {
+            Some((reference, array)) => {
+                let subject = self.temp(array);
+                let words = Operand::Copy(Place::deref(reference, 0, array));
+                self.assign(subject, Rvalue::Use(words), scrutinee.span);
+                subject
+            }
+            None => {
+                let subject = self.temp(scrutinee.ty);
+                self.assign(subject, Rvalue::Use(value), scrutinee.span);
+                subject
+            }
+        };
         let temp = self.result_temp(expr.ty);
         let mut join = None;
         for arm in arms {
@@ -2009,7 +2207,12 @@ impl Builder<'_> {
                 self.new_block()
             };
             self.test(subject, 0, &arm.pattern, next, arm.body.span);
-            self.bind(subject, 0, &arm.pattern, arm.body.span);
+            match borrowed {
+                Some((reference, _)) => {
+                    self.bind_borrowed(subject, reference, &arm.pattern, arm.body.span);
+                }
+                None => self.bind(subject, 0, &arm.pattern, arm.body.span),
+            }
             if let Some(guard) = &arm.guard {
                 match self.expr(guard)? {
                     Some(condition) => {
@@ -2033,7 +2236,9 @@ impl Builder<'_> {
             // The arm owns the scrutinee: bindings take their parts, and
             // the parts no binding takes are dropped.
             self.consume(scrutinee);
-            self.dispose(subject, 0, &arm.pattern, scrutinee.ty, arm.body.span);
+            if borrowed.is_none() {
+                self.dispose(subject, 0, &arm.pattern, scrutinee.ty, arm.body.span);
+            }
             if let Some(value) = self.expr(&arm.body)? {
                 self.consume(&arm.body);
                 if let Some(temp) = temp {
@@ -2155,7 +2360,150 @@ impl Builder<'_> {
                 self.goto(fail, span);
                 self.enter(success);
             }
-            _ => unreachable!("supported() rejects other patterns"),
+            Pattern::DynArray {
+                element,
+                prefix,
+                suffix,
+                rest,
+                ..
+            } => {
+                let width = self.program.width(*element);
+                let length = self.word(subject, offset);
+                let required = (prefix.len() + suffix.len()) as i64;
+                if *rest {
+                    let enough = self.temp(Type::Bool);
+                    let at_least = Rvalue::Binary(
+                        BinOp::Ge,
+                        length,
+                        Operand::Constant(required, Type::I64),
+                    );
+                    self.assign(enough, at_least, span);
+                    let enough = Operand::Move(Place::local(enough));
+                    self.expect_word(enough, 0, false, fail, span);
+                } else {
+                    self.expect_word(length, required, true, fail, span);
+                }
+                for (index, pattern) in prefix.iter().enumerate() {
+                    self.test(subject, offset + 1 + index * width, pattern, fail, span);
+                }
+                for (index, part) in suffix.iter().enumerate() {
+                    if refutable(part) {
+                        let item = self.suffix_item(subject, offset, pattern, index, span);
+                        self.test(item, 0, part, fail, span);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The runtime-length array of `element`s with `capacity` slots at
+    /// `offset` in the subject.
+    fn array_part(&self, subject: LocalId, offset: usize, element: Type, capacity: usize) -> Place {
+        let matches = |ty: Type| {
+            ty.layout()
+                .is_some_and(|id| self.program.enums[id].dynamic_array == Some((element, capacity)))
+        };
+        let whole = self.locals[subject].ty;
+        if offset == 0 && matches(whole) {
+            return Place::local(subject);
+        }
+        // Every array type of this element and capacity has one layout.
+        let id = (0..self.program.enums.len())
+            .find(|id| self.program.enums[*id].dynamic_array == Some((element, capacity)))
+            .expect("the array pattern's type");
+        Place::field(subject, offset, Type::Enum(id))
+    }
+
+    /// A temporary holding suffix element `index` of the array at `offset`
+    /// in the subject, matched by the array pattern `pattern`.
+    fn suffix_item(
+        &mut self,
+        subject: LocalId,
+        offset: usize,
+        pattern: &Pattern,
+        index: usize,
+        span: Span,
+    ) -> LocalId {
+        let Pattern::DynArray {
+            element,
+            capacity,
+            prefix,
+            suffix,
+            ..
+        } = pattern
+        else {
+            unreachable!("an array pattern");
+        };
+        let item = self.temp(*element);
+        let op = ArrayOp::Suffix {
+            element: *element,
+            capacity: *capacity,
+            prefix: prefix.len(),
+            suffix: suffix.len(),
+            index,
+        };
+        let array = Operand::Copy(self.array_part(subject, offset, *element, *capacity));
+        self.assign(item, Rvalue::Array(op, vec![array]), span);
+        item
+    }
+
+    /// Bind an array pattern over a borrowed array: element names receive
+    /// slot addresses, the rest a view, and other element patterns bind
+    /// from the copy in `subject`. Other patterns bind nothing, as on the
+    /// tree path.
+    fn bind_borrowed(
+        &mut self,
+        subject: LocalId,
+        reference: LocalId,
+        pattern: &Pattern,
+        span: Span,
+    ) {
+        let Pattern::DynArray {
+            element,
+            prefix,
+            suffix,
+            rest_binding,
+            ..
+        } = pattern
+        else {
+            return;
+        };
+        let width = self.program.width(*element);
+        let behind = Operand::Copy(Place::local(reference));
+        for (index, part) in prefix.iter().enumerate() {
+            let offset = 1 + index * width;
+            match part {
+                Pattern::Bind(slot) => {
+                    let place = Place::deref(reference, offset, *element);
+                    self.assign(*slot, Rvalue::Ref(place), span);
+                }
+                part => self.bind(subject, offset, part, span),
+            }
+        }
+        for (index, part) in suffix.iter().enumerate() {
+            match part {
+                Pattern::Bind(slot) => {
+                    let op = ArrayOp::SuffixAddress {
+                        element: *element,
+                        suffix: suffix.len(),
+                        index,
+                    };
+                    self.assign(*slot, Rvalue::Array(op, vec![behind]), span);
+                }
+                part if binds(part) => {
+                    let item = self.suffix_item(subject, 0, pattern, index, span);
+                    self.bind(item, 0, part, span);
+                }
+                _ => {}
+            }
+        }
+        if let Some(slot) = rest_binding {
+            let op = ArrayOp::RestView {
+                element: *element,
+                prefix: prefix.len(),
+                suffix: suffix.len(),
+            };
+            self.assign(*slot, Rvalue::Array(op, vec![behind]), span);
         }
     }
 
@@ -2245,6 +2593,35 @@ impl Builder<'_> {
                 }
             }
             Pattern::Type { inner, .. } => self.bind(subject, offset + 1, inner, span),
+            Pattern::DynArray {
+                element,
+                capacity,
+                prefix,
+                suffix,
+                rest_binding,
+                ..
+            } => {
+                let width = self.program.width(*element);
+                for (index, part) in prefix.iter().enumerate() {
+                    self.bind(subject, offset + 1 + index * width, part, span);
+                }
+                for (index, part) in suffix.iter().enumerate() {
+                    if binds(part) {
+                        let item = self.suffix_item(subject, offset, pattern, index, span);
+                        self.bind(item, 0, part, span);
+                    }
+                }
+                if let Some(slot) = rest_binding {
+                    let op = ArrayOp::Rest {
+                        element: *element,
+                        capacity: *capacity,
+                        prefix: prefix.len(),
+                        suffix: suffix.len(),
+                    };
+                    let array = Operand::Copy(self.array_part(subject, offset, *element, *capacity));
+                    self.assign(*slot, Rvalue::Array(op, vec![array]), span);
+                }
+            }
             Pattern::Or(alternatives) if binds(pattern) => {
                 self.each_alternative(subject, offset, alternatives, span, |builder, p| {
                     builder.bind(subject, offset, p, span);
@@ -2292,9 +2669,6 @@ impl Builder<'_> {
                 );
                 return Ok(None);
             }
-            Target::StageCompile(_) | Target::StageEntry(_) => {
-                return Err(format!("a call to {}", target_name(target)));
-            }
             other => {
                 self.builtins.push(*other);
                 Callee::Builtin(self.builtins.len() - 1)
@@ -2332,14 +2706,6 @@ impl Builder<'_> {
         }
         Some(Operand::Move(Place::local(destination)))
     }
-}
-
-fn target_name(target: &Target) -> String {
-    let text = format!("{target:?}");
-    let end = text
-        .find(|c: char| !c.is_alphanumeric())
-        .unwrap_or(text.len());
-    format!("the builtin {}", &text[..end])
 }
 
 /// The variant's name, without formatting its whole subtree.
