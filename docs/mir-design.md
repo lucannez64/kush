@@ -191,7 +191,21 @@ FND-MIR-REFS (first part) added references:
   uses its pinned storage, or a snapshot when it was never pinned, and a
   field adds its offset to the local's address.
 
-Slices and text views are still to come.
+The second part added views, inline arrays and builtins:
+
+- `view` builds a slice or text view of an array local (aliasing its
+  storage when it has a stable address), a `&Vec`, `&Bytes`, `&String`,
+  an array value or another view, with an optional range check.
+- Every builtin call target except staging is a `call builtin N`
+  terminator. Native code lowers it through the same `call_target`
+  dispatch as the tree path. Each body lists its builtins, and the text
+  form prints their definitions as comments. Reading the text back takes
+  the table from the program. Printing builtins in full is
+  FND-MIR-TEXT-BUILTINS.
+- The tree path's loop optimizations (vector push shadows, deferred
+  proofs of element accesses) key their facts on tree expressions, so the
+  MIR path calls builtins without them. Porting them is part of
+  FND-MIR-DEFAULT.
 
 The flags are dynamic everywhere, as on the tree path. Removing the ones
 a dataflow pass can decide statically is FND-MIR-DROP-FLAGS.

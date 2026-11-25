@@ -35,12 +35,15 @@ fn every_built_body_verifies_and_reads_back_from_its_text() {
         let (covered, functions) = kush::mir::coverage(&program);
         built += covered;
         total += functions;
-        checked += kush::mir::self_check(&program)
-            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        checked +=
+            kush::mir::self_check(&program).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     }
     assert_eq!(checked, built);
     // The corpus exercises the builder; coverage only grows.
-    assert!(built >= 115, "MIR covers {built} of {total} example functions");
+    assert!(
+        built >= 190,
+        "MIR covers {built} of {total} example functions"
+    );
 }
 
 #[test]
@@ -104,8 +107,7 @@ fn same_program_on_both_paths(program: &executable::Executable, stats: bool) -> 
             mir,
             ..CodegenOptions::default()
         };
-        native::build_with_codegen(program, &binary, stats, &LinkSpec::default(), codegen)
-            .unwrap();
+        native::build_with_codegen(program, &binary, stats, &LinkSpec::default(), codegen).unwrap();
         let output = Command::new(&binary).output().unwrap();
         outputs.push((output.status.code(), output.stdout, output.stderr));
     }
@@ -199,7 +201,10 @@ fn records_and_enums_match_the_tree_path() {
         }";
     let program = executable::check(source).unwrap();
     let (built, total) = kush::mir::coverage(&program);
-    assert!(built + 1 >= total, "MIR covers {built} of {total} functions");
+    assert!(
+        built + 1 >= total,
+        "MIR covers {built} of {total} functions"
+    );
     let output = same_on_both_paths(source);
     assert_eq!(output, "399\n0\n7\n39\n0\n100\n-1\n100\n34\n");
 }
@@ -248,7 +253,10 @@ fn owned_values_are_dropped_once_on_return_break_and_unwind() {
     let covered = ["keep", "open", "sum", "hold", "first_large"];
     let text = kush::mir::dump(&program);
     for name in covered {
-        assert!(text.contains(&format!("fn \"{name}\"(")), "{name} is not covered\n{text}");
+        assert!(
+            text.contains(&format!("fn \"{name}\"(")),
+            "{name} is not covered\n{text}"
+        );
     }
     let output = same_program_on_both_paths(&program, true);
     assert_eq!(output, "10\n5\n12\n-1\n");
@@ -288,11 +296,52 @@ fn references_read_and_write_through_places() {
     let program = kush::program::load_source("<mir-refs>", source).unwrap();
     let program = executable::check_program(&program).unwrap();
     let text = kush::mir::dump(&program);
-    for name in ["width", "nudge", "reset", "read", "bump", "swap_box", "main"] {
-        assert!(text.contains(&format!("fn \"{name}\"(")), "{name} is not covered\n{text}");
+    for name in [
+        "width", "nudge", "reset", "read", "bump", "swap_box", "main",
+    ] {
+        assert!(
+            text.contains(&format!("fn \"{name}\"(")),
+            "{name} is not covered\n{text}"
+        );
     }
     let output = same_program_on_both_paths(&program, true);
     assert_eq!(output, "8\n13\n13\n0\n42\n7\n");
+}
+
+#[test]
+fn builtins_views_and_arrays_match_the_tree_path() {
+    let source = "
+        fn total(values: &[i64]) -> i64 {
+            let mut sum = 0;
+            let mut i = 0;
+            while i < values.len() { sum = sum + values[i]; i = i + 1; }
+            sum
+        }
+        fn middle(values: &[i64]) -> i64 { total(&values[1..values.len() - 1]) }
+        fn letters(text: &str) -> i64 { text.len() * 100 + text.scalar_len() }
+        fn main() -> Unit ! {io, alloc} {
+            let array: [i64; 5] = [1, 2, 3, 4, 5];
+            print_i64(total(&array[..]));
+            print_i64(middle(&array[..]));
+            let mut list: Vec<i64> = Vec.with_capacity(2);
+            list = list.push(10);
+            list = list.push(20);
+            list = list.push(30);
+            print_i64(total(&list[..]));
+            print_i64(middle(&list[..]));
+            let text = \"héllo\";
+            let view: &str = text.as_str();
+            print_i64(letters(view));
+            print_i64(letters(&view[3..6]));
+            let mut bytes = Bytes.with_capacity(1);
+            bytes = bytes.push(7);
+            print_i64(bytes.len() + bytes.get(0));
+        }";
+    let program = executable::check(source).unwrap();
+    let (built, total) = kush::mir::coverage(&program);
+    assert_eq!(built, total, "{}", kush::mir::dump(&program));
+    let output = same_program_on_both_paths(&program, true);
+    assert_eq!(output, "15\n9\n60\n20\n605\n303\n8\n");
 }
 
 #[test]

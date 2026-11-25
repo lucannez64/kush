@@ -40,6 +40,9 @@ pub(crate) fn print(body: &Body) -> String {
         body.name,
         type_name(body.result)
     );
+    for (index, target) in body.builtins.0.iter().enumerate() {
+        let _ = writeln!(out, "    // builtin {index}: {target:?}");
+    }
     for (local, decl) in body.locals.iter().enumerate().skip(body.parameters) {
         let _ = writeln!(
             out,
@@ -98,6 +101,10 @@ fn type_name(ty: Type) -> String {
         Type::Box(pointee) => format!("box#{pointee}"),
         Type::Vec(pointee) => format!("vec#{pointee}"),
         Type::Bytes => "bytes".into(),
+        Type::Str => "str".into(),
+        Type::StrMut => "strmut".into(),
+        Type::Slice(element) => format!("slice#{element}"),
+        Type::SliceMut(element) => format!("slicemut#{element}"),
         Type::Ref(pointee) => format!("ref#{pointee}"),
         Type::RefMut(pointee) => format!("refmut#{pointee}"),
         Type::String => "string".into(),
@@ -159,8 +166,33 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
         Rvalue::BoxNew(operand) => format!("box_new({})", operand_text(*operand)),
         Rvalue::BoxTake(operand) => format!("box_take({})", operand_text(*operand)),
         Rvalue::Ref(place) => format!("&{}", place_text(*place)),
+        Rvalue::View {
+            source,
+            start,
+            end,
+            element,
+            check,
+            text,
+        } => {
+            let bound = |operand: &Option<Operand>| operand.map_or("none".into(), operand_text);
+            let source = match source {
+                ViewSource::Array(local) => format!("array _{local}"),
+                ViewSource::Value(operand) => format!("value {}", operand_text(*operand)),
+            };
+            format!(
+                "view{}{} {source} [{} .. {}] of {}",
+                if *check { " check" } else { "" },
+                if *text { " text" } else { "" },
+                bound(start),
+                bound(end),
+                type_name(*element)
+            )
+        }
         Rvalue::Bytes(bytes) => {
-            let hex = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+            let hex = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
             format!("bytes \"{hex}\"")
         }
     }
@@ -201,6 +233,7 @@ fn terminator_text(kind: &TerminatorKind) -> String {
             let callee = match callee {
                 Callee::Function(index) => format!("fn {index}"),
                 Callee::PrintInt(kind) => format!("print_int {}", kind.name()),
+                Callee::Builtin(index) => format!("builtin {index}"),
             };
             let args = args
                 .iter()
@@ -236,7 +269,10 @@ pub(crate) fn parse(text: &str) -> Result<Body, String> {
     };
     let body = parser.body()?;
     if parser.at != parser.tokens.len() {
-        return Err(format!("unexpected '{}' after the body", parser.tokens[parser.at]));
+        return Err(format!(
+            "unexpected '{}' after the body",
+            parser.tokens[parser.at]
+        ));
     }
     Ok(body)
 }
@@ -379,6 +415,16 @@ impl Parser {
             }
             "bytes" => Type::Bytes,
             "string" => Type::String,
+            "str" => Type::Str,
+            "strmut" => Type::StrMut,
+            "slice" => {
+                self.expect("#")?;
+                Type::Slice(self.number()?)
+            }
+            "slicemut" => {
+                self.expect("#")?;
+                Type::SliceMut(self.number()?)
+            }
             "ref" => {
                 self.expect("#")?;
                 Type::Ref(self.number()?)
@@ -495,6 +541,7 @@ impl Parser {
             locals,
             blocks,
             result,
+            builtins: Builtins::default(),
         })
     }
     fn declared(&mut self, expected: usize) -> Result<(), String> {
@@ -589,6 +636,39 @@ impl Parser {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| format!("invalid hex bytes '{hex}'"))?;
             return Ok(Rvalue::Bytes(bytes));
+        }
+        if name == "view" {
+            self.at += 1;
+            let check = self.eat("check");
+            let text = self.eat("text");
+            let source = match self.next()?.as_str() {
+                "array" => ViewSource::Array(self.local()?),
+                "value" => ViewSource::Value(self.operand()?),
+                other => return Err(format!("expected a view source, found '{other}'")),
+            };
+            self.expect("[")?;
+            let start = if self.eat("none") {
+                None
+            } else {
+                Some(self.operand()?)
+            };
+            self.expect("..")?;
+            let end = if self.eat("none") {
+                None
+            } else {
+                Some(self.operand()?)
+            };
+            self.expect("]")?;
+            self.expect("of")?;
+            let element = self.ty()?;
+            return Ok(Rvalue::View {
+                source,
+                start,
+                end,
+                element,
+                check,
+                text,
+            });
         }
         if name == "&" {
             self.at += 1;
@@ -688,6 +768,7 @@ impl Parser {
                 self.expect("call")?;
                 let callee = match self.next()?.as_str() {
                     "fn" => Callee::Function(self.number()?),
+                    "builtin" => Callee::Builtin(self.number()?),
                     "print_int" => {
                         let name = self.next()?;
                         Callee::PrintInt(

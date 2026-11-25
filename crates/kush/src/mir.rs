@@ -14,10 +14,10 @@ mod build;
 mod text;
 mod verify;
 
+use crate::Span;
 use crate::executable::{Executable, Type};
 use crate::int::{ArithOp, IntKind, IntOp, Shift};
 use crate::lexer::Kind;
-use crate::Span;
 
 pub(crate) use build::build;
 pub(crate) use verify::verify;
@@ -34,6 +34,20 @@ pub(crate) struct Body {
     pub locals: Vec<LocalDecl>,
     pub blocks: Vec<BasicBlock>,
     pub result: Type,
+    /// The builtin operations the body calls, by `Callee::Builtin` index.
+    pub builtins: Builtins,
+}
+
+/// The builtin call targets of a body. The text form names them by index
+/// and shows each one in a comment; reading the text back takes them from
+/// the program (see [`self_check`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Builtins(pub Vec<crate::executable::Target>);
+
+impl PartialEq for Builtins {
+    fn eq(&self, other: &Self) -> bool {
+        format!("{self:?}") == format!("{other:?}")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -110,6 +124,36 @@ pub(crate) enum Rvalue {
     Bytes(Vec<u8>),
     /// The address of a place: a reference to it.
     Ref(Place),
+    /// A view of the elements `start..end` (default: all) of `source`, or
+    /// with `text`, a text view of its bytes. `check` tests the range (and
+    /// for text, that both ends are scalar boundaries) at run time.
+    View {
+        source: ViewSource,
+        start: Option<Operand>,
+        end: Option<Operand>,
+        element: Type,
+        check: bool,
+        text: bool,
+    },
+}
+
+/// What a view looks into.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ViewSource {
+    /// An inline array local: the view aliases its storage when it has a
+    /// stable address, and a copy of it otherwise (as on the tree path).
+    Array(LocalId),
+    /// A `&Bytes`, `&Vec`, `&String`, array value or another view.
+    Value(Operand),
+}
+
+impl ViewSource {
+    pub(crate) fn ty(self, body: &Body) -> Type {
+        match self {
+            ViewSource::Array(local) => body.locals[local].ty,
+            ViewSource::Value(operand) => body.operand_ty(operand),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,7 +207,9 @@ pub(crate) enum TerminatorKind {
     },
     Return(Operand),
     /// A `panic(..)`: unwinds to `unwind`, or continues unwinding.
-    Panic { unwind: Option<BlockId> },
+    Panic {
+        unwind: Option<BlockId>,
+    },
     /// Run the drop glue of the value at `place`.
     Drop {
         place: Place,
@@ -179,6 +225,8 @@ pub(crate) enum TerminatorKind {
 pub(crate) enum Callee {
     Function(usize),
     PrintInt(IntKind),
+    /// A builtin operation, by its index in the body's [`Builtins`].
+    Builtin(usize),
 }
 
 impl Body {
@@ -348,7 +396,11 @@ pub(crate) fn int_op_named(name: &str) -> Option<IntOp> {
         IntOp::UncheckedShift(Shift::Right),
     ];
     for op in ariths {
-        all.extend([IntOp::Wrapping(op), IntOp::Saturating(op), IntOp::Unchecked(op)]);
+        all.extend([
+            IntOp::Wrapping(op),
+            IntOp::Saturating(op),
+            IntOp::Unchecked(op),
+        ]);
     }
     all.into_iter()
         .find(|op| int_op_name(*op).is_some_and(|candidate| candidate == name))
@@ -384,7 +436,10 @@ pub fn dump(program: &Executable) -> String {
 /// How many functions [`build`] covers, as `(built, total)`.
 pub fn coverage(program: &Executable) -> (usize, usize) {
     let bodies = bodies(program);
-    (bodies.iter().filter(|body| body.is_ok()).count(), bodies.len())
+    (
+        bodies.iter().filter(|body| body.is_ok()).count(),
+        bodies.len(),
+    )
 }
 
 /// Build every covered body, check it, print it, parse the text back and
@@ -394,7 +449,9 @@ pub fn self_check(program: &Executable) -> Result<usize, String> {
     for body in bodies(program).into_iter().flatten() {
         verify(program, &body).map_err(|e| format!("fn {}: {e}", body.name))?;
         let printed = text::print(&body);
-        let parsed = text::parse(&printed).map_err(|e| format!("fn {}: {e}\n{printed}", body.name))?;
+        let mut parsed =
+            text::parse(&printed).map_err(|e| format!("fn {}: {e}\n{printed}", body.name))?;
+        parsed.builtins = body.builtins.clone();
         if parsed != body {
             return Err(format!(
                 "fn {}: the text form does not read back\n{printed}",

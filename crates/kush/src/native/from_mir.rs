@@ -6,7 +6,10 @@
 //! run-time calls are the ones the tree emits.
 
 use super::*;
-use crate::mir::{BlockId, Body, Callee, Operand, Place, Rvalue, StatementKind, TerminatorKind};
+use crate::mir::{
+    BlockId, Body, Callee, Operand, Place, Rvalue, StatementKind, Terminator, TerminatorKind,
+    ViewSource,
+};
 
 impl Generator<'_, '_> {
     pub(super) fn mir_body(&mut self, body: &Body) {
@@ -50,7 +53,7 @@ impl Generator<'_, '_> {
                 };
                 self.mir_store(*place, &words);
             }
-            self.mir_terminator(body, &blocks, &block.terminator.kind);
+            self.mir_terminator(body, &blocks, &block.terminator);
         }
         self.mir_unwind = None;
     }
@@ -165,7 +168,9 @@ impl Generator<'_, '_> {
                     let right = self.float_value(kind, right);
                     return Some(vec![self.float_binary(kind, &op, left, right)]);
                 }
-                Some(vec![self.scalar_binary(&op, left_kind, right_kind, left, right, None)])
+                Some(vec![self.scalar_binary(
+                    &op, left_kind, right_kind, left, right, None,
+                )])
             }
             Rvalue::Int(op, source, target, operands) => {
                 let values = self.mir_operands(operands);
@@ -196,6 +201,42 @@ impl Generator<'_, '_> {
                 Some(values)
             }
             Rvalue::Ref(place) => Some(vec![self.mir_address(*place)]),
+            Rvalue::View {
+                source,
+                start,
+                end,
+                element,
+                check,
+                text,
+            } => {
+                let base_ty = source.ty(body);
+                let (location, values) = match source {
+                    ViewSource::Array(local) => {
+                        let location = self.locations[*local];
+                        let values = if location.is_some() {
+                            Vec::new()
+                        } else {
+                            self.local_words(*local)
+                        };
+                        (location, values)
+                    }
+                    ViewSource::Value(operand) => (None, self.mir_operand(*operand)),
+                };
+                let start = match start {
+                    Some(start) => self.mir_scalar(*start),
+                    None => self.constant(0),
+                };
+                if *text {
+                    let (pointer, length) = self.text_view_source(base_ty, &values);
+                    let end = end.map_or(length, |end| self.mir_scalar(end));
+                    return Some(self.finish_text_view(pointer, length, start, end, *check));
+                }
+                let width = self.program.width(*element);
+                let (pointer, length, stride, bytes) =
+                    self.view_source(base_ty, width, location, None, &values);
+                let end = end.map_or(length, |end| self.mir_scalar(end));
+                Some(self.finish_view(pointer, length, stride, bytes, start, end, *check))
+            }
             Rvalue::Bytes(bytes) => {
                 let id = match self.module.literal(bytes) {
                     Ok(id) => id,
@@ -213,8 +254,8 @@ impl Generator<'_, '_> {
         }
     }
 
-    fn mir_terminator(&mut self, body: &Body, blocks: &[ir::Block], kind: &TerminatorKind) {
-        match kind {
+    fn mir_terminator(&mut self, body: &Body, blocks: &[ir::Block], terminator: &Terminator) {
+        match &terminator.kind {
             TerminatorKind::Goto(target) => self.jump(blocks[*target], &[]),
             TerminatorKind::Switch {
                 value,
@@ -231,7 +272,9 @@ impl Generator<'_, '_> {
                 for (case, target) in targets {
                     let hit = self.builder.ins().icmp_imm_s(IntCC::Equal, value, *case);
                     let next = self.builder.create_block();
-                    self.builder.ins().brif(hit, blocks[*target], &[], next, &[]);
+                    self.builder
+                        .ins()
+                        .brif(hit, blocks[*target], &[], next, &[]);
                     self.builder.switch_to_block(next);
                 }
                 self.jump(blocks[*otherwise], &[]);
@@ -254,6 +297,17 @@ impl Generator<'_, '_> {
                             self.print
                         };
                         vec![self.runtime_call(print, &values)]
+                    }
+                    Callee::Builtin(index) => {
+                        let ty = body.locals[*destination].ty;
+                        let target = body.builtins.0[*index];
+                        let Some(words) =
+                            self.call_target(&target, values, ty, terminator.span, None)
+                        else {
+                            // The builtin always panics; the block has ended.
+                            return;
+                        };
+                        words
                     }
                 };
                 self.assign(*destination, &result);

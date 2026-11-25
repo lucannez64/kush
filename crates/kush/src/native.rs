@@ -1005,6 +1005,19 @@ impl Drop for Scratch {
 /// Only HandlerPush changes the local dynamic-handler depth. The exhaustive
 /// child walker includes guards, initializers, conditions and capture operands;
 /// separately compiled callback bodies perform their own analysis.
+/// Whether a body contains a `while` loop anywhere.
+fn block_has_while(block: &ex::Block) -> bool {
+    fn expression(expr: &Expr) -> bool {
+        let mut found = matches!(expr.kind, ExprKind::While(..));
+        expr.for_each_child(&mut |child| found = found || expression(child));
+        found
+    }
+    block.statements.iter().any(|statement| match statement {
+        ex::Statement::Let(_, expr) | ex::Statement::Expr(expr) => expression(expr),
+        ex::Statement::Declare(_) => false,
+    }) || block.tail.as_deref().is_some_and(expression)
+}
+
 fn block_installs_handler(block: &ex::Block) -> bool {
     fn expression(expr: &Expr) -> bool {
         if matches!(
@@ -2112,9 +2125,20 @@ fn lower(
     // caller can absorb any small reachable callee.
     let mut bodies: Vec<Option<ir::Function>> = vec![None; program.functions.len()];
     // FND-MIR: the functions the CFG IR covers are lowered from it.
+    // The tree path's loop optimizations (deferred overflow checks, vector
+    // push shadows) are not ported yet (FND-MIR-DEFAULT): when one is on, a
+    // function with a `while` loop keeps the tree path.
+    let loop_optimized = codegen.defers_overflow()
+        || (codegen.optimization == Optimization::Speed && codegen.backend == Backend::Llvm);
     let mir_bodies: Vec<Option<crate::mir::Body>> = if codegen.mir {
         (0..program.functions.len())
-            .map(|index| crate::mir::build(program, index).ok())
+            .map(|index| {
+                let body = &program.functions[index].body;
+                if loop_optimized && block_has_while(body) {
+                    return None;
+                }
+                crate::mir::build(program, index).ok()
+            })
             .collect()
     } else {
         Vec::new()
@@ -7146,29 +7170,7 @@ impl Generator<'_, '_> {
             } => {
                 if *text {
                     let base_values = lower!(self.expr(base));
-                    let (pointer, length) = match base.ty {
-                        Type::Ref(p) | Type::RefMut(p) => match self.program.pointees[p] {
-                            Type::String => {
-                                let handle = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    base_values[0],
-                                    0,
-                                );
-                                let data = self.builder.ins().iadd_imm_s(handle, 16);
-                                let length = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    handle,
-                                    0,
-                                );
-                                (data, length)
-                            }
-                            _ => unreachable!("checked text view source"),
-                        },
-                        Type::Str | Type::StrMut => (base_values[0], base_values[1]),
-                        _ => unreachable!("checked text view source"),
-                    };
+                    let (pointer, length) = self.text_view_source(base.ty, &base_values);
                     let start = match start {
                         Some(start) => lower!(self.scalar(start)),
                         None => self.constant(0),
@@ -7177,14 +7179,7 @@ impl Generator<'_, '_> {
                         Some(end) => lower!(self.scalar(end)),
                         None => length,
                     };
-                    if *check {
-                        self.check_range(start, end, length);
-                        self.check_text_boundary(pointer, start, length);
-                        self.check_text_boundary(pointer, end, length);
-                    }
-                    let pointer = self.builder.ins().iadd(pointer, start);
-                    let length = self.builder.ins().isub(end, start);
-                    return Some(vec![pointer, length, self.constant(1), self.constant(1)]);
+                    return Some(self.finish_text_view(pointer, length, start, end, *check));
                 }
                 let element_width = self.program.width(*element);
                 let array_location = match &base.kind {
@@ -7244,105 +7239,13 @@ impl Generator<'_, '_> {
                 } else {
                     lower!(self.expr(base))
                 };
-                let (pointer, length, stride, bytes) =
-                    if let Some((location, word_offset)) = dynamic_array_location {
-                        // Word 0 is the runtime length; elements follow it.
-                        let base_address = if word_offset == 0 {
-                            location
-                        } else {
-                            self.builder
-                                .ins()
-                                .iadd_imm_s(location, (word_offset * 8) as i64)
-                        };
-                        let data = self.builder.ins().iadd_imm_s(base_address, 8);
-                        let length =
-                            self.builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), base_address, 0);
-                        (
-                            data,
-                            length,
-                            self.constant((element_width * 8) as i64),
-                            self.constant(0),
-                        )
-                    } else if let Some(location) = array_location {
-                        let (_, length) = base
-                            .ty
-                            .layout()
-                            .and_then(|id| self.program.enums[id].array)
-                            .expect("checked array slice source");
-                        // Word 0 is the private array tag; elements follow it.
-                        let data = self.builder.ins().iadd_imm_s(location, 8);
-                        (
-                            data,
-                            self.constant(length as i64),
-                            self.constant((element_width * 8) as i64),
-                            self.constant(0),
-                        )
-                    } else if let Some((_, length)) =
-                        base.ty.layout().and_then(|id| self.program.enums[id].array)
-                    {
-                        let slot = self.stack_words(base_values.len());
-                        self.store_words(slot, &base_values);
-                        // Word 0 is the private array tag; elements follow it.
-                        let data = self.builder.ins().iadd_imm_s(slot, 8);
-                        (
-                            data,
-                            self.constant(length as i64),
-                            self.constant((element_width * 8) as i64),
-                            self.constant(0),
-                        )
-                    } else {
-                        match base.ty {
-                            Type::Ref(p) => match self.program.pointees[p] {
-                                Type::Bytes => {
-                                    let handle = self.builder.ins().load(
-                                        I64,
-                                        ir::MemFlagsData::new(),
-                                        base_values[0],
-                                        0,
-                                    );
-                                    let data = self.builder.ins().iadd_imm_s(handle, 16);
-                                    let length = self.builder.ins().load(
-                                        I64,
-                                        ir::MemFlagsData::new(),
-                                        handle,
-                                        0,
-                                    );
-                                    (data, length, self.constant(1), self.constant(1))
-                                }
-                                Type::Vec(_) => {
-                                    let handle = self.builder.ins().load(
-                                        I64,
-                                        ir::MemFlagsData::new(),
-                                        base_values[0],
-                                        0,
-                                    );
-                                    let data = self.builder.ins().iadd_imm_s(handle, 16);
-                                    let length = self.builder.ins().load(
-                                        I64,
-                                        ir::MemFlagsData::new(),
-                                        handle,
-                                        0,
-                                    );
-                                    (
-                                        data,
-                                        length,
-                                        self.constant((element_width * 8) as i64),
-                                        self.constant(0),
-                                    )
-                                }
-                                _ => unreachable!("checked slice source"),
-                            },
-                            Type::Slice(_) | Type::SliceMut(_) => (
-                                base_values[0],
-                                base_values[1],
-                                base_values[2],
-                                base_values[3],
-                            ),
-                            _ => unreachable!("checked slice source"),
-                        }
-                    };
+                let (pointer, length, stride, bytes) = self.view_source(
+                    base.ty,
+                    element_width,
+                    array_location,
+                    dynamic_array_location,
+                    &base_values,
+                );
                 let start = match start {
                     Some(start) => lower!(self.scalar(start)),
                     None => self.constant(0),
@@ -7351,13 +7254,7 @@ impl Generator<'_, '_> {
                     Some(end) => lower!(self.scalar(end)),
                     None => length,
                 };
-                if *check {
-                    self.check_range(start, end, length);
-                }
-                let offset = self.builder.ins().imul(start, stride);
-                let pointer = self.builder.ins().iadd(pointer, offset);
-                let length = self.builder.ins().isub(end, start);
-                return Some(vec![pointer, length, stride, bytes]);
+                return Some(self.finish_view(pointer, length, stride, bytes, start, end, *check));
             }
             ExprKind::While(condition, body) => {
                 self.lower_while(condition, body);
@@ -7457,7 +7354,14 @@ impl Generator<'_, '_> {
                 let value = lower!(self.scalar(operand));
                 let deferral = self.deferral(expr);
                 return self
-                    .unary_value(expr.span, op, operand.ty, value, deferral, deferred::key(operand))
+                    .unary_value(
+                        expr.span,
+                        op,
+                        operand.ty,
+                        value,
+                        deferral,
+                        deferred::key(operand),
+                    )
                     .map(|value| vec![value]);
             }
             ExprKind::Assign(slot, replacement) => {
@@ -7537,9 +7441,9 @@ impl Generator<'_, '_> {
                     self.track_leaf(left_key, left);
                     self.track_leaf(deferred::key(right_expr), right);
                 }
-                return Some(vec![self.scalar_binary(
-                    op, left_kind, right_kind, left, right, deferral,
-                )]);
+                return Some(vec![
+                    self.scalar_binary(op, left_kind, right_kind, left, right, deferral),
+                ]);
             }
             ExprKind::VecMap {
                 vector,
@@ -7928,291 +7832,8 @@ impl Generator<'_, '_> {
                 for arg in args {
                     self.consume(arg);
                 }
-                if matches!(
-                    target,
-                    Target::Vec(..)
-                        | Target::AllocVec(..)
-                        | Target::Slice(..)
-                        | Target::DynArray(..)
-                        | Target::Bytes(..)
-                ) {
-                    self.fuzz_enter(expr.span, 0);
-                }
-                match target {
-                    Target::Io(op, shape) => match op {
-                        IoOp::Stdin => self.constant(0),
-                        IoOp::Stdout => self.constant(1),
-                        IoOp::ReadAll | IoOp::ReadLine | IoOp::ReadChunk | IoOp::Write => {
-                            let ok_value = if matches!(op, IoOp::Write) {
-                                values[1] = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    values[1],
-                                    0,
-                                );
-                                self.constant(0)
-                            } else {
-                                values[1]
-                            };
-                            let callee = if matches!(op, IoOp::ReadAll) {
-                                self.read_all
-                            } else if matches!(op, IoOp::ReadLine) {
-                                self.read_line
-                            } else if matches!(op, IoOp::ReadChunk) {
-                                self.read_chunk
-                            } else {
-                                self.write
-                            };
-                            let status = self.runtime_call(callee, &values);
-                            let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
-                            let shape = shape.expect("checked I/O result shape");
-                            let ok_tag = self.constant(shape.ok_tag as i64);
-                            let err_tag = self.constant(shape.err_tag as i64);
-                            let tag = self.builder.ins().select(success, ok_tag, err_tag);
-                            let payload = self.builder.ins().select(success, ok_value, status);
-                            return Some(vec![tag, payload]);
-                        }
-                    },
-                    Target::Host(op, shape) => {
-                        let mut arguments = values.clone();
-                        for (index, borrowed) in op.borrowed().iter().enumerate() {
-                            if *borrowed {
-                                arguments[index] = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    arguments[index],
-                                    0,
-                                );
-                            }
-                        }
-                        let out = self.stack_words(1);
-                        arguments.push(out);
-                        let status = self.runtime_call(self.host_ops[op], &arguments);
-                        let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
-                        let value = self
-                            .builder
-                            .ins()
-                            .load(I64, ir::MemFlagsData::new(), out, 0);
-                        let ok_tag = self.constant(shape.ok_tag as i64);
-                        let err_tag = self.constant(shape.err_tag as i64);
-                        let tag = self.builder.ins().select(success, ok_tag, err_tag);
-                        let payload = self.builder.ins().select(success, value, status);
-                        return Some(vec![tag, payload]);
-                    }
-                    Target::Bytes(op) => {
-                        if op.borrowed() {
-                            values[0] =
-                                self.builder
-                                    .ins()
-                                    .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                        }
-                        if *op == BytesOp::Get
-                            && self.proved_accesses.contains(&deferred::key(expr))
-                        {
-                            // A deferred chunk proved it in range. Data
-                            // follows the 16-byte header.
-                            let address = self.builder.ins().iadd(values[0], values[1]);
-                            return Some(vec![self.builder.ins().uload8(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                address,
-                                16,
-                            )]);
-                        }
-                        if matches!(op, BytesOp::Push | BytesOp::PushReserved)
-                            && self.codegen.optimization == Optimization::Speed
-                        {
-                            self.push_bytes(values[0], values[1], *op)
-                        } else if self.codegen.optimization == Optimization::Speed
-                            // Checked indexed reads stay a runtime call. Inlining
-                            // them moved the JSON benchmark's hot loop and cost
-                            // ~6% on an older Zen 3 laptop for ~1% on Zen 5;
-                            // see the plain-byte-capacity benchmark analysis.
-                            && matches!(op, BytesOp::Len | BytesOp::Capacity | BytesOp::Clear)
-                        {
-                            self.bytes_access(*op, &values)
-                        } else {
-                            self.runtime_call(self.bytes_ops[op], &values)
-                        }
-                    }
-                    Target::String(op) => {
-                        if op.borrowed() {
-                            values[0] =
-                                self.builder
-                                    .ins()
-                                    .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                        }
-                        match op {
-                            StringOp::Len if self.codegen.optimization == Optimization::Speed => {
-                                self.bytes_access(BytesOp::Len, &values)
-                            }
-                            StringOp::Len => {
-                                self.runtime_call(self.bytes_ops[&BytesOp::Len], &values)
-                            }
-                            StringOp::ScalarLen => {
-                                self.runtime_call(self.string_scalar_len, &values)
-                            }
-                            StringOp::ByteAt => {
-                                self.runtime_call(self.bytes_ops[&BytesOp::Get], &values)
-                            }
-                            StringOp::AsBytes => {
-                                self.runtime_call(self.bytes_ops[&BytesOp::Copy], &values)
-                            }
-                            StringOp::IntoBytes => values[0],
-                            StringOp::ScalarAt { some_tag, none_tag } => {
-                                let codepoint = self.runtime_call(self.string_scalar_at, &values);
-                                let present = self.builder.ins().icmp_imm_s(
-                                    IntCC::SignedGreaterThanOrEqual,
-                                    codepoint,
-                                    0,
-                                );
-                                return Some(self.optional_words(
-                                    expr.ty,
-                                    present,
-                                    &[codepoint],
-                                    *some_tag,
-                                    *none_tag,
-                                ));
-                            }
-                            StringOp::FromUtf8 { ok_tag, err_tag } => {
-                                let valid = self.runtime_call(self.string_validate, &values);
-                                let present =
-                                    self.builder.ins().icmp_imm_s(IntCC::NotEqual, valid, 0);
-                                let ok = self.constant(*ok_tag as i64);
-                                let err = self.constant(*err_tag as i64);
-                                let tag = self.builder.ins().select(present, ok, err);
-                                let width = self.program.width(expr.ty);
-                                let mut words = vec![tag, values[0]];
-                                while words.len() < width {
-                                    words.push(self.constant(0));
-                                }
-                                return Some(words);
-                            }
-                        }
-                    }
-                    Target::Str(op) => return Some(self.str_call(*op, values, expr.ty)),
-                    Target::Foreign(index) => return self.foreign_call(*index, &values),
-                    Target::Function(index) => return Some(self.function_call(*index, values)),
-                    Target::DynCall { spec, .. } => return Some(self.dyn_call(*spec, values)),
-                    Target::UnionBorrowCall { spec, .. } => {
-                        return Some(self.union_borrow_call(*spec, values));
-                    }
-                    Target::Vec(op, element) => {
-                        // The push a loop registered for one of its
-                        // shadowed vectors is this very expression.
-                        let address = std::ptr::from_ref(expr) as usize;
-                        self.push_shadow = match self
-                            .pending_pushes
-                            .iter()
-                            .position(|(pending, _)| *pending == address)
-                        {
-                            Some(at) if *op == VecOp::Push => {
-                                let (_, slot) = self.pending_pushes.remove(at);
-                                self.vec_shadows.get(&slot).copied()
-                            }
-                            _ => None,
-                        };
-                        let op = match op {
-                            VecOp::Get if self.proved_accesses.contains(&deferred::key(expr)) => {
-                                VecOp::At
-                            }
-                            other => *other,
-                        };
-                        let result = self.vec_call(op, *element, values);
-                        self.push_shadow = None;
-                        return Some(result);
-                    }
-                    Target::AllocVec(op, element) => {
-                        return Some(self.alloc_vec_call(*op, *element, values, expr.ty));
-                    }
-                    Target::Slice(op, element) => {
-                        // A deferred chunk proved this access in range.
-                        let proved = self.proved_accesses.contains(&deferred::key(expr));
-                        let op = match op {
-                            SliceOp::Get if proved => SliceOp::At,
-                            other => *other,
-                        };
-                        self.store_proved = proved && op == SliceOp::Set;
-                        let result = self.slice_call(op, *element, values);
-                        self.store_proved = false;
-                        return Some(result);
-                    }
-                    Target::ChannelNew => {
-                        let Type::Channel(pointer) = expr.ty else {
-                            unreachable!("checked Channel.new has a channel type")
-                        };
-                        let width = self.program.width(self.program.pointees[pointer]);
-                        let width = self.constant(width as i64);
-                        self.runtime_call(self.channel_new, &[values[0], width])
-                    }
-                    Target::DynArray(op, element) => {
-                        return Some(self.dyn_array_call(*op, *element, values));
-                    }
-                    Target::Print => self.runtime_call(self.print, &values),
-                    Target::PrintInt(kind) => {
-                        let callee = if *kind == IntKind::U64 {
-                            self.print_u64
-                        } else {
-                            self.print
-                        };
-                        self.runtime_call(callee, &values)
-                    }
-                    Target::PrintFloat(kind) => {
-                        let callee = match kind {
-                            FloatKind::F32 => self.print_f32,
-                            FloatKind::F64 => self.print_f64,
-                        };
-                        self.runtime_call(callee, &values)
-                    }
-                    Target::Float(op) => {
-                        return Some(self.float_builtin(*op, &values, expr.ty));
-                    }
-                    Target::Int(op, source, target) => {
-                        return Some(self.int_builtin(*op, *source, *target, &values, expr.ty));
-                    }
-                    Target::Panic => {
-                        self.abort();
-                        return None;
-                    }
-                    Target::StageCompile(shape) => {
-                        let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                            ir::StackSlotKind::ExplicitSlot,
-                            8,
-                            STACK_SLOT_ALIGN_SHIFT,
-                        ));
-                        let pointer = self.builder.ins().stack_addr(I64, slot, 0);
-                        let status = self.runtime_call(self.stage_compile, &[values[0], pointer]);
-                        let owner =
-                            self.builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), pointer, 0);
-                        let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
-                        let ok = self.encode_variant(expr.ty, shape.ok_tag, &[owner]);
-                        let err = self.encode_variant(expr.ty, shape.err_tag, &[status]);
-                        return Some(
-                            ok.into_iter()
-                                .zip(err)
-                                .map(|(ok, err)| self.builder.ins().select(success, ok, err))
-                                .collect(),
-                        );
-                    }
-                    Target::StageEntry(signature) => {
-                        debug_assert_eq!(expr.ty, Type::Fn(*signature));
-                        let owner =
-                            self.builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                        self.builder
-                            .ins()
-                            .load(I64, ir::MemFlagsData::new(), owner, 16)
-                    }
-                    // GPU-SUBSET: `#[gpu]` bodies are compiled for the CPU
-                    // only as unreachable code; no CPU call reaches them.
-                    Target::Gpu(..) => {
-                        self.abort();
-                        return None;
-                    }
-                }
+                let site = (std::ptr::from_ref(expr) as usize, deferred::key(expr));
+                return self.call_target(target, values, expr.ty, expr.span, Some(site));
             }
             ExprKind::Return(arg) => {
                 let value = lower!(self.expr(arg));
@@ -11012,6 +10633,453 @@ impl Generator<'_, '_> {
                 }
             }
         }
+    }
+    /// Lower a call to `target` on its lowered argument words; `ty` is the
+    /// result type. `site` is the tree path's call expression (its address
+    /// and deferred key), which the loop optimizations of the tree path key
+    /// their facts on; the MIR path has none.
+    fn call_target(
+        &mut self,
+        target: &Target,
+        mut values: Words,
+        ty: Type,
+        span: crate::Span,
+        site: Option<(usize, usize)>,
+    ) -> Option<Words> {
+        if matches!(
+            target,
+            Target::Vec(..)
+                | Target::AllocVec(..)
+                | Target::Slice(..)
+                | Target::DynArray(..)
+                | Target::Bytes(..)
+        ) {
+            self.fuzz_enter(span, 0);
+        }
+        let scalar = match target {
+            Target::Io(op, shape) => match op {
+                IoOp::Stdin => self.constant(0),
+                IoOp::Stdout => self.constant(1),
+                IoOp::ReadAll | IoOp::ReadLine | IoOp::ReadChunk | IoOp::Write => {
+                    let ok_value = if matches!(op, IoOp::Write) {
+                        values[1] =
+                            self.builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), values[1], 0);
+                        self.constant(0)
+                    } else {
+                        values[1]
+                    };
+                    let callee = if matches!(op, IoOp::ReadAll) {
+                        self.read_all
+                    } else if matches!(op, IoOp::ReadLine) {
+                        self.read_line
+                    } else if matches!(op, IoOp::ReadChunk) {
+                        self.read_chunk
+                    } else {
+                        self.write
+                    };
+                    let status = self.runtime_call(callee, &values);
+                    let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+                    let shape = shape.expect("checked I/O result shape");
+                    let ok_tag = self.constant(shape.ok_tag as i64);
+                    let err_tag = self.constant(shape.err_tag as i64);
+                    let tag = self.builder.ins().select(success, ok_tag, err_tag);
+                    let payload = self.builder.ins().select(success, ok_value, status);
+                    return Some(vec![tag, payload]);
+                }
+            },
+            Target::Host(op, shape) => {
+                let mut arguments = values.clone();
+                for (index, borrowed) in op.borrowed().iter().enumerate() {
+                    if *borrowed {
+                        arguments[index] = self.builder.ins().load(
+                            I64,
+                            ir::MemFlagsData::new(),
+                            arguments[index],
+                            0,
+                        );
+                    }
+                }
+                let out = self.stack_words(1);
+                arguments.push(out);
+                let status = self.runtime_call(self.host_ops[op], &arguments);
+                let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+                let value = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), out, 0);
+                let ok_tag = self.constant(shape.ok_tag as i64);
+                let err_tag = self.constant(shape.err_tag as i64);
+                let tag = self.builder.ins().select(success, ok_tag, err_tag);
+                let payload = self.builder.ins().select(success, value, status);
+                return Some(vec![tag, payload]);
+            }
+            Target::Bytes(op) => {
+                if op.borrowed() {
+                    values[0] = self
+                        .builder
+                        .ins()
+                        .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                }
+                if *op == BytesOp::Get
+                    && site.is_some_and(|(_, key)| self.proved_accesses.contains(&key))
+                {
+                    // A deferred chunk proved it in range. Data
+                    // follows the 16-byte header.
+                    let address = self.builder.ins().iadd(values[0], values[1]);
+                    return Some(vec![self.builder.ins().uload8(
+                        I64,
+                        ir::MemFlagsData::new(),
+                        address,
+                        16,
+                    )]);
+                }
+                if matches!(op, BytesOp::Push | BytesOp::PushReserved)
+                    && self.codegen.optimization == Optimization::Speed
+                {
+                    self.push_bytes(values[0], values[1], *op)
+                } else if self.codegen.optimization == Optimization::Speed
+                    // Checked indexed reads stay a runtime call. Inlining
+                    // them moved the JSON benchmark's hot loop and cost
+                    // ~6% on an older Zen 3 laptop for ~1% on Zen 5;
+                    // see the plain-byte-capacity benchmark analysis.
+                    && matches!(op, BytesOp::Len | BytesOp::Capacity | BytesOp::Clear)
+                {
+                    self.bytes_access(*op, &values)
+                } else {
+                    self.runtime_call(self.bytes_ops[op], &values)
+                }
+            }
+            Target::String(op) => {
+                if op.borrowed() {
+                    values[0] = self
+                        .builder
+                        .ins()
+                        .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                }
+                match op {
+                    StringOp::Len if self.codegen.optimization == Optimization::Speed => {
+                        self.bytes_access(BytesOp::Len, &values)
+                    }
+                    StringOp::Len => self.runtime_call(self.bytes_ops[&BytesOp::Len], &values),
+                    StringOp::ScalarLen => self.runtime_call(self.string_scalar_len, &values),
+                    StringOp::ByteAt => self.runtime_call(self.bytes_ops[&BytesOp::Get], &values),
+                    StringOp::AsBytes => self.runtime_call(self.bytes_ops[&BytesOp::Copy], &values),
+                    StringOp::IntoBytes => values[0],
+                    StringOp::ScalarAt { some_tag, none_tag } => {
+                        let codepoint = self.runtime_call(self.string_scalar_at, &values);
+                        let present = self.builder.ins().icmp_imm_s(
+                            IntCC::SignedGreaterThanOrEqual,
+                            codepoint,
+                            0,
+                        );
+                        return Some(self.optional_words(
+                            ty,
+                            present,
+                            &[codepoint],
+                            *some_tag,
+                            *none_tag,
+                        ));
+                    }
+                    StringOp::FromUtf8 { ok_tag, err_tag } => {
+                        let valid = self.runtime_call(self.string_validate, &values);
+                        let present = self.builder.ins().icmp_imm_s(IntCC::NotEqual, valid, 0);
+                        let ok = self.constant(*ok_tag as i64);
+                        let err = self.constant(*err_tag as i64);
+                        let tag = self.builder.ins().select(present, ok, err);
+                        let width = self.program.width(ty);
+                        let mut words = vec![tag, values[0]];
+                        while words.len() < width {
+                            words.push(self.constant(0));
+                        }
+                        return Some(words);
+                    }
+                }
+            }
+            Target::Str(op) => return Some(self.str_call(*op, values, ty)),
+            Target::Foreign(index) => return self.foreign_call(*index, &values),
+            Target::Function(index) => return Some(self.function_call(*index, values)),
+            Target::DynCall { spec, .. } => return Some(self.dyn_call(*spec, values)),
+            Target::UnionBorrowCall { spec, .. } => {
+                return Some(self.union_borrow_call(*spec, values));
+            }
+            Target::Vec(op, element) => {
+                // The push a loop registered for one of its
+                // shadowed vectors is this very expression.
+                let address = site.map(|(address, _)| address);
+                self.push_shadow = match self
+                    .pending_pushes
+                    .iter()
+                    .position(|(pending, _)| Some(*pending) == address)
+                {
+                    Some(at) if *op == VecOp::Push => {
+                        let (_, slot) = self.pending_pushes.remove(at);
+                        self.vec_shadows.get(&slot).copied()
+                    }
+                    _ => None,
+                };
+                let op = match op {
+                    VecOp::Get
+                        if site.is_some_and(|(_, key)| self.proved_accesses.contains(&key)) =>
+                    {
+                        VecOp::At
+                    }
+                    other => *other,
+                };
+                let result = self.vec_call(op, *element, values);
+                self.push_shadow = None;
+                return Some(result);
+            }
+            Target::AllocVec(op, element) => {
+                return Some(self.alloc_vec_call(*op, *element, values, ty));
+            }
+            Target::Slice(op, element) => {
+                // A deferred chunk proved this access in range.
+                let proved = site.is_some_and(|(_, key)| self.proved_accesses.contains(&key));
+                let op = match op {
+                    SliceOp::Get if proved => SliceOp::At,
+                    other => *other,
+                };
+                self.store_proved = proved && op == SliceOp::Set;
+                let result = self.slice_call(op, *element, values);
+                self.store_proved = false;
+                return Some(result);
+            }
+            Target::ChannelNew => {
+                let Type::Channel(pointer) = ty else {
+                    unreachable!("checked Channel.new has a channel type")
+                };
+                let width = self.program.width(self.program.pointees[pointer]);
+                let width = self.constant(width as i64);
+                self.runtime_call(self.channel_new, &[values[0], width])
+            }
+            Target::DynArray(op, element) => {
+                return Some(self.dyn_array_call(*op, *element, values));
+            }
+            Target::Print => self.runtime_call(self.print, &values),
+            Target::PrintInt(kind) => {
+                let callee = if *kind == IntKind::U64 {
+                    self.print_u64
+                } else {
+                    self.print
+                };
+                self.runtime_call(callee, &values)
+            }
+            Target::PrintFloat(kind) => {
+                let callee = match kind {
+                    FloatKind::F32 => self.print_f32,
+                    FloatKind::F64 => self.print_f64,
+                };
+                self.runtime_call(callee, &values)
+            }
+            Target::Float(op) => {
+                return Some(self.float_builtin(*op, &values, ty));
+            }
+            Target::Int(op, source, target) => {
+                return Some(self.int_builtin(*op, *source, *target, &values, ty));
+            }
+            Target::Panic => {
+                self.abort();
+                return None;
+            }
+            Target::StageCompile(shape) => {
+                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    8,
+                    STACK_SLOT_ALIGN_SHIFT,
+                ));
+                let pointer = self.builder.ins().stack_addr(I64, slot, 0);
+                let status = self.runtime_call(self.stage_compile, &[values[0], pointer]);
+                let owner = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), pointer, 0);
+                let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+                let ok = self.encode_variant(ty, shape.ok_tag, &[owner]);
+                let err = self.encode_variant(ty, shape.err_tag, &[status]);
+                return Some(
+                    ok.into_iter()
+                        .zip(err)
+                        .map(|(ok, err)| self.builder.ins().select(success, ok, err))
+                        .collect(),
+                );
+            }
+            Target::StageEntry(signature) => {
+                debug_assert_eq!(ty, Type::Fn(*signature));
+                let owner = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                self.builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), owner, 16)
+            }
+            // GPU-SUBSET: `#[gpu]` bodies are compiled for the CPU
+            // only as unreachable code; no CPU call reaches them.
+            Target::Gpu(..) => {
+                self.abort();
+                return None;
+            }
+        };
+        Some(vec![scalar])
+    }
+    /// The data pointer and byte length of a text view's source: a
+    /// `&String` or another text view (`values` are its lowered words).
+    fn text_view_source(&mut self, base_ty: Type, values: &[Value]) -> (Value, Value) {
+        match base_ty {
+            Type::Ref(p) | Type::RefMut(p) => match self.program.pointees[p] {
+                Type::String => {
+                    let handle =
+                        self.builder
+                            .ins()
+                            .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                    let data = self.builder.ins().iadd_imm_s(handle, 16);
+                    let length = self
+                        .builder
+                        .ins()
+                        .load(I64, ir::MemFlagsData::new(), handle, 0);
+                    (data, length)
+                }
+                _ => unreachable!("checked text view source"),
+            },
+            Type::Str | Type::StrMut => (values[0], values[1]),
+            _ => unreachable!("checked text view source"),
+        }
+    }
+    /// Check a text view's range and build its descriptor.
+    fn finish_text_view(
+        &mut self,
+        pointer: Value,
+        length: Value,
+        start: Value,
+        end: Value,
+        check: bool,
+    ) -> Words {
+        if check {
+            self.check_range(start, end, length);
+            self.check_text_boundary(pointer, start, length);
+            self.check_text_boundary(pointer, end, length);
+        }
+        let pointer = self.builder.ins().iadd(pointer, start);
+        let length = self.builder.ins().isub(end, start);
+        vec![pointer, length, self.constant(1), self.constant(1)]
+    }
+    /// `(data, length, stride, byte flag)` of an element view's source: a
+    /// dynamic array or inline array in pinned storage, or lowered `values`
+    /// of an array, `&Bytes`, `&Vec` or slice.
+    fn view_source(
+        &mut self,
+        base_ty: Type,
+        element_width: usize,
+        array_location: Option<Value>,
+        dynamic_array_location: Option<(Value, usize)>,
+        values: &[Value],
+    ) -> (Value, Value, Value, Value) {
+        if let Some((location, word_offset)) = dynamic_array_location {
+            // Word 0 is the runtime length; elements follow it.
+            let base_address = if word_offset == 0 {
+                location
+            } else {
+                self.builder
+                    .ins()
+                    .iadd_imm_s(location, (word_offset * 8) as i64)
+            };
+            let data = self.builder.ins().iadd_imm_s(base_address, 8);
+            let length = self
+                .builder
+                .ins()
+                .load(I64, ir::MemFlagsData::new(), base_address, 0);
+            (
+                data,
+                length,
+                self.constant((element_width * 8) as i64),
+                self.constant(0),
+            )
+        } else if let Some(location) = array_location {
+            let (_, length) = base_ty
+                .layout()
+                .and_then(|id| self.program.enums[id].array)
+                .expect("checked array slice source");
+            // Word 0 is the private array tag; elements follow it.
+            let data = self.builder.ins().iadd_imm_s(location, 8);
+            (
+                data,
+                self.constant(length as i64),
+                self.constant((element_width * 8) as i64),
+                self.constant(0),
+            )
+        } else if let Some((_, length)) =
+            base_ty.layout().and_then(|id| self.program.enums[id].array)
+        {
+            let slot = self.stack_words(values.len());
+            self.store_words(slot, values);
+            // Word 0 is the private array tag; elements follow it.
+            let data = self.builder.ins().iadd_imm_s(slot, 8);
+            (
+                data,
+                self.constant(length as i64),
+                self.constant((element_width * 8) as i64),
+                self.constant(0),
+            )
+        } else {
+            match base_ty {
+                Type::Ref(p) => match self.program.pointees[p] {
+                    Type::Bytes => {
+                        let handle =
+                            self.builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                        let data = self.builder.ins().iadd_imm_s(handle, 16);
+                        let length =
+                            self.builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), handle, 0);
+                        (data, length, self.constant(1), self.constant(1))
+                    }
+                    Type::Vec(_) => {
+                        let handle =
+                            self.builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                        let data = self.builder.ins().iadd_imm_s(handle, 16);
+                        let length =
+                            self.builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), handle, 0);
+                        (
+                            data,
+                            length,
+                            self.constant((element_width * 8) as i64),
+                            self.constant(0),
+                        )
+                    }
+                    _ => unreachable!("checked slice source"),
+                },
+                Type::Slice(_) | Type::SliceMut(_) => (values[0], values[1], values[2], values[3]),
+                _ => unreachable!("checked slice source"),
+            }
+        }
+    }
+    /// Check an element view's range and build its descriptor.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_view(
+        &mut self,
+        pointer: Value,
+        length: Value,
+        stride: Value,
+        bytes: Value,
+        start: Value,
+        end: Value,
+        check: bool,
+    ) -> Words {
+        if check {
+            self.check_range(start, end, length);
+        }
+        let offset = self.builder.ins().imul(start, stride);
+        let pointer = self.builder.ins().iadd(pointer, offset);
+        let length = self.builder.ins().isub(end, start);
+        vec![pointer, length, stride, bytes]
     }
     /// A binary operation (not `&&`/`||`) on lowered non-float scalars.
     fn scalar_binary(

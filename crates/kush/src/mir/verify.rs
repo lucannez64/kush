@@ -80,7 +80,9 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                 }
                 Rvalue::Int(op, _, target, values) => {
                     if int_op_name(*op).is_none() {
-                        return Err(here(format!("the integer builtin {op:?} has no one-word result")));
+                        return Err(here(format!(
+                            "the integer builtin {op:?} has no one-word result"
+                        )));
                     }
                     for value in values {
                         operand(*value).map_err(here)?;
@@ -88,7 +90,9 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     Type::int(*target)
                 }
                 Rvalue::Aggregate(ty, tag, values) => {
-                    let layout = ty.layout().ok_or_else(|| here(format!("an aggregate of {ty:?}")))?;
+                    let layout = ty
+                        .layout()
+                        .ok_or_else(|| here(format!("an aggregate of {ty:?}")))?;
                     let variant = program.enums[layout]
                         .variants
                         .get(*tag)
@@ -129,7 +133,26 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                         other => return Err(here(format!("box_take of a {other:?}"))),
                     }
                 }
-                Rvalue::Bytes(_) => Type::Bytes,
+                // A text literal is `Bytes` with a UTF-8 invariant.
+                Rvalue::Bytes(_) => match target_ty {
+                    Type::Bytes | Type::String => target_ty,
+                    other => return Err(here(format!("bytes stored in a {other:?}"))),
+                },
+                Rvalue::View {
+                    source, start, end, ..
+                } => {
+                    match source {
+                        ViewSource::Array(array) => local(*array).map_err(here)?,
+                        ViewSource::Value(value) => operand(*value).map_err(here)?,
+                    }
+                    for bound in start.iter().chain(end) {
+                        operand(*bound).map_err(here)?;
+                    }
+                    match target_ty {
+                        Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::StrMut => target_ty,
+                        other => return Err(here(format!("a view stored in a {other:?}"))),
+                    }
+                }
                 Rvalue::Ref(source) => {
                     place(*source).map_err(here)?;
                     match target_ty {

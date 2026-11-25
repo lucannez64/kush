@@ -9,8 +9,8 @@
 //! generation then lowers that function from the tree.
 
 use super::*;
-use crate::executable::{Expr, ExprKind, Function, Pattern, Target};
 use crate::executable::Statement as TreeStatement;
+use crate::executable::{Expr, ExprKind, Function, Pattern, Target};
 
 pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> {
     let function = &program.functions[index];
@@ -21,6 +21,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
         resources: Vec::new(),
         cleanup: None,
         in_cleanup: false,
+        builtins: Vec::new(),
         locals: function
             .locals
             .iter()
@@ -38,7 +39,11 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
     builder.current = Some(entry);
     builder.start(function.span);
     if let Some(value) = builder.block(&function.body)? {
-        let span = function.body.tail.as_ref().map_or(function.span, |tail| tail.span);
+        let span = function
+            .body
+            .tail
+            .as_ref()
+            .map_or(function.span, |tail| tail.span);
         builder.return_value(value, span);
     }
     builder.finish_cleanup(function.span);
@@ -64,6 +69,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
         locals: builder.locals,
         blocks,
         result: function.result,
+        builtins: Builtins(builder.builtins),
     })
 }
 
@@ -81,15 +87,19 @@ fn scalar(ty: Type) -> bool {
     )
 }
 
-/// A value the builder covers: a scalar, a box, vector, reference, `Bytes`
-/// or `String`, or a record or enum of such values.
+/// A value the builder covers: a scalar, a box, vector, reference, view,
+/// `Bytes` or `String`, or a record, enum or inline array of such values.
 fn plain(program: &Executable, ty: Type) -> bool {
     fn go(program: &Executable, ty: Type, depth: usize) -> bool {
-        if scalar(ty) || matches!(ty, Type::Bytes | Type::String) {
+        if scalar(ty) || matches!(ty, Type::Bytes | Type::String | Type::Str | Type::StrMut) {
             return true;
         }
-        if let Type::Box(pointee) | Type::Vec(pointee) | Type::Ref(pointee) | Type::RefMut(pointee) =
-            ty
+        if let Type::Box(pointee)
+        | Type::Vec(pointee)
+        | Type::Ref(pointee)
+        | Type::RefMut(pointee)
+        | Type::Slice(pointee)
+        | Type::SliceMut(pointee) = ty
         {
             return depth < 16 && go(program, program.pointees[pointee], depth + 1);
         }
@@ -98,13 +108,14 @@ fn plain(program: &Executable, ty: Type) -> bool {
         };
         let definition = &program.enums[id];
         depth < 16
-            && definition.array.is_none()
             && definition.dynamic_array.is_none()
             && definition.runtime_length.is_none()
-            && definition
-                .variants
-                .iter()
-                .all(|variant| variant.fields.iter().all(|field| go(program, *field, depth + 1)))
+            && definition.variants.iter().all(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .all(|field| go(program, *field, depth + 1))
+            })
     }
     go(program, ty, 0)
 }
@@ -247,6 +258,8 @@ struct Builder<'a> {
     cleanup: Option<BlockId>,
     /// Blocks created now belong to the cleanup.
     in_cleanup: bool,
+    /// The builtin targets called so far.
+    builtins: Vec<Target>,
     locals: Vec<LocalDecl>,
     blocks: Vec<Partial>,
     /// The block being filled; `None` after a terminator, until the next
@@ -314,7 +327,10 @@ impl Builder<'_> {
         (!matches!(ty, Type::Unit | Type::Never)).then(|| self.temp(ty))
     }
     fn result(temp: Option<LocalId>, ty: Type) -> Operand {
-        temp.map_or_else(|| Self::no_value(ty), |temp| Operand::Move(Place::local(temp)))
+        temp.map_or_else(
+            || Self::no_value(ty),
+            |temp| Operand::Move(Place::local(temp)),
+        )
     }
 
     /// Drop flags start clear; owned parameters are live on entry. A
@@ -364,7 +380,11 @@ impl Builder<'_> {
                 other => other,
             };
             self.assign(slot, Rvalue::Use(value), expr.span);
-            self.assign(flag, Rvalue::Use(Operand::Constant(1, Type::Bool)), expr.span);
+            self.assign(
+                flag,
+                Rvalue::Use(Operand::Constant(1, Type::Bool)),
+                expr.span,
+            );
         }
     }
     /// A parent took ownership of the expression's result.
@@ -634,7 +654,11 @@ impl Builder<'_> {
                 Self::no_value(expr.ty)
             }
             ExprKind::Block(block) => return self.block(block),
-            ExprKind::Construct { enum_id, tag, fields } => {
+            ExprKind::Construct {
+                enum_id,
+                tag,
+                fields,
+            } => {
                 let fields = fields.iter().collect::<Vec<_>>();
                 let Some(values) = self.operands(&fields)? else {
                     return Ok(None);
@@ -643,7 +667,11 @@ impl Builder<'_> {
                     self.consume(field);
                 }
                 let temp = self.temp(expr.ty);
-                self.assign(temp, Rvalue::Aggregate(Type::Enum(*enum_id), *tag, values), span);
+                self.assign(
+                    temp,
+                    Rvalue::Aggregate(Type::Enum(*enum_id), *tag, values),
+                    span,
+                );
                 Operand::Move(Place::local(temp))
             }
             ExprKind::Project(base, offset) if base.ty.is_ref() => {
@@ -659,6 +687,62 @@ impl Builder<'_> {
                 };
                 let pointer = self.pointer_local(value, reference.ty, span);
                 Operand::Copy(Place::deref(pointer, 0, expr.ty))
+            }
+            ExprKind::Slice {
+                base,
+                start,
+                end,
+                element,
+                check,
+                split: _,
+                text,
+                field,
+            } => {
+                if field.is_some() {
+                    return Err("a view of a record field".into());
+                }
+                let array = match &base.kind {
+                    ExprKind::Local(slot) | ExprKind::Peek(slot)
+                        if !text
+                            && base
+                                .ty
+                                .layout()
+                                .is_some_and(|id| self.program.enums[id].array.is_some()) =>
+                    {
+                        Some(*slot)
+                    }
+                    _ => None,
+                };
+                let mut exprs = Vec::new();
+                if array.is_none() {
+                    exprs.push(&**base);
+                }
+                exprs.extend(start.as_deref());
+                exprs.extend(end.as_deref());
+                let Some(mut values) = self.operands(&exprs)? else {
+                    return Ok(None);
+                };
+                let source = match array {
+                    Some(slot) => ViewSource::Array(slot),
+                    None => ViewSource::Value(values.remove(0)),
+                };
+                let mut values = values.into_iter();
+                let start = start.as_ref().map(|_| values.next().expect("start"));
+                let end = end.as_ref().map(|_| values.next().expect("end"));
+                let temp = self.temp(expr.ty);
+                self.assign(
+                    temp,
+                    Rvalue::View {
+                        source,
+                        start,
+                        end,
+                        element: *element,
+                        check: *check,
+                        text: *text,
+                    },
+                    span,
+                );
+                Operand::Move(Place::local(temp))
             }
             ExprKind::Borrow(slot) => {
                 let temp = self.temp(expr.ty);
@@ -850,7 +934,11 @@ impl Builder<'_> {
                 for id in cleanup {
                     self.cleanup_resource(Some(*id), span);
                 }
-                let scope = self.loops.len().checked_sub(1).ok_or("a break outside a loop")?;
+                let scope = self
+                    .loops
+                    .len()
+                    .checked_sub(1)
+                    .ok_or("a break outside a loop")?;
                 let mut exit = self.loops[scope].exit;
                 self.goto_join(&mut exit, span);
                 self.loops[scope].exit = exit;
@@ -940,7 +1028,11 @@ impl Builder<'_> {
             }
             // An arm without a test or guard matches everything left.
             let irrefutable = !refutable(&arm.pattern) && arm.guard.is_none();
-            let next = if irrefutable { usize::MAX } else { self.new_block() };
+            let next = if irrefutable {
+                usize::MAX
+            } else {
+                self.new_block()
+            };
             self.test(subject, 0, &arm.pattern, next, arm.body.span);
             self.bind(subject, 0, &arm.pattern, arm.body.span);
             if let Some(guard) = &arm.guard {
@@ -1006,7 +1098,14 @@ impl Builder<'_> {
 
     /// Continue when `value` equals (or, with `equal` false, differs from)
     /// `constant`; otherwise jump to `fail`.
-    fn expect_word(&mut self, value: Operand, constant: i64, equal: bool, fail: BlockId, span: Span) {
+    fn expect_word(
+        &mut self,
+        value: Operand,
+        constant: i64,
+        equal: bool,
+        fail: BlockId,
+        span: Span,
+    ) {
         let ok = self.new_block();
         let (hit, miss) = if equal { (ok, fail) } else { (fail, ok) };
         self.terminate(
@@ -1023,7 +1122,14 @@ impl Builder<'_> {
     /// Emit the tests of `pattern` against the subject's words from
     /// `offset`: the current block continues when they pass, and jumps to
     /// `fail` when one does not.
-    fn test(&mut self, subject: LocalId, offset: usize, pattern: &Pattern, fail: BlockId, span: Span) {
+    fn test(
+        &mut self,
+        subject: LocalId,
+        offset: usize,
+        pattern: &Pattern,
+        fail: BlockId,
+        span: Span,
+    ) {
         match pattern {
             Pattern::Any | Pattern::Bind(_) => {}
             Pattern::Literal(value) => {
@@ -1075,7 +1181,14 @@ impl Builder<'_> {
 
     /// The tree path's `dispose_pattern`: after a match, each binding owns
     /// its part of the subject, and each owned part under `_` is dropped.
-    fn dispose(&mut self, subject: LocalId, offset: usize, pattern: &Pattern, ty: Type, span: Span) {
+    fn dispose(
+        &mut self,
+        subject: LocalId,
+        offset: usize,
+        pattern: &Pattern,
+        ty: Type,
+        span: Span,
+    ) {
         match pattern {
             Pattern::Any => {
                 if self.program.owns(ty) {
@@ -1085,7 +1198,9 @@ impl Builder<'_> {
             }
             Pattern::Bind(slot) => self.activate_local(*slot, span),
             Pattern::Variant { tag, fields, .. } => {
-                let layout = ty.layout().expect("a variant pattern over a record or enum");
+                let layout = ty
+                    .layout()
+                    .expect("a variant pattern over a record or enum");
                 let types = self.program.enums[layout].variants[*tag].fields.clone();
                 for ((field, pattern), ty) in fields.iter().zip(types).rev() {
                     self.dispose(subject, offset + field, pattern, ty, span);
@@ -1097,8 +1212,8 @@ impl Builder<'_> {
 
     /// The words of type `ty` at `offset` in the subject.
     fn part(&self, subject: LocalId, offset: usize, ty: Type) -> Place {
-        let whole =
-            offset == 0 && self.program.width(ty) == self.program.width(self.locals[subject].ty);
+        // A niche payload has the subject's word but not its type.
+        let whole = offset == 0 && ty == self.locals[subject].ty;
         if whole {
             Place::local(subject)
         } else {
@@ -1160,7 +1275,13 @@ impl Builder<'_> {
                 );
                 return Ok(None);
             }
-            other => return Err(format!("a call to {}", target_name(other))),
+            Target::StageCompile(_) | Target::StageEntry(_) => {
+                return Err(format!("a call to {}", target_name(target)));
+            }
+            other => {
+                self.builtins.push(*other);
+                Callee::Builtin(self.builtins.len() - 1)
+            }
         };
         let exprs = args.iter().collect::<Vec<_>>();
         let Some(args) = self.operands(&exprs)? else {
