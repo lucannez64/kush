@@ -333,74 +333,26 @@ impl Analysis<'_> {
             Err(_) => None,
         }
     }
-    /// `Some(c)` when the index operand of the call in `block` is the
-    /// counter plus `c`, and where its value was taken: the statement, or
-    /// `None` for the call itself.
-    fn counter_offset(
-        &self,
-        block: BlockId,
-        index: Operand,
-        counter: LocalId,
-    ) -> Option<(i64, Option<usize>)> {
-        let statements = &self.body.blocks[block].statements;
-        // A temporary defined in the call's block, before the call, from
-        // the counter's value at that point.
-        let local_value = |operand: Operand, before: usize| -> Option<usize> {
-            let place = operand.place()?;
-            if place.deref || place.field.is_some() {
-                return None;
-            }
-            if place.local == counter {
-                return Some(before);
-            }
-            if !self.body.locals[place.local].temporary {
-                return None;
-            }
-            let (at, rvalue) =
-                statements[..before]
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(at, statement)| {
-                        let StatementKind::Assign(target, rvalue) = &statement.kind;
-                        (target.local == place.local).then_some((at, rvalue))
-                    })?;
-            match rvalue {
-                Rvalue::Use(Operand::Copy(source) | Operand::Move(source))
-                    if source.local == counter && source.field.is_none() && !source.deref =>
-                {
-                    Some(at)
-                }
-                _ => None,
-            }
-        };
-        let assigns_counter = |from: usize, to: usize| {
-            statements[from..to].iter().any(|statement| {
-                let StatementKind::Assign(target, _) = &statement.kind;
-                target.local == counter
-            })
-        };
-        let end = statements.len();
-        // The counter itself, or a copy of it.
-        if let Some(at) = local_value(index, end) {
-            if assigns_counter(at, end) && at != end {
-                return None;
-            }
-            return Some((0, (at != end).then_some(at)));
-        }
-        let place = index.place()?;
-        if !self.body.locals[place.local].temporary || place.field.is_some() || place.deref {
+    /// `Some((c, read))` when `operand`, used at `at`, is the counter plus
+    /// `c`, the counter's value being read at `read` (a statement, or past
+    /// a block's statements for its terminator). Temporaries are followed
+    /// to their one definition in the loop.
+    fn counter_offset(&self, operand: Operand, at: At, counter: LocalId) -> Option<(i64, At)> {
+        let place = operand.place()?;
+        if place.deref || place.field.is_some() {
             return None;
         }
-        let (at, rvalue) = statements
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(at, statement)| {
-                let StatementKind::Assign(target, rvalue) = &statement.kind;
-                (target.local == place.local).then_some((at, rvalue))
-            })?;
-        let (subtract, base, amount) = match rvalue {
+        if place.local == counter {
+            return Some((0, at));
+        }
+        if !self.body.locals[place.local].temporary {
+            return None;
+        }
+        let Some(Ok(definition)) = self.definition(place.local) else {
+            return None;
+        };
+        let (subtract, base, amount) = match self.rvalue(definition) {
+            Rvalue::Use(operand) => return self.counter_offset(*operand, definition, counter),
             Rvalue::Binary(op @ (BinOp::Add | BinOp::Sub), base, amount) => {
                 (*op == BinOp::Sub, *base, *amount)
             }
@@ -414,16 +366,13 @@ impl Analysis<'_> {
         let Operand::Constant(constant, _) = amount else {
             return None;
         };
-        let read = local_value(base, at)?;
-        if assigns_counter(read, at) || assigns_counter(at, end) {
-            return None;
-        }
-        let offset = if subtract {
+        let (offset, read) = self.counter_offset(base, definition, counter)?;
+        let constant = if subtract {
             constant.checked_neg()?
         } else {
             constant
         };
-        Some((offset, Some(read)))
+        Some((offset.checked_add(constant)?, read))
     }
     /// Every statement an exact value depends on, through the definitions
     /// of temporaries and the assignments of locals in the loop.
@@ -854,13 +803,18 @@ fn plan(
     let (update_block, update_at) = counted.update;
     let mut accesses = Vec::new();
     for (block, receiver, container, target, index) in &scan.accesses {
-        let Some((offset, read)) = analysis.counter_offset(*block, *index, counted.counter) else {
+        let call = (*block, body.blocks[*block].statements.len());
+        let Some((offset, (read_block, read_at))) =
+            analysis.counter_offset(*index, call, counted.counter)
+        else {
             return Err("an index that does not follow the counter".into());
         };
-        let after = if *block == update_block {
-            read.is_none_or(|read| read > update_at)
+        // The update runs once per iteration, in a block every iteration
+        // runs: a read is after it when the update dominates the read.
+        let after = if read_block == update_block {
+            read_at > update_at
         } else {
-            loops::dominates(&analysis.idom, update_block, *block)
+            loops::dominates(&analysis.idom, update_block, read_block)
         };
         let offset = if after {
             offset
