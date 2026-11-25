@@ -907,6 +907,50 @@ impl Builder<'_> {
                 );
                 Operand::Move(Place::local(temp))
             }
+            ExprKind::TaskSpawn {
+                body,
+                result,
+                obligation,
+                parallel,
+            } => {
+                let op = TaskOp::Spawn {
+                    result: *result,
+                    obligation: *obligation,
+                    parallel: *parallel,
+                };
+                return self.task(expr, op, Some(body), true);
+            }
+            ExprKind::TaskScope {
+                body,
+                failure,
+                catch,
+                parallel,
+                ..
+            } => {
+                let op = TaskOp::Scope {
+                    failure: *failure,
+                    catch: *catch,
+                    parallel: *parallel,
+                };
+                return self.task(expr, op, Some(body), true);
+            }
+            ExprKind::TaskYield => return self.task(expr, TaskOp::Yield, None, false),
+            ExprKind::TaskCheckCancel => return self.task(expr, TaskOp::CheckCancel, None, false),
+            ExprKind::TaskCancel(reference) => {
+                return self.task(expr, TaskOp::Cancel, Some(reference), false);
+            }
+            ExprKind::TaskJoin {
+                task,
+                exit,
+                parallel,
+                ..
+            } => {
+                let op = TaskOp::Join {
+                    exit: *exit,
+                    parallel: *parallel,
+                };
+                return self.task(expr, op, Some(task), true);
+            }
             ExprKind::Region { body, finish } => return self.region(expr, body, finish.as_deref()),
             ExprKind::RegionExit {
                 value,
@@ -1302,6 +1346,34 @@ impl Builder<'_> {
             ExprKind::Call(target, args) => return self.call(expr, target, args),
             other => return Err(variant_name(other)),
         }))
+    }
+
+    /// A task operation on at most one operand, which it consumes when
+    /// `consumes` (as the tree path's arm does).
+    fn task(
+        &mut self,
+        expr: &Expr,
+        op: TaskOp,
+        operand: Option<&Expr>,
+        consumes: bool,
+    ) -> Result<Option<Operand>, String> {
+        let mut operands = Vec::new();
+        if let Some(operand) = operand {
+            let Some(value) = self.expr(operand)? else {
+                return Ok(None);
+            };
+            if consumes {
+                self.consume(operand);
+            }
+            operands.push(value);
+        }
+        let temp = self.temp(expr.ty);
+        self.assign(temp, Rvalue::Task(op, operands), expr.span);
+        if expr.ty == Type::Never {
+            self.terminate(TerminatorKind::Unreachable, expr.span);
+            return Ok(None);
+        }
+        Ok(Some(Operand::Move(Place::local(temp))))
     }
 
     /// A `Region`: its body may leave early through `RegionExit` and

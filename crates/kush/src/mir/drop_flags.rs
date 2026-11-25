@@ -149,7 +149,9 @@ fn rvalue_operands(rvalue: &Rvalue) -> Vec<Operand> {
             vec![*operand]
         }
         Rvalue::Binary(_, left, right) | Rvalue::ByteAt(left, right) => vec![*left, *right],
-        Rvalue::Int(_, _, _, operands) | Rvalue::Aggregate(_, _, operands) => operands.clone(),
+        Rvalue::Int(_, _, _, operands)
+        | Rvalue::Aggregate(_, _, operands)
+        | Rvalue::Task(_, operands) => operands.clone(),
         Rvalue::Bytes(_) => Vec::new(),
         Rvalue::Ref(place) => vec![Operand::Copy(*place)],
         Rvalue::ElementAddress(base, index) => {

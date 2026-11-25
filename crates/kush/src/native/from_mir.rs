@@ -7,8 +7,8 @@
 
 use super::*;
 use crate::mir::{
-    BlockId, Body, Callee, Capture, ElementBase, Operand, Place, Rvalue, StatementKind, Terminator,
-    TerminatorKind, ViewSource,
+    BlockId, Body, Callee, Capture, ElementBase, Operand, Place, Rvalue, StatementKind, TaskOp,
+    Terminator, TerminatorKind, ViewSource,
 };
 
 impl Generator<'_, '_> {
@@ -395,6 +395,43 @@ impl Generator<'_, '_> {
                     self.view_source(base_ty, width, location, None, &values);
                 let end = end.map_or(length, |end| self.mir_scalar(end));
                 Some(self.finish_view(pointer, length, stride, bytes, start, end, *check))
+            }
+            Rvalue::Task(op, operands) => {
+                let words = operands
+                    .iter()
+                    .map(|operand| self.mir_operand(*operand))
+                    .collect::<Vec<_>>();
+                match *op {
+                    TaskOp::Spawn {
+                        result,
+                        obligation,
+                        parallel,
+                    } => {
+                        let body_ty = body.operand_ty(operands[0]);
+                        Some(vec![self.task_spawn(
+                            &words[0], body_ty, result, obligation, parallel,
+                        )])
+                    }
+                    TaskOp::Scope {
+                        failure,
+                        catch,
+                        parallel,
+                    } => {
+                        let body_ty = body.operand_ty(operands[0]);
+                        self.task_scope(&words[0], body_ty, ty, failure, catch, parallel)
+                    }
+                    TaskOp::Yield => Some(vec![self.runtime_call(self.task_yield, &[])]),
+                    TaskOp::CheckCancel => {
+                        Some(vec![self.runtime_call(self.task_check_cancel, &[])])
+                    }
+                    TaskOp::Cancel => {
+                        self.runtime_void(self.task_cancel, &[words[0][0]]);
+                        Some(vec![self.constant(0)])
+                    }
+                    TaskOp::Join { exit, parallel } => {
+                        Some(self.task_join(words[0][0], exit, parallel))
+                    }
+                }
             }
             Rvalue::Bytes(bytes) => {
                 let id = match self.module.literal(bytes) {

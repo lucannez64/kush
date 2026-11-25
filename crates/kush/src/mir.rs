@@ -135,6 +135,8 @@ pub(crate) enum Rvalue {
     BoxTake(Operand),
     /// A new `Bytes` holding a copy of a literal.
     Bytes(Vec<u8>),
+    /// A task operation on its operands; it may suspend or run other tasks.
+    Task(TaskOp, Vec<Operand>),
     /// The byte at an index of a `Bytes` handle, proved in bounds (no
     /// run-time check).
     ByteAt(Operand, Operand),
@@ -162,6 +164,33 @@ pub(crate) enum Rvalue {
         element: Type,
         check: bool,
         text: bool,
+    },
+}
+
+/// A structured-concurrency operation (the tree path's task expressions).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum TaskOp {
+    /// Spawn a task or thread running the owned `once` body (operand 0).
+    Spawn {
+        result: Type,
+        obligation: bool,
+        parallel: bool,
+    },
+    /// Run the owned `once` body (operand 0) in a task or thread scope, or
+    /// in a `Task.catch` (a scope that is also a catch boundary).
+    Scope {
+        failure: Option<crate::runtime_types::ResultShape>,
+        catch: Option<crate::runtime_types::ResultShape>,
+        parallel: bool,
+    },
+    Yield,
+    CheckCancel,
+    /// Cancel the task behind a reference (operand 0).
+    Cancel,
+    /// Join a task or thread handle (operand 0).
+    Join {
+        exit: crate::executable::TaskExitShape,
+        parallel: bool,
     },
 }
 

@@ -7520,31 +7520,8 @@ impl Generator<'_, '_> {
                 parallel,
             } => {
                 let values = lower!(self.expr(body));
-                let Type::Once(id) = body.ty else {
-                    unreachable!("checked task body is once")
-                };
                 self.consume(body);
-                let wrapper = self.task_wrappers[&id];
-                let wrapper = self.module.declare_func_in_func(wrapper, self.builder.func);
-                let wrapper = self.builder.ins().func_addr(I64, wrapper);
-                let bytes = self.constant((self.program.width(*result).max(1) * 8) as i64);
-                let drop = if self.program.owns(*result) {
-                    let drop = self.task_pointer_drops[&result.full()];
-                    let drop = self.module.declare_func_in_func(drop, self.builder.func);
-                    self.builder.ins().func_addr(I64, drop)
-                } else {
-                    self.constant(0)
-                };
-                let preserve = self.constant(i64::from(*obligation));
-                let spawn = if *parallel {
-                    self.thread_spawn
-                } else {
-                    self.task_spawn
-                };
-                self.runtime_call(
-                    spawn,
-                    &[wrapper, values[0], values[1], bytes, drop, preserve],
-                )
+                self.task_spawn(&values, body.ty, *result, *obligation, *parallel)
             }
             ExprKind::TaskScope {
                 body,
@@ -7554,152 +7531,10 @@ impl Generator<'_, '_> {
                 parallel,
                 ..
             } => {
-                let (scope_begin, scope_end) = if *parallel {
-                    (self.thread_scope_begin, self.thread_scope_end)
-                } else {
-                    (self.task_scope_begin, self.task_scope_end)
-                };
                 let values = lower!(self.expr(body));
-                let Type::Once(id) = body.ty else {
-                    unreachable!("checked scope body is once")
-                };
                 self.consume(body);
-                let result_ty = self.program.function_types[id].result;
-                let aggregate = aggregate_result(self.program, result_ty);
-                let pointer = if aggregate {
-                    let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                        ir::StackSlotKind::ExplicitSlot,
-                        (self.program.width(result_ty).max(1) * 8) as u32,
-                        STACK_SLOT_ALIGN_SHIFT,
-                    ));
-                    Some(self.builder.ins().stack_addr(I64, slot, 0))
-                } else {
-                    None
-                };
-                // PANIC-UNWIND-USE: `Task.catch` is a scope that is also a
-                // catch boundary; its value is `Result<T, Panic>`.
-                let caught = catch.map(|shape| (shape, self.join(expr.ty).unwrap()));
-                if caught.is_some() {
-                    self.runtime_void(self.catch_enter, &[]);
-                }
-                self.runtime_void(scope_begin, &[]);
-                let mut arguments = Vec::new();
-                if let Some(pointer) = pointer {
-                    arguments.push(pointer);
-                }
-                arguments.push(values[1]);
-                let signature = self.indirect_signature(id);
-                let signature = self.builder.import_signature(signature);
-                let call = self
-                    .builder
-                    .ins()
-                    .call_indirect(signature, values[0], &arguments);
-                if self.program.uses_unwinding {
-                    // A panic unwinding out of the body: cancel and join the
-                    // children with the word clear (other tasks run during
-                    // the join), then stop here (a catch) or go on unwinding.
-                    let address = self.abort_word_address();
-                    let word = self
-                        .builder
-                        .ins()
-                        .load(I64, ir::MemFlagsData::new(), address, 0);
-                    let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, word, 1);
-                    let unwind = self.builder.create_block();
-                    let normal = self.builder.create_block();
-                    self.builder.ins().brif(panicked, unwind, &[], normal, &[]);
-                    self.builder.switch_to_block(unwind);
-                    let zero = self.constant(0);
-                    self.builder
-                        .ins()
-                        .store(ir::MemFlagsData::new(), zero, address, 0);
-                    if !*parallel {
-                        self.runtime_void(self.task_cancel_scope, &[]);
-                    }
-                    self.runtime_void_raw(scope_end, &[]);
-                    let address = self.abort_word_address();
-                    if let Some((shape, join)) = caught {
-                        let zero = self.constant(0);
-                        self.builder
-                            .ins()
-                            .store(ir::MemFlagsData::new(), zero, address, 0);
-                        self.runtime_void(self.catch_leave, &[]);
-                        let values = self.encode_variant(expr.ty, shape.err_tag, &[]);
-                        self.jump(join, &values);
-                    } else {
-                        let one = self.constant(1);
-                        self.builder
-                            .ins()
-                            .store(ir::MemFlagsData::new(), one, address, 0);
-                        self.unwind_exit();
-                    }
-                    self.builder.switch_to_block(normal);
-                }
-                let result_values = if let Some(pointer) = pointer {
-                    self.load_words(pointer, 0, self.program.width(result_ty))
-                } else {
-                    self.builder.inst_results(call).to_vec()
-                };
-                if result_ty == Type::Never {
-                    self.runtime_void_raw(scope_end, &[]);
-                    if let Some((_, join)) = caught {
-                        self.builder.ins().trap(TrapCode::unwrap_user(1));
-                        self.builder.switch_to_block(join);
-                        return Some(self.builder.block_params(join).to_vec());
-                    }
-                    self.test_panic();
-                    return None;
-                }
-                if let Some(shape) = *failure {
-                    let failed = self.builder.create_block();
-                    let succeeded = self.builder.create_block();
-                    let done = self.builder.create_block();
-                    let condition = self.builder.ins().icmp_imm_s(
-                        IntCC::Equal,
-                        result_values[0],
-                        shape.err_tag as i64,
-                    );
-                    self.builder
-                        .ins()
-                        .brif(condition, failed, &[], succeeded, &[]);
-                    self.builder.switch_to_block(failed);
-                    self.runtime_void(self.task_cancel_scope, &[]);
-                    self.jump(done, &[]);
-                    self.builder.switch_to_block(succeeded);
-                    self.jump(done, &[]);
-                    self.builder.switch_to_block(done);
-                }
-                // The epilogue raises the panic of a child it joined.
-                self.runtime_void_raw(scope_end, &[]);
                 let _ = result;
-                let Some((shape, join)) = caught else {
-                    self.test_panic();
-                    return Some(result_values);
-                };
-                let address = self.abort_word_address();
-                let word = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), address, 0);
-                let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, word, 1);
-                let child = self.builder.create_block();
-                let fine = self.builder.create_block();
-                self.builder.ins().brif(panicked, child, &[], fine, &[]);
-                self.builder.switch_to_block(child);
-                let zero = self.constant(0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), zero, address, 0);
-                // The body's result is dropped: the catch answers Err.
-                self.drop_value(result_ty, &result_values);
-                self.runtime_void(self.catch_leave, &[]);
-                let values = self.encode_variant(expr.ty, shape.err_tag, &[]);
-                self.jump(join, &values);
-                self.builder.switch_to_block(fine);
-                self.runtime_void(self.catch_leave, &[]);
-                let values = self.encode_variant(expr.ty, shape.ok_tag, &result_values);
-                self.jump(join, &values);
-                self.builder.switch_to_block(join);
-                return Some(self.builder.block_params(join).to_vec());
+                return self.task_scope(&values, body.ty, expr.ty, *failure, *catch, *parallel);
             }
             ExprKind::TaskYield => self.runtime_call(self.task_yield, &[]),
             ExprKind::TaskCheckCancel => self.runtime_call(self.task_check_cancel, &[]),
@@ -7711,43 +7546,12 @@ impl Generator<'_, '_> {
             ExprKind::TaskJoin {
                 task,
                 exit,
-                parallel: true,
+                parallel,
                 ..
             } => {
-                // A thread always completes: its join yields the payload.
                 let handle = lower!(self.scalar(task));
                 self.consume(task);
-                let width = self.program.width(exit.payload).max(1);
-                let out = self.stack_words(width);
-                let status = self.runtime_call(self.thread_join, &[handle, out]);
-                self.rethrow_if_panicked(status);
-                return Some(self.load_words(out, 0, self.program.width(exit.payload)));
-            }
-            ExprKind::TaskJoin { task, exit, .. } => {
-                let handle = lower!(self.scalar(task));
-                self.consume(task);
-                let width = self.program.width(exit.payload).max(1);
-                let out = self.stack_words(width);
-                let status = self.runtime_call(self.task_join, &[handle, out]);
-                self.rethrow_if_panicked(status);
-                let completed = self.builder.create_block();
-                let cancelled = self.builder.create_block();
-                let join = self.join(exit.result).unwrap();
-                let condition = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
-                self.builder
-                    .ins()
-                    .brif(condition, completed, &[], cancelled, &[]);
-                self.builder.switch_to_block(completed);
-                let payload = self.load_words(out, 0, width);
-                let values = self.encode_variant(exit.result, exit.completed_tag, &payload);
-                self.jump(join, &values);
-                self.builder.switch_to_block(cancelled);
-                let payload = self.load_words(out, 0, width);
-                self.drop_value(exit.payload, &payload);
-                let values = self.encode_variant(exit.result, exit.cancelled_tag, &[]);
-                self.jump(join, &values);
-                self.builder.switch_to_block(join);
-                return Some(self.builder.block_params(join).to_vec());
+                return Some(self.task_join(handle, *exit, *parallel));
             }
             ExprKind::Call(target, args) => {
                 let erased_parameters = match target {
@@ -10649,6 +10453,228 @@ impl Generator<'_, '_> {
             }
             Coercion::DynUpcast { from, to } => Some(self.dyn_upcast(*from, *to, &values)),
         }
+    }
+    /// Spawn a task or thread running the owned `once` body `values`.
+    fn task_spawn(
+        &mut self,
+        values: &[Value],
+        body_ty: Type,
+        result: Type,
+        obligation: bool,
+        parallel: bool,
+    ) -> Value {
+        let Type::Once(id) = body_ty else {
+            unreachable!("checked task body is once")
+        };
+        let wrapper = self.task_wrappers[&id];
+        let wrapper = self.module.declare_func_in_func(wrapper, self.builder.func);
+        let wrapper = self.builder.ins().func_addr(I64, wrapper);
+        let bytes = self.constant((self.program.width(result).max(1) * 8) as i64);
+        let drop = if self.program.owns(result) {
+            let drop = self.task_pointer_drops[&result.full()];
+            let drop = self.module.declare_func_in_func(drop, self.builder.func);
+            self.builder.ins().func_addr(I64, drop)
+        } else {
+            self.constant(0)
+        };
+        let preserve = self.constant(i64::from(obligation));
+        let spawn = if parallel {
+            self.thread_spawn
+        } else {
+            self.task_spawn
+        };
+        self.runtime_call(
+            spawn,
+            &[wrapper, values[0], values[1], bytes, drop, preserve],
+        )
+    }
+    /// A task or thread scope (or `Task.catch`, a scope that is also a
+    /// catch boundary) running the owned `once` body `values`; `ty` is the
+    /// scope's type. `None` when the scope cannot complete.
+    fn task_scope(
+        &mut self,
+        values: &[Value],
+        body_ty: Type,
+        ty: Type,
+        failure: Option<crate::runtime_types::ResultShape>,
+        catch: Option<crate::runtime_types::ResultShape>,
+        parallel: bool,
+    ) -> Option<Words> {
+        let (scope_begin, scope_end) = if parallel {
+            (self.thread_scope_begin, self.thread_scope_end)
+        } else {
+            (self.task_scope_begin, self.task_scope_end)
+        };
+        let Type::Once(id) = body_ty else {
+            unreachable!("checked scope body is once")
+        };
+        let result_ty = self.program.function_types[id].result;
+        let aggregate = aggregate_result(self.program, result_ty);
+        let pointer = if aggregate {
+            let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                (self.program.width(result_ty).max(1) * 8) as u32,
+                STACK_SLOT_ALIGN_SHIFT,
+            ));
+            Some(self.builder.ins().stack_addr(I64, slot, 0))
+        } else {
+            None
+        };
+        // PANIC-UNWIND-USE: `Task.catch` is a scope that is also a
+        // catch boundary; its value is `Result<T, Panic>`.
+        let caught = catch.map(|shape| (shape, self.join(ty).unwrap()));
+        if caught.is_some() {
+            self.runtime_void(self.catch_enter, &[]);
+        }
+        self.runtime_void(scope_begin, &[]);
+        let mut arguments = Vec::new();
+        if let Some(pointer) = pointer {
+            arguments.push(pointer);
+        }
+        arguments.push(values[1]);
+        let signature = self.indirect_signature(id);
+        let signature = self.builder.import_signature(signature);
+        let call = self
+            .builder
+            .ins()
+            .call_indirect(signature, values[0], &arguments);
+        if self.program.uses_unwinding {
+            // A panic unwinding out of the body: cancel and join the
+            // children with the word clear (other tasks run during
+            // the join), then stop here (a catch) or go on unwinding.
+            let address = self.abort_word_address();
+            let word = self
+                .builder
+                .ins()
+                .load(I64, ir::MemFlagsData::new(), address, 0);
+            let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, word, 1);
+            let unwind = self.builder.create_block();
+            let normal = self.builder.create_block();
+            self.builder.ins().brif(panicked, unwind, &[], normal, &[]);
+            self.builder.switch_to_block(unwind);
+            let zero = self.constant(0);
+            self.builder
+                .ins()
+                .store(ir::MemFlagsData::new(), zero, address, 0);
+            if !parallel {
+                self.runtime_void(self.task_cancel_scope, &[]);
+            }
+            self.runtime_void_raw(scope_end, &[]);
+            let address = self.abort_word_address();
+            if let Some((shape, join)) = caught {
+                let zero = self.constant(0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), zero, address, 0);
+                self.runtime_void(self.catch_leave, &[]);
+                let values = self.encode_variant(ty, shape.err_tag, &[]);
+                self.jump(join, &values);
+            } else {
+                let one = self.constant(1);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), one, address, 0);
+                self.unwind_exit();
+            }
+            self.builder.switch_to_block(normal);
+        }
+        let result_values = if let Some(pointer) = pointer {
+            self.load_words(pointer, 0, self.program.width(result_ty))
+        } else {
+            self.builder.inst_results(call).to_vec()
+        };
+        if result_ty == Type::Never {
+            self.runtime_void_raw(scope_end, &[]);
+            if let Some((_, join)) = caught {
+                self.builder.ins().trap(TrapCode::unwrap_user(1));
+                self.builder.switch_to_block(join);
+                return Some(self.builder.block_params(join).to_vec());
+            }
+            self.test_panic();
+            return None;
+        }
+        if let Some(shape) = failure {
+            let failed = self.builder.create_block();
+            let succeeded = self.builder.create_block();
+            let done = self.builder.create_block();
+            let condition =
+                self.builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, result_values[0], shape.err_tag as i64);
+            self.builder
+                .ins()
+                .brif(condition, failed, &[], succeeded, &[]);
+            self.builder.switch_to_block(failed);
+            self.runtime_void(self.task_cancel_scope, &[]);
+            self.jump(done, &[]);
+            self.builder.switch_to_block(succeeded);
+            self.jump(done, &[]);
+            self.builder.switch_to_block(done);
+        }
+        // The epilogue raises the panic of a child it joined.
+        self.runtime_void_raw(scope_end, &[]);
+        let Some((shape, join)) = caught else {
+            self.test_panic();
+            return Some(result_values);
+        };
+        let address = self.abort_word_address();
+        let word = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), address, 0);
+        let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, word, 1);
+        let child = self.builder.create_block();
+        let fine = self.builder.create_block();
+        self.builder.ins().brif(panicked, child, &[], fine, &[]);
+        self.builder.switch_to_block(child);
+        let zero = self.constant(0);
+        self.builder
+            .ins()
+            .store(ir::MemFlagsData::new(), zero, address, 0);
+        // The body's result is dropped: the catch answers Err.
+        self.drop_value(result_ty, &result_values);
+        self.runtime_void(self.catch_leave, &[]);
+        let values = self.encode_variant(ty, shape.err_tag, &[]);
+        self.jump(join, &values);
+        self.builder.switch_to_block(fine);
+        self.runtime_void(self.catch_leave, &[]);
+        let values = self.encode_variant(ty, shape.ok_tag, &result_values);
+        self.jump(join, &values);
+        self.builder.switch_to_block(join);
+        return Some(self.builder.block_params(join).to_vec());
+    }
+    /// Join a task or thread handle. A thread always completes: its join
+    /// yields the payload; a task's join yields its `TaskExit`.
+    fn task_join(&mut self, handle: Value, exit: ex::TaskExitShape, parallel: bool) -> Words {
+        if parallel {
+            let width = self.program.width(exit.payload).max(1);
+            let out = self.stack_words(width);
+            let status = self.runtime_call(self.thread_join, &[handle, out]);
+            self.rethrow_if_panicked(status);
+            return self.load_words(out, 0, self.program.width(exit.payload));
+        }
+        let width = self.program.width(exit.payload).max(1);
+        let out = self.stack_words(width);
+        let status = self.runtime_call(self.task_join, &[handle, out]);
+        self.rethrow_if_panicked(status);
+        let completed = self.builder.create_block();
+        let cancelled = self.builder.create_block();
+        let join = self.join(exit.result).unwrap();
+        let condition = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+        self.builder
+            .ins()
+            .brif(condition, completed, &[], cancelled, &[]);
+        self.builder.switch_to_block(completed);
+        let payload = self.load_words(out, 0, width);
+        let values = self.encode_variant(exit.result, exit.completed_tag, &payload);
+        self.jump(join, &values);
+        self.builder.switch_to_block(cancelled);
+        let payload = self.load_words(out, 0, width);
+        self.drop_value(exit.payload, &payload);
+        let values = self.encode_variant(exit.result, exit.cancelled_tag, &[]);
+        self.jump(join, &values);
+        self.builder.switch_to_block(join);
+        self.builder.block_params(join).to_vec()
     }
     /// Lower a call to `target` on its lowered argument words; `ty` is the
     /// result type. `site` is the tree path's call expression (its address

@@ -1625,7 +1625,7 @@ pub(crate) struct Arm {
     pub body: Expr,
 }
 /// The checked `TaskExit<T>` layout used by `Task.join`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TaskExitShape {
     pub completed_tag: usize,
     pub cancelled_tag: usize,

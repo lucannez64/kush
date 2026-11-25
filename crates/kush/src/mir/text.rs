@@ -290,6 +290,10 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
                 type_name(*element)
             )
         }
+        Rvalue::Task(op, operands) => {
+            let json = serde_json::to_string(op).expect("a task operation serializes");
+            format!("task {json:?}({})", operands_text(operands))
+        }
         Rvalue::Bytes(bytes) => {
             let hex = bytes
                 .iter()
@@ -765,6 +769,12 @@ impl Parser {
             let index = self.operand()?;
             self.expect("]")?;
             return Ok(Rvalue::ElementAddress(base, index));
+        }
+        if name == "task" {
+            self.at += 1;
+            let json = self.string()?;
+            let op = serde_json::from_str(&json).map_err(|e| format!("task operation: {e}"))?;
+            return Ok(Rvalue::Task(op, self.operands()?));
         }
         if name == "byte_at" {
             self.at += 1;

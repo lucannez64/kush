@@ -169,6 +169,12 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     operand(*index).map_err(here)?;
                     target_ty
                 }
+                Rvalue::Task(_, values) => {
+                    for value in values {
+                        operand(*value).map_err(here)?;
+                    }
+                    target_ty
+                }
                 Rvalue::ByteAt(handle, index) => {
                     operand(*handle).map_err(here)?;
                     operand(*index).map_err(here)?;
