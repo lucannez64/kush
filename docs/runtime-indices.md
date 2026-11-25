@@ -11,8 +11,8 @@ native lowering.
 cargo run -p kush -- check examples/runtime-indices.kush
 cargo run -p kush -- eval  examples/runtime-indices.kush   # exit status 42
 cargo run -p kush -- run   examples/runtime-indices.kush   # native exit status 42
-cargo test --offline --test runtime_indices
-cargo test --offline --test kernel
+cargo test --offline --test all runtime_indices::
+cargo test --offline --test all kernel::
 ```
 
 This extends the closed/open erased-proof boundary documented in

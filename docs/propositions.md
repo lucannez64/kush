@@ -11,10 +11,10 @@ proof; the Rust implementation, compiler, and machine remain trusted.
 cargo run -p kush -- check examples/finite-proofs.kush
 cargo run -p kush -- eval  examples/finite-proofs.kush   # exit status 42
 cargo run -p kush -- run   examples/finite-proofs.kush   # native exit status 42
-cargo test --offline --test kernel
-cargo test --offline --test check
-cargo test --offline --test logical_data
-cargo test --offline --test interop
+cargo test --offline --test all kernel::
+cargo test --offline --test all check::
+cargo test --offline --test all logical_data::
+cargo test --offline --test all interop::
 ```
 
 Proofs are logical evidence. They are never runtime values. The surface syntax

@@ -13,3 +13,9 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# The tests run the compiler (and Cranelift) many times: at opt-level 1 the
+# suite takes half the time, while a rebuild after a compiler change costs
+# the same. Debug assertions and overflow checks stay on.
+[profile.dev]
+opt-level = 1

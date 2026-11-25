@@ -19,6 +19,10 @@ and use conservative build concurrency (start with two jobs).
   the rest. `scripts/test-all.sh` runs the whole suite with cargo-nextest,
   sized to the machine's free memory and cores (about 3.5 minutes instead of
   about 40 with `mbx test -j 2`); targeted runs can stay on `mbx test`.
+- The integration tests are one binary, `tests/all.rs`, with each file in
+  `crates/kush/tests/` as a module, so a change relinks once. A new test file
+  needs a `#[path]` line there. Run one file with `mbx test -p kush --test all
+  name::`, or `-E 'test(/^name::/)'` with nextest.
 - `docs/reference/` is the language as implemented. A change to language
   behavior updates the affected chapter in the same commit, and
   `scripts/check-reference.py` (uses `target/release/kush`, `--native` to also

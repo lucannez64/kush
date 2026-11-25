@@ -1,7 +1,7 @@
 //! The kernel written in Kush (`examples/kernel`, docs/kernel-in-kush.md):
-//! its package tests pass, it reads and prints back every exchange file the
-//! Rust side dumps from the example corpus byte for byte, and its normal
-//! forms agree with the Rust kernel's.
+//! its package tests pass (each one as its own test), it reads and prints
+//! back every exchange file the Rust side dumps from the example corpus byte
+//! for byte, and its normal forms agree with the Rust kernel's.
 use std::{path::PathBuf, process::Command};
 
 const CORPUS: &[&str] = &[
@@ -29,21 +29,71 @@ fn scratch(label: &str) -> PathBuf {
     path
 }
 
-#[test]
-fn the_package_tests_pass() {
+/// Run the package tests whose names match `filter`; their summary line.
+fn package_tests(filter: &str) -> String {
     let output = kush()
         .arg("test")
         .arg("--manifest-path")
         .arg(root().join("examples/kernel/Kush.toml"))
+        .arg(filter)
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(
         output.status.success(),
         "{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("0 failed"), "{stdout}");
+    stdout
+}
+
+/// The package's tests, one Rust test each so they run in parallel (a
+/// single `kush test` of the whole package takes over a minute).
+mod package {
+    macro_rules! package_tests {
+        ($($name:ident),* $(,)?) => {
+            $(
+                #[test]
+                fn $name() {
+                    let stdout = super::package_tests(stringify!($name));
+                    assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+                }
+            )*
+            pub(super) const NAMES: &[&str] = &[$(stringify!($name)),*];
+        };
+    }
+    package_tests!(
+        equal_terms_share_one_id,
+        the_store_grows_and_keeps_every_id,
+        levels_are_canonical,
+        terms_round_trip_canonically,
+        items_round_trip,
+        shifting_moves_only_free_indices_at_or_above_the_cutoff,
+        substitution_lowers_indices_and_never_captures,
+        outer_binders_are_rewritten_in_parallel,
+        universe_parameters_are_instantiated_everywhere,
+        shared_subterms_are_visited_once,
+        spines_split_and_rebuild_applications,
+        weak_head_reduction_stops_at_the_head,
+        reduction_budgets_fail_closed,
+        definitions_are_admitted_only_after_checking,
+        data_families_are_admitted_and_eliminated,
+        the_api_works_in_a_context,
+        failures_say_which_term_failed_and_why,
+        abstraction_builds_rewrite_motives,
+        rewinding_drops_new_objects_and_keeps_old_ones,
+        checking_a_definition_leaves_only_its_entry_behind,
+    );
+}
+
+#[test]
+fn every_package_test_has_a_rust_test() {
+    let stdout = package_tests("no package test has this name");
+    let filtered = format!("0 passed; 0 failed; {} filtered out", package::NAMES.len());
+    assert!(
+        stdout.contains(&filtered),
+        "add the new package test to `package`: {stdout}"
+    );
 }
 
 fn build(dir: &std::path::Path) -> PathBuf {

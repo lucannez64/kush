@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# One integration-test binary (tests/all.rs) instead of one per file.
+autotests = false
 
 [lints]
 workspace = true
@@ -17,3 +19,7 @@ cranelift-object = "=0.135.0"
 toml = { version = "=1.1.8", default-features = false, features = ["parse", "serde", "std"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.150"
+
+[[test]]
+name = "all"
+path = "tests/all.rs"

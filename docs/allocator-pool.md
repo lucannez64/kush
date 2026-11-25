@@ -173,7 +173,7 @@ counting and fallible operations use separate non-aborting runtime entry points.
 Run them with:
 
 ```sh
-cargo test -p kush --test allocator_pool
+cargo test -p kush --test all allocator_pool::
 ```
 
 ## Compact headers and retention
