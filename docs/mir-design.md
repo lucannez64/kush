@@ -321,3 +321,88 @@ Taken on 2026-11-25:
    is built.
 5. **Text form**: a stable, parseable text form for MIR dumps, used in
    tests the way the kernel exchange format is.
+6. **Loop optimizations** (FND-MIR-DEFAULT): rewritten as MIR passes
+   (section 8), not carried over from the tree path. Taken by the user.
+
+## 8. Loop optimizations on the MIR
+
+The tree path optimizes `while` loops in four ways. Each reads tree
+expressions and lowers the loop body more than once:
+
+| Optimization | When | Tree code |
+|---|---|---|
+| Upper-bound facts: `i < v.len()` drops the upper bound check of `v[i]` | `Speed` | `upper_bounds`, `slice_out_of_bounds` |
+| Slice-layout versioning: a copy of the loop where the view `v` has whole consecutive elements | `Speed` | `lower_checked_while` |
+| Push shadows: a vector's length and capacity in variables across `v = v.push(e)` | `Speed` and LLVM | `lower_while`, `vec_push` |
+| Deferred overflow checks (`native/deferred.rs`) | `defers_overflow()` | `lower_deferred_while` |
+
+Until all four exist on the MIR, `native::lower` keeps the tree path for
+functions with a `while` loop when one of them is on. FND-MIR-DEFAULT
+removes that gate.
+
+The MIR versions are passes over a built body, run before native
+lowering. Each writes its result into the body, so the text form shows
+it and tests can check it without compiling.
+
+**Loops (`mir/loops.rs`, FND-MIR-LOOPS).**
+- Dominators over the normal edges. A back edge's target is a loop
+  header; its natural loop is the set of blocks that reach the back edge
+  without passing the header.
+- Each loop gets a preheader: a block whose only successor is the header,
+  inserted when the header has several entries from outside.
+- A loop is *counted* when:
+  - its header tests `c = i <op> bound` and switches on `c`;
+  - `i` is assigned once in the loop, `i = i + k` (or `-`, checked or
+    unchecked) with a constant `k > 0`, in a block that every iteration
+    runs (it dominates every back edge);
+  - the bound's operands are constants, locals the loop does not assign,
+    or lengths of such locals.
+- Versioning clones a loop's blocks. The preheader then branches on a
+  guard to the original or the copy. Both copies share the exits and the
+  unwind cleanup.
+
+**Upper-bound facts (FND-MIR-BOUNDS).**
+- A forward must-analysis of facts `i < len(v)`. A fact is made on the
+  taken edge of a header test against a slice length, and an assignment
+  to `i` or `v` kills it. Copies of a local into temporaries carry the
+  local's facts while the local is unchanged.
+- A slice element call whose index and view carry a fact is marked
+  `below`. Native code then keeps only the sign check, as the tree path
+  does.
+
+**Slice-layout versioning (FND-MIR-SLICE-VERSION).**
+- Applies to a small counted loop over `i < v.len()`: a view `v` the loop
+  does not assign, and a body under the tree path's budget with no nested
+  loop.
+- The guard is `v.stride == 8 * width && v.bytes == 0`. The fast copy's
+  entry assigns those two words their constant values. That is a no-op
+  at run time, but it lets the code generator treat them as constants in
+  the loop.
+
+**Push shadows (FND-MIR-PUSH-SHADOWS).**
+- Applies to vector locals that a loop touches only as
+  `v = Vec.push(move v, e)`. The loop records them as shadowed.
+- Native code loads the length and capacity once at the preheader. At
+  each push in the loop it updates them, and it reloads the capacity
+  after a growth, as the tree path does.
+
+**Deferred overflow (FND-MIR-DEFERRED).**
+- The analysis of `native/deferred.rs` moves to the MIR:
+  - The expression trees become chains of single-assignment
+    temporaries.
+  - An operation is *exact*, keeping its immediate check, when its value
+    reaches a switch, an index or a counter. That is a backward walk over
+    the definitions of the operands.
+  - A certified bound is a tree over the definitions of temporaries. The
+    leaves are operands that are not certified operations.
+- The transform versions the loop into a deferred chunk and the checked
+  loop, and emits the chunk's frame as MIR:
+  - the sticky word and the leaf magnitude words;
+  - the chunk limit and the proof that its accesses are in range;
+  - the certificate after the chunk;
+  - the replay of the entry state when the certificate fails.
+- Deferred arithmetic is an `Rvalue::Binary` with a mode (exact, certified
+  or accumulate). The frame's computations are `loop` rvalues: magnitude,
+  chunk limit, ranges and the certificate.
+- `native/deferred.rs` and the tree versions are deleted once the MIR
+  passes cover the optimization-shape tests in `tests/llvm_backend.rs`.
