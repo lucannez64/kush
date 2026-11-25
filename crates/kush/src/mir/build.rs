@@ -81,14 +81,16 @@ fn scalar(ty: Type) -> bool {
     )
 }
 
-/// A value the builder covers: a scalar, a box, vector, `Bytes` or
-/// `String`, or a record or enum of such values that holds no borrow.
+/// A value the builder covers: a scalar, a box, vector, reference, `Bytes`
+/// or `String`, or a record or enum of such values.
 fn plain(program: &Executable, ty: Type) -> bool {
     fn go(program: &Executable, ty: Type, depth: usize) -> bool {
         if scalar(ty) || matches!(ty, Type::Bytes | Type::String) {
             return true;
         }
-        if let Type::Box(pointee) | Type::Vec(pointee) = ty {
+        if let Type::Box(pointee) | Type::Vec(pointee) | Type::Ref(pointee) | Type::RefMut(pointee) =
+            ty
+        {
             return depth < 16 && go(program, program.pointees[pointee], depth + 1);
         }
         let Some(id) = ty.layout() else {
@@ -96,8 +98,6 @@ fn plain(program: &Executable, ty: Type) -> bool {
         };
         let definition = &program.enums[id];
         depth < 16
-            && !definition.borrowed
-            && !definition.mutable_borrow
             && definition.array.is_none()
             && definition.dynamic_array.is_none()
             && definition.runtime_length.is_none()
@@ -133,9 +133,6 @@ fn eligible(program: &Executable, function: &Function) -> Result<(), String> {
     for local in &function.locals {
         if !plain(program, local.ty) {
             return Err(format!("a local of type {:?}", local.ty));
-        }
-        if local.pinned {
-            return Err("a local whose address is taken".into());
         }
         if erased(local.grade) {
             return Err("an erased local".into());
@@ -280,9 +277,12 @@ impl Builder<'_> {
         self.locals.len() - 1
     }
     fn assign(&mut self, local: LocalId, rvalue: Rvalue, span: Span) {
+        self.store(Place::local(local), rvalue, span);
+    }
+    fn store(&mut self, place: Place, rvalue: Rvalue, span: Span) {
         let block = self.current.expect("an assignment in reachable code");
         self.blocks[block].statements.push(Statement {
-            kind: StatementKind::Assign(local, rvalue),
+            kind: StatementKind::Assign(place, rvalue),
             span,
         });
     }
@@ -317,13 +317,20 @@ impl Builder<'_> {
         temp.map_or_else(|| Self::no_value(ty), |temp| Operand::Move(Place::local(temp)))
     }
 
-    /// Drop flags start clear; owned parameters are live on entry.
+    /// Drop flags start clear; owned parameters are live on entry. A
+    /// local's resource is dropped from the local itself, which a write
+    /// through `&mut` may have replaced; others from their own local.
     fn start(&mut self, span: Span) {
         let types = self.function.resources.clone();
-        for ty in types {
+        for (id, ty) in types.into_iter().enumerate() {
+            let owner = self
+                .function
+                .local_resources
+                .iter()
+                .position(|resource| *resource == Some(id));
             let resource = self.program.owns(ty).then(|| {
                 let flag = self.temp(Type::Bool);
-                let value = self.temp(ty);
+                let value = owner.unwrap_or_else(|| self.temp(ty));
                 (flag, value)
             });
             if let Some((flag, _)) = resource {
@@ -369,10 +376,7 @@ impl Builder<'_> {
     }
     /// A local now owns its value.
     fn activate_local(&mut self, slot: LocalId, span: Span) {
-        if let Some((flag, value)) = self.resource(self.local_resource(slot)) {
-            self.assign(value, Rvalue::Use(Operand::Copy(Place::local(slot))), span);
-            self.assign(flag, Rvalue::Use(Operand::Constant(1, Type::Bool)), span);
-        }
+        self.set_flag(self.local_resource(slot), true, span);
     }
     /// Drop a resource if its flag is set, and clear the flag.
     fn cleanup_resource(&mut self, id: Option<usize>, span: Span) {
@@ -419,6 +423,49 @@ impl Builder<'_> {
         );
         self.enter(next);
     }
+    /// A local holding the reference `value`, so places can go through it.
+    fn pointer_local(&mut self, value: Operand, ty: Type, span: Span) -> LocalId {
+        match value.place() {
+            Some(place) if !place.deref && place.field.is_none() => place.local,
+            _ => {
+                let temp = self.temp(ty);
+                self.assign(temp, Rvalue::Use(value), span);
+                temp
+            }
+        }
+    }
+    /// The place a checked place expression names, for taking its address:
+    /// a local, or fields of one, possibly through references.
+    fn place_of(&mut self, expr: &Expr) -> Result<Option<Place>, String> {
+        Ok(Some(match &expr.kind {
+            // The tree path takes such an address with `local_address`,
+            // which a whole-local field also selects natively.
+            ExprKind::Local(slot) | ExprKind::Peek(slot) => {
+                Place::field(*slot, 0, self.locals[*slot].ty)
+            }
+            ExprKind::Project(base, offset) if base.ty.is_ref() => {
+                let Some(value) = self.expr(base)? else {
+                    return Ok(None);
+                };
+                let pointer = self.pointer_local(value, base.ty, expr.span);
+                Place::deref(pointer, *offset, expr.ty)
+            }
+            ExprKind::Project(base, offset) => {
+                let Some(place) = self.place_of(base)? else {
+                    return Ok(None);
+                };
+                Place {
+                    local: place.local,
+                    deref: place.deref,
+                    field: Some(Field {
+                        offset: place.field.map_or(0, |field| field.offset) + offset,
+                        ty: expr.ty,
+                    }),
+                }
+            }
+            other => return Err(format!("a borrow of {}", variant_name(other))),
+        }))
+    }
     /// The unwind edge of a call or panic.
     fn unwind(&self) -> Option<BlockId> {
         self.cleanup
@@ -427,7 +474,7 @@ impl Builder<'_> {
     /// emitted before it is used cannot reach it first.
     fn settle(&mut self, value: Operand, ty: Type, span: Span) -> Operand {
         match value.place() {
-            Some(place) if !self.locals[place.local].temporary => {
+            Some(place) if place.deref || !self.locals[place.local].temporary => {
                 let temp = self.temp(ty);
                 self.assign(temp, Rvalue::Use(value), span);
                 Operand::Move(Place::local(temp))
@@ -511,8 +558,12 @@ impl Builder<'_> {
             let Some(value) = self.expr(expr)? else {
                 return Ok(None);
             };
+            // A read through a reference is exposed too: a later expression
+            // may write through another one.
             let exposed = match value {
-                Operand::Copy(place) | Operand::Move(place) => !self.locals[place.local].temporary,
+                Operand::Copy(place) | Operand::Move(place) => {
+                    place.deref || !self.locals[place.local].temporary
+                }
                 Operand::Constant(..) => false,
             };
             let value = if exposed && exprs[index + 1..].iter().any(|later| !leaf(later)) {
@@ -595,16 +646,69 @@ impl Builder<'_> {
                 self.assign(temp, Rvalue::Aggregate(Type::Enum(*enum_id), *tag, values), span);
                 Operand::Move(Place::local(temp))
             }
-            ExprKind::Project(base, offset) => {
-                if base.ty.is_ref() {
-                    return Err("a field read through a reference".into());
+            ExprKind::Project(base, offset) if base.ty.is_ref() => {
+                let Some(value) = self.expr(base)? else {
+                    return Ok(None);
+                };
+                let pointer = self.pointer_local(value, base.ty, span);
+                Operand::Copy(Place::deref(pointer, *offset, expr.ty))
+            }
+            ExprKind::RefRead(reference) => {
+                let Some(value) = self.expr(reference)? else {
+                    return Ok(None);
+                };
+                let pointer = self.pointer_local(value, reference.ty, span);
+                Operand::Copy(Place::deref(pointer, 0, expr.ty))
+            }
+            ExprKind::Borrow(slot) => {
+                let temp = self.temp(expr.ty);
+                self.assign(temp, Rvalue::Ref(Place::local(*slot)), span);
+                Operand::Move(Place::local(temp))
+            }
+            ExprKind::BorrowPlace(place) => {
+                let Some(place) = self.place_of(place)? else {
+                    return Ok(None);
+                };
+                let temp = self.temp(expr.ty);
+                self.assign(temp, Rvalue::Ref(place), span);
+                Operand::Move(Place::local(temp))
+            }
+            ExprKind::RefAssign(reference, offset, replacement) => {
+                let Some(values) = self.operands(&[reference, replacement])? else {
+                    return Ok(None);
+                };
+                let pointer = self.pointer_local(values[0], reference.ty, span);
+                let place = Place::deref(pointer, *offset, replacement.ty);
+                self.store(place, Rvalue::Use(values[1]), span);
+                self.consume(replacement);
+                Self::no_value(expr.ty)
+            }
+            ExprKind::DerefWrite(reference, replacement) => {
+                let Some(values) = self.operands(&[reference, replacement])? else {
+                    return Ok(None);
+                };
+                let pointer = self.pointer_local(values[0], reference.ty, span);
+                let pointee = reference
+                    .ty
+                    .ref_pointee()
+                    .map(|pointee| self.program.pointees[pointee])
+                    .ok_or("a write through a non-reference")?;
+                let place = Place::deref(pointer, 0, pointee);
+                if self.program.owns(pointee) {
+                    self.drop_place(place, span);
                 }
+                self.store(place, Rvalue::Use(values[1]), span);
+                self.consume(replacement);
+                Self::no_value(expr.ty)
+            }
+            ExprKind::Project(base, offset) => {
                 let Some(value) = self.expr(base)? else {
                     return Ok(None);
                 };
                 let place = value.place().ok_or("a field of a constant")?;
                 Operand::Copy(Place {
                     local: place.local,
+                    deref: place.deref,
                     field: Some(Field {
                         offset: place.field.map_or(0, |field| field.offset) + offset,
                         ty: expr.ty,
@@ -896,13 +1000,7 @@ impl Builder<'_> {
         if offset == 0 && self.program.width(self.locals[subject].ty) == 1 {
             Operand::Copy(Place::local(subject))
         } else {
-            Operand::Copy(Place {
-                local: subject,
-                field: Some(Field {
-                    offset,
-                    ty: Type::I64,
-                }),
-            })
+            Operand::Copy(Place::field(subject, offset, Type::I64))
         }
     }
 
@@ -1001,9 +1099,10 @@ impl Builder<'_> {
     fn part(&self, subject: LocalId, offset: usize, ty: Type) -> Place {
         let whole =
             offset == 0 && self.program.width(ty) == self.program.width(self.locals[subject].ty);
-        Place {
-            local: subject,
-            field: (!whole).then_some(Field { offset, ty }),
+        if whole {
+            Place::local(subject)
+        } else {
+            Place::field(subject, offset, ty)
         }
     }
 

@@ -31,20 +31,33 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
             Err(format!("_{local} does not exist"))
         }
     };
-    let operand = |operand: Operand| match operand {
-        Operand::Copy(place) | Operand::Move(place) => {
-            local(place.local)?;
-            if let Some(field) = place.field {
-                let width = program.width(body.locals[place.local].ty);
-                if field.offset + program.width(field.ty) > width {
-                    return Err(format!(
-                        "_{}.{} reads past the {width} words of the local",
-                        place.local, field.offset
-                    ));
-                }
+    let place = |place: Place| {
+        local(place.local)?;
+        let base = body.locals[place.local].ty;
+        let base = if place.deref {
+            let pointee = base
+                .ref_pointee()
+                .ok_or_else(|| format!("*_{} dereferences a {base:?}", place.local))?;
+            if place.field.is_none() {
+                return Err(format!("*_{} names no field", place.local));
             }
-            Ok(())
+            program.pointees[pointee]
+        } else {
+            base
+        };
+        if let Some(field) = place.field {
+            let width = program.width(base);
+            if field.offset + program.width(field.ty) > width {
+                return Err(format!(
+                    "_{}.{} reads past the {width} words of its value",
+                    place.local, field.offset
+                ));
+            }
         }
+        Ok(())
+    };
+    let operand = |operand: Operand| match operand {
+        Operand::Copy(target) | Operand::Move(target) => place(target),
         Operand::Constant(..) => Ok(()),
     };
     for (index, data) in body.blocks.iter().enumerate() {
@@ -54,7 +67,8 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
         }
         for statement in &data.statements {
             let StatementKind::Assign(target, rvalue) = &statement.kind;
-            local(*target).map_err(here)?;
+            place(*target).map_err(here)?;
+            let target_ty = body.place_ty(*target);
             let ty = match rvalue {
                 Rvalue::Use(value) => {
                     operand(*value).map_err(here)?;
@@ -99,7 +113,7 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                 }
                 Rvalue::BoxNew(value) => {
                     operand(*value).map_err(here)?;
-                    match body.locals[*target].ty {
+                    match target_ty {
                         Type::Box(pointee)
                             if compatible(body.operand_ty(*value), program.pointees[pointee]) =>
                         {
@@ -116,6 +130,13 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     }
                 }
                 Rvalue::Bytes(_) => Type::Bytes,
+                Rvalue::Ref(source) => {
+                    place(*source).map_err(here)?;
+                    match target_ty {
+                        Type::Ref(_) | Type::RefMut(_) => target_ty,
+                        other => return Err(here(format!("a reference stored in a {other:?}"))),
+                    }
+                }
                 Rvalue::Binary(op, left, right) => {
                     operand(*left).map_err(here)?;
                     operand(*right).map_err(here)?;
@@ -138,10 +159,10 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     }
                 }
             };
-            if !compatible(ty, body.locals[*target].ty) {
+            if !compatible(ty, target_ty) {
                 return Err(here(format!(
-                    "_{target} of type {:?} is assigned a {ty:?}",
-                    body.locals[*target].ty
+                    "{target:?} of type {:?} is assigned a {ty:?}",
+                    target_ty
                 )));
             }
         }
@@ -189,8 +210,12 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     block(*unwind).map_err(here)?;
                 }
             }
-            TerminatorKind::Drop { place, next, unwind } => {
-                operand(Operand::Copy(*place)).map_err(here)?;
+            TerminatorKind::Drop {
+                place: dropped,
+                next,
+                unwind,
+            } => {
+                operand(Operand::Copy(*dropped)).map_err(here)?;
                 block(*next).map_err(here)?;
                 if let Some(unwind) = unwind {
                     block(*unwind).map_err(here)?;

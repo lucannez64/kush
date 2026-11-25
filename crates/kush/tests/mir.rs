@@ -40,7 +40,7 @@ fn every_built_body_verifies_and_reads_back_from_its_text() {
     }
     assert_eq!(checked, built);
     // The corpus exercises the builder; coverage only grows.
-    assert!(built >= 105, "MIR covers {built} of {total} example functions");
+    assert!(built >= 115, "MIR covers {built} of {total} example functions");
 }
 
 #[test]
@@ -252,6 +252,47 @@ fn owned_values_are_dropped_once_on_return_break_and_unwind() {
     }
     let output = same_program_on_both_paths(&program, true);
     assert_eq!(output, "10\n5\n12\n-1\n");
+}
+
+#[test]
+fn references_read_and_write_through_places() {
+    let source = "
+        struct Point { x: i64, y: i64 }
+        struct Line { from: Point, to: Point }
+        fn width(line: &Line) -> i64 { line.to.x - line.from.x }
+        fn nudge(p: &mut Point, by: i64) -> Unit { p.x = p.x + by; }
+        fn reset(p: &mut Point) -> Unit { *p = Point { x: 0, y: 0 }; }
+        fn read(x: &i64) -> i64 { *x }
+        fn bump(x: &mut i64) -> Unit { *x = *x + 1; }
+        struct Holder { b: Box<i64>, n: i64 }
+        fn swap_box(slot: &mut Holder, value: i64) -> Unit ! {alloc} {
+            *slot = Holder { b: Box.new(value), n: value };
+        }
+        fn main() -> Unit ! {io, alloc} {
+            let mut line = Line { from: Point { x: 1, y: 2 }, to: Point { x: 9, y: 4 } };
+            print_i64(width(&line));
+            nudge(&mut line.to, 5);
+            print_i64(width(&line));
+            let mut p = Point { x: 3, y: 4 };
+            nudge(&mut p, 10);
+            print_i64(p.x);
+            reset(&mut p);
+            print_i64(p.x + p.y);
+            let mut n = 41;
+            bump(&mut n);
+            print_i64(read(&n));
+            let mut h = Holder { b: Box.new(1), n: 1 };
+            swap_box(&mut h, 7);
+            print_i64(h.n);
+        }";
+    let program = kush::program::load_source("<mir-refs>", source).unwrap();
+    let program = executable::check_program(&program).unwrap();
+    let text = kush::mir::dump(&program);
+    for name in ["width", "nudge", "reset", "read", "bump", "swap_box", "main"] {
+        assert!(text.contains(&format!("fn \"{name}\"(")), "{name} is not covered\n{text}");
+    }
+    let output = same_program_on_both_paths(&program, true);
+    assert_eq!(output, "8\n13\n13\n0\n42\n7\n");
 }
 
 #[test]

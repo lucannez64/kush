@@ -31,8 +31,8 @@ impl Generator<'_, '_> {
             self.builder.switch_to_block(blocks[index]);
             self.mir_unwind = block.unwind.map(|target| blocks[target]);
             for statement in &block.statements {
-                let StatementKind::Assign(local, rvalue) = &statement.kind;
-                let ty = body.locals[*local].ty;
+                let StatementKind::Assign(place, rvalue) = &statement.kind;
+                let ty = body.place_ty(*place);
                 let depth = self.fuzz_depth;
                 let words = self.mir_rvalue(body, rvalue, ty, statement.span);
                 if self.fuzz_depth > depth {
@@ -48,7 +48,7 @@ impl Generator<'_, '_> {
                     // The operation always panics; the block has ended.
                     continue 'blocks;
                 };
-                self.assign(*local, &words);
+                self.mir_store(*place, &words);
             }
             self.mir_terminator(body, &blocks, &block.terminator.kind);
         }
@@ -62,11 +62,57 @@ impl Generator<'_, '_> {
     fn mir_place(&mut self, place: Place) -> Words {
         let words = self.local_words(place.local);
         match place.field {
+            Some(field) if place.deref => {
+                let width = self.program.width(field.ty);
+                self.load_words(words[0], (field.offset * 8) as i32, width)
+            }
             Some(field) => {
                 let width = self.program.width(field.ty);
                 words[field.offset..field.offset + width].to_vec()
             }
             None => words,
+        }
+    }
+
+    fn mir_store(&mut self, place: Place, values: &[Value]) {
+        match place.field {
+            Some(field) if place.deref => {
+                let pointer = self.local_words(place.local)[0];
+                for (index, value) in values.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *value,
+                        pointer,
+                        ((field.offset + index) * 8) as i32,
+                    );
+                }
+            }
+            Some(field) => {
+                let mut words = self.local_words(place.local);
+                words[field.offset..field.offset + values.len()].copy_from_slice(values);
+                self.assign(place.local, &words);
+            }
+            None => self.assign(place.local, values),
+        }
+    }
+
+    /// The address of a place, as the tree path takes it: `borrow_local_value`
+    /// for a whole local, `local_address` plus the offset for a field.
+    fn mir_address(&mut self, place: Place) -> Value {
+        let offset = place.field.map_or(0, |field| field.offset * 8) as i64;
+        let base = if place.deref {
+            self.local_words(place.local)[0]
+        } else if place.field.is_none()
+            && place.local < self.program.functions[self.function_index].locals.len()
+        {
+            return self.borrow_local_value(place.local)[0];
+        } else {
+            self.local_address(place.local)
+        };
+        if offset == 0 {
+            base
+        } else {
+            self.builder.ins().iadd_imm_s(base, offset)
         }
     }
 
@@ -149,6 +195,7 @@ impl Generator<'_, '_> {
                 emit_drop(&mut self.builder, self.module, self.free, &[pointer]);
                 Some(values)
             }
+            Rvalue::Ref(place) => Some(vec![self.mir_address(*place)]),
             Rvalue::Bytes(bytes) => {
                 let id = match self.module.literal(bytes) {
                     Ok(id) => id,

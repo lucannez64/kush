@@ -176,6 +176,23 @@ enums that own them. Every drop is now in the MIR:
   resource and ends in `resume`. Native code jumps there wherever the tree
   path ran `unwind_exit`.
 
+A local's resource is dropped from the local itself, so a value replaced
+through `&mut` is the one dropped. Other resources are dropped from their
+own value local.
+
+FND-MIR-REFS (first part) added references:
+
+- A place may go through the reference held in a local: `*_p.off:ty` is
+  the words of type `ty` at word `off` of the pointee.
+- Assignments target places, so writes through references are ordinary
+  assignments. A write replacing an owned pointee drops the old value
+  first.
+- `&place` takes an address the way the tree path does. A whole local
+  uses its pinned storage, or a snapshot when it was never pinned, and a
+  field adds its offset to the local's address.
+
+Slices and text views are still to come.
+
 The flags are dynamic everywhere, as on the tree path. Removing the ones
 a dataflow pass can decide statically is FND-MIR-DROP-FLAGS.
 

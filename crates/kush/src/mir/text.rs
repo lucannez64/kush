@@ -59,10 +59,11 @@ pub(crate) fn print(body: &Body) -> String {
             }
         }
         for statement in &block.statements {
-            let StatementKind::Assign(local, rvalue) = &statement.kind;
+            let StatementKind::Assign(place, rvalue) = &statement.kind;
             let _ = writeln!(
                 out,
-                "        _{local} = {} {};",
+                "        {} = {} {};",
+                place_text(*place),
                 rvalue_text(rvalue),
                 span(statement.span)
             );
@@ -97,15 +98,23 @@ fn type_name(ty: Type) -> String {
         Type::Box(pointee) => format!("box#{pointee}"),
         Type::Vec(pointee) => format!("vec#{pointee}"),
         Type::Bytes => "bytes".into(),
+        Type::Ref(pointee) => format!("ref#{pointee}"),
+        Type::RefMut(pointee) => format!("refmut#{pointee}"),
         Type::String => "string".into(),
         other => format!("?{other:?}"),
     }
 }
 
 fn place_text(place: Place) -> String {
+    let deref = if place.deref { "*" } else { "" };
     match place.field {
-        Some(field) => format!("_{}.{}:{}", place.local, field.offset, type_name(field.ty)),
-        None => format!("_{}", place.local),
+        Some(field) => format!(
+            "{deref}_{}.{}:{}",
+            place.local,
+            field.offset,
+            type_name(field.ty)
+        ),
+        None => format!("{deref}_{}", place.local),
     }
 }
 
@@ -149,6 +158,7 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
         ),
         Rvalue::BoxNew(operand) => format!("box_new({})", operand_text(*operand)),
         Rvalue::BoxTake(operand) => format!("box_take({})", operand_text(*operand)),
+        Rvalue::Ref(place) => format!("&{}", place_text(*place)),
         Rvalue::Bytes(bytes) => {
             let hex = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
             format!("bytes \"{hex}\"")
@@ -369,6 +379,14 @@ impl Parser {
             }
             "bytes" => Type::Bytes,
             "string" => Type::String,
+            "ref" => {
+                self.expect("#")?;
+                Type::Ref(self.number()?)
+            }
+            "refmut" => {
+                self.expect("#")?;
+                Type::RefMut(self.number()?)
+            }
             "variants" => {
                 self.expect("#")?;
                 let id = self.number()?;
@@ -454,13 +472,13 @@ impl Parser {
                 if let Some(terminator) = self.terminator()? {
                     break terminator;
                 }
-                let local = self.local()?;
+                let place = self.place()?;
                 self.expect("=")?;
                 let rvalue = self.rvalue()?;
                 let span = self.span()?;
                 self.expect(";")?;
                 statements.push(Statement {
-                    kind: StatementKind::Assign(local, rvalue),
+                    kind: StatementKind::Assign(place, rvalue),
                     span,
                 });
             };
@@ -488,6 +506,7 @@ impl Parser {
         }
     }
     fn place(&mut self) -> Result<Place, String> {
+        let deref = self.eat("*");
         let local = self.local()?;
         let field = if self.eat(".") {
             let offset = self.number()?;
@@ -499,7 +518,14 @@ impl Parser {
         } else {
             None
         };
-        Ok(Place { local, field })
+        if deref && field.is_none() {
+            return Err(format!("the deref place *_{local} names no field"));
+        }
+        Ok(Place {
+            local,
+            deref,
+            field,
+        })
     }
     fn operands(&mut self) -> Result<Vec<Operand>, String> {
         self.expect("(")?;
@@ -563,6 +589,10 @@ impl Parser {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| format!("invalid hex bytes '{hex}'"))?;
             return Ok(Rvalue::Bytes(bytes));
+        }
+        if name == "&" {
+            self.at += 1;
+            return Ok(Rvalue::Ref(self.place()?));
         }
         if name == "aggregate" {
             self.at += 1;

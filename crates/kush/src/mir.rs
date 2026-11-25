@@ -61,14 +61,17 @@ pub(crate) struct Statement {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum StatementKind {
-    Assign(LocalId, Rvalue),
+    Assign(Place, Rvalue),
 }
 
-/// A local, or a run of its words. Records and enums are flat words, so
-/// a nested field is one offset from the start of the local.
+/// A local, or a run of its words; or, with `deref`, a run of the words
+/// the reference in the local points to. Records and enums are flat words,
+/// so a nested field is one offset from the start. A deref place always
+/// names its field.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Place {
     pub local: LocalId,
+    pub deref: bool,
     pub field: Option<Field>,
 }
 
@@ -105,6 +108,8 @@ pub(crate) enum Rvalue {
     BoxTake(Operand),
     /// A new `Bytes` holding a copy of a literal.
     Bytes(Vec<u8>),
+    /// The address of a place: a reference to it.
+    Ref(Place),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,7 +197,26 @@ impl Body {
 
 impl Place {
     pub(crate) fn local(local: LocalId) -> Self {
-        Place { local, field: None }
+        Place {
+            local,
+            deref: false,
+            field: None,
+        }
+    }
+    pub(crate) fn field(local: LocalId, offset: usize, ty: Type) -> Self {
+        Place {
+            local,
+            deref: false,
+            field: Some(Field { offset, ty }),
+        }
+    }
+    /// The words of type `ty` at `offset` behind the reference in `local`.
+    pub(crate) fn deref(local: LocalId, offset: usize, ty: Type) -> Self {
+        Place {
+            local,
+            deref: true,
+            field: Some(Field { offset, ty }),
+        }
     }
 }
 
