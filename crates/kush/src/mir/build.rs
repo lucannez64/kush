@@ -17,6 +17,10 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
     eligible(program, function)?;
     let mut builder = Builder {
         program,
+        function,
+        resources: Vec::new(),
+        cleanup: None,
+        in_cleanup: false,
         locals: function
             .locals
             .iter()
@@ -32,10 +36,13 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
     };
     let entry = builder.new_block();
     builder.current = Some(entry);
+    builder.start(function.span);
     if let Some(value) = builder.block(&function.body)? {
         let span = function.body.tail.as_ref().map_or(function.span, |tail| tail.span);
-        builder.terminate(TerminatorKind::Return(value), span);
+        builder.return_value(value, span);
     }
+    builder.finish_cleanup(function.span);
+    let unwind = builder.cleanup;
     let blocks = builder
         .blocks
         .into_iter()
@@ -47,7 +54,7 @@ pub(crate) fn build(program: &Executable, index: usize) -> Result<Body, String> 
             Ok(BasicBlock {
                 statements: block.statements,
                 terminator,
-                unwind: None,
+                unwind: if block.cleanup { None } else { unwind },
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -74,19 +81,21 @@ fn scalar(ty: Type) -> bool {
     )
 }
 
-/// A value the builder covers: a scalar, or a record or enum of such
-/// values that owns nothing and holds no borrow.
+/// A value the builder covers: a scalar, a box, vector, `Bytes` or
+/// `String`, or a record or enum of such values that holds no borrow.
 fn plain(program: &Executable, ty: Type) -> bool {
     fn go(program: &Executable, ty: Type, depth: usize) -> bool {
-        if scalar(ty) {
+        if scalar(ty) || matches!(ty, Type::Bytes | Type::String) {
             return true;
+        }
+        if let Type::Box(pointee) | Type::Vec(pointee) = ty {
+            return depth < 16 && go(program, program.pointees[pointee], depth + 1);
         }
         let Some(id) = ty.layout() else {
             return false;
         };
         let definition = &program.enums[id];
         depth < 16
-            && !program.owns(ty)
             && !definition.borrowed
             && !definition.mutable_borrow
             && definition.array.is_none()
@@ -121,7 +130,7 @@ fn eligible(program: &Executable, function: &Function) -> Result<(), String> {
     if !plain(program, function.result) {
         return Err(format!("a {:?} result", function.result));
     }
-    for (slot, local) in function.locals.iter().enumerate() {
+    for local in &function.locals {
         if !plain(program, local.ty) {
             return Err(format!("a local of type {:?}", local.ty));
         }
@@ -130,9 +139,6 @@ fn eligible(program: &Executable, function: &Function) -> Result<(), String> {
         }
         if erased(local.grade) {
             return Err("an erased local".into());
-        }
-        if function.local_resources.get(slot).copied().flatten().is_some() {
-            return Err("a local that owns a resource".into());
         }
     }
     Ok(())
@@ -178,6 +184,14 @@ fn supported(pattern: &Pattern) -> Result<(), String> {
     }
 }
 
+fn has_alternatives(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Or(_) => true,
+        Pattern::Variant { fields, .. } => fields.iter().any(|(_, p)| has_alternatives(p)),
+        _ => false,
+    }
+}
+
 fn binds(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Bind(_) => true,
@@ -213,6 +227,8 @@ fn leaf(expr: &Expr) -> bool {
 struct Partial {
     statements: Vec<Statement>,
     terminator: Option<Terminator>,
+    /// Part of the unwind cleanup: a panic here continues unwinding.
+    cleanup: bool,
 }
 
 struct Loop {
@@ -225,6 +241,15 @@ struct Loop {
 
 struct Builder<'a> {
     program: &'a Executable,
+    function: &'a Function,
+    /// Per checked resource that owns something: its drop flag and the
+    /// local holding its value (the tree path's tracked words).
+    resources: Vec<Option<(LocalId, LocalId)>>,
+    /// The cleanup block every panic unwinds to, when the function has
+    /// owned resources: it drops each one whose flag is set.
+    cleanup: Option<BlockId>,
+    /// Blocks created now belong to the cleanup.
+    in_cleanup: bool,
     locals: Vec<LocalDecl>,
     blocks: Vec<Partial>,
     /// The block being filled; `None` after a terminator, until the next
@@ -238,6 +263,7 @@ impl Builder<'_> {
         self.blocks.push(Partial {
             statements: Vec::new(),
             terminator: None,
+            cleanup: self.in_cleanup,
         });
         self.blocks.len() - 1
     }
@@ -269,13 +295,14 @@ impl Builder<'_> {
     }
     /// Jump to a join block, creating it on first use.
     fn goto_join(&mut self, join: &mut Option<BlockId>, span: Span) {
-        let target = *join.get_or_insert_with(|| {
-            self.blocks.push(Partial {
-                statements: Vec::new(),
-                terminator: None,
-            });
-            self.blocks.len() - 1
-        });
+        let target = match *join {
+            Some(target) => target,
+            None => {
+                let target = self.new_block();
+                *join = Some(target);
+                target
+            }
+        };
         self.goto(target, span);
     }
     /// The value of a unit or never-typed expression, which has no storage.
@@ -290,27 +317,189 @@ impl Builder<'_> {
         temp.map_or_else(|| Self::no_value(ty), |temp| Operand::Move(Place::local(temp)))
     }
 
+    /// Drop flags start clear; owned parameters are live on entry.
+    fn start(&mut self, span: Span) {
+        let types = self.function.resources.clone();
+        for ty in types {
+            let resource = self.program.owns(ty).then(|| {
+                let flag = self.temp(Type::Bool);
+                let value = self.temp(ty);
+                (flag, value)
+            });
+            if let Some((flag, _)) = resource {
+                self.assign(flag, Rvalue::Use(Operand::Constant(0, Type::Bool)), span);
+            }
+            self.resources.push(resource);
+        }
+        if self.resources.iter().any(Option::is_some) {
+            self.in_cleanup = true;
+            self.cleanup = Some(self.new_block());
+            self.in_cleanup = false;
+        }
+        for slot in 0..self.function.parameters {
+            self.activate_local(slot, span);
+        }
+    }
+    fn resource(&self, id: Option<usize>) -> Option<(LocalId, LocalId)> {
+        id.and_then(|id| self.resources[id])
+    }
+    fn set_flag(&mut self, id: Option<usize>, live: bool, span: Span) {
+        if let Some((flag, _)) = self.resource(id) {
+            let value = Operand::Constant(i64::from(live), Type::Bool);
+            self.assign(flag, Rvalue::Use(value), span);
+        }
+    }
+    /// The tree path's `track`: an expression's owned result is live.
+    fn track(&mut self, expr: &Expr, value: Operand) {
+        if let Some((flag, slot)) = self.resource(expr.resource) {
+            let value = match value {
+                Operand::Move(place) => Operand::Copy(place),
+                other => other,
+            };
+            self.assign(slot, Rvalue::Use(value), expr.span);
+            self.assign(flag, Rvalue::Use(Operand::Constant(1, Type::Bool)), expr.span);
+        }
+    }
+    /// A parent took ownership of the expression's result.
+    fn consume(&mut self, expr: &Expr) {
+        self.set_flag(expr.resource, false, expr.span);
+    }
+    fn local_resource(&self, slot: LocalId) -> Option<usize> {
+        self.function.local_resources.get(slot).copied().flatten()
+    }
+    /// A local now owns its value.
+    fn activate_local(&mut self, slot: LocalId, span: Span) {
+        if let Some((flag, value)) = self.resource(self.local_resource(slot)) {
+            self.assign(value, Rvalue::Use(Operand::Copy(Place::local(slot))), span);
+            self.assign(flag, Rvalue::Use(Operand::Constant(1, Type::Bool)), span);
+        }
+    }
+    /// Drop a resource if its flag is set, and clear the flag.
+    fn cleanup_resource(&mut self, id: Option<usize>, span: Span) {
+        let Some((flag, value)) = self.resource(id) else {
+            return;
+        };
+        let live = self.new_block();
+        let skip = self.new_block();
+        self.terminate(
+            TerminatorKind::Switch {
+                value: Operand::Copy(Place::local(flag)),
+                targets: vec![(0, skip)],
+                otherwise: live,
+            },
+            span,
+        );
+        self.enter(live);
+        self.assign(flag, Rvalue::Use(Operand::Constant(0, Type::Bool)), span);
+        self.terminate(
+            TerminatorKind::Drop {
+                place: Place::local(value),
+                next: skip,
+                unwind: None,
+            },
+            span,
+        );
+        self.enter(skip);
+    }
+    fn cleanup_all(&mut self, span: Span) {
+        for id in (0..self.resources.len()).rev() {
+            self.cleanup_resource(Some(id), span);
+        }
+    }
+    /// Run drop glue on a place, then continue in a new block.
+    fn drop_place(&mut self, place: Place, span: Span) {
+        let next = self.new_block();
+        self.terminate(
+            TerminatorKind::Drop {
+                place,
+                next,
+                unwind: None,
+            },
+            span,
+        );
+        self.enter(next);
+    }
+    /// The unwind edge of a call or panic.
+    fn unwind(&self) -> Option<BlockId> {
+        self.cleanup
+    }
+    /// Copy a value read from a source local into a temporary, so drops
+    /// emitted before it is used cannot reach it first.
+    fn settle(&mut self, value: Operand, ty: Type, span: Span) -> Operand {
+        match value.place() {
+            Some(place) if !self.locals[place.local].temporary => {
+                let temp = self.temp(ty);
+                self.assign(temp, Rvalue::Use(value), span);
+                Operand::Move(Place::local(temp))
+            }
+            _ => value,
+        }
+    }
+    fn return_value(&mut self, value: Operand, span: Span) {
+        let ty = self.function.result;
+        let value = if self.cleanup.is_some() {
+            self.settle(value, ty, span)
+        } else {
+            value
+        };
+        self.cleanup_all(span);
+        self.terminate(TerminatorKind::Return(value), span);
+    }
+    /// Fill the cleanup block: drop every live resource, then resume.
+    fn finish_cleanup(&mut self, span: Span) {
+        let Some(cleanup) = self.cleanup else {
+            return;
+        };
+        self.in_cleanup = true;
+        self.enter(cleanup);
+        self.cleanup_all(span);
+        self.terminate(TerminatorKind::Resume, span);
+        self.in_cleanup = false;
+    }
+
     fn block(&mut self, block: &crate::executable::Block) -> Result<Option<Operand>, String> {
+        let mut slots = Vec::new();
         for statement in &block.statements {
             match statement {
                 TreeStatement::Let(slot, expr) => {
                     let Some(value) = self.expr(expr)? else {
                         return Ok(None);
                     };
+                    self.consume(expr);
                     self.assign(*slot, Rvalue::Use(value), expr.span);
+                    self.activate_local(*slot, expr.span);
+                    slots.push(*slot);
                 }
                 TreeStatement::Declare(_) => return Err("a temporary owner".into()),
                 TreeStatement::Expr(expr) => {
                     if self.expr(expr)?.is_none() {
                         return Ok(None);
                     }
+                    self.cleanup_resource(expr.resource, expr.span);
                 }
             }
         }
-        match &block.tail {
-            Some(tail) => self.expr(tail),
-            None => Ok(Some(Self::no_value(Type::Unit))),
+        let (value, span) = match &block.tail {
+            Some(tail) => {
+                let Some(value) = self.expr(tail)? else {
+                    return Ok(None);
+                };
+                self.consume(tail);
+                (value, tail.span)
+            }
+            None => (Self::no_value(Type::Unit), Span::new(0, 0)),
+        };
+        let owned = slots
+            .iter()
+            .any(|slot| self.resource(self.local_resource(*slot)).is_some());
+        if !owned {
+            return Ok(Some(value));
         }
+        let value = self.settle(value, block.ty, span);
+        for slot in slots.into_iter().rev() {
+            self.cleanup_resource(self.local_resource(slot), span);
+        }
+        Ok(Some(value))
     }
 
     /// Lower expressions evaluated left to right. A value read from a
@@ -338,24 +527,70 @@ impl Builder<'_> {
         Ok(Some(values))
     }
 
+    /// Lower an expression; an owned result becomes live, as the tree
+    /// path's `expr` tracks it.
     fn expr(&mut self, expr: &Expr) -> Result<Option<Operand>, String> {
-        if expr.resource.is_some() {
-            return Err("an owned resource".into());
-        }
         if !plain(self.program, expr.ty) {
             return Err(format!("a value of type {:?}", expr.ty));
         }
+        let value = self.expression(expr)?;
+        if let Some(value) = value {
+            self.track(expr, value);
+        }
+        Ok(value)
+    }
+
+    fn expression(&mut self, expr: &Expr) -> Result<Option<Operand>, String> {
         let span = expr.span;
         Ok(Some(match &expr.kind {
             ExprKind::Constant(value) => Operand::Constant(*value, expr.ty),
             ExprKind::Local(slot) | ExprKind::Peek(slot) => Operand::Copy(Place::local(*slot)),
-            ExprKind::Move(slot) => Operand::Move(Place::local(*slot)),
+            ExprKind::Move(slot) => {
+                self.set_flag(self.local_resource(*slot), false, span);
+                Operand::Move(Place::local(*slot))
+            }
+            ExprKind::BytesLiteral(bytes) => {
+                let temp = self.temp(expr.ty);
+                self.assign(temp, Rvalue::Bytes(bytes.clone()), span);
+                Operand::Move(Place::local(temp))
+            }
+            ExprKind::BoxNew(value) | ExprKind::BoxTake(value) => {
+                let Some(operand) = self.expr(value)? else {
+                    return Ok(None);
+                };
+                let temp = self.temp(expr.ty);
+                let rvalue = if matches!(expr.kind, ExprKind::BoxNew(_)) {
+                    Rvalue::BoxNew(operand)
+                } else {
+                    Rvalue::BoxTake(operand)
+                };
+                self.assign(temp, rvalue, span);
+                self.consume(value);
+                Operand::Move(Place::local(temp))
+            }
+            ExprKind::Drop(value) => {
+                let Some(operand) = self.expr(value)? else {
+                    return Ok(None);
+                };
+                self.consume(value);
+                if self.program.owns(value.ty) {
+                    let place = match operand.place() {
+                        Some(place) => place,
+                        None => return Err("a drop of a constant".into()),
+                    };
+                    self.drop_place(place, span);
+                }
+                Self::no_value(expr.ty)
+            }
             ExprKind::Block(block) => return self.block(block),
             ExprKind::Construct { enum_id, tag, fields } => {
                 let fields = fields.iter().collect::<Vec<_>>();
                 let Some(values) = self.operands(&fields)? else {
                     return Ok(None);
                 };
+                for field in &fields {
+                    self.consume(field);
+                }
                 let temp = self.temp(expr.ty);
                 self.assign(temp, Rvalue::Aggregate(Type::Enum(*enum_id), *tag, values), span);
                 Operand::Move(Place::local(temp))
@@ -397,11 +632,21 @@ impl Builder<'_> {
                 self.assign(temp, Rvalue::Binary(op, values[0], values[1]), span);
                 Operand::Move(Place::local(temp))
             }
-            ExprKind::Assign(slot, value) => {
-                let Some(value) = self.expr(value)? else {
+            ExprKind::Assign(slot, replacement) => {
+                let Some(value) = self.expr(replacement)? else {
                     return Ok(None);
                 };
+                self.consume(replacement);
+                let old = self.local_resource(*slot);
+                let value = if self.resource(old).is_some() {
+                    let value = self.settle(value, replacement.ty, span);
+                    self.cleanup_resource(old, span);
+                    value
+                } else {
+                    value
+                };
                 self.assign(*slot, Rvalue::Use(value), span);
+                self.activate_local(*slot, span);
                 Self::no_value(expr.ty)
             }
             ExprKind::If(condition, yes, no) => {
@@ -489,16 +734,17 @@ impl Builder<'_> {
                 Self::result(result, expr.ty)
             }
             ExprKind::Break(value, cleanup) => {
-                if !cleanup.is_empty() {
-                    return Err("a break that drops resources".into());
-                }
                 if let Some(value) = value {
-                    let Some(value) = self.expr(value)? else {
+                    let Some(operand) = self.expr(value)? else {
                         return Ok(None);
                     };
+                    self.consume(value);
                     if let Some(result) = self.loops.last().and_then(|scope| scope.result) {
-                        self.assign(result, Rvalue::Use(value), span);
+                        self.assign(result, Rvalue::Use(operand), span);
                     }
+                }
+                for id in cleanup {
+                    self.cleanup_resource(Some(*id), span);
                 }
                 let scope = self.loops.len().checked_sub(1).ok_or("a break outside a loop")?;
                 let mut exit = self.loops[scope].exit;
@@ -507,18 +753,19 @@ impl Builder<'_> {
                 return Ok(None);
             }
             ExprKind::Continue(cleanup) => {
-                if !cleanup.is_empty() {
-                    return Err("a continue that drops resources".into());
+                for id in cleanup {
+                    self.cleanup_resource(Some(*id), span);
                 }
                 let head = self.loops.last().ok_or("a continue outside a loop")?.head;
                 self.goto(head, span);
                 return Ok(None);
             }
             ExprKind::Return(value) => {
-                let Some(value) = self.expr(value)? else {
+                let Some(operand) = self.expr(value)? else {
                     return Ok(None);
                 };
-                self.terminate(TerminatorKind::Return(value), span);
+                self.consume(value);
+                self.return_value(operand, span);
                 return Ok(None);
             }
             ExprKind::Call(target, args) => return self.call(expr, target, args),
@@ -581,8 +828,12 @@ impl Builder<'_> {
         self.assign(subject, Rvalue::Use(value), scrutinee.span);
         let temp = self.result_temp(expr.ty);
         let mut join = None;
+        let owned = self.program.owns(scrutinee.ty);
         for arm in arms {
             supported(&arm.pattern)?;
+            if owned && has_alternatives(&arm.pattern) {
+                return Err("alternatives over an owned value".into());
+            }
             // An arm without a test or guard matches everything left.
             let irrefutable = !refutable(&arm.pattern) && arm.guard.is_none();
             let next = if irrefutable { usize::MAX } else { self.new_block() };
@@ -608,9 +859,19 @@ impl Builder<'_> {
                     }
                 }
             }
+            // The arm owns the scrutinee: bindings take their parts, and
+            // the parts no binding takes are dropped.
+            self.consume(scrutinee);
+            self.dispose(subject, 0, &arm.pattern, scrutinee.ty, arm.body.span);
             if let Some(value) = self.expr(&arm.body)? {
+                self.consume(&arm.body);
                 if let Some(temp) = temp {
                     self.assign(temp, Rvalue::Use(value), arm.body.span);
+                }
+                let mut slots = std::collections::BTreeSet::new();
+                crate::ownership::pattern_bindings(&arm.pattern, &mut slots);
+                for slot in slots.into_iter().rev() {
+                    self.cleanup_resource(self.local_resource(slot), arm.body.span);
                 }
                 self.goto_join(&mut join, arm.body.span);
             }
@@ -714,17 +975,43 @@ impl Builder<'_> {
         }
     }
 
+    /// The tree path's `dispose_pattern`: after a match, each binding owns
+    /// its part of the subject, and each owned part under `_` is dropped.
+    fn dispose(&mut self, subject: LocalId, offset: usize, pattern: &Pattern, ty: Type, span: Span) {
+        match pattern {
+            Pattern::Any => {
+                if self.program.owns(ty) {
+                    let place = self.part(subject, offset, ty);
+                    self.drop_place(place, span);
+                }
+            }
+            Pattern::Bind(slot) => self.activate_local(*slot, span),
+            Pattern::Variant { tag, fields, .. } => {
+                let layout = ty.layout().expect("a variant pattern over a record or enum");
+                let types = self.program.enums[layout].variants[*tag].fields.clone();
+                for ((field, pattern), ty) in fields.iter().zip(types).rev() {
+                    self.dispose(subject, offset + field, pattern, ty, span);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The words of type `ty` at `offset` in the subject.
+    fn part(&self, subject: LocalId, offset: usize, ty: Type) -> Place {
+        let whole =
+            offset == 0 && self.program.width(ty) == self.program.width(self.locals[subject].ty);
+        Place {
+            local: subject,
+            field: (!whole).then_some(Field { offset, ty }),
+        }
+    }
+
     /// Assign the bindings of a pattern that matched.
     fn bind(&mut self, subject: LocalId, offset: usize, pattern: &Pattern, span: Span) {
         match pattern {
             Pattern::Bind(slot) => {
-                let ty = self.locals[*slot].ty;
-                let whole = offset == 0
-                    && self.program.width(ty) == self.program.width(self.locals[subject].ty);
-                let place = Place {
-                    local: subject,
-                    field: (!whole).then_some(Field { offset, ty }),
-                };
+                let place = self.part(subject, offset, self.locals[*slot].ty);
                 self.assign(*slot, Rvalue::Use(Operand::Copy(place)), span);
             }
             Pattern::Variant { fields, .. } => {
@@ -766,15 +1053,23 @@ impl Builder<'_> {
                 }) {
                     return Err("a panic with a computed message".into());
                 }
-                self.terminate(TerminatorKind::Panic { unwind: None }, span);
+                self.terminate(
+                    TerminatorKind::Panic {
+                        unwind: self.unwind(),
+                    },
+                    span,
+                );
                 return Ok(None);
             }
             other => return Err(format!("a call to {}", target_name(other))),
         };
-        let args = args.iter().collect::<Vec<_>>();
-        let Some(args) = self.operands(&args)? else {
+        let exprs = args.iter().collect::<Vec<_>>();
+        let Some(args) = self.operands(&exprs)? else {
             return Ok(None);
         };
+        for arg in exprs {
+            self.consume(arg);
+        }
         let destination = self.temp(expr.ty);
         let next = self.new_block();
         self.terminate(
@@ -783,7 +1078,7 @@ impl Builder<'_> {
                 args,
                 destination,
                 next,
-                unwind: None,
+                unwind: self.unwind(),
             },
             span,
         );

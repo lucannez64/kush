@@ -40,7 +40,7 @@ fn every_built_body_verifies_and_reads_back_from_its_text() {
     }
     assert_eq!(checked, built);
     // The corpus exercises the builder; coverage only grows.
-    assert!(built >= 95, "MIR covers {built} of {total} example functions");
+    assert!(built >= 105, "MIR covers {built} of {total} example functions");
 }
 
 #[test]
@@ -90,7 +90,12 @@ fn \"count\"(_0: i64) -> i64 {
 /// Build `source` natively on the tree path and on the MIR path; both must
 /// print the same and exit the same way.
 fn same_on_both_paths(source: &str) -> String {
-    let program = executable::check(source).unwrap();
+    same_program_on_both_paths(&executable::check(source).unwrap(), false)
+}
+
+/// As [`same_on_both_paths`]; with `stats`, the programs also report their
+/// allocations, which must agree.
+fn same_program_on_both_paths(program: &executable::Executable, stats: bool) -> String {
     let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
     let mut outputs = Vec::new();
     for mir in [false, true] {
@@ -99,12 +104,23 @@ fn same_on_both_paths(source: &str) -> String {
             mir,
             ..CodegenOptions::default()
         };
-        native::build_with_codegen(&program, &binary, false, &LinkSpec::default(), codegen)
+        native::build_with_codegen(program, &binary, stats, &LinkSpec::default(), codegen)
             .unwrap();
         let output = Command::new(&binary).output().unwrap();
         outputs.push((output.status.code(), output.stdout, output.stderr));
     }
     assert_eq!(outputs[0], outputs[1]);
+    if stats {
+        let report = String::from_utf8_lossy(&outputs[0].2).into_owned();
+        let count = |key: &str| {
+            report
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix(key))
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_else(|| panic!("no {key} in {report}"))
+        };
+        assert_eq!(count("allocations="), count("deallocations="), "{report}");
+    }
     String::from_utf8(outputs.remove(0).1).unwrap()
 }
 
@@ -186,6 +202,56 @@ fn records_and_enums_match_the_tree_path() {
     assert!(built + 1 >= total, "MIR covers {built} of {total} functions");
     let output = same_on_both_paths(source);
     assert_eq!(output, "399\n0\n7\n39\n0\n100\n-1\n100\n34\n");
+}
+
+#[test]
+fn owned_values_are_dropped_once_on_return_break_and_unwind() {
+    let source = "
+        use std.result.Result;
+        use std.task.Panic;
+        struct Pair { left: Box<i64>, right: i64 }
+        enum Tree { Leaf(i64), Node(Box<i64>, Box<i64>) }
+        fn keep(p: Pair) -> i64 { p.right }
+        fn open(b: Box<i64>) -> i64 { b.take() }
+        fn sum(t: Tree) -> i64 {
+            match t { Tree.Leaf(v) => v, Tree.Node(a, _) => open(a) }
+        }
+        fn hold(depth: i64, fail: Bool) -> i64 ! {alloc} {
+            let a = Box.new(depth);
+            let p = Pair { left: Box.new(1), right: depth };
+            if depth == 0 {
+                if fail { panic(); }
+                return 0;
+            }
+            hold(depth - 1, fail) + keep(p) + a.take()
+        }
+        fn first_large(limit: i64) -> i64 ! {alloc} {
+            let mut i = 0;
+            loop {
+                let b = Box.new(i * i);
+                i = i + 1;
+                if i == 2 { continue; }
+                if open(b) > limit { break i; }
+            }
+        }
+        fn show(result: Result<i64, Panic>) -> Unit ! {io} {
+            match result { Result.Ok(value) => print_i64(value), Result.Err(_) => print_i64(-1) }
+        }
+        fn main() -> Unit ! {io, alloc, suspend} {
+            print_i64(sum(Tree.Node(Box.new(7), Box.new(8))) + sum(Tree.Leaf(3)));
+            print_i64(first_large(10));
+            show(Task.catch(fn() -> i64 ! {alloc} { hold(3, false) }));
+            show(Task.catch(fn() -> i64 ! {alloc} { hold(3, true) }));
+        }";
+    let program = kush::program::load_source("<mir-owned>", source).unwrap();
+    let program = executable::check_program(&program).unwrap();
+    let covered = ["keep", "open", "sum", "hold", "first_large"];
+    let text = kush::mir::dump(&program);
+    for name in covered {
+        assert!(text.contains(&format!("fn \"{name}\"(")), "{name} is not covered\n{text}");
+    }
+    let output = same_program_on_both_paths(&program, true);
+    assert_eq!(output, "10\n5\n12\n-1\n");
 }
 
 #[test]

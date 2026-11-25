@@ -2277,6 +2277,7 @@ fn lower(
             vec_shadows: BTreeMap::new(),
             pending_pushes: Vec::new(),
             push_shadow: None,
+            mir_unwind: None,
         };
         let entry = g.builder.create_block();
         g.builder.append_block_params_for_function_params(entry);
@@ -4332,6 +4333,9 @@ struct Generator<'a, 'b> {
     function_index: usize,
     /// The innermost loop whose overflow panics are deferred to its exit.
     deferred: Option<DeferredLoop>,
+    /// FND-MIR: the cleanup block a panic at the current MIR statement or
+    /// terminator unwinds to; `None` leaves the function directly.
+    mir_unwind: Option<ir::Block>,
 }
 /// State of one loop lowered with deferred overflow checks; see
 /// [`deferred`] for the conditions and the argument that this is unobservable.
@@ -5219,6 +5223,10 @@ impl Generator<'_, '_> {
     /// Leave the function while a panic unwinds: drop every live value and
     /// return a dummy result; the caller tests the word in turn.
     fn unwind_exit(&mut self) {
+        if let Some(cleanup) = self.mir_unwind {
+            self.jump(cleanup, &[]);
+            return;
+        }
         let emitting = std::mem::replace(&mut self.unwind_emitting, true);
         self.cleanup_all();
         self.return_dummy();

@@ -94,6 +94,10 @@ fn type_name(ty: Type) -> String {
         Type::Never => "never".into(),
         Type::Enum(id) => format!("enum#{id}"),
         Type::Variants(id, mask) => format!("variants#{id}#{mask}"),
+        Type::Box(pointee) => format!("box#{pointee}"),
+        Type::Vec(pointee) => format!("vec#{pointee}"),
+        Type::Bytes => "bytes".into(),
+        Type::String => "string".into(),
         other => format!("?{other:?}"),
     }
 }
@@ -143,6 +147,12 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
             type_name(*ty),
             operands_text(operands)
         ),
+        Rvalue::BoxNew(operand) => format!("box_new({})", operand_text(*operand)),
+        Rvalue::BoxTake(operand) => format!("box_take({})", operand_text(*operand)),
+        Rvalue::Bytes(bytes) => {
+            let hex = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+            format!("bytes \"{hex}\"")
+        }
     }
 }
 
@@ -194,6 +204,16 @@ fn terminator_text(kind: &TerminatorKind) -> String {
         }
         TerminatorKind::Return(operand) => format!("return {}", operand_text(*operand)),
         TerminatorKind::Panic { unwind } => format!("panic {}", unwind_text(*unwind)),
+        TerminatorKind::Drop {
+            place,
+            next,
+            unwind,
+        } => format!(
+            "drop {} -> bb{next} {}",
+            place_text(*place),
+            unwind_text(*unwind)
+        ),
+        TerminatorKind::Resume => "resume".into(),
         TerminatorKind::Unreachable => "unreachable".into(),
     }
 }
@@ -339,6 +359,16 @@ impl Parser {
                 self.expect("#")?;
                 Type::Enum(self.number()?)
             }
+            "box" => {
+                self.expect("#")?;
+                Type::Box(self.number()?)
+            }
+            "vec" => {
+                self.expect("#")?;
+                Type::Vec(self.number()?)
+            }
+            "bytes" => Type::Bytes,
+            "string" => Type::String,
             "variants" => {
                 self.expect("#")?;
                 let id = self.number()?;
@@ -506,6 +536,34 @@ impl Parser {
             let target = self.int_kind()?;
             return Ok(Rvalue::Int(op, source, target, self.operands()?));
         }
+        if let Some(op) = ["box_new", "box_take"].into_iter().find(|op| *op == name) {
+            self.at += 1;
+            self.expect("(")?;
+            let operand = self.operand()?;
+            self.expect(")")?;
+            return Ok(if op == "box_new" {
+                Rvalue::BoxNew(operand)
+            } else {
+                Rvalue::BoxTake(operand)
+            });
+        }
+        if name == "bytes" {
+            self.at += 1;
+            let text = self.next()?;
+            let hex = text
+                .strip_prefix('"')
+                .and_then(|text| text.strip_suffix('"'))
+                .ok_or_else(|| format!("expected quoted hex bytes, found '{text}'"))?;
+            if hex.len() % 2 != 0 {
+                return Err(format!("odd-length hex bytes '{hex}'"));
+            }
+            let bytes = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| format!("invalid hex bytes '{hex}'"))?;
+            return Ok(Rvalue::Bytes(bytes));
+        }
         if name == "aggregate" {
             self.at += 1;
             let ty = self.ty()?;
@@ -578,6 +636,21 @@ impl Parser {
             Some("unreachable") => {
                 self.at += 1;
                 TerminatorKind::Unreachable
+            }
+            Some("resume") => {
+                self.at += 1;
+                TerminatorKind::Resume
+            }
+            Some("drop") => {
+                self.at += 1;
+                let place = self.place()?;
+                self.expect("->")?;
+                let next = self.block_id()?;
+                TerminatorKind::Drop {
+                    place,
+                    next,
+                    unwind: self.unwind()?,
+                }
             }
             Some(_) if self.tokens.get(self.at + 2).is_some_and(|t| t == "call") => {
                 let destination = self.local()?;

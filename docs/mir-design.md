@@ -157,9 +157,27 @@ nests. `aggregate` builds a variant, and `match` compiles variant,
 literal and or-patterns to switches on words, following each variant's
 tag or niche.
 
-Nothing so far needs drops or cleanup blocks, so every `unwind` is
-`continue`. Owned values come next, with drop elaboration (decision 2)
-and cleanup blocks (decision 1), and references with them.
+FND-MIR-OWNED added boxes, vectors, `Bytes`, `String` and records and
+enums that own them. Every drop is now in the MIR:
+
+- Each checked resource that owns something gets a drop flag (a `bool`
+  local) and a value local. These are the tree path's tracked words and
+  activation flags, made explicit. An expression's owned result sets its
+  flag. The parent that takes ownership (a call, a constructor, a `let`,
+  an assignment, a `return`, a matching arm) clears it, exactly where the
+  tree path calls `consume`.
+- The end of a scope, a reassignment, `break`, `continue` and `return`
+  drop each resource whose flag is set: a `switch` on the flag, then a
+  `drop` terminator.
+- A matching arm owns its scrutinee. Bindings take their parts, and the
+  parts under `_` are dropped.
+- A function with owned resources has one cleanup block. Every call,
+  `panic` and checked statement unwinds to it. It drops every live
+  resource and ends in `resume`. Native code jumps there wherever the tree
+  path ran `unwind_exit`.
+
+The flags are dynamic everywhere, as on the tree path. Removing the ones
+a dataflow pass can decide statically is FND-MIR-DROP-FLAGS.
 
 ## 7. Decisions
 

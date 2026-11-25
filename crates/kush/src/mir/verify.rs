@@ -97,6 +97,25 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     }
                     *ty
                 }
+                Rvalue::BoxNew(value) => {
+                    operand(*value).map_err(here)?;
+                    match body.locals[*target].ty {
+                        Type::Box(pointee)
+                            if compatible(body.operand_ty(*value), program.pointees[pointee]) =>
+                        {
+                            Type::Box(pointee)
+                        }
+                        other => return Err(here(format!("box_new into a {other:?}"))),
+                    }
+                }
+                Rvalue::BoxTake(value) => {
+                    operand(*value).map_err(here)?;
+                    match body.operand_ty(*value) {
+                        Type::Box(pointee) => program.pointees[pointee],
+                        other => return Err(here(format!("box_take of a {other:?}"))),
+                    }
+                }
+                Rvalue::Bytes(_) => Type::Bytes,
                 Rvalue::Binary(op, left, right) => {
                     operand(*left).map_err(here)?;
                     operand(*right).map_err(here)?;
@@ -170,7 +189,14 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     block(*unwind).map_err(here)?;
                 }
             }
-            TerminatorKind::Unreachable => {}
+            TerminatorKind::Drop { place, next, unwind } => {
+                operand(Operand::Copy(*place)).map_err(here)?;
+                block(*next).map_err(here)?;
+                if let Some(unwind) = unwind {
+                    block(*unwind).map_err(here)?;
+                }
+            }
+            TerminatorKind::Resume | TerminatorKind::Unreachable => {}
         }
     }
     Ok(())

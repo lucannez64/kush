@@ -99,6 +99,12 @@ pub(crate) enum Rvalue {
     Int(IntOp, IntKind, IntKind, Vec<Operand>),
     /// The variant `tag` of a record or enum of type `ty`, from its fields.
     Aggregate(Type, usize, Vec<Operand>),
+    /// Allocate a box and move the operand into it.
+    BoxNew(Operand),
+    /// Move the payload out of a box and free the allocation.
+    BoxTake(Operand),
+    /// A new `Bytes` holding a copy of a literal.
+    Bytes(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +159,14 @@ pub(crate) enum TerminatorKind {
     Return(Operand),
     /// A `panic(..)`: unwinds to `unwind`, or continues unwinding.
     Panic { unwind: Option<BlockId> },
+    /// Run the drop glue of the value at `place`.
+    Drop {
+        place: Place,
+        next: BlockId,
+        unwind: Option<BlockId>,
+    },
+    /// End of a cleanup block: continue unwinding into the caller.
+    Resume,
     Unreachable,
 }
 
