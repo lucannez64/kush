@@ -799,6 +799,13 @@ pub(crate) fn bodies(program: &Executable) -> Vec<Result<Body, String>> {
 /// `kush mir FILE`: the text form of every body, and a comment naming the
 /// first construct of each function the builder does not cover yet.
 pub fn dump(program: &Executable) -> String {
+    dump_with(program, crate::native::CodegenOptions::default())
+}
+
+/// `kush mir FILE [--release] [--backend llvm] ...`: as [`dump`], after the
+/// loop passes a native build with `codegen` runs on each body. A default
+/// build runs none, so this prints the bodies as built.
+pub fn dump_with(program: &Executable, codegen: crate::native::CodegenOptions) -> String {
     let mut out = String::new();
     for (index, body) in bodies(program).into_iter().enumerate() {
         if index > 0 {
@@ -806,7 +813,10 @@ pub fn dump(program: &Executable) -> String {
         }
         out.push_str(&format!("// function {index}\n"));
         match body {
-            Ok(body) => out.push_str(&text::print(&body)),
+            Ok(mut body) => {
+                optimize(program, &mut body, codegen);
+                out.push_str(&text::print(&body));
+            }
             Err(reason) => {
                 let name = &program.functions[index].name;
                 out.push_str(&format!("// fn {name}: not lowered: {reason}\n"));
@@ -814,6 +824,46 @@ pub fn dump(program: &Executable) -> String {
         }
     }
     out
+}
+
+/// The loop passes of docs/mir-design.md section 8 that a native build with
+/// `codegen` runs, in `native::lower`'s order: push shadows (LLVM `Speed`),
+/// then deferred overflow checks (on by default with LLVM) or else
+/// slice-layout versioning (`Speed`), then upper-bound facts (`Speed`).
+/// `KUSH_TRACE_SHADOWS` and `KUSH_TRACE_DEFERRED` report as in a build.
+pub(crate) fn optimize(
+    program: &Executable,
+    body: &mut Body,
+    codegen: crate::native::CodegenOptions,
+) {
+    use crate::native::{Backend, Optimization};
+    let speed = codegen.optimization == Optimization::Speed;
+    let llvm = codegen.backend == Backend::Llvm;
+    // As `CodegenOptions::defers_overflow` and `wide_multiply`.
+    let defers_overflow = !codegen.fuzz && codegen.deferred_overflow.unwrap_or(llvm);
+    #[cfg(target_arch = "x86_64")]
+    let wide_multiply = codegen.native_cpu && std::arch::is_x86_feature_detected!("avx512dq");
+    #[cfg(not(target_arch = "x86_64"))]
+    let wide_multiply = false;
+    if speed && llvm {
+        let trace = std::env::var_os("KUSH_TRACE_SHADOWS").is_some();
+        push_shadows::shadow(body, trace);
+    }
+    let deferred = if defers_overflow {
+        let options = deferred::Options {
+            wide_multiply,
+            wide_vectors: codegen.native_cpu,
+            speed,
+            trace: std::env::var_os("KUSH_TRACE_DEFERRED").is_some(),
+        };
+        deferred::defer(program, body, options)
+    } else {
+        Default::default()
+    };
+    if speed {
+        slice_layout::version(program, body, &deferred);
+        bounds::mark(body);
+    }
 }
 
 /// How many functions [`build`] covers, as `(built, total)`.

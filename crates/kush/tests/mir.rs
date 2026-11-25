@@ -637,3 +637,50 @@ fn kush_mir_prints_the_ir_and_its_coverage() {
         "MIR covers 2 of 2 functions.\n"
     );
 }
+
+#[test]
+fn kush_mir_with_build_flags_prints_the_ir_after_the_loop_passes() {
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    let file = scratch.path().join("program.kush");
+    fs::write(
+        &file,
+        "fn total(xs: &[i64]) -> i64 {
+            let mut i = 0;
+            let mut sum = 0;
+            while i < xs.len() { sum = sum + xs[i]; i = i + 1; }
+            sum
+        }
+        fn main() -> Unit ! {io} { print_i64(0); }",
+    )
+    .unwrap();
+    let mir = |flags: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_kush"))
+            .arg("mir")
+            .arg(&file)
+            .args(flags)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{flags:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    // As built: no pass has run.
+    let built = mir(&[]);
+    assert!(!built.contains(" below(") && !built.contains("deferred"), "{built}");
+    // A release build marks the guarded read and versions the loop.
+    let release = mir(&["--release"]);
+    assert!(release.contains(" below("), "{release}");
+    assert!(release.contains("_0.2:i64 = const 8: i64"), "{release}");
+    assert!(!release.contains("deferred"), "{release}");
+    // An LLVM release build defers the loop's overflow checks.
+    let llvm = mir(&["--release", "--backend", "llvm"]);
+    for expected in ["deferred \"", "Certificate", " proved(", " below("] {
+        assert!(llvm.contains(expected), "{expected}\n{llvm}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_kush"))
+        .arg("mir")
+        .arg(&file)
+        .arg("--bogus")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}

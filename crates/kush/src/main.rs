@@ -26,7 +26,8 @@ Kernel exchange (docs/kernel-exchange.md):\n\
   kush core <file.kush>       print the checked logical environment and queries\n\
   kush kernel <file.kcore>    answer an exchange file with the Rust kernel\n\n\
 Compiler IR (docs/mir-design.md):\n\
-  kush mir <file.kush> [--stats]  print the control-flow-graph IR of each covered function\n\n\
+  kush mir <file.kush> [--stats]  print the control-flow-graph IR of each covered function\n\
+  kush mir <file.kush> --release [--backend llvm]  the IR after a release build's loop passes\n\n\
 Projects (Kush.toml):\n\
   kush new <directory> [--name <name>]\n\
   kush check [--manifest-path <Kush.toml>] [--locked]\n\
@@ -121,14 +122,27 @@ fn exchange_command(
     Ok(0)
 }
 
-/// `kush mir <file> [--stats]` (FND-MIR): the CFG IR of every function the
-/// builder covers, in its text form, or how many functions it covers.
+/// `kush mir <file> [--stats] [codegen flags]` (FND-MIR): the CFG IR of
+/// every function the builder covers, in its text form, or how many
+/// functions it covers. With `kush build`'s codegen flags (`--release`,
+/// `--backend llvm`, ...), the bodies are printed after the loop passes such
+/// a build runs.
 fn mir_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {
-    let (path, stats) = match args {
-        [path] => (path, false),
-        [path, flag] if flag == "--stats" => (path, true),
-        _ => return Err((2, "usage: kush mir <file> [--stats]".into())),
+    const USAGE: &str = "usage: kush mir <file> [--stats] [--release] [--backend cranelift|llvm] [--target-cpu baseline|native] [--deferred-overflow|--no-deferred-overflow]";
+    let Some(path) = args.first() else {
+        return Err((2, USAGE.into()));
     };
+    let mut stats = false;
+    let mut codegen = kush::native::CodegenOptions::default();
+    let mut index = 1;
+    while index < args.len() {
+        if args[index] == "--stats" {
+            stats = true;
+        } else if !codegen_argument(args, &mut index, &mut codegen, "mir")? {
+            return Err((2, format!("unknown option '{}'\n{USAGE}", args[index].to_string_lossy())));
+        }
+        index += 1;
+    }
     let path = Path::new(path);
     let name = path.to_string_lossy();
     let source = fs::read_to_string(path).map_err(|e| (1, format!("cannot read {name}: {e}")))?;
@@ -144,7 +158,7 @@ fn mir_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, Strin
         let (built, total) = kush::mir::coverage(&checked);
         format!("MIR covers {built} of {total} functions.\n")
     } else {
-        kush::mir::dump(&checked)
+        kush::mir::dump_with(&checked, codegen)
     };
     out.write_all(text.as_bytes()).map_err(output_error)?;
     Ok(0)
