@@ -45,6 +45,8 @@ fn fault<T>(what: impl Into<String>) -> Run<T> {
 
 /// Code pointers live in their own range of words.
 const CODE: i64 = 1 << 62;
+/// A closure environment's first word: its drop glue, by index.
+const DROP: i64 = 1 << 61;
 
 struct Allocation {
     bytes: Vec<u8>,
@@ -144,8 +146,11 @@ struct Frame {
     statement: usize,
     /// The words of each local without an address.
     locals: Vec<Words>,
-    /// The stack allocation of each local whose address the body takes.
+    /// The stack allocation of each local whose address the body takes, or
+    /// for a capture by reference, the caller's slot it goes through.
     homes: Vec<Option<i64>>,
+    /// Which homes belong to this frame (the rest are borrowed).
+    owned: Vec<bool>,
     /// `None` for the entry function.
     caller: Option<Return>,
 }
@@ -159,6 +164,9 @@ struct Machine<'p, 'o> {
     /// The panic a cleanup block runs for.
     unwinding: Option<Diagnostic>,
     fuel: usize,
+    /// The capture types of each closure environment's drop glue, by the
+    /// index its environment's first word names (`DROP | index`).
+    closure_types: Vec<Vec<Type>>,
 }
 
 /// Run the program's entry function on the machine. Returns its result word
@@ -173,9 +181,10 @@ pub fn evaluate(program: &Executable, output: &mut dyn Write) -> Run<(i64, Memor
         stack: Vec::new(),
         unwinding: None,
         fuel: program.eval_fuel,
+        closure_types: Vec::new(),
     };
     machine.memory.stats.fusions = program.fusions;
-    machine.enter(entry, Vec::new(), None)?;
+    machine.enter(entry, Vec::new(), None, None)?;
     let result = machine.run()?;
     if machine.memory.live_heap != 0 {
         return Err(Stop::Panic(Diagnostic::new(
@@ -284,25 +293,66 @@ impl Machine<'_, '_> {
     }
 
     /// Push a frame for `function` with its parameters' words.
-    fn enter(&mut self, function: usize, args: Vec<Words>, caller: Option<Return>) -> Run<()> {
+    /// Push a frame for `function` with its parameters' words, and for a
+    /// closure, its environment (native's function prologue).
+    fn enter(
+        &mut self,
+        function: usize,
+        args: Vec<Words>,
+        caller: Option<Return>,
+        environment: Option<i64>,
+    ) -> Run<()> {
         let body = self.body(function)?;
+        let program = self.program;
+        let checked = &program.functions[function];
         let mut locals = body
             .locals
             .iter()
             .map(|local| vec![0; self.width(local.ty)])
             .collect::<Vec<_>>();
-        let slots = self.program.functions[function].parameter_slots.clone();
-        for (position, words) in args.into_iter().enumerate() {
-            let slot = slots.as_ref().map_or(position, |slots| slots[position]);
+        let slot = |position: usize| {
+            checked
+                .parameter_slots
+                .as_ref()
+                .map_or(position, |slots| slots[position])
+        };
+        let mut homes = vec![None; body.locals.len()];
+        let mut owned = vec![false; body.locals.len()];
+        // A closure's captures come first: values from its environment, or
+        // for a capture by reference, the caller's slot to go through.
+        let captures = checked.closure.unwrap_or(0);
+        let environment = environment.unwrap_or(0);
+        if captures != 0 {
+            let mut offset = 8;
+            for position in 0..captures {
+                let slot = slot(position);
+                if checked.capture_refs.get(position).copied().unwrap_or(false) {
+                    homes[slot] = Some(self.memory.load(environment + offset, 1)?[0]);
+                    offset += 8;
+                    continue;
+                }
+                let width = locals[slot].len();
+                locals[slot] = self.memory.load(environment + offset, width)?;
+                offset += (width * 8) as i64;
+            }
+            // A `once` environment is consumed by its call.
+            if !checked.shared_environment {
+                self.memory.free(environment)?;
+            }
+        }
+        for (index, words) in args.into_iter().enumerate() {
+            let slot = slot(captures + index);
             let width = locals[slot].len();
             locals[slot] = fit(words, width);
         }
-        let taken = loops::address_taken(&body);
-        let mut homes = vec![None; body.locals.len()];
-        for local in taken {
+        for local in loops::address_taken(&body) {
+            if homes[local].is_some() {
+                continue;
+            }
             let home = self.memory.allocate(locals[local].len() * 8, false);
             self.memory.store(home, &locals[local])?;
             homes[local] = Some(home);
+            owned[local] = true;
         }
         self.stack.push(Frame {
             body,
@@ -310,6 +360,7 @@ impl Machine<'_, '_> {
             statement: 0,
             locals,
             homes,
+            owned,
             caller,
         });
         Ok(())
@@ -318,8 +369,10 @@ impl Machine<'_, '_> {
     /// Pop the top frame, releasing its locals' homes.
     fn leave(&mut self) -> Run<Frame> {
         let frame = self.stack.pop().expect("a frame to leave");
-        for home in frame.homes.iter().flatten() {
-            self.memory.free(*home)?;
+        for (home, owned) in frame.homes.iter().zip(&frame.owned) {
+            if let (Some(home), true) = (home, owned) {
+                self.memory.free(*home)?;
+            }
         }
         Ok(frame)
     }
@@ -410,7 +463,7 @@ impl Machine<'_, '_> {
                             next: *next,
                             unwind: *unwind,
                         };
-                        self.enter(*index, values, Some(caller))
+                        self.enter(*index, values, Some(caller), None)
                             .map_err(Raise::Stop)?;
                     }
                     Callee::PrintInt(kind) => {
@@ -423,6 +476,29 @@ impl Machine<'_, '_> {
                         self.finish_call(*destination, vec![0], *next)
                             .map_err(Raise::Stop)?;
                     }
+                    Callee::Builtin { index, .. }
+                        if matches!(
+                            body.builtins.0[*index],
+                            crate::executable::Target::DynCall { .. }
+                                | crate::executable::Target::UnionBorrowCall { .. }
+                        ) =>
+                    {
+                        let caller = Return {
+                            destination: *destination,
+                            next: *next,
+                            unwind: *unwind,
+                        };
+                        match body.builtins.0[*index] {
+                            crate::executable::Target::DynCall { spec, .. } => {
+                                self.dyn_call(spec, values, caller)
+                            }
+                            crate::executable::Target::UnionBorrowCall { spec, .. } => {
+                                self.union_call(spec, values, caller)
+                            }
+                            _ => unreachable!("matched above"),
+                        }
+                        .map_err(Raise::Stop)?;
+                    }
                     Callee::Builtin { index, .. } => {
                         let target = body.builtins.0[*index];
                         return Err(Raise::Stop(Stop::Unsupported(format!(
@@ -430,8 +506,27 @@ impl Machine<'_, '_> {
                             target_name(&target)
                         ))));
                     }
-                    Callee::Indirect(_) => {
-                        return Err(Raise::Stop(Stop::Unsupported("an indirect call".into())));
+                    Callee::Indirect(callable) => {
+                        // A `fn` value is its code word; a `once` or `multi`
+                        // value adds its environment.
+                        let words = self.operand(*callable).map_err(Raise::Stop)?;
+                        let environment = match body.operand_ty(*callable) {
+                            Type::Fn(_) => None,
+                            Type::Multi(_) if words[1] != 0 => {
+                                return Err(Raise::Stop(Stop::Unsupported(
+                                    "a call through a capturing multi fn".into(),
+                                )));
+                            }
+                            _ => Some(words[1]),
+                        };
+                        let function = code_function(words[0]).map_err(Raise::Stop)?;
+                        let caller = Return {
+                            destination: *destination,
+                            next: *next,
+                            unwind: *unwind,
+                        };
+                        self.enter(function, values, Some(caller), environment)
+                            .map_err(Raise::Stop)?;
                     }
                 }
             }
@@ -671,9 +766,276 @@ impl Machine<'_, '_> {
                 words
             }
             Rvalue::Ref(place) => vec![self.address(*place)?],
-            Rvalue::StructEq(..) => return unsupported("structural equality"),
+            Rvalue::FnValue { function, captures } => {
+                self.fn_value(body, *function, captures, ty)?
+            }
+            Rvalue::Coerce(operand, index) => {
+                let values = self.operand(*operand)?;
+                let (to, coercion) = body.coercions.0[*index].clone();
+                self.coerce(&values, to, &coercion)?
+            }
+            Rvalue::StructEq(left, right, negated) => {
+                let ty = body.operand_ty(*left);
+                let (left, right) = (self.operand(*left)?, self.operand(*right)?);
+                vec![i64::from(self.struct_eq(ty, &left, &right) != *negated)]
+            }
             other => return unsupported(rvalue_name(other)),
         })
+    }
+
+    /// A call on a trait object (native's `dyn_call`): the receiver's member
+    /// selects the method. An owned receiver's payload moves out of its
+    /// allocation into the call; a borrowed one passes the payload pointer.
+    fn dyn_call(&mut self, spec: usize, mut values: Vec<Words>, caller: Return) -> Run<()> {
+        let program = self.program;
+        let spec = &program.dyn_calls[spec];
+        let members = program
+            .dyn_members
+            .get(spec.object)
+            .cloned()
+            .unwrap_or_default();
+        let owned = spec.mode == crate::executable::ReceiverMode::Owned;
+        let (member, pointer) = if owned {
+            (values[0][0], values[0][1])
+        } else {
+            let object = self.memory.load(values[0][0], 2)?;
+            (object[0], object[1])
+        };
+        let Some(entry) = usize::try_from(member)
+            .ok()
+            .and_then(|index| members.get(index))
+        else {
+            return fault(format!("a trait object of unregistered member {member}"));
+        };
+        let function = *entry
+            .methods
+            .get(&spec.key)
+            .expect("a checked member registers every object-safe method");
+        values[0] = if owned {
+            let payload = self.memory.load(pointer, self.width(entry.member))?;
+            self.memory.free(pointer)?;
+            payload
+        } else {
+            vec![pointer]
+        };
+        self.enter(function, values, Some(caller), None)
+    }
+
+    /// A borrowed call on a closed-world union object (native's
+    /// `union_borrow_call`): the tag behind the reference selects the
+    /// member's method, which gets the payload's address.
+    fn union_call(&mut self, spec: usize, mut values: Vec<Words>, caller: Return) -> Run<()> {
+        let program = self.program;
+        let spec = &program.union_calls[spec];
+        let pointer = values[0][0];
+        let tag = self.memory.load(pointer, 1)?[0];
+        let Some((_, _, function)) = spec
+            .members
+            .iter()
+            .find(|(member_tag, _, _)| *member_tag as i64 == tag)
+        else {
+            return fault(format!("a union object of unregistered tag {tag}"));
+        };
+        values[0] = vec![pointer + 8];
+        self.enter(*function, values, Some(caller), None)
+    }
+
+    /// A function value (native's `mir_fn_value`): its code word, and for a
+    /// `once` or `multi` value an environment word, a heap environment
+    /// `[drop glue, captures...]` when it captures.
+    fn fn_value(
+        &mut self,
+        body: &Body,
+        function: usize,
+        captures: &[Capture],
+        ty: Type,
+    ) -> Run<Words> {
+        let code = CODE | function as i64;
+        if captures.is_empty() {
+            return Ok(match ty {
+                Type::Once(_) | Type::Multi(_) => vec![code, 0],
+                _ => vec![code],
+            });
+        }
+        if matches!(ty, Type::Multi(_)) {
+            return unsupported("a capturing multi fn");
+        }
+        let types = captures
+            .iter()
+            .map(|capture| match capture {
+                Capture::Value(operand) => body.operand_ty(*operand).full(),
+                Capture::Address(local) => body.locals[*local].ty.full(),
+            })
+            .collect::<Vec<_>>();
+        let mut words = Vec::new();
+        for capture in captures {
+            match capture {
+                Capture::Value(operand) => words.extend(self.operand(*operand)?),
+                Capture::Address(local) => words.push(self.address(Place::local(*local))?),
+            }
+        }
+        // An address capture is one word whatever the local's type: native
+        // sizes the environment by the capture types, so it does too.
+        let bytes = 8 + types.iter().map(|ty| self.width(*ty) * 8).sum::<usize>();
+        let environment = self.memory.allocate(bytes.max(8 + words.len() * 8), true);
+        let drop = self.closure_drop(types);
+        self.memory.store(environment, &[drop])?;
+        self.memory.store(environment + 8, &words)?;
+        Ok(vec![code, environment])
+    }
+
+    /// The drop glue word of an environment with these capture types.
+    fn closure_drop(&mut self, types: Vec<Type>) -> i64 {
+        let index = match self.closure_types.iter().position(|known| *known == types) {
+            Some(index) => index,
+            None => {
+                self.closure_types.push(types);
+                self.closure_types.len() - 1
+            }
+        };
+        DROP | index as i64
+    }
+
+    /// A representation change (native's `coerce_values` and
+    /// `nested_coercion_words`).
+    fn coerce(
+        &mut self,
+        values: &[i64],
+        to: Type,
+        coercion: &crate::executable::Coercion,
+    ) -> Run<Words> {
+        use crate::executable::Coercion;
+        let width = self.width(to);
+        Ok(match coercion {
+            Coercion::Inject { tag } => {
+                let mut out = vec![*tag as i64];
+                out.extend(values.iter().take(width.saturating_sub(1)));
+                fit(out, width)
+            }
+            Coercion::Repack { map } => {
+                let Some(target) = usize::try_from(values[0]).ok().and_then(|tag| map.get(tag))
+                else {
+                    return fault(format!("a union tag {} outside its repack", values[0]));
+                };
+                let mut out = vec![*target as i64];
+                out.extend(values.iter().skip(1).take(width.saturating_sub(1)));
+                fit(out, width)
+            }
+            Coercion::Struct {
+                source,
+                kept,
+                drops,
+            } => {
+                let target_id = to.layout().expect("a structural target layout");
+                let target_fields = self.program.enums[target_id].variants[0].fields.clone();
+                let source_id = source.layout().expect("a structural source layout");
+                let source_fields = self.program.enums[source_id].variants[0].fields.clone();
+                let mut offsets = Vec::with_capacity(source_fields.len());
+                let mut offset = self.program.enums[source_id].tag_words();
+                for field in &source_fields {
+                    offsets.push(offset);
+                    offset += self.width(*field);
+                }
+                let mut out = vec![0];
+                for (target, source, nested) in kept {
+                    let start = offsets[*source];
+                    let field = &values[start..start + self.width(source_fields[*source])];
+                    match nested {
+                        Some(nested) => {
+                            out.extend(self.coerce(field, target_fields[*target], nested)?);
+                        }
+                        None => out.extend_from_slice(field),
+                    }
+                }
+                for (source, ty) in drops {
+                    let start = offsets[*source];
+                    let field = values[start..start + self.width(*ty)].to_vec();
+                    self.drop_value(*ty, &field)?;
+                }
+                fit(out, width)
+            }
+            Coercion::DynBox {
+                member,
+                member_type,
+            } => {
+                let payload = &values[..self.width(*member_type).min(values.len())];
+                let pointer = self.memory.allocate(payload.len().max(1) * 8, true);
+                self.memory.store(pointer, payload)?;
+                vec![*member as i64, pointer]
+            }
+            Coercion::DynUpcast { from, to } => {
+                let source = self
+                    .program
+                    .dyn_members
+                    .get(*from)
+                    .cloned()
+                    .unwrap_or_default();
+                let target = self
+                    .program
+                    .dyn_members
+                    .get(*to)
+                    .cloned()
+                    .unwrap_or_default();
+                let mapped = usize::try_from(values[0])
+                    .ok()
+                    .and_then(|index| source.get(index))
+                    .and_then(|entry| {
+                        target
+                            .iter()
+                            .position(|candidate| candidate.member == entry.member)
+                    })
+                    .unwrap_or(0);
+                vec![mapped as i64, values[1]]
+            }
+            Coercion::Callable {
+                function,
+                capture,
+                target,
+            } => {
+                let code = CODE | *function as i64;
+                if !matches!(target, Type::Once(_)) {
+                    return Ok(vec![code]);
+                }
+                let Some(capture) = capture else {
+                    return Ok(vec![code, 0]);
+                };
+                let width = self.width(*capture);
+                let environment = self.memory.allocate(8 + width * 8, true);
+                let drop = self.closure_drop(vec![capture.full()]);
+                self.memory.store(environment, &[drop])?;
+                self.memory
+                    .store(environment + 8, &values[..width.min(values.len())])?;
+                vec![code, environment]
+            }
+        })
+    }
+
+    /// Native's `struct_eq_words`: field by field, a word per scalar field.
+    fn struct_eq(&self, ty: Type, left: &[i64], right: &[i64]) -> bool {
+        let Some(layout) = ty.layout() else {
+            return left.first() == right.first();
+        };
+        let definition = &self.program.enums[layout];
+        let mut offset = definition.tag_words();
+        for field in &definition.variants[0].fields {
+            let width = self.width(*field);
+            if width > 0 {
+                let (a, b) = (
+                    &left[offset..offset + width],
+                    &right[offset..offset + width],
+                );
+                let equal = if field.layout().is_some() {
+                    self.struct_eq(*field, a, b)
+                } else {
+                    a[0] == b[0]
+                };
+                if !equal {
+                    return false;
+                }
+            }
+            offset += width;
+        }
+        true
     }
 
     /// An enum or record value's words (native's `encode_variant`).
@@ -756,6 +1118,58 @@ impl Machine<'_, '_> {
                 }
                 Ok(())
             }
+            Type::Once(_) => {
+                // The environment's drop glue: its captures, then itself.
+                let environment = words[1];
+                if environment == 0 {
+                    return Ok(());
+                }
+                let drop = self.memory.load(environment, 1)?[0];
+                let Some(types) = usize::try_from(drop & !DROP)
+                    .ok()
+                    .filter(|_| drop & DROP != 0)
+                    .and_then(|index| self.closure_types.get(index).cloned())
+                else {
+                    return fault(format!("an environment without drop glue: {drop:#x}"));
+                };
+                let mut offset = 8;
+                for ty in types {
+                    let width = self.width(ty);
+                    let capture = self.memory.load(environment + offset, width)?;
+                    self.drop_value(ty, &capture)?;
+                    offset += (width * 8) as i64;
+                }
+                self.memory.free(environment)
+            }
+            Type::Union(index) => {
+                let members = &self.program.unions[index].members;
+                let Some(member) = usize::try_from(words[0])
+                    .ok()
+                    .and_then(|tag| members.get(tag))
+                    .copied()
+                else {
+                    return fault(format!("a union tag {} outside its members", words[0]));
+                };
+                let width = self.width(member);
+                self.drop_value(member, &words[1..1 + width])
+            }
+            Type::DynObj(object) => {
+                let members = self
+                    .program
+                    .dyn_members
+                    .get(object)
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(entry) = usize::try_from(words[0])
+                    .ok()
+                    .and_then(|index| members.get(index))
+                    && self.program.owns(entry.member)
+                {
+                    let payload = self.memory.load(words[1], self.width(entry.member))?;
+                    self.drop_value(entry.member, &payload)?;
+                }
+                self.memory.free(words[1])
+            }
             other => unsupported(format!("dropping a {other:?}")),
         }
     }
@@ -774,6 +1188,15 @@ impl Raise {
             Stop::Panic(diagnostic) => Raise::Panic(diagnostic, unwind),
             other => Raise::Stop(other),
         }
+    }
+}
+
+/// The function a code word names.
+fn code_function(word: i64) -> Run<usize> {
+    if word & CODE != 0 && word & DROP == 0 {
+        Ok((word & !CODE) as usize)
+    } else {
+        fault(format!("a call through the non-code word {word:#x}"))
     }
 }
 

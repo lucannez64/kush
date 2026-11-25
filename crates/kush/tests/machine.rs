@@ -78,7 +78,57 @@ fn covered_examples_run_as_on_the_tree_evaluator() {
 }
 
 /// The examples the machine runs; raise it as nodes land.
-const MACHINE_FLOOR: usize = 13;
+const MACHINE_FLOOR: usize = 18;
+
+#[test]
+fn closures_and_trait_objects_run_as_on_the_tree_evaluator() {
+    for source in [
+        // Function values, capturing `once` closures, an environment that
+        // owns a box, and a capture by reference.
+        "struct Pair { left: i64, right: i64 }
+        fn apply(f: fn(i64) -> i64 ! {}, x: i64) -> i64 { f(x) }
+        fn twice(f: fn(i64) -> i64 ! {}, x: i64) -> i64 { f(f(x)) }
+        fn apply_once(f: once fn(i64) -> i64 ! {}, x: i64) -> i64 { f(x) }
+        fn split(f: once fn(i64) -> Pair ! {}, x: i64) -> i64 { let p = f(x); p.left * 10 + p.right }
+        fn run_once(f: once fn() -> i64 ! {alloc}) -> i64 ! {alloc} { f() }
+        fn inc(x: i64) -> i64 { x + 1 }
+        fn main() -> Unit ! {io, alloc} {
+            print_i64(apply(inc, 4));
+            print_i64(twice(fn(x: i64) -> i64 ! {} { x * 3 }, 2));
+            let offset = 10;
+            print_i64(apply_once(fn(x: i64) -> i64 ! {} { x + offset }, 5));
+            print_i64(split(fn(x: i64) -> Pair ! {} { Pair { left: x, right: x + offset } }, 2));
+            let boxed = Box.new(7);
+            print_i64(run_once(fn() -> i64 ! {alloc} { boxed.take() + 1 }));
+        }",
+        // Trait objects: owned and borrowed receivers, payloads that own.
+        "trait Describe {
+            fn describe(self: Self) -> i64 ! {};
+            fn peek(self: &Self) -> i64 ! {};
+        }
+        struct Point { x: i64 }
+        struct Held { value: Box<i64> }
+        impl Describe for Point {
+            fn describe(self: Self) -> i64 ! {} { self.x }
+            fn peek(self: &Self) -> i64 ! {} { self.x + 100 }
+        }
+        impl Describe for Held {
+            fn describe(self: Self) -> i64 ! {} { let Held { value: value } = self; value.take() }
+            fn peek(self: &Self) -> i64 ! {} { 200 }
+        }
+        fn main() -> Unit ! {io, alloc} {
+            let point: dyn Describe = Point { x: 9 };
+            print_i64(point.peek());
+            print_i64(point.describe());
+            let held: dyn Describe = Held { value: Box.new(4) };
+            print_i64(held.peek());
+            print_i64(held.describe());
+        }",
+    ] {
+        let program = executable::check(source).unwrap();
+        assert_eq!(compare(&program), Ok(true), "{source}");
+    }
+}
 
 #[test]
 fn panics_unwind_through_cleanup_and_report_the_tree_message() {
