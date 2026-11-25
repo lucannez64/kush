@@ -322,6 +322,9 @@ Taken on 2026-11-25:
    tests the way the kernel exchange format is.
 6. **Loop optimizations** (FND-MIR-DEFAULT): rewritten as MIR passes
    (section 8), not carried over from the tree path. Taken by the user.
+7. **Evaluator** (FND-MIR-EVAL): a word-level machine over the MIR with
+   native's data layouts (section 9), not an interpreter over the tree
+   evaluator's structured values. Taken by the user.
 
 ## 8. Loop optimizations on the MIR
 
@@ -435,3 +438,57 @@ it and tests can check it without compiling.
     wrapping arithmetic. Its proof may rest on a deferred operation whose
     overflow is not reported yet, and narrow values must stay canonical,
     as the tree path ensured inside a deferred loop.
+
+## 9. The evaluator as a word-level machine
+
+FND-MIR-EVAL replaces `eval.rs`, the interpreter over the checked tree,
+with a machine that runs MIR bodies (decision 7). The machine is a
+word-level model of a native build: values are the words native code
+uses, with the same layouts, and the runtime's data structures (buffer
+headers, vector blocks, the handler stack) are the ones `runtime/kush.c`
+keeps. A program therefore has one meaning, defined by its MIR, and the
+evaluator is a checked model of what native code does with it.
+
+**Memory.**
+- Memory is a set of allocations, each a byte array. Heap allocations
+  come from the runtime's allocation functions; a stack allocation holds
+  the locals of a frame whose address is taken (native's pinned locals).
+- A pointer is a word `(allocation + 1) << 32 | offset`. Native code only
+  adds offsets to pointers, and the machine does the same.
+- Every load and store checks that the allocation is live and that the
+  access lies inside it. A failure is an internal error of the machine,
+  not a Kush panic: a checked program never does it. This is the check a
+  native build cannot make.
+- Code pointers are words in their own range (`1 << 62 | function`), so a
+  function value is the word native code stores.
+
+**Execution.**
+- The call stack is explicit: a frame has its body, its block and
+  statement, and its locals' words. A task is its own stack, so a task can
+  suspend in the middle of a call and the scheduler can switch to another.
+  The machine never recurses on the Rust stack for a Kush call.
+- Bodies are built once per function with `mir::build`, without the loop
+  passes: those are code-generation choices, not semantics.
+- A panic follows the body's `unwind` edges through its cleanup blocks,
+  frame by frame, as native unwinding does. At the root it ends the run
+  with the panic's diagnostic, keeping today's messages.
+- The `allocation-stats` report counts what `kush.c` counts, so the
+  evaluator's report and a native build's agree.
+
+**The runtime.** Each builtin the MIR calls (`call builtin N`, `alloc`,
+`array`, `runtime`, `task` and the other rvalue groups) gets a Rust
+implementation over machine memory, written from the native lowering
+(`call_target` and its helpers) and the `kush.c` function it calls.
+
+**Plan.** The work lands in steps. Until the last one, the tree evaluator
+stays the default, and tests compare the two on every program the machine
+covers:
+
+| Node | Scope |
+|---|---|
+| FND-EVAL-MACHINE | Memory, frames, statements and terminators, scalar arithmetic and checks, records and enums, calls, panics and unwinding, boxes and drops, `print`, the stats report, and a differential test against the tree evaluator |
+| FND-EVAL-BUFFERS | `Vec`, `Bytes`, `String`, slices, `str`, runtime-length arrays, views, `Vec.map` |
+| FND-EVAL-CALLABLES | Function values, closures and their environments, `dyn` objects, unions and coercions |
+| FND-EVAL-EFFECTS | Handlers, aborts, continuations and `multi fn`, tasks, threads, channels |
+| FND-EVAL-RUNTIME | Allocators and contexts, arenas, standard I/O, host operations, staging |
+| FND-EVAL-SWITCH | `Executable::evaluate` runs the machine; `eval.rs` is deleted |
