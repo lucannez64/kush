@@ -362,7 +362,9 @@ fn terminator_text(kind: &TerminatorKind) -> String {
             let callee = match callee {
                 Callee::Function(index) => format!("fn {index}"),
                 Callee::PrintInt(kind) => format!("print_int {}", kind.name()),
-                Callee::Builtin(index) => format!("builtin {index}"),
+                Callee::Builtin { index, below } => {
+                    format!("builtin {index}{}", if *below { " below" } else { "" })
+                }
                 Callee::Indirect(operand) => format!("indirect {}", operand_text(*operand)),
             };
             let args = args
@@ -1005,7 +1007,10 @@ impl Parser {
                 self.expect("call")?;
                 let callee = match self.next()?.as_str() {
                     "fn" => Callee::Function(self.number()?),
-                    "builtin" => Callee::Builtin(self.number()?),
+                    "builtin" => Callee::Builtin {
+                        index: self.number()?,
+                        below: self.eat("below"),
+                    },
                     "indirect" => Callee::Indirect(self.operand()?),
                     "print_int" => {
                         let name = self.next()?;

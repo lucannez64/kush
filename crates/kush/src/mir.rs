@@ -10,8 +10,12 @@
 //! [`text`] gives the stable text form printed by `kush mir FILE`; its
 //! parser reads the same form back, and the tests check that the two agree.
 
+pub(crate) mod bounds;
 mod build;
 mod drop_flags;
+// The loop passes of docs/mir-design.md section 8 use it as they land.
+#[allow(dead_code)]
+pub(crate) mod loops;
 mod text;
 mod verify;
 
@@ -498,8 +502,10 @@ pub(crate) enum TerminatorKind {
 pub(crate) enum Callee {
     Function(usize),
     PrintInt(IntKind),
-    /// A builtin operation, by its index in the body's [`Builtins`].
-    Builtin(usize),
+    /// A builtin operation, by its index in the body's [`Builtins`]. With
+    /// `below`, the call's index operand is known to be below its slice's
+    /// length (FND-MIR-BOUNDS), so native code only checks its sign.
+    Builtin { index: usize, below: bool },
     /// A `fn` or `once fn` value.
     Indirect(Operand),
 }

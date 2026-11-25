@@ -2151,9 +2151,13 @@ fn lower(
                 if loop_optimized && block_has_while(body) {
                     return None;
                 }
-                crate::mir::build(program, index)
+                let mut body = crate::mir::build(program, index)
                     .inspect_err(|reason| report_fallback(program, index, reason))
-                    .ok()
+                    .ok()?;
+                if codegen.optimization == Optimization::Speed {
+                    crate::mir::bounds::mark(&mut body);
+                }
+                Some(body)
             })
             .collect()
     } else {
@@ -2314,6 +2318,7 @@ fn lower(
             proved_accesses: std::collections::BTreeSet::new(),
             store_proved: false,
             upper_bounds: Vec::new(),
+            index_below: false,
             vec_shadows: BTreeMap::new(),
             pending_pushes: Vec::new(),
             push_shadow: None,
@@ -4255,6 +4260,9 @@ struct Generator<'a, 'b> {
     store_proved: bool,
     // Dominating signed `index < length` tests, identified by SSA value.
     upper_bounds: Vec<(Value, Value)>,
+    /// The MIR call being lowered has its index proved below its slice's
+    /// length (`Callee::Builtin { below: true }`, FND-MIR-BOUNDS).
+    index_below: bool,
     /// Vector locals whose length and capacity a loop keeps in variables:
     /// slot to (length, capacity). See [`Generator::lower_while`].
     vec_shadows: BTreeMap<usize, (Variable, Variable)>,
@@ -7740,8 +7748,9 @@ impl Generator<'_, '_> {
     }
 
     fn slice_out_of_bounds(&mut self, index: Value, length: Value) -> Value {
-        if self.codegen.optimization == Optimization::Speed
-            && self.upper_bounds.iter().any(|(known_index, known_length)| {
+        if self.index_below
+            || self.codegen.optimization == Optimization::Speed
+                && self.upper_bounds.iter().any(|(known_index, known_length)| {
                 self.builder.func.dfg.resolve_aliases(*known_index)
                     == self.builder.func.dfg.resolve_aliases(index)
                     && self.builder.func.dfg.resolve_aliases(*known_length)

@@ -96,17 +96,24 @@ fn same_on_both_paths(source: &str) -> String {
     same_program_on_both_paths(&executable::check(source).unwrap(), false)
 }
 
+/// As [`same_program_on_both_paths`], from `base` options instead of the
+/// default ones.
+fn same_on_both_paths_with(source: &str, base: CodegenOptions) -> String {
+    compare_paths(&executable::check(source).unwrap(), false, base)
+}
+
 /// As [`same_on_both_paths`]; with `stats`, the programs also report their
 /// allocations, which must agree.
 fn same_program_on_both_paths(program: &executable::Executable, stats: bool) -> String {
+    compare_paths(program, stats, CodegenOptions::default())
+}
+
+fn compare_paths(program: &executable::Executable, stats: bool, base: CodegenOptions) -> String {
     let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
     let mut outputs = Vec::new();
     for mir in [false, true] {
         let binary = scratch.path().join(format!("program-{mir}"));
-        let codegen = CodegenOptions {
-            mir,
-            ..CodegenOptions::default()
-        };
+        let codegen = CodegenOptions { mir, ..base };
         native::build_with_codegen(program, &binary, stats, &LinkSpec::default(), codegen).unwrap();
         let output = Command::new(&binary).output().unwrap();
         outputs.push((output.status.code(), output.stdout, output.stderr));
@@ -500,6 +507,28 @@ fn checked_arithmetic_panics_on_the_mir_path_as_on_the_tree() {
         "fn half(x: i64, y: i64) -> i64 { x / y }
         fn main() -> Unit ! {io} { print_i64(half(4, 2)); print_i64(half(1, 0)); }",
     );
+}
+
+#[test]
+fn proved_upper_bounds_keep_the_sign_check() {
+    // FND-MIR-BOUNDS: under `i < xs.len()` a release build drops the upper
+    // bound check of `xs[i]`, but a negative index must still panic.
+    let output = same_on_both_paths_with(
+        "fn sum(xs: &[i64], start: i64) -> i64 {
+            let mut i = start;
+            let mut total = 0;
+            while i < xs.len() { total = total + xs[i]; i = i + 1; }
+            total
+        }
+        fn main() -> Unit ! {io, alloc} {
+            let v = [1, 2, 3, 4];
+            print_i64(sum(v[..], 0));
+            print_i64(sum(v[..], 2));
+            print_i64(sum(v[..], -1));
+        }",
+        CodegenOptions::release(),
+    );
+    assert_eq!(output, "10\n7\n");
 }
 
 #[test]

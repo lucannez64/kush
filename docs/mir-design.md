@@ -369,6 +369,9 @@ it and tests can check it without compiling.
 - A slice element call whose index and view carry a fact is marked
   `below`. Native code then keeps only the sign check, as the tree path
   does.
+- Status: `mir/bounds.rs` marks the calls (text form `call builtin N
+  below(...)`) in `Speed` builds. Unlike the tree path, it also uses the
+  tests of `if` branches, not just loop conditions.
 
 **Slice-layout versioning (FND-MIR-SLICE-VERSION).**
 - Applies to a small counted loop over `i < v.len()`: a view `v` the loop

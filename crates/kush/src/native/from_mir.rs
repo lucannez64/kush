@@ -890,12 +890,13 @@ impl Generator<'_, '_> {
                             .collect::<Vec<_>>();
                         self.mir_indirect_call(callee_ty, &callable, arguments)
                     }
-                    Callee::Builtin(index) => {
+                    Callee::Builtin { index, below } => {
                         let ty = body.locals[*destination].ty;
                         let target = body.builtins.0[*index];
-                        let Some(words) =
-                            self.call_target(&target, values, ty, terminator.span, None)
-                        else {
+                        self.index_below = *below;
+                        let words = self.call_target(&target, values, ty, terminator.span, None);
+                        self.index_below = false;
+                        let Some(words) = words else {
                             // The builtin always panics; the block has ended.
                             return;
                         };

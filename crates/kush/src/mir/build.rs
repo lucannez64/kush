@@ -2671,7 +2671,10 @@ impl Builder<'_> {
             }
             other => {
                 self.builtins.push(*other);
-                Callee::Builtin(self.builtins.len() - 1)
+                Callee::Builtin {
+                    index: self.builtins.len() - 1,
+                    below: false,
+                }
             }
         };
         let exprs = args.iter().collect::<Vec<_>>();
