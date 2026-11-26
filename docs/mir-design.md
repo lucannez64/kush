@@ -596,3 +596,55 @@ allocation attempts as the tree did (`Box.try_new`, a growing
 tree: continuation environments count as `kush.c` counts them (64 KiB
 chunks, not one per environment), and there is no call-depth limit (the
 tree stopped at 128 nested calls; the machine's stacks are explicit).
+
+## 10. LLVM from the MIR (FND-LLVM-DIRECT)
+
+**Today.** The native lowering (`Generator` in `native.rs` and
+`native/from_mir.rs`, about 10,000 lines) builds Cranelift IR: about 800
+instruction calls over some 70 operations, plus blocks, variables, stack
+slots and signatures. The LLVM backend (`native/llvm.rs`) translates the
+finished Cranelift IR into textual LLVM IR. It sees untyped words: pointer
+provenance is rebuilt from how values are used, and aliasing facts reach it
+only through a side channel (the memory class carried as a source location,
+and the exclusive-pointer parameters it infers).
+
+**Decision 8: one lowering behind an instruction-builder trait.** The
+lowering is written once, against a trait `Emit` with two implementations:
+Cranelift's `FunctionBuilder`, and a builder that writes typed LLVM IR as it
+goes. Nothing is lowered twice, and the translator is deleted at the end.
+(The alternative, a second MIR-to-LLVM emitter, would lower every builtin
+twice: the duplication FND-EVAL just removed from the evaluator.)
+
+**The trait.**
+- Associated types for the handles: `Value`, `Block`, `Var`, `Slot`,
+  `FuncRef`, `SigRef`. Value types are Cranelift's `ir::Type` (the integer,
+  float and vector types the lowering uses).
+- One method per operation the lowering uses, with Cranelift's names and
+  argument order (`iadd`, `icmp_imm_s`, `load`, `brif`, `call`, ...), so
+  migrating a call site is mechanical: `self.builder.ins().iadd(a, b)`
+  becomes `self.e.iadd(a, b)`.
+- Block and variable management (`create_block`, `switch_to_block`,
+  `append_block_param`, `block_params`, `declare_var`, `def_var`,
+  `use_var`, `seal_all_blocks`), stack slots, and function and data
+  references.
+- Facts the Cranelift builder ignores and the LLVM builder uses: a value's
+  pointer provenance where the lowering knows it (an address of a MIR place,
+  a handle the runtime returns), a load's or store's memory class, and a
+  function's exclusive (`&mut`) pointer parameters from its MIR signature.
+
+**The LLVM builder.** Every value has its LLVM type when it is made; a value
+that is an address is kept as a `ptr` (`getelementptr` for offsets), so
+LLVM sees real pointers without reconstructing them. `&mut` parameters are
+`noalias`; memory classes become alias scopes, as the translator does now.
+Block parameters become `phi` nodes; variables are SSA-renamed as Cranelift's
+builder does (or lowered to `alloca` and left to `mem2reg`).
+
+**Steps.**
+
+| Node | Scope | Done when |
+|---|---|---|
+| FND-LLVM-EMIT | The `Emit` trait and its Cranelift implementation; `Generator` and the helper builders call it (still Cranelift-only) | the suite passes, the generated code is unchanged |
+| FND-LLVM-GENERIC | `Generator` and the helpers generic over `Emit` (handles as associated types) | the suite passes |
+| FND-LLVM-BUILDER | The typed LLVM builder; `--backend llvm` uses it, the translator stays for comparison | both backends pass the suite and check-reference |
+| FND-LLVM-FACTS | Pointer provenance, `noalias` and alias scopes from the MIR | LLVM benchmarks at least as fast as with the translator |
+| FND-LLVM-SWITCH | The translator (`llvm.rs`'s Cranelift reader) is deleted | the suite passes; benchmarks recorded |
