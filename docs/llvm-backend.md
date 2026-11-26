@@ -60,8 +60,14 @@ handler protocol are therefore identical by construction, and a lowering fix
 reaches both backends.
 
 In the LLVM builder every value has its LLVM type from the start. Block
-parameters become `phi` nodes. Variables live in `alloca`s that `mem2reg`
-promotes, and within one block a variable's value is reused without a load.
+parameters become `phi` nodes. Variables become SSA values the way
+Cranelift's builder makes them: a variable read before any definition in a
+block is a `phi` of its values at the ends of the predecessors, resolved when
+the function is finished, and a `phi` whose operands are all one value is
+replaced by that value. The IR LLVM receives is therefore the translator's,
+instruction for instruction, without the loads and stores of `alloca`s.
+(With `alloca`s left to `mem2reg`, LLVM ordered the loop `phi`s differently
+and the vectorized `sum` loop of `benchmarks/checked-loops` ran 7% slower.)
 A staging recipe ([staging.md](staging.md)) is still built with Cranelift, because the
 staging runtime copies its machine code; Cranelift IR is then translated by
 `native/llvm.rs` for the LLVM module. The translator is also used for every

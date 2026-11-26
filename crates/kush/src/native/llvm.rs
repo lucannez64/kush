@@ -538,7 +538,7 @@ impl LlvmModule {
             };
             functions.push((format!("{name}{WORD_THUNK}"), thunk(name, typed)));
         }
-        let total: usize = functions.iter().map(|(_, text)| size(text)).sum();
+        let total: usize = functions.iter().map(|(_, text)| text.lines().count()).sum();
         let wanted = match total.checked_div(split.minimum) {
             Some(most) => split.cores.max(total.div_ceil(split.target)).min(most),
             None => split.cores,
@@ -745,17 +745,6 @@ fn declaration_of(text: &str) -> String {
     format!("declare hidden {}({params})", &header[..open])
 }
 
-/// The size of a function's text for partitioning: its lines, without the
-/// typed builder's variable traffic (the `alloca`s of variables `%xN` and the
-/// loads and stores through them), which `mem2reg` removes first. Without
-/// this the same program would be cut into about twice as many partitions
-/// as from the translator, and LLVM would inline less across them.
-fn size(text: &str) -> usize {
-    text.lines()
-        .filter(|line| !(line.starts_with("  %x") || line.contains(", ptr %x")))
-        .count()
-}
-
 /// Where each function of a split program goes.
 struct Partitioning {
     count: usize,
@@ -791,7 +780,7 @@ fn partition(functions: &[(String, String)], wanted: usize) -> Partitioning {
         .collect();
     let sizes: Vec<usize> = functions
         .iter()
-        .map(|(_, text)| size(text).max(1))
+        .map(|(_, text)| text.lines().count().max(1))
         .collect();
     // Which defined functions each function refers to (calls, addresses).
     let references: Vec<BTreeSet<usize>> = functions

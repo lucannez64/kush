@@ -3,8 +3,9 @@
 //! An [`Emit`] that writes LLVM IR text as the lowering calls it, instead of
 //! building Cranelift IR for the translator (`llvm.rs`) to read back. Every
 //! value gets its LLVM type when it is made. Block parameters become `phi`
-//! nodes. Variables live in `alloca`s that LLVM's `mem2reg` turns back into
-//! SSA, and within one block a variable's value is reused directly. Values
+//! nodes. Variables become SSA values as Cranelift's builder makes them: a
+//! read before any definition in a block is a phi, resolved when the
+//! function is finished (see [`LlvmBuilder::resolve_variables`]). Values
 //! with a known pointer origin (stack slots, symbols, exclusive parameters,
 //! pointers the runtime returns) keep a pointer form, and addresses are
 //! rebuilt as `getelementptr` from it, as the translator does.
@@ -57,6 +58,11 @@ struct BlockData {
     /// The label code is appended under (a block splits at each trap check).
     label: String,
     filled: bool,
+    /// Each variable's current value here: its value on exit once filled.
+    vars: HashMap<usize, ir::Value>,
+    /// Variables read here before any definition, with the value standing
+    /// for each on entry (a phi, or what it resolves to), in reading order.
+    entry_vars: Vec<(usize, ir::Value)>,
 }
 
 struct Edge {
@@ -91,8 +97,6 @@ pub(super) struct LlvmBuilder {
     current: Option<ir::Block>,
     edges: Vec<Edge>,
     variables: Vec<ir::Type>,
-    /// Variable values known in the current block.
-    local: HashMap<usize, ir::Value>,
     slots: Vec<ir::StackSlotData>,
     class: Option<u32>,
     temporaries: usize,
@@ -130,7 +134,6 @@ impl LlvmBuilder {
             current: None,
             edges: Vec::new(),
             variables: Vec::new(),
-            local: HashMap::new(),
             slots: Vec::new(),
             class: None,
             temporaries: 0,
@@ -202,7 +205,15 @@ impl LlvmBuilder {
     }
     fn terminate(&mut self) {
         self.block().filled = true;
-        self.local.clear();
+    }
+    /// A new value standing for `var` on entry to `block`.
+    fn entry_value(&mut self, block: ir::Block, var: usize) -> ir::Value {
+        let ty = self.variables[var];
+        let value = self.value(ty);
+        let data = &mut self.blocks[block.index()];
+        data.entry_vars.push((var, value));
+        data.vars.insert(var, value);
+        value
     }
     fn trap_now(&mut self) {
         self.intrinsic("declare void @llvm.trap()");
@@ -715,7 +726,7 @@ impl LlvmBuilder {
     }
 
     /// The finished function text, or why it could not be built.
-    pub(super) fn finish(self) -> std::result::Result<String, String> {
+    pub(super) fn finish(mut self) -> std::result::Result<String, String> {
         if let Some(failure) = self.failure {
             return Err(failure);
         }
@@ -739,6 +750,14 @@ impl LlvmBuilder {
                 work.extend(successors.get(&block).into_iter().flatten().copied());
             }
         }
+        // Each block's incoming edges from reachable blocks, in branch order.
+        let mut incoming: HashMap<ir::Block, Vec<usize>> = HashMap::new();
+        for (index, edge) in self.edges.iter().enumerate() {
+            if reachable.contains(&edge.from_block) {
+                incoming.entry(edge.target).or_default().push(index);
+            }
+        }
+        let (phis, replaced) = self.resolve_variables(entry, &incoming);
         let exclusive: &[usize] = self
             .shared
             .exclusive
@@ -776,11 +795,6 @@ impl LlvmBuilder {
                 data.size.max(1)
             );
         }
-        for (variable, ty) in self.variables.iter().enumerate() {
-            let tyn = ty_name(*ty)?;
-            let _ = writeln!(prologue, "  %x{variable} = alloca {tyn}");
-            let _ = writeln!(prologue, "  store {tyn} zeroinitializer, ptr %x{variable}");
-        }
         let linkage = match self.linkage {
             Linkage::Local | Linkage::Hidden => "internal ",
             _ => "",
@@ -804,12 +818,14 @@ impl LlvmBuilder {
             if block == entry {
                 out.push_str(&prologue);
             } else {
+                let edges = incoming.get(&block).map_or(&[][..], Vec::as_slice);
                 for (index, param) in data.params.iter().enumerate() {
-                    let incoming = self
-                        .edges
+                    let incoming = edges
                         .iter()
-                        .filter(|edge| edge.target == block && reachable.contains(&edge.from_block))
-                        .map(|edge| format!("[ {}, %{} ]", edge.values[index], edge.from))
+                        .map(|edge| {
+                            let edge = &self.edges[*edge];
+                            format!("[ {}, %{} ]", edge.values[index], edge.from)
+                        })
                         .collect::<Vec<_>>();
                     let _ = writeln!(
                         out,
@@ -819,6 +835,24 @@ impl LlvmBuilder {
                         incoming.join(", ")
                     );
                 }
+                for (_, value) in &data.entry_vars {
+                    if let Some(operands) = phis.get(value) {
+                        let incoming = edges
+                            .iter()
+                            .zip(operands)
+                            .map(|(edge, operand)| {
+                                format!("[ {operand}, %{} ]", self.edges[*edge].from)
+                            })
+                            .collect::<Vec<_>>();
+                        let _ = writeln!(
+                            out,
+                            "  {} = phi {} {}",
+                            name(*value),
+                            ty_name(self.types[value.index()])?,
+                            incoming.join(", ")
+                        );
+                    }
+                }
             }
             out.push_str(&data.body);
             if !data.filled {
@@ -826,12 +860,160 @@ impl LlvmBuilder {
             }
         }
         out.push_str("}\n");
-        Ok(drop_unused_flags(out))
+        Ok(drop_unused_flags(rename(out, &replaced)))
+    }
+
+    /// Variable reads become SSA values the way Cranelift's builder makes
+    /// them (Braun et al.): a read before any definition in a block stands
+    /// for a phi of the variable's values at the ends of the predecessors,
+    /// and a phi whose operands are all one value (or itself) is that value.
+    /// A variable read on a path from the entry with no definition is zero.
+    /// Returns the operands of the phis that remain and the text replacing
+    /// each value that resolved to another.
+    #[allow(clippy::type_complexity)]
+    fn resolve_variables(
+        &mut self,
+        entry: ir::Block,
+        incoming: &HashMap<ir::Block, Vec<usize>>,
+    ) -> (HashMap<ir::Value, Vec<String>>, HashMap<usize, String>) {
+        // Every entry value, including those the lookups add, with its
+        // operands (`None` for zero).
+        let mut work: Vec<(ir::Block, usize, ir::Value)> = Vec::new();
+        for (index, data) in self.blocks.iter().enumerate() {
+            for (var, value) in &data.entry_vars {
+                work.push((ir::Block::new(index), *var, *value));
+            }
+        }
+        let mut operands: HashMap<ir::Value, Vec<Option<ir::Value>>> = HashMap::new();
+        let mut next = 0;
+        while next < work.len() {
+            let (block, var, value) = work[next];
+            next += 1;
+            let mut found = Vec::new();
+            if block != entry {
+                for edge in incoming.get(&block).into_iter().flatten() {
+                    let from = self.edges[*edge].from_block;
+                    let operand = match self.blocks[from.index()].vars.get(&var) {
+                        Some(&known) => Some(known),
+                        None if from == entry => None,
+                        None => {
+                            let added = self.entry_value(from, var);
+                            work.push((from, var, added));
+                            Some(added)
+                        }
+                    };
+                    found.push(operand);
+                }
+            }
+            operands.insert(value, found);
+        }
+        // Remove trivial phis until none is left.
+        let mut alias: HashMap<ir::Value, Option<ir::Value>> = HashMap::new();
+        let resolve = |alias: &HashMap<ir::Value, Option<ir::Value>>, value: Option<ir::Value>| {
+            let mut value = value?;
+            while let Some(&next) = alias.get(&value) {
+                value = next?;
+            }
+            Some(value)
+        };
+        loop {
+            let mut changed = false;
+            for (_, _, value) in &work {
+                if alias.contains_key(value) {
+                    continue;
+                }
+                let mut unique: Option<Option<ir::Value>> = None;
+                let mut trivial = true;
+                for operand in &operands[value] {
+                    let operand = resolve(&alias, *operand);
+                    if operand == Some(*value) {
+                        continue;
+                    }
+                    match unique {
+                        None => unique = Some(operand),
+                        Some(seen) if seen == operand => {}
+                        Some(_) => {
+                            trivial = false;
+                            break;
+                        }
+                    }
+                }
+                if trivial {
+                    alias.insert(*value, unique.flatten());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let render = |this: &Self, value: ir::Value| match resolve(&alias, Some(value)) {
+            Some(value) => this.op(value),
+            None if this.ty(value).is_int() => "0".to_owned(),
+            None => "zeroinitializer".to_owned(),
+        };
+        let replaced = alias
+            .keys()
+            .map(|value| (value.index(), render(self, *value)))
+            .collect();
+        let phis = work
+            .iter()
+            .filter(|(_, _, value)| !alias.contains_key(value))
+            .map(|(_, _, value)| {
+                let rendered = operands[value]
+                    .iter()
+                    .map(|operand| match operand {
+                        Some(operand) => render(self, *operand),
+                        None if self.ty(*value).is_int() => "0".to_owned(),
+                        None => "zeroinitializer".to_owned(),
+                    })
+                    .collect();
+                (*value, rendered)
+            })
+            .collect();
+        (phis, replaced)
     }
 }
 
 fn name(value: ir::Value) -> String {
     format!("%v{}", value.index())
+}
+
+/// `text` with each whole `%vN` whose `N` is in `replaced` replaced.
+fn rename(text: String, replaced: &HashMap<usize, String>) -> String {
+    if replaced.is_empty() {
+        return text;
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let (mut copied, mut at) = (0, 0);
+    while let Some(found) = text[at..].find("%v") {
+        let start = at + found;
+        let mut end = start + 2;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        at = end;
+        let whole = end > start + 2
+            && !(end < bytes.len()
+                && (bytes[end] == b'.'
+                    || bytes[end] == b'_'
+                    || bytes[end].is_ascii_alphanumeric()));
+        if !whole {
+            continue;
+        }
+        if let Some(replacement) = text[start + 2..end]
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| replaced.get(&index))
+        {
+            out.push_str(&text[copied..start]);
+            out.push_str(replacement);
+            copied = end;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
 }
 
 /// The literal of an integer constant of type `ty`: sign-extended from its
@@ -857,7 +1039,6 @@ impl Emit for LlvmBuilder {
             self.entry = Some(block);
         }
         self.current = Some(block);
-        self.local.clear();
     }
     fn append_block_param(&mut self, block: ir::Block, ty: ir::Type) -> ir::Value {
         let value = self.value(ty);
@@ -884,26 +1065,14 @@ impl Emit for LlvmBuilder {
         Variable::new(self.variables.len() - 1)
     }
     fn def_var(&mut self, var: Variable, value: ir::Value) {
-        let ty = self.variables[var.index()];
-        let tyn = self.tyn(ty);
-        let operand = self.op(value);
-        self.line(format!("store {tyn} {operand}, ptr %x{}", var.index()));
-        self.local.insert(var.index(), value);
+        self.block().vars.insert(var.index(), value);
     }
     fn use_var(&mut self, var: Variable) -> ir::Value {
-        if let Some(&value) = self.local.get(&var.index()) {
-            return value;
+        let block = self.current.expect("a variable read outside any block");
+        match self.blocks[block.index()].vars.get(&var.index()) {
+            Some(&value) => value,
+            None => self.entry_value(block, var.index()),
         }
-        let ty = self.variables[var.index()];
-        let result = self.value(ty);
-        let tyn = self.tyn(ty);
-        self.line(format!(
-            "{} = load {tyn}, ptr %x{}",
-            name(result),
-            var.index()
-        ));
-        self.local.insert(var.index(), result);
-        result
     }
     fn create_sized_stack_slot(&mut self, data: ir::StackSlotData) -> ir::StackSlot {
         self.slots.push(data);
