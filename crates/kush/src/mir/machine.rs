@@ -185,12 +185,40 @@ impl Memory {
     }
 }
 
-/// Where a call's result goes in the caller.
+/// Where a call's result goes in the caller, and where a panic in the
+/// callee unwinds to.
 struct Return {
-    destination: LocalId,
-    next: BlockId,
+    site: Site,
     unwind: Option<BlockId>,
 }
+
+/// What made a call: every call is a frame on the task's stack, so a task
+/// can suspend anywhere in it.
+enum Site {
+    /// A call terminator: its destination, then its next block.
+    Call { destination: LocalId, next: BlockId },
+    /// A statement that calls (a `perform`, a `Vec.map` callback): its
+    /// place, then the next statement.
+    Statement(Place),
+    /// The rest of a builtin, which takes the result and goes on, then
+    /// where its own result goes.
+    Native { then: Then, site: Box<Site> },
+}
+
+/// What a statement or builtin does: produce its result, or call a
+/// function first and hand the result to `then` (none: it is the result).
+enum Flow {
+    Done(Words),
+    Call {
+        function: usize,
+        args: Vec<Words>,
+        environment: Option<i64>,
+        then: Option<Then>,
+    },
+}
+
+/// The rest of a builtin after a call it made.
+type Then = Box<dyn for<'p, 'o, 'm> FnOnce(&'m mut Machine<'p, 'o>, Words) -> Run<Flow>>;
 
 struct Frame {
     body: Rc<Body>,
@@ -238,6 +266,9 @@ struct Machine<'p, 'o> {
     abort_word: i64,
     /// Environments of `multi fn` tokens.
     kstack: effects::KStack,
+    /// Runtime callbacks running to their result inside an operation
+    /// ([`Machine::call_nested`]); a task cannot switch while one runs.
+    nested: usize,
 }
 
 /// Run the program's entry function on the machine. Returns its result word
@@ -294,6 +325,7 @@ fn run_program(
         handlers: Vec::new(),
         abort_word: 0,
         kstack: effects::KStack::default(),
+        nested: 0,
     };
     machine.memory.stats.fusions = program.fusions;
     machine.enter(entry, Vec::new(), None, None)?;
@@ -632,21 +664,17 @@ impl Machine<'_, '_> {
         }
     }
 
-    /// Call `function` from inside a statement (a `Vec.map` callback) and
-    /// run it to its result. A panic leaves it as a [`Stop::Panic`].
+    /// Call a runtime callback (an allocator's, an arena strategy) from
+    /// inside an operation and run it to its result here. Its effect row
+    /// cannot suspend (the checker allows at most `alloc`), so no task
+    /// switches while it runs; [`Machine::nested`] counts these runs. A
+    /// panic leaves it as a [`Stop::Panic`].
     fn call_nested(&mut self, function: usize, args: Vec<Words>) -> Run<Words> {
-        self.call_with(function, args, None)
-    }
-
-    /// [`Machine::call_nested`] of a closure with its environment.
-    fn call_with(
-        &mut self,
-        function: usize,
-        args: Vec<Words>,
-        environment: Option<i64>,
-    ) -> Run<Words> {
-        self.enter(function, args, None, environment)?;
-        self.run()
+        self.enter(function, args, None, None)?;
+        self.nested += 1;
+        let result = self.run();
+        self.nested -= 1;
+        result
     }
 
     /// Run one statement or terminator. `Some` is the result of a frame
@@ -658,11 +686,10 @@ impl Machine<'_, '_> {
         if let Some(statement) = block.statements.get(frame.statement) {
             let StatementKind::Assign(place, rvalue) = &statement.kind;
             let ty = body.place_ty(*place);
-            let words = self
-                .rvalue(&body, rvalue, ty, statement.span)
+            let flow = self
+                .statement_flow(&body, rvalue, ty, statement.span)
                 .map_err(|stop| Raise::at(stop, block.unwind))?;
-            self.store(*place, &words).map_err(Raise::Stop)?;
-            self.stack.last_mut().expect("a frame").statement += 1;
+            self.proceed(flow, Site::Statement(*place), block.unwind)?;
             return Ok(None);
         }
         let span = block.terminator.span;
@@ -695,8 +722,10 @@ impl Machine<'_, '_> {
                 match callee {
                     Callee::Function(index) => {
                         let caller = Return {
-                            destination: *destination,
-                            next: *next,
+                            site: Site::Call {
+                                destination: *destination,
+                                next: *next,
+                            },
                             unwind: *unwind,
                         };
                         self.enter(*index, values, Some(caller), None)
@@ -720,8 +749,10 @@ impl Machine<'_, '_> {
                         ) =>
                     {
                         let caller = Return {
-                            destination: *destination,
-                            next: *next,
+                            site: Site::Call {
+                                destination: *destination,
+                                next: *next,
+                            },
                             unwind: *unwind,
                         };
                         match body.builtins.0[*index] {
@@ -758,8 +789,10 @@ impl Machine<'_, '_> {
                         };
                         let function = code_function(words[0]).map_err(Raise::Stop)?;
                         let caller = Return {
-                            destination: *destination,
-                            next: *next,
+                            site: Site::Call {
+                                destination: *destination,
+                                next: *next,
+                            },
                             unwind: *unwind,
                         };
                         self.enter(function, values, Some(caller), environment)
@@ -771,10 +804,7 @@ impl Machine<'_, '_> {
                 let words = self.operand(*value).map_err(Raise::Stop)?;
                 let frame = self.leave().map_err(Raise::Stop)?;
                 match frame.caller {
-                    Some(caller) => {
-                        self.finish_call(caller.destination, words, caller.next)
-                            .map_err(Raise::Stop)?;
-                    }
+                    Some(caller) => self.deliver(caller.site, caller.unwind, words)?,
                     None => return Ok(Some(words)),
                 }
             }
@@ -811,10 +841,7 @@ impl Machine<'_, '_> {
                 // dummy, and its caller tests the abort word.
                 let frame = self.leave().map_err(Raise::Stop)?;
                 match frame.caller {
-                    Some(caller) => {
-                        self.finish_call(caller.destination, Vec::new(), caller.next)
-                            .map_err(Raise::Stop)?;
-                    }
+                    Some(caller) => self.deliver(caller.site, caller.unwind, Vec::new())?,
                     None => return Ok(Some(Vec::new())),
                 }
             }
@@ -825,6 +852,80 @@ impl Machine<'_, '_> {
             }
         }
         Ok(None)
+    }
+
+    /// What a statement does: most compute their value; a `perform` and a
+    /// `Vec.map` call functions, as frames on the stack (the callee may
+    /// suspend the task).
+    fn statement_flow(&mut self, body: &Body, rvalue: &Rvalue, ty: Type, span: Span) -> Run<Flow> {
+        match rvalue {
+            Rvalue::Runtime(RuntimeOp::Perform { operation, .. }, operands) => {
+                let payload = self.operand(operands[0])?;
+                let resume = self.operand(operands[1])?;
+                self.perform(*operation, payload, resume, span)
+            }
+            Rvalue::Map(op, operands) => {
+                let handle = self.scalar(operands[0])?;
+                let callbacks = operands[1..]
+                    .iter()
+                    .map(|callback| self.scalar(*callback))
+                    .collect::<Run<Vec<_>>>()?;
+                self.vec_map(op, handle, callbacks)
+            }
+            _ => Ok(Flow::Done(self.rvalue(body, rvalue, ty, span)?)),
+        }
+    }
+
+    /// Go on with a statement's or builtin's flow: deliver its result to
+    /// `site`, or push the frame of the call it makes.
+    fn proceed(
+        &mut self,
+        flow: Flow,
+        site: Site,
+        unwind: Option<BlockId>,
+    ) -> std::result::Result<(), Raise> {
+        match flow {
+            Flow::Done(words) => self.deliver(site, unwind, words),
+            Flow::Call {
+                function,
+                args,
+                environment,
+                then,
+            } => {
+                let site = match then {
+                    Some(then) => Site::Native {
+                        then,
+                        site: Box::new(site),
+                    },
+                    None => site,
+                };
+                self.enter(function, args, Some(Return { site, unwind }), environment)
+                    .map_err(Raise::Stop)
+            }
+        }
+    }
+
+    /// A call's result arrives at its site in the (now top) caller frame.
+    fn deliver(
+        &mut self,
+        site: Site,
+        unwind: Option<BlockId>,
+        words: Words,
+    ) -> std::result::Result<(), Raise> {
+        match site {
+            Site::Call { destination, next } => self
+                .finish_call(destination, words, next)
+                .map_err(Raise::Stop),
+            Site::Statement(place) => {
+                self.store(place, &words).map_err(Raise::Stop)?;
+                self.stack.last_mut().expect("a frame").statement += 1;
+                Ok(())
+            }
+            Site::Native { then, site } => {
+                let flow = then(self, words).map_err(|stop| Raise::at(stop, unwind))?;
+                self.proceed(flow, *site, unwind)
+            }
+        }
     }
 
     /// A builtin call on its arguments' words (native's `call_target`).
@@ -1293,14 +1394,7 @@ impl Machine<'_, '_> {
             }
             Rvalue::Alloc(op, operands) => self.alloc_op(body, *op, operands, ty, span)?,
             Rvalue::Runtime(op, operands) => self.runtime_op(body, *op, operands, span)?,
-            Rvalue::Map(op, operands) => {
-                let handle = self.scalar(operands[0])?;
-                let callbacks = operands[1..]
-                    .iter()
-                    .map(|callback| self.scalar(*callback))
-                    .collect::<Run<Vec<_>>>()?;
-                vec![self.vec_map(op, handle, &callbacks)?]
-            }
+            Rvalue::Map(..) => return fault("a Vec.map outside statement_flow"),
             other => return unsupported(rvalue_name(other)),
         })
     }

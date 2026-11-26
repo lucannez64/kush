@@ -103,17 +103,8 @@ impl Machine<'_, '_> {
                 }
                 vec![before]
             }
-            RuntimeOp::Perform { operation, .. } => {
-                let Some((code, environment, once)) = self.lookup(operation as i64)? else {
-                    return panic_at(span, NO_HANDLER);
-                };
-                let function = code_function(code)?;
-                let environment = (once != 0).then_some(environment);
-                self.call_with(
-                    function,
-                    vec![words[0].clone(), words[1].clone()],
-                    environment,
-                )?
+            RuntimeOp::Perform { .. } => {
+                return fault("a perform outside statement_flow");
             }
             RuntimeOp::AbortBuffer { words } => {
                 let buffer = self.memory.allocate(words.max(1) * 8, false);
@@ -152,6 +143,27 @@ impl Machine<'_, '_> {
                 self.kstack_restore(words[0][0])?;
                 vec![0]
             }
+        })
+    }
+
+    /// `perform`: call the innermost handler frame for `operation` with the
+    /// payload and the resume value, as a frame on the stack (the handler
+    /// may suspend the task).
+    pub(super) fn perform(
+        &mut self,
+        operation: usize,
+        payload: Words,
+        resume: Words,
+        span: Span,
+    ) -> Run<Flow> {
+        let Some((code, environment, once)) = self.lookup(operation as i64)? else {
+            return panic_at(span, NO_HANDLER);
+        };
+        Ok(Flow::Call {
+            function: code_function(code)?,
+            args: vec![payload, resume],
+            environment: (once != 0).then_some(environment),
+            then: None,
         })
     }
 

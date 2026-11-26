@@ -418,7 +418,8 @@ impl Machine<'_, '_> {
 
     /// `Vec.map` in place (native's `vec_map`): restride once when the
     /// elements widen or narrow, then apply the callbacks to each element.
-    pub(super) fn vec_map(&mut self, op: &MapOp, handle: i64, callbacks: &[i64]) -> Run<i64> {
+    /// The callbacks run as frames on the stack, one at a time.
+    pub(super) fn vec_map(&mut self, op: &MapOp, handle: i64, callbacks: Vec<i64>) -> Run<Flow> {
         let source = self.width(op.source);
         let target = self.width(op.target);
         let mut handle = handle;
@@ -448,18 +449,21 @@ impl Machine<'_, '_> {
             source
         };
         let (length, _) = self.header(handle)?;
-        for index in 0..length {
-            let mut current = self
-                .memory
-                .load(handle + 16 + index * (stride * 8) as i64, source)?;
-            for code in callbacks {
-                let function = code_function(*code)?;
-                current = self.call_nested(function, vec![current])?;
-            }
-            self.memory
-                .store(handle + 16 + index * (target * 8) as i64, &current)?;
-        }
-        Ok(handle)
+        map_step(
+            self,
+            Mapping {
+                handle,
+                length,
+                index: 0,
+                pending: false,
+                callback: 0,
+                callbacks,
+                current: Vec::new(),
+                source,
+                stride,
+                target,
+            },
+        )
     }
 
     // ---- views -------------------------------------------------------------
@@ -996,5 +1000,55 @@ impl Machine<'_, '_> {
             vec![shape.err_tag as i64, status]
         };
         Ok(fit(words, self.width(ty)))
+    }
+}
+
+/// Where a `Vec.map` is: with `pending`, element `index` is `current`,
+/// about to go through callback `callback` (past the last one: stored).
+struct Mapping {
+    handle: i64,
+    length: i64,
+    index: i64,
+    pending: bool,
+    callback: usize,
+    callbacks: Vec<i64>,
+    current: Words,
+    /// The elements' widths before and after, and the stride they are
+    /// read at, in words.
+    source: usize,
+    stride: usize,
+    target: usize,
+}
+
+/// Run a `Vec.map` until its next callback call, or to its end.
+fn map_step(machine: &mut Machine<'_, '_>, mut state: Mapping) -> Run<Flow> {
+    loop {
+        if state.pending {
+            if state.callback < state.callbacks.len() {
+                let function = code_function(state.callbacks[state.callback])?;
+                let args = vec![std::mem::take(&mut state.current)];
+                return Ok(Flow::Call {
+                    function,
+                    args,
+                    environment: None,
+                    then: Some(Box::new(move |machine, result| {
+                        state.current = result;
+                        state.callback += 1;
+                        map_step(machine, state)
+                    })),
+                });
+            }
+            let slot = state.handle + 16 + state.index * (state.target * 8) as i64;
+            machine.memory.store(slot, &state.current)?;
+            state.index += 1;
+            state.pending = false;
+        }
+        if state.index >= state.length {
+            return Ok(Flow::Done(vec![state.handle]));
+        }
+        let slot = state.handle + 16 + state.index * (state.stride * 8) as i64;
+        state.current = machine.memory.load(slot, state.source)?;
+        state.callback = 0;
+        state.pending = true;
     }
 }
