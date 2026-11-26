@@ -117,7 +117,6 @@ impl Checker<'_, '_> {
                         value: Box::new(value),
                         element,
                         capacity,
-                        check: !proved,
                     },
                     ty,
                     span,

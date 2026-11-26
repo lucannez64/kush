@@ -11,12 +11,12 @@
 //!
 //! Growth follows kush.c: a buffer's allocation has the size class the
 //! runtime would give it, and growth that fits it keeps the allocation.
-//! Panic messages are the tree evaluator's.
 
 use super::*;
 use crate::executable::{BytesOp, DynArrayOp, SliceOp, StrOp, StringOp, VecOp};
 
-/// The tree evaluator's storage limits; a run past them is not compared.
+/// The evaluator's storage limits: past them a run ends with "budget
+/// exhausted" (native code has no such limit).
 const BYTES_LIMIT: usize = 16 * 1024 * 1024;
 const VEC_LIMIT: usize = 1 << 20;
 
@@ -365,23 +365,36 @@ impl Machine<'_, '_> {
                 }
             }
             VecOp::TryReserve { ok_tag, err_tag } => {
-                // The machine has no allocation budget: a request within the
-                // limits always succeeds.
+                // A request within the limits succeeds when it fits the
+                // capacity or the allocation, or the allocation budget allows
+                // a growth.
                 let handle = values[0];
                 let (length, capacity) = self.header(handle)?;
+                let usable = self.memory.size(handle)?;
                 let request = usize::try_from(values[1])
                     .ok()
                     .and_then(|additional| (length as usize).checked_add(additional))
-                    .filter(|needed| *needed <= VEC_LIMIT);
+                    .filter(|needed| *needed <= VEC_LIMIT)
+                    .and_then(|needed| {
+                        needed
+                            .checked_mul(width * 8)
+                            .and_then(|bytes| bytes.checked_add(16))
+                            .filter(|bytes| *bytes <= i64::MAX as usize)
+                            .map(|bytes| (needed, bytes))
+                    });
+                let success = request.is_some_and(|(needed, bytes)| {
+                    needed as i64 <= capacity || bytes <= usable || self.try_charge()
+                });
                 let mut owner = handle;
-                if let Some(needed) = request
+                if success
+                    && let Some((needed, bytes)) = request
                     && needed as i64 > capacity
                 {
-                    owner = self.memory.grow(handle, 16 + needed * width * 8, true)?;
+                    owner = self.memory.grow(handle, bytes, true)?;
                     self.memory.store(owner + 8, &[needed as i64])?;
                     self.memory.stats.buffer_growths += 1;
                 }
-                let tag = if request.is_some() { ok_tag } else { err_tag };
+                let tag = if success { ok_tag } else { err_tag };
                 fit(vec![tag as i64, owner], self.width(ty))
             }
             VecOp::ReplaceBorrowed => {
@@ -920,6 +933,19 @@ fn io_error_code(error: &std::io::Error) -> i64 {
 }
 
 impl Machine<'_, '_> {
+    /// One read or write attempt costs a step: a reader that keeps being
+    /// interrupted exhausts the budget instead of looping forever.
+    fn spend_io(&mut self) -> Run<()> {
+        if self.fuel == 0 {
+            return panic_at(
+                Span::default(),
+                "reference I/O computation budget exhausted",
+            );
+        }
+        self.fuel -= 1;
+        Ok(())
+    }
+
     /// Standard input and output (native's `kush_io_*`, as the tree runs
     /// them): a read fills the owned buffer it consumes, without growing
     /// it, and frees it on failure; a write sends a borrowed buffer.
@@ -943,6 +969,7 @@ impl Machine<'_, '_> {
                 let chunk = matches!(op, IoOp::ReadChunk);
                 let mut probe = [0u8; 1];
                 let status = loop {
+                    self.spend_io()?;
                     let full = length == capacity;
                     if full && chunk {
                         break EFBIG;
@@ -981,6 +1008,7 @@ impl Machine<'_, '_> {
                     if offset == data.len() {
                         break 0;
                     }
+                    self.spend_io()?;
                     match self.output.write(&data[offset..]) {
                         Ok(0) => break EIO,
                         Ok(count) => offset += count,

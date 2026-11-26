@@ -2607,8 +2607,6 @@ impl Checker<'_, '_> {
         let spec = self.functions.dyn_calls.len();
         self.functions.dyn_calls.push(DynCallSpec {
             object,
-            trait_name: self.resolution.bindings[trait_id].name.clone(),
-            method: name.to_owned(),
             key,
             mode: contract.mode,
             parameter_grades: contract.parameter_grades.clone(),
@@ -2850,7 +2848,6 @@ impl Checker<'_, '_> {
             let members = self.union_member_functions(trait_id, &trait_arguments, name, span)?;
             let spec = self.functions.union_calls.len();
             self.functions.union_calls.push(UnionCallSpec {
-                mode: receiver_mode,
                 parameter_grades: contract.parameter_grades.clone(),
                 result: contract.result,
                 result_grade: contract.result_grade,

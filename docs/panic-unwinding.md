@@ -68,11 +68,10 @@ own buffer, so a panic passes through them like any other foreign abort.
     state is not safe.
   A runtime helper that calls another one that can fail checks the word and
   returns too.
-- **The evaluator** already turns a callee's pending abort into its
-  caller's `AbortCall` exit (`Flow::Abort`). A panic becomes a pending abort
-  with the panic word instead of an `Err` that skips cleanup; the 60-odd
-  panic sites in `eval.rs` return it. The end-of-run ownership check stays
-  strict.
+- **The evaluator** (the MIR machine) runs the cleanup blocks the MIR
+  builds, as native code does: a panic unwinds frame by frame to the next
+  cleanup block, a task's entry or a `Task.catch`. The end-of-run ownership
+  check stays strict.
 
 ## 4. Checker rules
 

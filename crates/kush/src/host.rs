@@ -136,9 +136,6 @@ pub struct Host {
     pub(crate) monotonic_origin: Instant,
     /// Files opened by `FS.open`, by handle (STD-FILE). Shared by tasks.
     pub(crate) files: Arc<std::sync::Mutex<FileTable>>,
-    /// `KUSH_MACHINE_CHECK`: each host call's outcome, for the MIR machine
-    /// to replay (its effects happened once, here).
-    pub(crate) record: Option<Arc<std::sync::Mutex<Vec<crate::mir::machine::HostRecord>>>>,
 }
 /// The evaluator's open files. Handles are never reused, so a stale handle
 /// is always `EBADF` here (natively the descriptor number may be reused,
@@ -390,7 +387,6 @@ impl Host {
             environment: Arc::new(BTreeMap::new()),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
-            record: None,
         }
     }
     /// The current process arguments (including argv[0]) and environment.
@@ -404,7 +400,6 @@ impl Host {
             environment: Arc::new(environment),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
-            record: None,
         }
     }
     /// Replace argv while retaining this host's environment and clock origin.
@@ -420,7 +415,6 @@ impl Host {
             environment: Arc::new(environment.into_iter().collect()),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
-            record: None,
         }
     }
     fn var(&self, name: &[u8]) -> Option<&[u8]> {

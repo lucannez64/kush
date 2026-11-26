@@ -1,6 +1,5 @@
-//! Tasks, threads and channels on the machine (FND-EVAL-EFFECTS), as the
-//! tree evaluator schedules them: one valid schedule, cooperative, with a
-//! FIFO ready queue.
+//! Tasks, threads and channels on the machine (FND-EVAL-EFFECTS): one valid
+//! schedule, cooperative, with a FIFO ready queue.
 //!
 //! - Each task has its own frame stack, handler stack and continuation
 //!   stack; a switch swaps them into the machine. A task's body frame is
@@ -9,8 +8,8 @@
 //!   [`Flow::Suspend`] with the rest of its work; the run loop resumes it
 //!   when the scheduler picks the task again.
 //! - A task counts two allocations (its control block and stack) from its
-//!   spawn to its join, and the root two for the whole run, as the tree
-//!   counts them. A thread is a task that inherits no handlers and is never
+//!   spawn to its join, and the root two for the whole run (kush.c counts a
+//!   result buffer too). A thread is a task that inherits no handlers and is never
 //!   cancelled; its join yields its payload.
 //! - A panic in a task ends it; its join raises the panic in the joiner.
 //!   `Task.scope` joins its children even when its body panics, after
@@ -37,6 +36,14 @@ pub(super) enum State {
     Blocked,
     Finished,
 }
+
+/// The rest of an operation once a task's outcome is known (a join).
+type OnOutcome = Box<dyn for<'p, 'o, 'm> FnOnce(&'m mut Machine<'p, 'o>, Outcome) -> Run<Flow>>;
+
+/// The rest of a scope once its children are joined: the first child's
+/// panic, if any.
+type OnEnd =
+    Box<dyn for<'p, 'o, 'm> FnOnce(&'m mut Machine<'p, 'o>, Option<Diagnostic>) -> Run<Flow>>;
 
 /// A suspended operation: the rest of its work, then where its result goes.
 pub(super) struct Resume {
@@ -326,19 +333,6 @@ impl Machine<'_, '_> {
         Ok(id)
     }
 
-    /// Yield `times` times, then produce `words`.
-    pub(super) fn yield_then(&mut self, times: usize, words: Words) -> Flow {
-        if times == 0 || self.tasks.is_empty() {
-            return Flow::Done(words);
-        }
-        let current = self.current;
-        self.tasks[current].state = State::Ready;
-        self.ready.push_back(current);
-        Flow::Suspend(Box::new(move |machine, _| {
-            Ok(machine.yield_then(times - 1, words))
-        }))
-    }
-
     /// Structured cancellation: the target and its unfinished descendants.
     fn cancel(&mut self, target: usize) {
         if target >= self.tasks.len() {
@@ -360,11 +354,7 @@ impl Machine<'_, '_> {
 
     /// Join `target`: its outcome goes to `then` once it has finished,
     /// blocking the current task until then.
-    fn join(
-        &mut self,
-        target: usize,
-        then: Box<dyn for<'p, 'o, 'm> FnOnce(&'m mut Machine<'p, 'o>, Outcome) -> Run<Flow>>,
-    ) -> Run<Flow> {
+    fn join(&mut self, target: usize, then: OnOutcome) -> Run<Flow> {
         let failed = |message: &str| Outcome::Failed(Diagnostic::new(Span::default(), message));
         if target >= self.tasks.len() || target == 0 {
             return then(self, failed("Task.join received an invalid task handle"));
@@ -486,12 +476,7 @@ impl Machine<'_, '_> {
 
     /// Close the innermost scope: join its children in spawn order,
     /// dropping their results; `then` gets the first child's panic.
-    fn scope_end(
-        &mut self,
-        then: Box<
-            dyn for<'p, 'o, 'm> FnOnce(&'m mut Machine<'p, 'o>, Option<Diagnostic>) -> Run<Flow>,
-        >,
-    ) -> Run<Flow> {
+    fn scope_end(&mut self, then: OnEnd) -> Run<Flow> {
         let current = self.current;
         let children = self.tasks[current].scopes.pop().unwrap_or_default();
         let children = children
@@ -719,7 +704,7 @@ fn join_children(
     machine: &mut Machine<'_, '_>,
     mut children: VecDeque<usize>,
     failure: Option<Diagnostic>,
-    then: Box<dyn for<'p, 'o, 'm> FnOnce(&'m mut Machine<'p, 'o>, Option<Diagnostic>) -> Run<Flow>>,
+    then: OnEnd,
 ) -> Run<Flow> {
     let Some(child) = children.pop_front() else {
         return then(machine, failure);

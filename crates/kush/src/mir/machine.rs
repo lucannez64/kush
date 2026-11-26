@@ -1,20 +1,18 @@
-//! The evaluator as a word-level machine over the MIR (FND-EVAL-MACHINE,
-//! docs/mir-design.md section 9).
+//! The evaluator: a word-level machine over the MIR (FND-EVAL,
+//! docs/mir-design.md section 9). `Executable::evaluate` and `kush eval`
+//! run it.
 //!
 //! A program's values are the words native code uses, with native's
 //! layouts. Memory is a set of byte allocations; a pointer is the word
 //! `(allocation + 1) << 32 | offset`, and every access is checked against a
-//! live allocation. The call stack is explicit, so a task can later be a
-//! stack of its own. Bodies are built without the loop passes: those are
-//! code-generation choices, not semantics.
-//!
-//! The machine grows one node at a time. Until it covers a construct, it
-//! stops with [`Stop::Unsupported`] and the tree evaluator stays the
-//! reference.
+//! live allocation. Each task's call stack is explicit, and every call is a
+//! frame on it. Bodies are built without the loop passes: those are
+//! code-generation choices, not semantics. Panic messages and allocation
+//! counts are those the tree evaluator it replaced reported.
 
 use super::*;
 use crate::Diagnostic;
-use crate::eval::MemoryStats;
+use crate::evaluate::MemoryStats;
 use std::io::{Read, Write};
 use std::rc::Rc;
 
@@ -30,9 +28,9 @@ type Words = Vec<i64>;
 #[derive(Debug)]
 pub enum Stop {
     /// A Kush panic, or an error the evaluator reports (an exhausted
-    /// computation budget), with the tree evaluator's message.
+    /// computation budget).
     Panic(Diagnostic),
-    /// A construct the machine does not cover yet.
+    /// A construct the machine cannot run (a body the MIR builder rejects).
     Unsupported(String),
     /// The program broke a machine invariant (an access outside a live
     /// allocation, say). A checked program never does.
@@ -44,7 +42,7 @@ type Run<T> = std::result::Result<T, Stop>;
 fn unsupported<T>(what: impl Into<String>) -> Run<T> {
     Err(Stop::Unsupported(what.into()))
 }
-/// A Kush panic with the tree evaluator's message.
+/// A Kush panic with its message.
 fn panic_at<T>(span: Span, message: &str) -> Run<T> {
     Err(Stop::Panic(Diagnostic::new(span, message)))
 }
@@ -68,6 +66,8 @@ struct Allocation {
 struct Memory {
     allocations: Vec<Allocation>,
     live_heap: usize,
+    /// The bytes of the live heap allocations.
+    live_bytes: usize,
     stats: MemoryStats,
 }
 
@@ -81,6 +81,7 @@ impl Memory {
         });
         if heap {
             self.live_heap += 1;
+            self.live_bytes += bytes;
             self.stats.allocations += 1;
             self.stats.peak_live = self.stats.peak_live.max(self.live_heap);
         }
@@ -130,6 +131,7 @@ impl Memory {
         }
         let mut new = vec![0; if exact { bytes } else { physical(bytes) }];
         new[..old.len()].copy_from_slice(&old);
+        self.live_bytes = self.live_bytes + new.len() - old.len();
         self.allocations[id].live = false;
         self.allocations.push(Allocation {
             bytes: new,
@@ -154,9 +156,10 @@ impl Memory {
         }
         let allocation = &mut self.allocations[id];
         allocation.live = false;
-        allocation.bytes = Vec::new();
+        let freed = std::mem::take(&mut allocation.bytes).len();
         if allocation.heap {
             self.live_heap -= 1;
+            self.live_bytes -= freed;
             self.stats.deallocations += 1;
         }
         Ok(())
@@ -282,15 +285,19 @@ struct Machine<'p, 'o> {
     memory: Memory,
     input: &'o mut dyn Read,
     output: &'o mut dyn Write,
-    /// In check mode, the tree's host calls to replay: their effects
-    /// (files, processes, clocks) happened once, on the tree.
-    hosts: Option<std::collections::VecDeque<HostRecord>>,
     /// The arguments, environment and open files host calls use.
     system: crate::host::Host,
     stack: Vec<Frame>,
     /// The panic a cleanup block runs for.
     unwinding: Option<Diagnostic>,
     fuel: usize,
+    /// Fallible allocation attempts left, when bounded.
+    try_budget: Option<usize>,
+    /// A compile-time generator runs (see [`Limits`]).
+    generation: bool,
+    /// A generator's arena chunks and payloads, which its allocation budget
+    /// counts and never credits back.
+    arena_bytes: usize,
     /// The capture types of each closure environment's drop glue, by the
     /// index its environment's first word names (`DROP | index`).
     closure_types: Vec<Vec<Type>>,
@@ -304,100 +311,38 @@ struct Machine<'p, 'o> {
     /// Runtime callbacks running to their result inside an operation
     /// ([`Machine::call_nested`]); a task cannot switch while one runs.
     nested: usize,
-    /// Whether a continuation environment was pushed: the tree counts each
-    /// one, kush.c (and the machine) the chunks they live in.
-    continuations: bool,
     /// With the task runtime, every task (the root first) and the one
     /// running; `stack`, `handlers`, `kstack` and `unwinding` are its own.
     tasks: Vec<tasks::TaskRecord>,
     current: usize,
     ready: std::collections::VecDeque<usize>,
     channels: Vec<tasks::Channel>,
-    /// The yields of the host call just replayed, still to make.
-    pending_yields: usize,
 }
 
-/// Run the program's entry function on the machine. Returns its result word
-/// (zero for `Unit`) and the allocation stats a native build reports.
-pub fn evaluate(program: &Executable, output: &mut dyn Write) -> Run<(i64, MemoryStats)> {
-    evaluate_with_input(program, &mut std::io::empty(), output)
+/// How a run is bounded.
+pub(crate) struct Limits {
+    /// Steps before "computation budget exhausted".
+    pub(crate) fuel: usize,
+    /// Fallible allocation attempts that succeed before the others are
+    /// refused (`Executable::evaluate_with_alloc_budget`), if bounded.
+    pub(crate) try_budget: Option<usize>,
+    /// A compile-time generator: no host, no runtime compilation, and an
+    /// allocation budget.
+    pub(crate) generation: bool,
 }
 
-/// [`evaluate`] with standard input read from `input`.
-pub fn evaluate_with_input(
-    program: &Executable,
-    input: &mut dyn Read,
-    output: &mut dyn Write,
-) -> Run<(i64, MemoryStats)> {
-    evaluate_with_host(program, input, output, &crate::host::Host::empty())
-}
-
-/// [`evaluate`] with standard input read from `input`, and the arguments,
-/// environment and files of `host`.
-pub fn evaluate_with_host(
+/// Run the program's entry function on the machine, with standard input
+/// read from `input` and the arguments, environment and files of `host`.
+/// Returns its result word (zero for `Unit`) and the allocation stats.
+pub(crate) fn evaluate(
     program: &Executable,
     input: &mut dyn Read,
     output: &mut dyn Write,
     host: &crate::host::Host,
+    limits: Limits,
 ) -> Run<(i64, MemoryStats)> {
-    run_program(program, input, output, None, host.clone())
-        .map(|(result, stats, _)| (result, stats))
-}
-
-/// [`evaluate`], and whether its stats are comparable with the tree
-/// evaluator's (see [`run_program`]).
-pub fn evaluate_comparing(
-    program: &Executable,
-    output: &mut dyn Write,
-) -> Run<(i64, MemoryStats, bool)> {
-    run_program(
-        program,
-        &mut std::io::empty(),
-        output,
-        None,
-        crate::host::Host::empty(),
-    )
-}
-
-/// The run's result and stats, and whether the stats are the tree's too:
-/// the tree counts each continuation environment, kush.c (and the machine)
-/// the chunks they live in.
-fn run_program(
-    program: &Executable,
-    input: &mut dyn Read,
-    output: &mut dyn Write,
-    hosts: Option<std::collections::VecDeque<HostRecord>>,
-    system: crate::host::Host,
-) -> Run<(i64, MemoryStats, bool)> {
     let entry = program.entry().map_err(Stop::Panic)?;
-    let mut machine = Machine {
-        system,
-        program: Program::Main(program),
-        program_id: 0,
-        main: program,
-        artifacts: Vec::new(),
-        bodies: vec![vec![None; program.functions.len()]],
-        installs_handlers: vec![vec![false; program.functions.len()]],
-        memory: Memory::default(),
-        input,
-        hosts,
-        output,
-        stack: Vec::new(),
-        unwinding: None,
-        fuel: program.eval_fuel,
-        closure_types: Vec::new(),
-        handlers: Vec::new(),
-        abort_word: 0,
-        kstack: effects::KStack::default(),
-        nested: 0,
-        continuations: false,
-        tasks: Vec::new(),
-        current: 0,
-        ready: Default::default(),
-        channels: Vec::new(),
-        pending_yields: 0,
-    };
-    machine.memory.stats.fusions = program.fusions;
+    let mut machine = Machine::new(program, input, output, host.clone(), limits);
     // The task runtime runs `main` as the root task.
     if program.uses_tasks {
         machine.start_tasks();
@@ -412,181 +357,91 @@ fn run_program(
             "internal ownership error: live owning allocations after normal program exit",
         )));
     }
-    Ok((result, machine.memory.stats, !machine.continuations))
+    Ok((result, machine.memory.stats))
 }
 
-/// The outcome of one read or write: what it moved, or its error.
-pub(crate) type IoOutcome<T> = std::result::Result<T, (std::io::ErrorKind, Option<i32>)>;
-
-fn io_error((kind, code): (std::io::ErrorKind, Option<i32>)) -> std::io::Error {
-    match code {
-        Some(code) => std::io::Error::from_raw_os_error(code),
-        None => kind.into(),
-    }
-}
-
-/// What the tree evaluator's reads and writes did, call by call, for the
-/// machine to replay.
-#[derive(Default)]
-pub(crate) struct Transcript {
-    /// Each read's bytes or error.
-    pub(crate) reads: Vec<IoOutcome<Vec<u8>>>,
-    /// Each write's accepted count or error.
-    pub(crate) writes: Vec<IoOutcome<usize>>,
-    /// The bytes the writer accepted.
-    pub(crate) written: Vec<u8>,
-    /// Each host call's outcome.
-    pub(crate) hosts: Vec<HostRecord>,
-}
-
-/// What one host call did on the tree evaluator: its result (`value` is
-/// the error code, or a scalar payload), and for each argument that is a
-/// byte buffer, its contents after the call (`None` when the call consumed
-/// it, or for an argument that is not a buffer).
-#[derive(Debug)]
-pub(crate) struct HostRecord {
-    pub(crate) ok: bool,
-    pub(crate) value: i64,
-    pub(crate) buffers: Vec<Option<Vec<u8>>>,
-    /// How often the calling task yielded during the call (a wait for a
-    /// descriptor yields between polls).
-    pub(crate) yields: usize,
-}
-
-/// The tree's reads, call by call.
-struct Replay(std::collections::VecDeque<IoOutcome<Vec<u8>>>);
-
-impl Read for Replay {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        match self.0.pop_front() {
-            None => Ok(0),
-            Some(Err(error)) => Err(io_error(error)),
-            Some(Ok(mut chunk)) => {
-                let count = chunk.len().min(buffer.len());
-                buffer[..count].copy_from_slice(&chunk[..count]);
-                if count < chunk.len() {
-                    chunk.drain(..count);
-                    self.0.push_front(Ok(chunk));
-                }
-                Ok(count)
-            }
-        }
-    }
-}
-
-/// A writer that accepts what the tree's writer accepted, call by call, and
-/// keeps the accepted bytes. Past the tree's writes it accepts everything.
-struct Echo {
-    writes: std::collections::VecDeque<IoOutcome<usize>>,
-    written: Vec<u8>,
-}
-
-impl Write for Echo {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let accepted = match self.writes.pop_front() {
-            None => bytes.len(),
-            Some(Err(error)) => return Err(io_error(error)),
-            Some(Ok(count)) => count.min(bytes.len()),
-        };
-        self.written.extend_from_slice(&bytes[..accepted]);
-        Ok(accepted)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// `KUSH_MACHINE_CHECK`: run the machine on a program the tree evaluator ran
-/// (`tree` is its outcome, `transcript` what its reads and writes did). A
-/// difference is an error; a construct the machine does not cover is
-/// appended, with the program's entry function, to the file
-/// `KUSH_MACHINE_REPORT` names.
-pub(crate) fn check(
-    program: &Executable,
-    transcript: Transcript,
-    tree: &std::result::Result<(i64, MemoryStats), Diagnostic>,
-) -> std::result::Result<(), Diagnostic> {
-    let disagree = |what: String| {
-        Err(Diagnostic::new(
-            Span::default(),
-            format!("the MIR machine disagrees with the tree evaluator: {what}"),
+/// Run a compile-time generator (`#[staged]`): a parameterless function
+/// returning a `Code` value, whose graph it returns.
+pub(crate) fn generate(program: &Executable, entry: usize) -> Run<Vec<u8>> {
+    let limits = Limits {
+        fuel: 1_000_000,
+        try_budget: None,
+        generation: true,
+    };
+    let (mut input, mut output) = (std::io::empty(), std::io::sink());
+    let host = crate::host::Host::empty();
+    let mut machine = Machine::new(program, &mut input, &mut output, host, limits);
+    machine.enter(entry, Vec::new(), None, None)?;
+    let code = machine.run()?;
+    // A `Code` value is a record holding its graph's `Bytes`.
+    let ty = program.functions[entry].result;
+    let graph = code.first().copied().unwrap_or(0);
+    let bytes = machine.buffer_data(graph).map_err(|_| {
+        Stop::Panic(Diagnostic::new(
+            program.functions[entry].span,
+            "a staged generator must return an owned Code value",
         ))
-    };
-    // Budgets count different steps; a fuel-limited run is not compared.
-    if tree
-        .as_ref()
-        .is_err_and(|error| error.message.contains("budget exhausted"))
-    {
-        return Ok(());
+    })?;
+    machine.drop_value(ty, &code)?;
+    if machine.memory.live_heap != 0 {
+        return Err(Stop::Panic(Diagnostic::new(
+            program.functions[entry].span,
+            "internal ownership error: generator left live allocations",
+        )));
     }
-    let mut input = Replay(transcript.reads.into());
-    let mut echo = Echo {
-        writes: transcript.writes.into(),
-        written: Vec::new(),
-    };
-    let tree_output = &transcript.written;
-    let result = run_program(
-        program,
-        &mut input,
-        &mut echo,
-        Some(transcript.hosts.into()),
-        crate::host::Host::empty(),
-    );
-    let output = echo.written;
-    let machine = match result {
-        Err(Stop::Unsupported(reason)) => {
-            report(program, &reason);
-            return Ok(());
-        }
-        Err(Stop::Panic(diagnostic)) if diagnostic.message.contains("budget exhausted") => {
-            report(program, "the machine's computation budget");
-            return Ok(());
-        }
-        Err(Stop::Fault(fault)) => return disagree(format!("the machine faulted: {fault}")),
-        Err(Stop::Panic(diagnostic)) => Err(diagnostic),
-        Ok(done) => Ok(done),
-    };
-    if output != *tree_output {
-        return disagree(format!(
-            "it printed {:?} where the tree printed {:?}",
-            String::from_utf8_lossy(&output),
-            String::from_utf8_lossy(tree_output)
-        ));
-    }
-    match (tree, machine) {
-        (Ok((tree_result, tree_stats)), Ok((result, stats, comparable))) => {
-            if result != *tree_result {
-                return disagree(format!("result {result} against {tree_result}"));
-            }
-            if comparable && stats.report() != tree_stats.report() {
-                return disagree(format!(
-                    "{} against {}",
-                    stats.report(),
-                    tree_stats.report()
-                ));
-            }
-        }
-        (Err(tree_error), Err(error)) if error.message == tree_error.message => {}
-        (tree, machine) => return disagree(format!("{machine:?} against {tree:?}")),
-    }
-    Ok(())
+    Ok(bytes)
 }
 
-fn report(program: &Executable, reason: &str) {
-    let Some(path) = std::env::var_os("KUSH_MACHINE_REPORT") else {
-        return;
-    };
-    let entry = program
-        .entry()
-        .ok()
-        .map(|entry| program.functions[entry].name.clone())
-        .unwrap_or_default();
-    let line = format!("{entry}\t{reason}\n");
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| file.write_all(line.as_bytes()));
+impl<'p, 'o> Machine<'p, 'o> {
+    fn new(
+        program: &'p Executable,
+        input: &'o mut dyn Read,
+        output: &'o mut dyn Write,
+        system: crate::host::Host,
+        limits: Limits,
+    ) -> Self {
+        let mut memory = Memory::default();
+        memory.stats.fusions = program.fusions;
+        Machine {
+            system,
+            program: Program::Main(program),
+            program_id: 0,
+            main: program,
+            artifacts: Vec::new(),
+            bodies: vec![vec![None; program.functions.len()]],
+            installs_handlers: vec![vec![false; program.functions.len()]],
+            memory,
+            input,
+            output,
+            stack: Vec::new(),
+            unwinding: None,
+            fuel: limits.fuel,
+            try_budget: limits.try_budget,
+            generation: limits.generation,
+            arena_bytes: 0,
+            closure_types: Vec::new(),
+            handlers: Vec::new(),
+            abort_word: 0,
+            kstack: effects::KStack::default(),
+            nested: 0,
+            tasks: Vec::new(),
+            current: 0,
+            ready: Default::default(),
+            channels: Vec::new(),
+        }
+    }
+
+    /// A fallible allocation attempt: refused once the budget is spent.
+    fn try_charge(&mut self) -> bool {
+        match &mut self.try_budget {
+            None => true,
+            Some(0) => false,
+            Some(left) => {
+                *left -= 1;
+                true
+            }
+        }
+    }
 }
 
 impl Machine<'_, '_> {
@@ -760,6 +615,16 @@ impl Machine<'_, '_> {
                 )));
             }
             self.fuel -= 1;
+            // A compile-time generator's allocations are bounded.
+            if self.generation
+                && (self.memory.live_heap > 1024
+                    || self.memory.live_bytes + self.arena_bytes > 64 * 1024 * 1024)
+            {
+                return Err(Stop::Panic(Diagnostic::new(
+                    Span::default(),
+                    "compile-time generator allocation budget exhausted",
+                )));
+            }
             // A task the scheduler just picked first enters its body or
             // resumes its suspended operation.
             let step = match self.tasks.is_empty() {
@@ -933,15 +798,14 @@ impl Machine<'_, '_> {
                                 element,
                             ) => self.channel_op(op, &values, element, span),
                             Target::ChannelNew => self.channel_new(values[0], span).map(Flow::Done),
-                            // Outside check mode a descriptor wait yields to
-                            // other tasks between polls.
+                            // A descriptor wait yields to other tasks
+                            // between polls.
                             Target::Foreign(foreign)
-                                if self.hosts.is_none()
-                                    && self.program.foreign_functions[foreign]
-                                        .as_ref()
-                                        .is_some_and(|function| {
-                                            function.symbol == "kush_sys_wait_ready"
-                                        }) =>
+                                if self.program.foreign_functions[foreign]
+                                    .as_ref()
+                                    .is_some_and(|function| {
+                                        function.symbol == "kush_sys_wait_ready"
+                                    }) =>
                             {
                                 self.wait_ready(foreign, &values, ty)
                             }
@@ -950,14 +814,6 @@ impl Machine<'_, '_> {
                                 .map(Flow::Done),
                         }
                         .map_err(|stop| Raise::at(stop, *unwind))?;
-                        // A replayed host call yields as often as it did.
-                        let flow = match flow {
-                            Flow::Done(words) if self.pending_yields > 0 => {
-                                let yields = std::mem::take(&mut self.pending_yields);
-                                self.yield_then(yields, words)
-                            }
-                            other => other,
-                        };
                         let site = Site::Call {
                             destination: *destination,
                             next: *next,
@@ -1170,7 +1026,7 @@ impl Machine<'_, '_> {
         use crate::executable::Target;
         match *target {
             Target::Host(op, shape) => {
-                self.host_replay(HostCall::Op(op), shape, values, types, ty, span)
+                self.host_op(HostCall::Op(op), shape, values, types, ty, span)
             }
             Target::Foreign(index) => self.foreign_call(index, values, types, ty, span),
             Target::Bytes(op) => self.bytes_call(op, values, span),
@@ -1248,8 +1104,18 @@ impl Machine<'_, '_> {
         graph: i64,
         ty: Type,
     ) -> Run<Words> {
+        if self.generation {
+            return Err(Stop::Panic(Diagnostic::new(
+                Span::default(),
+                "runtime compilation is unavailable during compile-time generation",
+            )));
+        }
         let data = self.buffer_data(graph)?;
         self.memory.free(graph)?;
+        // A refused allocation attempt is ENOMEM.
+        if !self.try_charge() {
+            return Ok(fit(vec![shape.err_tag as i64, 12], self.width(ty)));
+        }
         let words = match crate::staging::runtime_compile(&self.program, &data) {
             Ok(artifact) => {
                 let functions = artifact.program.functions.len();
@@ -1273,11 +1139,8 @@ impl Machine<'_, '_> {
     }
 
     /// A host call (filesystem, environment, clock, process, network) or a
-    /// `std.sys` shim, through the shared host layer. In check mode it is the
-    /// tree's call replayed instead: the recorded result, the recorded
-    /// contents of its buffer arguments, and a free of each owned buffer it
-    /// consumed.
-    fn host_replay(
+    /// `std.sys` shim, through the shared host layer.
+    fn host_op(
         &mut self,
         call: HostCall<'_>,
         shape: crate::runtime_types::ResultShape,
@@ -1286,18 +1149,17 @@ impl Machine<'_, '_> {
         ty: Type,
         span: Span,
     ) -> Run<Words> {
-        let what = match call {
-            HostCall::Op(op) => format!("Host({op:?})"),
-            HostCall::Sys(symbol) => format!("Foreign({symbol})"),
-        };
-        let result = match self.hosts {
-            Some(_) => self.replay(&what, shape, values, types, ty),
-            None => self.host_run(call, shape, values, types, ty, span),
-        };
-        result.map_err(|stop| match stop {
-            Stop::Fault(fault) => Stop::Fault(format!("{what}: {fault}")),
-            other => other,
-        })
+        self.host_run(call, shape, values, types, ty, span)
+            .map_err(|stop| match stop {
+                Stop::Fault(fault) => {
+                    let what = match call {
+                        HostCall::Op(op) => format!("Host({op:?})"),
+                        HostCall::Sys(symbol) => format!("Foreign({symbol})"),
+                    };
+                    Stop::Fault(format!("{what}: {fault}"))
+                }
+                other => other,
+            })
     }
 
     /// Run a host call: the shared host layer on the machine's memory.
@@ -1311,8 +1173,8 @@ impl Machine<'_, '_> {
         span: Span,
     ) -> Run<Words> {
         let system = self.system.clone();
-        // The machine's own fuel bounds the run; the layer's is not needed.
-        let mut fuel = usize::MAX;
+        // A host call and each of its retries cost a step of the run's fuel.
+        let mut fuel = self.fuel;
         let mut args = MachineArgs {
             machine: self,
             values,
@@ -1334,64 +1196,14 @@ impl Machine<'_, '_> {
         } else {
             vec![shape.err_tag as i64, status]
         };
+        self.fuel = fuel;
         Ok(fit(words, self.width(ty)))
     }
 
-    fn replay(
-        &mut self,
-        what: &str,
-        shape: crate::runtime_types::ResultShape,
-        values: &[i64],
-        types: &[Type],
-        ty: Type,
-    ) -> Run<Words> {
-        let Some(record) = self.hosts.as_mut().and_then(|hosts| hosts.pop_front()) else {
-            return unsupported(format!("the builtin {what} outside check mode"));
-        };
-        self.pending_yields = record.yields;
-        let mut owned = 0;
-        for (index, arg_ty) in types.iter().enumerate() {
-            let buffer = |ty: Type| matches!(ty, Type::Bytes | Type::String);
-            let (handle, is_owned) = match arg_ty.full() {
-                ty if buffer(ty) => (values[index], true),
-                Type::Ref(pointee) | Type::RefMut(pointee)
-                    if buffer(self.program.pointees[pointee].full()) =>
-                {
-                    (self.memory.load(values[index], 1)?[0], false)
-                }
-                _ => continue,
-            };
-            match record.buffers.get(index).cloned().flatten() {
-                Some(data) => {
-                    let (_, capacity) = self.header(handle)?;
-                    if data.len() as i64 > capacity {
-                        return fault("a host call's buffer outgrew its capacity");
-                    }
-                    self.memory.store_bytes(handle + 16, &data)?;
-                    self.memory.store(handle, &[data.len() as i64])?;
-                    if is_owned {
-                        owned = handle;
-                    }
-                }
-                None if is_owned => self.memory.free(handle)?,
-                None => {}
-            }
-        }
-        // An ok payload is the owned buffer the call filled, or the recorded
-        // scalar (zero for `Unit`).
-        let words = if record.ok {
-            let payload = if owned != 0 { owned } else { record.value };
-            vec![shape.ok_tag as i64, payload]
-        } else {
-            vec![shape.err_tag as i64, record.value]
-        };
-        Ok(fit(words, self.width(ty)))
-    }
-
-    /// A foreign call: the `std.sys` shims as the tree runs them (replayed,
-    /// except reads and writes of the standard streams, which go through
-    /// the machine's own input and output). Any other foreign function
-    /// stops the run, as on the tree.
+    /// A foreign call: the `std.sys` shims of the shared host layer, except
+    /// reads and writes of the standard streams, which go through the
+    /// machine's own input and output. Any other foreign function stops the
+    /// run: only native code calls C.
     fn foreign_call(
         &mut self,
         index: usize,
@@ -1421,11 +1233,7 @@ impl Machine<'_, '_> {
             "kush_sys_read" | "kush_sys_probe" | "kush_sys_write"
         ) && (0..=2).contains(&values[0]);
         if !stream {
-            return self.host_replay(HostCall::Sys(symbol), shape, values, types, ty, span);
-        }
-        // The tree recorded this call too; the machine makes it itself.
-        if let Some(hosts) = self.hosts.as_mut() {
-            hosts.pop_front();
+            return self.host_op(HostCall::Sys(symbol), shape, values, types, ty, span);
         }
         let fd = values[0];
         let positioned = symbol != "kush_sys_probe" && values[3] >= 0;
@@ -1627,7 +1435,18 @@ impl Machine<'_, '_> {
                     op,
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
                 );
-                vec![if let Some(float) = left_ty.float_kind() {
+                // Bitwise operators and shifts take a float's word as an
+                // `i64` (a staged lift serializes a float's bits this way).
+                let bitwise = matches!(
+                    op,
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr
+                );
+                let float = left_ty.float_kind().filter(|_| !bitwise);
+                let left_ty = match left_ty.float_kind() {
+                    Some(_) if bitwise => Type::I64,
+                    _ => left_ty,
+                };
+                vec![if let Some(float) = float {
                     if comparison {
                         i64::from(crate::float::compare(float, &kind, a, b))
                     } else {
@@ -1678,7 +1497,8 @@ impl Machine<'_, '_> {
             }
             Rvalue::BoxNew(operand) => {
                 let words = self.operand(*operand)?;
-                let pointer = self.memory.allocate(words.len().max(1) * 8, true);
+                // The runtime's size class: a reuse that fits it keeps the box.
+                let pointer = self.memory.allocate(physical(words.len() * 8), true);
                 self.memory.store(pointer, &words)?;
                 vec![pointer]
             }
@@ -2387,12 +2207,23 @@ mod tests {
     fn run(source: &str) -> (String, Run<(i64, MemoryStats)>) {
         let program = crate::executable::check(source).expect("the test program checks");
         let mut output = Vec::new();
-        let result = evaluate(&program, &mut output);
+        let limits = Limits {
+            fuel: crate::evaluate::DEFAULT_EVAL_FUEL,
+            try_budget: None,
+            generation: false,
+        };
+        let result = evaluate(
+            &program,
+            &mut std::io::empty(),
+            &mut output,
+            &crate::host::Host::empty(),
+            limits,
+        );
         (String::from_utf8(output).unwrap(), result)
     }
 
     #[test]
-    fn scalar_programs_print_and_panic_as_the_tree_evaluator() {
+    fn scalar_programs_print_and_panic() {
         let (output, result) = run(
             "fn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
             fn main() -> Unit ! {io} {

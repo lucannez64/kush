@@ -103,7 +103,14 @@ impl Machine<'_, '_> {
             AllocOp::ArenaAlloc | AllocOp::ArenaTryAlloc { .. } => {
                 let handle = self.memory.load(words[0][0], 1)?[0];
                 let bytes = (self.width(types[1]) * 8) as i64;
-                let pointer = self.arena_alloc(handle, bytes)?;
+                let fallible = matches!(op, AllocOp::ArenaTryAlloc { .. });
+                let Some(pointer) = self.arena_alloc(handle, bytes, fallible)? else {
+                    // A refused chunk hands the value back.
+                    let AllocOp::ArenaTryAlloc { shape } = op else {
+                        unreachable!("only a fallible allocation is refused")
+                    };
+                    return Ok(self.try_words(ty, shape, false, &words[1]));
+                };
                 self.memory.store(pointer, &words[1])?;
                 match op {
                     AllocOp::ArenaTryAlloc { shape } => self.try_words(ty, shape, true, &[pointer]),
@@ -144,7 +151,10 @@ impl Machine<'_, '_> {
                 vec![0]
             }
             AllocOp::BoxTryNew { shape } => {
-                let pointer = self.memory.allocate(words[0].len().max(1) * 8, true);
+                if !self.try_charge() {
+                    return Ok(self.try_words(ty, shape, false, &words[0]));
+                }
+                let pointer = self.memory.allocate(physical(words[0].len() * 8), true);
                 self.memory.store(pointer, &words[0])?;
                 self.try_words(ty, shape, true, &[pointer])
             }
@@ -153,9 +163,14 @@ impl Machine<'_, '_> {
                 let Type::Box(old) = types[0] else {
                     return fault("Box.try_reuse of a non-box");
                 };
+                // Only a growth past the box's size class spends the budget.
+                let requested = self.width(types[1]) * 8;
+                if requested > self.memory.size(pointer)? && !self.try_charge() {
+                    return Ok(self.try_words(ty, shape, false, &[pointer]));
+                }
                 let old = self.program.pointees[old];
                 let previous = self.memory.load(pointer, self.width(old))?;
-                let grown = self.memory.grow(pointer, self.width(types[1]) * 8, true)?;
+                let grown = self.memory.grow(pointer, requested, true)?;
                 self.drop_value(old, &previous)?;
                 self.memory.store(grown, &words[1])?;
                 self.memory.stats.reuses += 1;
@@ -163,7 +178,7 @@ impl Machine<'_, '_> {
             }
             AllocOp::BytesTryWithCapacity { shape } => {
                 let requested = words[0][0];
-                if (0..=BYTES_LIMIT).contains(&requested) {
+                if (0..=BYTES_LIMIT).contains(&requested) && self.try_charge() {
                     let handle = self.memory.allocate_buffer(16 + requested as usize);
                     self.memory.store(handle, &[0, requested])?;
                     self.try_words(ty, shape, true, &[handle])
@@ -556,8 +571,10 @@ impl Machine<'_, '_> {
     }
 
     /// `kush_arena_alloc`: room for `bytes` bytes after an arena header, in
-    /// the current chunk or a fresh one.
-    fn arena_alloc(&mut self, arena: i64, bytes: i64) -> Run<i64> {
+    /// the current chunk or a fresh one. A `fallible` request that needs a
+    /// fresh chunk spends one allocation attempt, and is `None` when refused
+    /// (`kush_arena_try_alloc`).
+    fn arena_alloc(&mut self, arena: i64, bytes: i64, fallible: bool) -> Run<Option<i64>> {
         let need = (bytes + 8 + 15) & !15;
         let [references, mut chunk, strategy] = self.memory.load(arena, 3)?[..] else {
             unreachable!("three words")
@@ -570,18 +587,41 @@ impl Machine<'_, '_> {
         };
         let mut used = used;
         if chunk == 0 || capacity - used < need {
+            if fallible && !self.try_charge() {
+                return Ok(None);
+            }
             let capacity = self.chunk_capacity(strategy, need, capacity)?;
+            if self.generation {
+                // A generator's budget counts the chunk before it exists.
+                self.arena_bytes = self.arena_bytes.saturating_add(capacity as usize);
+                if self.arena_bytes > 64 * 1024 * 1024 {
+                    return panic_at(
+                        Span::default(),
+                        "compile-time generator allocation budget exhausted",
+                    );
+                }
+            }
+            // The machine addresses an allocation with 32-bit offsets.
+            if CHUNK_HEADER + capacity > i64::from(u32::MAX) {
+                return panic_at(
+                    Span::default(),
+                    "reference evaluator memory budget exhausted (an arena chunk over 4 GiB)",
+                );
+            }
             let total = ((CHUNK_HEADER + capacity + 15) & !15) as usize;
             let fresh = self.memory.allocate(total, false);
             self.memory.store(fresh, &[chunk, 0, capacity, 0])?;
             chunk = fresh;
             used = 0;
         }
+        if self.generation {
+            self.arena_bytes += bytes as usize;
+        }
         let start = chunk + CHUNK_HEADER + used;
         self.memory.store(chunk + 8, &[used + need])?;
         self.memory.store(start, &[arena])?;
         self.memory.store(arena, &[references + 1, chunk])?;
-        Ok(start + 8)
+        Ok(Some(start + 8))
     }
 
     /// `kush_arena_chunk_capacity`: the default 4 KiB minimum, or what the

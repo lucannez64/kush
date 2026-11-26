@@ -288,12 +288,10 @@ fn replace_use(body: &mut Body, block: BlockId, at: usize, t: LocalId, source: P
             _ => false,
         }
     };
-    let count = body.blocks[block].statements.len();
-    for later in at + 1..count {
-        let statement = &body.blocks[block].statements[later];
+    for statement in &mut body.blocks[block].statements[at + 1..] {
         if statement_reads(statement).contains(&t) {
             // Only a plain operand use is substituted.
-            let StatementKind::Assign(_, rvalue) = &mut body.blocks[block].statements[later].kind;
+            let StatementKind::Assign(_, rvalue) = &mut statement.kind;
             return substitute_rvalue(rvalue, &substitute);
         }
         if statement_writes(statement).contains(&source.local) {

@@ -121,7 +121,7 @@ fn compare(
     );
 }
 
-pub(crate) const FILESYSTEM: &str = r#"
+const FILESYSTEM: &str = r#"
 use std.result.Result;
 use std.text;
 use std.path;

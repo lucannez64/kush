@@ -1,7 +1,7 @@
 //! Checked executable value subset: monomorphic functions, generic inline enums,
 //! and normalized heterogeneous union/intersection value types. Logical proof terms never
 //! enter this IR; only this module can construct a checked executable.
-pub use crate::eval::MemoryStats;
+pub use crate::evaluate::MemoryStats;
 use crate::{
     Diagnostic, Span, ast,
     coverage::Coverage,
@@ -2898,7 +2898,7 @@ fn check_program_pass(
         gpu_functions,
         simd_functions,
         unwind_functions,
-        eval_fuel: crate::eval::DEFAULT_EVAL_FUEL,
+        eval_fuel: crate::evaluate::DEFAULT_EVAL_FUEL,
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,
         bounds_proved: functions.bounds_proved,

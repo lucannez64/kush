@@ -502,14 +502,14 @@ evaluator is a checked model of what native code does with it.
 implementation over machine memory, written from the native lowering
 (`call_target` and its helpers) and the `kush.c` function it calls.
 
-**Checking it.**
-- `tests/machine.rs` compares the two evaluators on the examples and on
+**Checking it.** Until SWITCH:
+- `tests/machine.rs` compared the two evaluators on the examples and on
   targeted programs.
-- `KUSH_MACHINE_CHECK=1` runs the machine after every tree evaluation in
-  a process. A difference in output, result, panic message or stats is
-  an error, so the whole test suite becomes a differential test.
-  `KUSH_MACHINE_REPORT=FILE` lists the constructs the machine stopped at.
-- Runs limited by a computation budget are not compared: the two
+- `KUSH_MACHINE_CHECK=1` ran the machine after every tree evaluation in
+  a process. A difference in output, result, panic message or stats was
+  an error, so the whole test suite was a differential test.
+  `KUSH_MACHINE_REPORT=FILE` listed the constructs the machine stopped at.
+- Runs limited by a computation budget were not compared: the two
   evaluators count different steps.
 
 **Plan.** The work lands in steps. Until the last one, the tree evaluator
@@ -583,3 +583,16 @@ with each evaluator: the machine's wait polls for up to 1 ms and suspends
 its task in between, as the tree yields. Outside check mode the machine
 runs host calls itself (`machine::evaluate_with_host`); in check mode it
 still replays the tree's, so their effects happen once.
+
+SWITCH is done: `Executable::evaluate` and its variants (`evaluate.rs`)
+run the machine, and `eval.rs`, the differential tests and check mode are
+gone. Compile-time generators (`#[staged]`) run on it too, in a generation
+mode: no runtime compilation, and an allocation budget (1024 live
+allocations or 64 MiB with arena chunks) checked between steps and before
+an arena chunk is made. `evaluate_with_alloc_budget` bounds fallible
+allocation attempts as the tree did (`Box.try_new`, a growing
+`Box.try_reuse` or `Vec.try_reserve`, `Bytes.try_with_capacity`,
+`Arena.try_alloc` with a fresh chunk, `Code.compile`). Differences from the
+tree: continuation environments count as `kush.c` counts them (64 KiB
+chunks, not one per environment), and there is no call-depth limit (the
+tree stopped at 128 nested calls; the machine's stacks are explicit).

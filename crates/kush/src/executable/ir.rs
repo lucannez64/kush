@@ -520,8 +520,6 @@ impl DynMethodKey {
 #[derive(Debug, Clone)]
 pub(crate) struct DynCallSpec {
     pub object: usize,
-    pub trait_name: String,
-    pub method: String,
     /// Monomorphized generic-method arguments selecting the member-table entry.
     pub key: DynMethodKey,
     pub mode: ReceiverMode,
@@ -536,7 +534,6 @@ pub(crate) struct DynCallSpec {
 /// copied. `members` is the checked tag/member/function table.
 #[derive(Debug, Clone)]
 pub(crate) struct UnionCallSpec {
-    pub mode: ReceiverMode,
     pub parameter_grades: Vec<Option<Grade>>,
     pub result: Type,
     pub result_grade: Option<Grade>,
@@ -1509,14 +1506,13 @@ pub(crate) enum ExprKind {
     },
     /// Construct a runtime-length array `[T; n <= C]`: evaluate the length,
     /// then one copyable element, and store it in the first `length` slots.
-    /// `check` requests the runtime `0 <= length <= capacity` guard; it is
-    /// off when the bound was proved from facts.
+    /// The `0 <= length <= capacity` guard stays even when the checker proved
+    /// it (a check that cannot fire).
     DynArrayFill {
         length: Box<Expr>,
         value: Box<Expr>,
         element: Type,
         capacity: usize,
-        check: bool,
     },
     /// Overwrite one initialized slot in place. Copyable elements only; the
     /// inline storage and runtime length are preserved.

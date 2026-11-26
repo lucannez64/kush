@@ -37,7 +37,7 @@ What exists today, and what this design has to add:
   Farkas certificates plus a bounded integer fallback (cuts and branching,
   [integer-refutation.md](integer-refutation.md)). A failed search returns
   "not established", never a model.
-- The reference evaluator (`eval.rs`) reports every panic as a `Diagnostic`
+- The reference evaluator (the MIR machine, `mir/machine.rs`) reports every panic as a `Diagnostic`
   carrying the span of the failing expression: `panic: checked arithmetic
   failed` at the operator, `panic: index out of bounds` at the access. It has
   a per-run step budget (`eval_fuel`) and takes standard input as a

@@ -40,7 +40,7 @@ Because a failed call loses the buffer, this stub retries `EINTR` itself.
 
 ## Reference evaluator (EVAL-FOREIGN-SHIMS)
 
-`kush eval` runs `kush_sys_*` calls through a shim table in `eval.rs`, keyed
+`kush eval` runs `kush_sys_*` calls through a shim table in `host.rs`, keyed
 by symbol like Miri's foreign-function shims. Descriptors share the
 evaluator's never-reused file table with `FS.open`, so a stale descriptor is
 `EBADF`. Any other foreign call is still rejected there.

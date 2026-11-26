@@ -10,9 +10,8 @@
 //!   the abort word; functions then return dummies (`Abort`) until the
 //!   handler's activation clears it.
 //! - Environments of `multi fn` tokens live on the continuation stack:
-//!   64 KiB chunks (counted allocations) with one spare kept. kush.c counts
-//!   chunks; the tree evaluator counts each environment, so check mode does
-//!   not compare the stats of a run that pushed one.
+//!   64 KiB chunks (counted allocations, as kush.c counts them) with one
+//!   spare kept.
 
 use super::*;
 
@@ -247,7 +246,6 @@ impl Machine<'_, '_> {
 
     /// `kush_kstack_push`: a word-aligned environment of `bytes` bytes.
     pub(super) fn kstack_push(&mut self, bytes: i64) -> Run<i64> {
-        self.continuations = true;
         let need = (bytes + 15) & !15;
         let room = self.kstack.chunks.last().map_or(0, |(chunk, capacity)| {
             chunk + KCHUNK_HEADER + capacity - self.kstack.top
