@@ -20,6 +20,7 @@ use std::rc::Rc;
 
 mod alloc;
 mod buffers;
+mod effects;
 
 /// The words of a value.
 type Words = Vec<i64>;
@@ -159,6 +160,11 @@ impl Memory {
         }
         Ok(())
     }
+    /// The size in bytes of the allocation a pointer starts.
+    fn size(&self, pointer: i64) -> Run<usize> {
+        let (id, _) = self.locate(pointer, 0)?;
+        Ok(self.allocations[id].bytes.len())
+    }
     fn load(&self, pointer: i64, words: usize) -> Run<Words> {
         let (id, offset) = self.locate(pointer, words * 8)?;
         let bytes = &self.allocations[id].bytes[offset..offset + words * 8];
@@ -200,6 +206,9 @@ struct Frame {
     /// Stack storage the frame made for values without an address (an
     /// array value a view looks at).
     temporaries: Vec<i64>,
+    /// For a function that installs handlers, the handler-stack depth on
+    /// entry: every way out restores it (native's `handler_base`).
+    handler_base: Option<usize>,
     /// `None` for the entry function and a nested call.
     caller: Option<Return>,
 }
@@ -207,6 +216,8 @@ struct Frame {
 struct Machine<'p, 'o> {
     program: &'p Executable,
     bodies: Vec<Option<Rc<Body>>>,
+    /// Whether each function's body installs a handler.
+    installs_handlers: Vec<bool>,
     memory: Memory,
     input: &'o mut dyn Read,
     output: &'o mut dyn Write,
@@ -220,6 +231,13 @@ struct Machine<'p, 'o> {
     /// The capture types of each closure environment's drop glue, by the
     /// index its environment's first word names (`DROP | index`).
     closure_types: Vec<Vec<Type>>,
+    /// The dynamic handler stack.
+    handlers: Vec<effects::HandlerFrame>,
+    /// Nonzero while an abort travels to its handler: the payload buffer
+    /// of the activation it addresses.
+    abort_word: i64,
+    /// Environments of `multi fn` tokens.
+    kstack: effects::KStack,
 }
 
 /// Run the program's entry function on the machine. Returns its result word
@@ -234,15 +252,27 @@ pub fn evaluate_with_input(
     input: &mut dyn Read,
     output: &mut dyn Write,
 ) -> Run<(i64, MemoryStats)> {
-    run_program(program, input, output, None)
+    run_program(program, input, output, None).map(|(result, stats, _)| (result, stats))
 }
 
+/// [`evaluate`], and whether its stats are comparable with the tree
+/// evaluator's (see [`run_program`]).
+pub fn evaluate_comparing(
+    program: &Executable,
+    output: &mut dyn Write,
+) -> Run<(i64, MemoryStats, bool)> {
+    run_program(program, &mut std::io::empty(), output, None)
+}
+
+/// The run's result and stats, and whether the stats are the tree's too:
+/// the tree counts each continuation environment, kush.c (and the machine)
+/// the chunks they live in.
 fn run_program(
     program: &Executable,
     input: &mut dyn Read,
     output: &mut dyn Write,
     hosts: Option<std::collections::VecDeque<HostRecord>>,
-) -> Run<(i64, MemoryStats)> {
+) -> Run<(i64, MemoryStats, bool)> {
     let entry = program.entry().map_err(Stop::Panic)?;
     // The task runtime runs `main` as a task, whose allocations the stats
     // count (FND-EVAL-EFFECTS).
@@ -252,6 +282,7 @@ fn run_program(
     let mut machine = Machine {
         program,
         bodies: vec![None; program.functions.len()],
+        installs_handlers: vec![false; program.functions.len()],
         memory: Memory::default(),
         input,
         hosts,
@@ -260,17 +291,21 @@ fn run_program(
         unwinding: None,
         fuel: program.eval_fuel,
         closure_types: Vec::new(),
+        handlers: Vec::new(),
+        abort_word: 0,
+        kstack: effects::KStack::default(),
     };
     machine.memory.stats.fusions = program.fusions;
     machine.enter(entry, Vec::new(), None, None)?;
     let result = machine.run()?.first().copied().unwrap_or(0);
+    machine.kstack_drain()?;
     if machine.memory.live_heap != 0 {
         return Err(Stop::Panic(Diagnostic::new(
             Span::default(),
             "internal ownership error: live owning allocations after normal program exit",
         )));
     }
-    Ok((result, machine.memory.stats))
+    Ok((result, machine.memory.stats, !machine.kstack.used))
 }
 
 /// The outcome of one read or write: what it moved, or its error.
@@ -408,11 +443,11 @@ pub(crate) fn check(
         ));
     }
     match (tree, machine) {
-        (Ok((tree_result, tree_stats)), Ok((result, stats))) => {
+        (Ok((tree_result, tree_stats)), Ok((result, stats, comparable))) => {
             if result != *tree_result {
                 return disagree(format!("result {result} against {tree_result}"));
             }
-            if stats.report() != tree_stats.report() {
+            if comparable && stats.report() != tree_stats.report() {
                 return disagree(format!(
                     "{} against {}",
                     stats.report(),
@@ -455,6 +490,8 @@ impl Machine<'_, '_> {
             ))
         })?);
         self.bodies[function] = Some(body.clone());
+        self.installs_handlers[function] =
+            crate::native::block_installs_handler(&self.program.functions[function].body);
         Ok(body)
     }
     fn width(&self, ty: Type) -> usize {
@@ -531,14 +568,21 @@ impl Machine<'_, '_> {
             homes,
             owned,
             temporaries: Vec::new(),
+            handler_base: self.installs_handlers[function].then_some(self.handlers.len()),
             caller,
         });
         Ok(())
     }
 
-    /// Pop the top frame, releasing its locals' homes.
+    /// Pop the top frame, restoring the handler stack it found (when it
+    /// installs handlers) and releasing its locals' homes.
     fn leave(&mut self) -> Run<Frame> {
         let frame = self.stack.pop().expect("a frame to leave");
+        if let Some(base) = frame.handler_base {
+            while self.handlers.len() > base {
+                self.pop_handler()?;
+            }
+        }
         for (home, owned) in frame.homes.iter().zip(&frame.owned) {
             if let (Some(home), true) = (home, owned) {
                 self.memory.free(*home)?;
@@ -591,7 +635,17 @@ impl Machine<'_, '_> {
     /// Call `function` from inside a statement (a `Vec.map` callback) and
     /// run it to its result. A panic leaves it as a [`Stop::Panic`].
     fn call_nested(&mut self, function: usize, args: Vec<Words>) -> Run<Words> {
-        self.enter(function, args, None, None)?;
+        self.call_with(function, args, None)
+    }
+
+    /// [`Machine::call_nested`] of a closure with its environment.
+    fn call_with(
+        &mut self,
+        function: usize,
+        args: Vec<Words>,
+        environment: Option<i64>,
+    ) -> Run<Words> {
+        self.enter(function, args, None, environment)?;
         self.run()
     }
 
@@ -700,11 +754,6 @@ impl Machine<'_, '_> {
                         let words = self.operand(*callable).map_err(Raise::Stop)?;
                         let environment = match body.operand_ty(*callable) {
                             Type::Fn(_) => None,
-                            Type::Multi(_) if words[1] != 0 => {
-                                return Err(Raise::Stop(Stop::Unsupported(
-                                    "a call through a capturing multi fn".into(),
-                                )));
-                            }
                             _ => Some(words[1]),
                         };
                         let function = code_function(words[0]).map_err(Raise::Stop)?;
@@ -758,7 +807,16 @@ impl Machine<'_, '_> {
                 }
             }
             TerminatorKind::Abort => {
-                return Err(Raise::Stop(Stop::Unsupported("an abort".into())));
+                // An abort travels to its handler: the function returns a
+                // dummy, and its caller tests the abort word.
+                let frame = self.leave().map_err(Raise::Stop)?;
+                match frame.caller {
+                    Some(caller) => {
+                        self.finish_call(caller.destination, Vec::new(), caller.next)
+                            .map_err(Raise::Stop)?;
+                    }
+                    None => return Ok(Some(Vec::new())),
+                }
             }
             TerminatorKind::Unreachable => {
                 return Err(Raise::Stop(Stop::Fault(
@@ -1234,6 +1292,7 @@ impl Machine<'_, '_> {
                 self.array_op(*op, &words, span)?
             }
             Rvalue::Alloc(op, operands) => self.alloc_op(body, *op, operands, ty, span)?,
+            Rvalue::Runtime(op, operands) => self.runtime_op(body, *op, operands, span)?,
             Rvalue::Map(op, operands) => {
                 let handle = self.scalar(operands[0])?;
                 let callbacks = operands[1..]
@@ -1321,7 +1380,20 @@ impl Machine<'_, '_> {
             });
         }
         if matches!(ty, Type::Multi(_)) {
-            return unsupported("a capturing multi fn");
+            // A multishot token: the captures go on the continuation stack,
+            // after a word holding the environment's size.
+            let mut words = Vec::new();
+            for capture in captures {
+                match capture {
+                    Capture::Value(operand) => words.extend(self.operand(*operand)?),
+                    Capture::Address(local) => words.push(self.address(Place::local(*local))?),
+                }
+            }
+            let bytes = 8 + words.len() as i64 * 8;
+            let environment = self.kstack_push(bytes)?;
+            self.memory.store(environment, &[bytes])?;
+            self.memory.store(environment + 8, &words)?;
+            return Ok(vec![code, environment]);
         }
         let types = captures
             .iter()
@@ -1629,29 +1701,8 @@ impl Machine<'_, '_> {
                 }
                 Ok(())
             }
-            Type::Once(_) => {
-                // The environment's drop glue: its captures, then itself.
-                let environment = words[1];
-                if environment == 0 {
-                    return Ok(());
-                }
-                let drop = self.memory.load(environment, 1)?[0];
-                let Some(types) = usize::try_from(drop & !DROP)
-                    .ok()
-                    .filter(|_| drop & DROP != 0)
-                    .and_then(|index| self.closure_types.get(index).cloned())
-                else {
-                    return fault(format!("an environment without drop glue: {drop:#x}"));
-                };
-                let mut offset = 8;
-                for ty in types {
-                    let width = self.width(ty);
-                    let capture = self.memory.load(environment + offset, width)?;
-                    self.drop_value(ty, &capture)?;
-                    offset += (width * 8) as i64;
-                }
-                self.memory.free(environment)
-            }
+            Type::Once(_) if words[1] == 0 => Ok(()),
+            Type::Once(_) => self.drop_environment(words[1]),
             Type::Union(index) => {
                 let members = &self.program.unions[index].members;
                 let Some(member) = usize::try_from(words[0])
@@ -1683,6 +1734,26 @@ impl Machine<'_, '_> {
             }
             other => unsupported(format!("dropping a {other:?}")),
         }
+    }
+
+    /// A closure environment's drop glue: its captures, then itself.
+    fn drop_environment(&mut self, environment: i64) -> Run<()> {
+        let drop = self.memory.load(environment, 1)?[0];
+        let Some(types) = usize::try_from(drop & !DROP)
+            .ok()
+            .filter(|_| drop & DROP != 0)
+            .and_then(|index| self.closure_types.get(index).cloned())
+        else {
+            return fault(format!("an environment without drop glue: {drop:#x}"));
+        };
+        let mut offset = 8;
+        for ty in types {
+            let width = self.width(ty);
+            let capture = self.memory.load(environment + offset, width)?;
+            self.drop_value(ty, &capture)?;
+            offset += (width * 8) as i64;
+        }
+        self.memory.free(environment)
     }
 }
 
