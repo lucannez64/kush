@@ -218,29 +218,68 @@ impl Executable {
         host: &Host,
     ) -> Result<(i64, MemoryStats)> {
         if alloc_budget.is_none() && std::env::var_os("KUSH_MACHINE_CHECK").is_some() {
-            // The tree writes through to `output` as usual (so a failing
-            // writer fails where it would), and the bytes it accepted are
-            // kept for the comparison.
-            struct Tee<'a> {
-                output: &'a mut dyn Write,
-                written: Vec<u8>,
+            // The tree reads and writes through to `input` and `output` as
+            // usual (so a failing writer fails where it would). Every call's
+            // outcome is kept, so the machine sees the same input in the same
+            // pieces and the same writer behaviour, and the bytes the writer
+            // accepted are kept for the comparison.
+            use crate::mir::machine::{IoOutcome, Transcript};
+            fn outcome<T>(result: &io::Result<T>, value: impl FnOnce(&T) -> T) -> IoOutcome<T> {
+                match result {
+                    Ok(done) => Ok(value(done)),
+                    Err(error) => Err((error.kind(), error.raw_os_error())),
+                }
             }
-            impl Write for Tee<'_> {
+            struct Tee<'a, 't> {
+                output: &'a mut dyn Write,
+                transcript: &'t mut Transcript,
+            }
+            impl Write for Tee<'_, '_> {
                 fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                    let accepted = self.output.write(bytes)?;
-                    self.written.extend_from_slice(&bytes[..accepted]);
+                    let result = self.output.write(bytes);
+                    self.transcript
+                        .writes
+                        .push(outcome(&result, |count| *count));
+                    let accepted = result?;
+                    self.transcript
+                        .written
+                        .extend_from_slice(&bytes[..accepted]);
                     Ok(accepted)
                 }
                 fn flush(&mut self) -> io::Result<()> {
                     self.output.flush()
                 }
             }
-            let mut tee = Tee {
-                output,
-                written: Vec::new(),
-            };
-            let tree = self.tree_evaluate(input, &mut tee, alloc_budget, host);
-            crate::mir::machine::check(self, &tee.written, &tree)?;
+            struct Record<'a, 't> {
+                input: &'a mut dyn Read,
+                transcript: &'t mut Transcript,
+            }
+            impl Read for Record<'_, '_> {
+                fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                    let result = self.input.read(buffer);
+                    let read =
+                        outcome(&result, |count| *count).map(|count| buffer[..count].to_vec());
+                    self.transcript.reads.push(read);
+                    result
+                }
+            }
+            let mut transcript = Transcript::default();
+            let mut written = Transcript::default();
+            let tree = self.tree_evaluate(
+                &mut Record {
+                    input,
+                    transcript: &mut transcript,
+                },
+                &mut Tee {
+                    output,
+                    transcript: &mut written,
+                },
+                alloc_budget,
+                host,
+            );
+            transcript.writes = written.writes;
+            transcript.written = written.written;
+            crate::mir::machine::check(self, transcript, &tree)?;
             return tree;
         }
         self.tree_evaluate(input, output, alloc_budget, host)

@@ -15,9 +15,10 @@
 use super::*;
 use crate::Diagnostic;
 use crate::eval::MemoryStats;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::rc::Rc;
 
+mod alloc;
 mod buffers;
 
 /// The words of a value.
@@ -203,6 +204,7 @@ struct Machine<'p, 'o> {
     program: &'p Executable,
     bodies: Vec<Option<Rc<Body>>>,
     memory: Memory,
+    input: &'o mut dyn Read,
     output: &'o mut dyn Write,
     stack: Vec<Frame>,
     /// The panic a cleanup block runs for.
@@ -216,6 +218,15 @@ struct Machine<'p, 'o> {
 /// Run the program's entry function on the machine. Returns its result word
 /// (zero for `Unit`) and the allocation stats a native build reports.
 pub fn evaluate(program: &Executable, output: &mut dyn Write) -> Run<(i64, MemoryStats)> {
+    evaluate_with_input(program, &mut std::io::empty(), output)
+}
+
+/// [`evaluate`] with standard input read from `input`.
+pub fn evaluate_with_input(
+    program: &Executable,
+    input: &mut dyn Read,
+    output: &mut dyn Write,
+) -> Run<(i64, MemoryStats)> {
     let entry = program.entry().map_err(Stop::Panic)?;
     // The task runtime runs `main` as a task, whose allocations the stats
     // count (FND-EVAL-EFFECTS).
@@ -226,6 +237,7 @@ pub fn evaluate(program: &Executable, output: &mut dyn Write) -> Run<(i64, Memor
         program,
         bodies: vec![None; program.functions.len()],
         memory: Memory::default(),
+        input,
         output,
         stack: Vec::new(),
         unwinding: None,
@@ -244,13 +256,79 @@ pub fn evaluate(program: &Executable, output: &mut dyn Write) -> Run<(i64, Memor
     Ok((result, machine.memory.stats))
 }
 
+/// The outcome of one read or write: what it moved, or its error.
+pub(crate) type IoOutcome<T> = std::result::Result<T, (std::io::ErrorKind, Option<i32>)>;
+
+fn io_error((kind, code): (std::io::ErrorKind, Option<i32>)) -> std::io::Error {
+    match code {
+        Some(code) => std::io::Error::from_raw_os_error(code),
+        None => kind.into(),
+    }
+}
+
+/// What the tree evaluator's reads and writes did, call by call, for the
+/// machine to replay.
+#[derive(Default)]
+pub(crate) struct Transcript {
+    /// Each read's bytes or error.
+    pub(crate) reads: Vec<IoOutcome<Vec<u8>>>,
+    /// Each write's accepted count or error.
+    pub(crate) writes: Vec<IoOutcome<usize>>,
+    /// The bytes the writer accepted.
+    pub(crate) written: Vec<u8>,
+}
+
+/// The tree's reads, call by call.
+struct Replay(std::collections::VecDeque<IoOutcome<Vec<u8>>>);
+
+impl Read for Replay {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self.0.pop_front() {
+            None => Ok(0),
+            Some(Err(error)) => Err(io_error(error)),
+            Some(Ok(mut chunk)) => {
+                let count = chunk.len().min(buffer.len());
+                buffer[..count].copy_from_slice(&chunk[..count]);
+                if count < chunk.len() {
+                    chunk.drain(..count);
+                    self.0.push_front(Ok(chunk));
+                }
+                Ok(count)
+            }
+        }
+    }
+}
+
+/// A writer that accepts what the tree's writer accepted, call by call, and
+/// keeps the accepted bytes. Past the tree's writes it accepts everything.
+struct Echo {
+    writes: std::collections::VecDeque<IoOutcome<usize>>,
+    written: Vec<u8>,
+}
+
+impl Write for Echo {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let accepted = match self.writes.pop_front() {
+            None => bytes.len(),
+            Some(Err(error)) => return Err(io_error(error)),
+            Some(Ok(count)) => count.min(bytes.len()),
+        };
+        self.written.extend_from_slice(&bytes[..accepted]);
+        Ok(accepted)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// `KUSH_MACHINE_CHECK`: run the machine on a program the tree evaluator ran
-/// (`tree` is its outcome, `tree_output` what it printed). A difference is
-/// an error; a construct the machine does not cover is appended, with the
-/// program's entry function, to the file `KUSH_MACHINE_REPORT` names.
+/// (`tree` is its outcome, `transcript` what its reads and writes did). A
+/// difference is an error; a construct the machine does not cover is
+/// appended, with the program's entry function, to the file
+/// `KUSH_MACHINE_REPORT` names.
 pub(crate) fn check(
     program: &Executable,
-    tree_output: &[u8],
+    transcript: Transcript,
     tree: &std::result::Result<(i64, MemoryStats), Diagnostic>,
 ) -> std::result::Result<(), Diagnostic> {
     let disagree = |what: String| {
@@ -266,8 +344,15 @@ pub(crate) fn check(
     {
         return Ok(());
     }
-    let mut output = Vec::new();
-    let machine = match evaluate(program, &mut output) {
+    let mut input = Replay(transcript.reads.into());
+    let mut echo = Echo {
+        writes: transcript.writes.into(),
+        written: Vec::new(),
+    };
+    let tree_output = &transcript.written;
+    let result = evaluate_with_input(program, &mut input, &mut echo);
+    let output = echo.written;
+    let machine = match result {
         Err(Stop::Unsupported(reason)) => {
             report(program, &reason);
             return Ok(());
@@ -280,7 +365,7 @@ pub(crate) fn check(
         Err(Stop::Panic(diagnostic)) => Err(diagnostic),
         Ok(done) => Ok(done),
     };
-    if output != tree_output {
+    if output != *tree_output {
         return disagree(format!(
             "it printed {:?} where the tree printed {:?}",
             String::from_utf8_lossy(&output),
@@ -661,6 +746,7 @@ impl Machine<'_, '_> {
             Target::Vec(op, element) => self.vec_call(op, element, values, ty, span),
             Target::Slice(op, element) => self.slice_call(op, element, values, span),
             Target::DynArray(op, element) => self.dyn_array_call(op, element, values, span),
+            Target::Io(op, shape) => self.io_call(op, shape, values, ty),
             Target::Print | Target::PrintFloat(_) => {
                 let text = match *target {
                     Target::PrintFloat(kind) => crate::float::format(kind, values[0]),
@@ -932,6 +1018,7 @@ impl Machine<'_, '_> {
                     .collect::<Run<Vec<_>>>()?;
                 self.array_op(*op, &words, span)?
             }
+            Rvalue::Alloc(op, operands) => self.alloc_op(body, *op, operands, ty)?,
             Rvalue::Map(op, operands) => {
                 let handle = self.scalar(operands[0])?;
                 let callbacks = operands[1..]
@@ -1233,6 +1320,15 @@ impl Machine<'_, '_> {
                 self.memory.free(words[0])
             }
             Type::Bytes | Type::String => self.memory.free(words[0]),
+            Type::Arena => self.arena_release(words[0]),
+            Type::ArenaBox(pointee) => {
+                let pointee = self.program.pointees[pointee];
+                if self.program.owns(pointee) {
+                    let fields = self.memory.load(words[0], self.width(pointee))?;
+                    self.drop_value(pointee, &fields)?;
+                }
+                self.arena_box_release(words[0])
+            }
             Type::Vec(element) => {
                 let element = self.program.pointees[element];
                 if self.program.owns(element) {
@@ -1392,19 +1488,27 @@ fn fit(mut words: Words, width: usize) -> Words {
 }
 
 fn target_name(target: &crate::executable::Target) -> String {
-    let text = format!("{target:?}");
-    let end = text
-        .find(|c: char| !c.is_alphanumeric())
-        .unwrap_or(text.len());
-    text[..end].to_string()
+    variant_path(&format!("{target:?}"))
 }
 
 fn rvalue_name(rvalue: &Rvalue) -> String {
-    let text = format!("{rvalue:?}");
-    let end = text
-        .find(|c: char| !c.is_alphanumeric())
-        .unwrap_or(text.len());
-    format!("the rvalue {}", &text[..end])
+    format!("the rvalue {}", variant_path(&format!("{rvalue:?}")))
+}
+
+/// A debug form's variant and the variant of its first field: `Alloc(ArenaNew`
+/// of `Alloc(ArenaNew, [...])`.
+fn variant_path(text: &str) -> String {
+    let word_end = |text: &str| {
+        text.find(|c: char| !c.is_alphanumeric())
+            .unwrap_or(text.len())
+    };
+    let outer = word_end(text);
+    match text[outer..].strip_prefix('(') {
+        Some(rest) if rest.starts_with(|c: char| c.is_ascii_uppercase()) => {
+            format!("{}({}", &text[..outer], &rest[..word_end(rest)])
+        }
+        _ => text[..outer].to_string(),
+    }
 }
 
 #[cfg(test)]

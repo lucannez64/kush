@@ -905,3 +905,100 @@ fn scalar_at(data: &[u8], index: i64) -> Option<i64> {
     let text = std::str::from_utf8(data).ok()?;
     text.chars().nth(index).map(|ch| i64::from(u32::from(ch)))
 }
+
+// ---- standard I/O ----------------------------------------------------------
+
+/// Linux errno values the I/O builtins report.
+const EIO: i64 = 5;
+const EFBIG: i64 = 27;
+
+fn io_error_code(error: &std::io::Error) -> i64 {
+    error
+        .raw_os_error()
+        .filter(|code| *code > 0)
+        .map_or(EIO, i64::from)
+}
+
+impl Machine<'_, '_> {
+    /// Standard input and output (native's `kush_io_*`, as the tree runs
+    /// them): a read fills the owned buffer it consumes, without growing
+    /// it, and frees it on failure; a write sends a borrowed buffer.
+    pub(super) fn io_call(
+        &mut self,
+        op: crate::executable::IoOp,
+        shape: Option<crate::runtime_types::ResultShape>,
+        values: &[i64],
+        ty: Type,
+    ) -> Run<Words> {
+        use crate::executable::IoOp;
+        let (status, value) = match op {
+            IoOp::Stdin => return Ok(vec![0]),
+            IoOp::Stdout => return Ok(vec![1]),
+            IoOp::ReadAll | IoOp::ReadLine | IoOp::ReadChunk => {
+                let handle = values[1];
+                let (length, capacity) = self.header(handle)?;
+                let (mut length, capacity) = (length as usize, capacity as usize);
+                let mut data = self.memory.load_bytes(handle + 16, capacity)?;
+                let line = matches!(op, IoOp::ReadLine);
+                let chunk = matches!(op, IoOp::ReadChunk);
+                let mut probe = [0u8; 1];
+                let status = loop {
+                    let full = length == capacity;
+                    if full && chunk {
+                        break EFBIG;
+                    }
+                    let target = if full {
+                        &mut probe[..]
+                    } else {
+                        &mut data[length..if line { length + 1 } else { capacity }]
+                    };
+                    match self.input.read(target) {
+                        Ok(0) => break 0,
+                        Ok(_) if full => break EFBIG,
+                        Ok(count) => {
+                            length += count;
+                            if chunk || (line && data[length - 1] == b'\n') {
+                                break 0;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => break io_error_code(&error),
+                    }
+                };
+                if status == 0 {
+                    self.memory.store_bytes(handle + 16, &data[..length])?;
+                    self.memory.store(handle, &[length as i64])?;
+                } else {
+                    self.memory.free(handle)?;
+                }
+                (status, handle)
+            }
+            IoOp::Write => {
+                let handle = self.memory.load(values[1], 1)?[0];
+                let data = self.buffer_data(handle)?;
+                let mut offset = 0;
+                let status = loop {
+                    if offset == data.len() {
+                        break 0;
+                    }
+                    match self.output.write(&data[offset..]) {
+                        Ok(0) => break EIO,
+                        Ok(count) => offset += count,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => break io_error_code(&error),
+                    }
+                };
+                (status, 0)
+            }
+        };
+        let Some(shape) = shape else {
+            return fault("an I/O result without its shape");
+        };
+        let words = if status == 0 {
+            vec![shape.ok_tag as i64, value]
+        } else {
+            vec![shape.err_tag as i64, status]
+        };
+        Ok(fit(words, self.width(ty)))
+    }
+}
