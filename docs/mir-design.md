@@ -573,3 +573,13 @@ the program whose function it runs, and a code word carries its program
 above the function index, so a function value made in compiled code calls
 back into it. In check mode the machine now covers every program the
 suite runs.
+
+HOST is done. The host calls and the `std.sys` shims live in
+`crate::host`, on plain bytes and scalars: an evaluator presents a call's
+arguments through `HostArgs` (scalars, borrowed buffers, buffers to fill
+and put back, owned buffers a failed call consumes), and both evaluators
+call the same code. The standard streams and `kush_sys_wait_ready` stay
+with each evaluator: the machine's wait polls for up to 1 ms and suspends
+its task in between, as the tree yields. Outside check mode the machine
+runs host calls itself (`machine::evaluate_with_host`); in check mode it
+still replays the tree's, so their effects happen once.

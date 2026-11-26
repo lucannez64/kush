@@ -285,6 +285,8 @@ struct Machine<'p, 'o> {
     /// In check mode, the tree's host calls to replay: their effects
     /// (files, processes, clocks) happened once, on the tree.
     hosts: Option<std::collections::VecDeque<HostRecord>>,
+    /// The arguments, environment and open files host calls use.
+    system: crate::host::Host,
     stack: Vec<Frame>,
     /// The panic a cleanup block runs for.
     unwinding: Option<Diagnostic>,
@@ -327,7 +329,19 @@ pub fn evaluate_with_input(
     input: &mut dyn Read,
     output: &mut dyn Write,
 ) -> Run<(i64, MemoryStats)> {
-    run_program(program, input, output, None).map(|(result, stats, _)| (result, stats))
+    evaluate_with_host(program, input, output, &crate::host::Host::empty())
+}
+
+/// [`evaluate`] with standard input read from `input`, and the arguments,
+/// environment and files of `host`.
+pub fn evaluate_with_host(
+    program: &Executable,
+    input: &mut dyn Read,
+    output: &mut dyn Write,
+    host: &crate::host::Host,
+) -> Run<(i64, MemoryStats)> {
+    run_program(program, input, output, None, host.clone())
+        .map(|(result, stats, _)| (result, stats))
 }
 
 /// [`evaluate`], and whether its stats are comparable with the tree
@@ -336,7 +350,13 @@ pub fn evaluate_comparing(
     program: &Executable,
     output: &mut dyn Write,
 ) -> Run<(i64, MemoryStats, bool)> {
-    run_program(program, &mut std::io::empty(), output, None)
+    run_program(
+        program,
+        &mut std::io::empty(),
+        output,
+        None,
+        crate::host::Host::empty(),
+    )
 }
 
 /// The run's result and stats, and whether the stats are the tree's too:
@@ -347,9 +367,11 @@ fn run_program(
     input: &mut dyn Read,
     output: &mut dyn Write,
     hosts: Option<std::collections::VecDeque<HostRecord>>,
+    system: crate::host::Host,
 ) -> Run<(i64, MemoryStats, bool)> {
     let entry = program.entry().map_err(Stop::Panic)?;
     let mut machine = Machine {
+        system,
         program: Program::Main(program),
         program_id: 0,
         main: program,
@@ -508,6 +530,7 @@ pub(crate) fn check(
         &mut input,
         &mut echo,
         Some(transcript.hosts.into()),
+        crate::host::Host::empty(),
     );
     let output = echo.written;
     let machine = match result {
@@ -910,6 +933,18 @@ impl Machine<'_, '_> {
                                 element,
                             ) => self.channel_op(op, &values, element, span),
                             Target::ChannelNew => self.channel_new(values[0], span).map(Flow::Done),
+                            // Outside check mode a descriptor wait yields to
+                            // other tasks between polls.
+                            Target::Foreign(foreign)
+                                if self.hosts.is_none()
+                                    && self.program.foreign_functions[foreign]
+                                        .as_ref()
+                                        .is_some_and(|function| {
+                                            function.symbol == "kush_sys_wait_ready"
+                                        }) =>
+                            {
+                                self.wait_ready(foreign, &values, ty)
+                            }
                             _ => self
                                 .builtin(&target, &values, &types, ty, span)
                                 .map(Flow::Done),
@@ -1135,7 +1170,7 @@ impl Machine<'_, '_> {
         use crate::executable::Target;
         match *target {
             Target::Host(op, shape) => {
-                self.host_replay(&format!("Host({op:?})"), shape, values, types, ty)
+                self.host_replay(HostCall::Op(op), shape, values, types, ty, span)
             }
             Target::Foreign(index) => self.foreign_call(index, values, types, ty, span),
             Target::Bytes(op) => self.bytes_call(op, values, span),
@@ -1237,23 +1272,69 @@ impl Machine<'_, '_> {
         Ok(fit(words, self.width(ty)))
     }
 
-    /// A host call (filesystem, environment, clock, process, network) as the
-    /// tree ran it in check mode: the recorded result, the recorded contents
-    /// of its buffer arguments, and a free of each owned buffer it consumed.
-    /// Outside check mode the machine does not run host calls yet.
+    /// A host call (filesystem, environment, clock, process, network) or a
+    /// `std.sys` shim, through the shared host layer. In check mode it is the
+    /// tree's call replayed instead: the recorded result, the recorded
+    /// contents of its buffer arguments, and a free of each owned buffer it
+    /// consumed.
     fn host_replay(
         &mut self,
-        what: &str,
+        call: HostCall<'_>,
         shape: crate::runtime_types::ResultShape,
         values: &[i64],
         types: &[Type],
         ty: Type,
+        span: Span,
     ) -> Run<Words> {
-        self.replay(what, shape, values, types, ty)
-            .map_err(|stop| match stop {
-                Stop::Fault(fault) => Stop::Fault(format!("{what}: {fault}")),
-                other => other,
-            })
+        let what = match call {
+            HostCall::Op(op) => format!("Host({op:?})"),
+            HostCall::Sys(symbol) => format!("Foreign({symbol})"),
+        };
+        let result = match self.hosts {
+            Some(_) => self.replay(&what, shape, values, types, ty),
+            None => self.host_run(call, shape, values, types, ty, span),
+        };
+        result.map_err(|stop| match stop {
+            Stop::Fault(fault) => Stop::Fault(format!("{what}: {fault}")),
+            other => other,
+        })
+    }
+
+    /// Run a host call: the shared host layer on the machine's memory.
+    fn host_run(
+        &mut self,
+        call: HostCall<'_>,
+        shape: crate::runtime_types::ResultShape,
+        values: &[i64],
+        types: &[Type],
+        ty: Type,
+        span: Span,
+    ) -> Run<Words> {
+        let system = self.system.clone();
+        // The machine's own fuel bounds the run; the layer's is not needed.
+        let mut fuel = usize::MAX;
+        let mut args = MachineArgs {
+            machine: self,
+            values,
+            types,
+        };
+        let result = match call {
+            HostCall::Op(op) => crate::host::host_call(&system, op, &mut args, &mut fuel, span),
+            HostCall::Sys(symbol) => {
+                crate::host::sys_call(&system, symbol, &mut args, &mut fuel, span)
+            }
+        };
+        let (status, value) = result.map_err(Stop::Panic)?;
+        let words = if status == 0 {
+            let payload = match value {
+                crate::host::HostValue::Scalar(value) => value,
+                crate::host::HostValue::Buffer(index) => args.handle(index).unwrap_or(0),
+            };
+            vec![shape.ok_tag as i64, payload]
+        } else {
+            vec![shape.err_tag as i64, status]
+        };
+        Ok(fit(words, self.width(ty)))
     }
 
     fn replay(
@@ -1340,7 +1421,7 @@ impl Machine<'_, '_> {
             "kush_sys_read" | "kush_sys_probe" | "kush_sys_write"
         ) && (0..=2).contains(&values[0]);
         if !stream {
-            return self.host_replay(&format!("Foreign({symbol})"), shape, values, types, ty);
+            return self.host_replay(HostCall::Sys(symbol), shape, values, types, ty, span);
         }
         // The tree recorded this call too; the machine makes it itself.
         if let Some(hosts) = self.hosts.as_mut() {
@@ -2150,6 +2231,67 @@ impl Raise {
                 Raise::Panic(diagnostic, unwind)
             }
             other => Raise::Stop(other),
+        }
+    }
+}
+
+/// A call of the shared host layer.
+#[derive(Clone, Copy)]
+enum HostCall<'s> {
+    Op(crate::executable::HostOp),
+    Sys(&'s str),
+}
+
+/// A host call's arguments in the machine's memory.
+struct MachineArgs<'a, 'p, 'o> {
+    machine: &'a mut Machine<'p, 'o>,
+    values: &'a [i64],
+    types: &'a [Type],
+}
+
+impl MachineArgs<'_, '_, '_> {
+    /// The handle of buffer argument `index`: the owned `Bytes`, or the one
+    /// a reference points at.
+    fn handle(&self, index: usize) -> Option<i64> {
+        let buffer = |ty: Type| matches!(ty, Type::Bytes | Type::String);
+        match self.types.get(index)?.full() {
+            ty if buffer(ty) => Some(self.values[index]),
+            Type::Ref(pointee) | Type::RefMut(pointee)
+                if buffer(self.machine.program.pointees[pointee].full()) =>
+            {
+                Some(self.machine.memory.load(self.values[index], 1).ok()?[0])
+            }
+            _ => None,
+        }
+    }
+}
+
+impl crate::host::HostArgs for MachineArgs<'_, '_, '_> {
+    fn scalar(&self, index: usize) -> i64 {
+        self.values[index]
+    }
+    fn bytes(&self, index: usize) -> Option<Vec<u8>> {
+        self.machine.buffer_data(self.handle(index)?).ok()
+    }
+    fn take_buffer(&mut self, index: usize) -> Option<(usize, Vec<u8>, usize)> {
+        let handle = self.handle(index)?;
+        let (_, capacity) = self.machine.header(handle).ok()?;
+        let data = self.machine.buffer_data(handle).ok()?;
+        Some((index, data, capacity as usize))
+    }
+    fn put_buffer(&mut self, index: usize, data: Vec<u8>) {
+        if let Some(handle) = self.handle(index) {
+            let _ = self.machine.memory.store_bytes(handle + 16, &data);
+            let _ = self.machine.memory.store(handle, &[data.len() as i64]);
+        }
+    }
+    fn consume_buffer(&mut self, index: usize) {
+        let owned = matches!(
+            self.types.get(index).map(|ty| ty.full()),
+            Some(Type::Bytes | Type::String)
+        );
+        if owned && let Some(handle) = self.handle(index) {
+            let _ = self.machine.memory.free(handle);
         }
     }
 }

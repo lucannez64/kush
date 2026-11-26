@@ -85,6 +85,75 @@ fn covered_examples_run_as_on_the_tree_evaluator() {
 const MACHINE_FLOOR: usize = 46;
 
 #[test]
+fn host_calls_run_on_the_machine_as_on_the_tree_evaluator() {
+    // Outside check mode the machine makes host calls itself, through the
+    // shared host layer: each evaluator works in a fresh directory of its
+    // own, and both report the same.
+    let program = kush::program::load_source("<machine-host>", super::host_api::FILESYSTEM)
+        .map_err(|(_, error)| error.message)
+        .unwrap();
+    let program = executable::check_program(&program).unwrap();
+    let directory = |label: &str| {
+        let path =
+            std::env::temp_dir().join(format!("kush-machine-host-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir(&path).unwrap();
+        path
+    };
+    let run = |root: &Path, on_machine: bool| {
+        let host = kush::Host::new(
+            vec![b"program".to_vec(), root.display().to_string().into_bytes()],
+            Vec::new(),
+        );
+        let mut output = Vec::new();
+        let outcome = if on_machine {
+            machine::evaluate_with_host(&program, &mut std::io::empty(), &mut output, &host)
+                .map_err(|stop| format!("{stop:?}"))
+        } else {
+            program
+                .evaluate_with_host_and_stats(&mut std::io::empty(), &mut output, &host)
+                .map_err(|error| error.message)
+        };
+        let outcome = outcome.map(|(result, stats)| (result, stats.report()));
+        (String::from_utf8(output).unwrap(), outcome)
+    };
+    let (tree, machine) = (directory("tree"), directory("machine"));
+    let expected = run(&tree, false);
+    assert!(expected.1.is_ok(), "{expected:?}");
+    assert_eq!(run(&machine, true), expected);
+    let _ = fs::remove_dir_all(tree);
+    let _ = fs::remove_dir_all(machine);
+}
+
+#[test]
+fn a_server_and_its_clients_share_the_machine() {
+    // The std.sys shims and descriptor waits outside check mode: a server
+    // task and four clients on real sockets; a waiting task yields between
+    // polls, so they all make progress.
+    let source = format!(
+        "{}{}",
+        super::web_reactor::PRELUDE,
+        super::web_reactor::SERVER_AND_CLIENTS
+    );
+    let program = kush::program::load_source("<machine-reactor>", &source)
+        .map_err(|(_, error)| error.message)
+        .unwrap();
+    let program = executable::check_program(&program).unwrap();
+    let mut output = Vec::new();
+    let outcome = machine::evaluate_with_host(
+        &program,
+        &mut std::io::empty(),
+        &mut output,
+        &kush::Host::empty(),
+    );
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "2033\n3033\n31033\n5033\n4\n"
+    );
+}
+
+#[test]
 fn compiled_code_runs_as_on_the_tree_evaluator() {
     // Two artifacts of the same program, called from `main`, and code words
     // that name each artifact's own functions.

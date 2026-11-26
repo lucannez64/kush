@@ -52,7 +52,7 @@ fn both(source: &str, expected: &str) {
     assert_eq!(native(source), expected, "native");
 }
 
-const PRELUDE: &str = r#"
+pub(crate) const PRELUDE: &str = r#"
 use std.net;
 use std.net.Conn;
 use std.net.Listener;
@@ -72,7 +72,7 @@ fn show(exit: TaskExit<i64>) -> Unit ! {io} {
 }
 "#;
 
-const SERVER_AND_CLIENTS: &str = r#"
+pub(crate) const SERVER_AND_CLIENTS: &str = r#"
 /// Read until the peer closes; the bytes read, or minus the errno.
 fn read_all(conn: &Conn) -> Result<Bytes, i64> ! {io, alloc, suspend} {
     let mut buffer = Bytes.with_capacity(64);

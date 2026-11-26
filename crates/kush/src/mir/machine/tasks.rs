@@ -543,6 +543,97 @@ impl Machine<'_, '_> {
     }
 }
 
+impl Machine<'_, '_> {
+    /// `kush_sys_wait_ready` outside check mode (WEB-REACTOR's deterministic
+    /// model, as on the tree): in a task, poll the descriptor for up to 1 ms
+    /// at a time and yield in between, so waiting tasks are polled in
+    /// ready-queue order; without tasks, a plain poll.
+    pub(super) fn wait_ready(&mut self, foreign: usize, values: &[i64], ty: Type) -> Run<Flow> {
+        let program = self.program.clone();
+        let Some(shape) = program.foreign_functions[foreign]
+            .as_ref()
+            .and_then(|function| function.fallible)
+        else {
+            return fault("kush_sys_wait_ready without a Result");
+        };
+        let (fd, events, timeout) = (values[0], values[1], values[2]);
+        if !(-1..=i64::from(i32::MAX)).contains(&timeout) {
+            return Ok(Flow::Done(status_words(self, shape, (22, 0), ty)));
+        }
+        if self.tasks.is_empty() {
+            let result = if fd >= 0 {
+                crate::host::eval_poll(&self.system.files, fd, events, timeout)
+            } else {
+                loop {
+                    let wait = if timeout < 0 { 1000 } else { timeout as u64 };
+                    std::thread::sleep(std::time::Duration::from_millis(wait));
+                    if timeout >= 0 {
+                        break (0, 0);
+                    }
+                }
+            };
+            return Ok(Flow::Done(status_words(self, shape, result, ty)));
+        }
+        let deadline = (timeout >= 0)
+            .then(|| std::time::Instant::now() + std::time::Duration::from_millis(timeout as u64));
+        wait_step(self, fd, events, deadline, events & 256 != 0, shape, ty)
+    }
+}
+
+/// A host result's words: `Ok(value)` or `Err(status)`.
+fn status_words(
+    machine: &Machine<'_, '_>,
+    shape: crate::runtime_types::ResultShape,
+    (status, value): (i64, i64),
+    ty: Type,
+) -> Words {
+    let words = if status == 0 {
+        vec![shape.ok_tag as i64, value]
+    } else {
+        vec![shape.err_tag as i64, status]
+    };
+    fit(words, machine.width(ty))
+}
+
+/// One poll of a task's `kush_sys_wait_ready`; it yields between polls.
+fn wait_step(
+    machine: &mut Machine<'_, '_>,
+    fd: i64,
+    events: i64,
+    deadline: Option<std::time::Instant>,
+    shielded: bool,
+    shape: crate::runtime_types::ResultShape,
+    ty: Type,
+) -> Run<Flow> {
+    let done = |machine: &Machine<'_, '_>, result| {
+        Ok(Flow::Done(status_words(machine, shape, result, ty)))
+    };
+    if !shielded && machine.tasks[machine.current].cancelled {
+        return done(machine, (125, 0)); // ECANCELED
+    }
+    let left =
+        deadline.map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+    let slice = left.map_or(1, |left| left.as_millis().min(1) as i64);
+    let result = if fd >= 0 {
+        crate::host::eval_poll(&machine.system.files, fd, events, slice)
+    } else {
+        std::thread::sleep(std::time::Duration::from_millis(slice as u64));
+        (0, 0)
+    };
+    if result != (0, 0) {
+        return done(machine, result);
+    }
+    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        return done(machine, (0, 0));
+    }
+    let current = machine.current;
+    machine.tasks[current].state = State::Ready;
+    machine.ready.push_back(current);
+    Ok(Flow::Suspend(Box::new(move |machine, _| {
+        wait_step(machine, fd, events, deadline, shielded, shape, ty)
+    })))
+}
+
 /// A scope's value once its children are joined: the body's result, or the
 /// panic of the body or a child (`end`); a catch makes them `Ok` / `Err`.
 fn scope_finish(
