@@ -642,6 +642,18 @@ LLVM sees real pointers without reconstructing them. `&mut` parameters are
 Block parameters become `phi` nodes; variables are SSA-renamed as Cranelift's
 builder does (or lowered to `alloca` and left to `mem2reg`).
 
+*As built (FND-LLVM-BUILDER).* `native/llvm_builder.rs` writes the text as
+the lowering calls it. Variables are `alloca`s left to `mem2reg`, and a value
+defined earlier in the same block is reused without a load. A value's pointer
+form is rebuilt at each access the way the translator does it: `base + offset`
+becomes a `getelementptr`, so pointer facts do not yet flow through variables
+or phis (FND-LLVM-FACTS). `native/builder.rs` is an enum over the two
+builders, so `Generator` is instantiated once and
+`CodeModule::function_builder` picks the backend per function. A staging
+recipe still builds with Cranelift (the staging runtime copies its machine
+code) and goes through the translator; `KUSH_LLVM_TRANSLATE` selects the
+translator for every function, for comparison.
+
 **Steps.**
 
 | Node | Scope | Done when |

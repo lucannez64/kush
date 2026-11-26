@@ -28,6 +28,7 @@ Environment:
 | `KUSH_BACKEND=llvm\|llvm-release\|cranelift` | Override the backend of every native build in the process. Meant for replaying a test suite on the other backend; `llvm-release` also forces release settings, so the suite exercises `-O3` and deferred loops as users get them. |
 | `KUSH_EMIT_LLVM=path` | Also save the program's LLVM module (before linking with the runtime and optimizing). |
 | `KUSH_LLVM_NO_WHOLE_PROGRAM` | Do not use `llvm-link`: runtime operations stay calls into the runtime object. |
+| `KUSH_LLVM_TRANSLATE` | Build Cranelift IR and translate it, the backend's previous path, instead of the typed LLVM builder. Kept for comparison until FND-LLVM-SWITCH removes it. |
 | `KUSH_TRACE_DEFERRED` | Print why a loop keeps immediate overflow checks. |
 
 Requirements: Linux x86-64 and a `clang` with opaque pointers (LLVM 15 or
@@ -47,22 +48,30 @@ they stand relative to `--backend`.
 ### One lowering, two code generators
 
 The checked executable IR is lowered exactly once, by `Generator` in
-`native.rs`, into verified Cranelift IR. The default backend passes each
-function to Cranelift's code generator. The LLVM backend passes the same
-verified function to `native/llvm.rs`, which prints it as textual LLVM IR.
-
-`CodeModule` implements Cranelift's `Module` trait and makes the choice in
-`define_function`; the 6,500 lines of lowering do not know which backend is
+`native.rs` and `native/from_mir.rs`, against the instruction-builder trait
+`Emit` (`native/emit.rs`; docs/mir-design.md section 10). The trait has two
+implementations. Cranelift's `FunctionBuilder` builds verified Cranelift IR
+for Cranelift's code generator. The typed LLVM builder
+(`native/llvm_builder.rs`) writes textual LLVM IR as the lowering calls it.
+`CodeModule::function_builder` picks one per function (`native/builder.rs`
+dispatches between them), so the lowering does not know which backend is
 active. Evaluation order, checks, layouts, drop glue, task wrappers and the
 handler protocol are therefore identical by construction, and a lowering fix
-reaches both backends. The translator handles the instruction set the
-generator uses (about 60 opcodes) and reports any other instruction as an
-error instead of guessing.
+reaches both backends.
+
+In the LLVM builder every value has its LLVM type from the start. Block
+parameters become `phi` nodes. Variables live in `alloca`s that `mem2reg`
+promotes, and within one block a variable's value is reused without a load.
+A staging recipe ([staging.md](staging.md)) is still built with Cranelift, because the
+staging runtime copies its machine code; Cranelift IR is then translated by
+`native/llvm.rs` for the LLVM module. The translator is also used for every
+function when a test asks for a Cranelift IR dump (`build_with_clif`), and
+with `KUSH_LLVM_TRANSLATE` set. Fuzz builds always use Cranelift. The translator goes away in FND-LLVM-SWITCH.
 
 No LLVM library is linked into `kush`, the workspace keeps
 `unsafe_code = "forbid"`, and the compiler's own build time is unchanged.
 
-Where the two IRs differ, the translator keeps Cranelift's defined behaviour:
+Where the two IRs differ, the LLVM builder keeps Cranelift's defined behaviour:
 division and remainder trap on zero and on `MIN / -1` (LLVM would have
 undefined behaviour), shift amounts are reduced modulo the width, and loads and
 stores carry alignment 1.
@@ -70,7 +79,7 @@ stores carry alignment 1.
 ### Pointer forms
 
 Cranelift values are untyped words, and LLVM optimizes memory poorly when
-every address is an `inttoptr`. Each translated value keeps its integer form;
+every address is an `inttoptr`. Each value keeps its integer form;
 values with a known pointer origin (stack slots, symbols, function addresses,
 pointers returned by the runtime) also keep a pointer form. At each load,
 store and pointer-typed runtime argument the address is rebuilt as a
@@ -116,7 +125,7 @@ ways.
 **Exclusive parameters.** A parameter that is an owning handle (`Box<T>`,
 `Vec<T>`, `Bytes`, `String`) or an exclusive borrow (`&mut T`, the data
 pointer of `&mut [T]` and `&mut str`) becomes a `ptr noalias` parameter. The
-translator derives addresses of the usual `base + offset` shapes from it by
+builder derives addresses of the usual `base + offset` shapes from it by
 `getelementptr`; any other address arithmetic goes through the integer form
 and `inttoptr`, which LLVM treats as based on every pointer that contributed
 to the integer, so the fact stays true but is less useful there. When such a function is inlined, LLVM

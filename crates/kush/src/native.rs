@@ -28,10 +28,12 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+mod builder;
 mod deferred;
 mod emit;
 mod from_mir;
 mod llvm;
+mod llvm_builder;
 mod runtime_cache;
 mod staging;
 /// Every native stack slot is word aligned (`1 << 3` bytes). References to
@@ -988,7 +990,61 @@ struct CodeModule {
     stage_recipes: std::collections::BTreeSet<FuncId>,
     literals: BTreeMap<Vec<u8>, DataId>,
 }
+/// Finish a body built by [`CodeModule::function_builder`] and define it.
+macro_rules! define_body {
+    ($module:expr, $id:expr, $builder:expr, $context:expr) => {
+        match $builder {
+            builder::Builder::Cranelift(cranelift) => {
+                cranelift.finalize($module.target_config());
+                $module.define_function($id, &mut $context).map_err(error)
+            }
+            builder::Builder::Llvm(built) => $module.define_typed($id, *built),
+        }
+    };
+}
+
 impl CodeModule {
+    /// The builder for the body of `id` (FND-LLVM-BUILDER): typed LLVM IR
+    /// with the LLVM backend, Cranelift IR otherwise. A staging recipe still
+    /// needs Cranelift's machine code, a CLIF dump (`build_with_clif`) asks
+    /// for Cranelift IR, and `KUSH_LLVM_TRANSLATE` keeps the Cranelift-IR
+    /// translator for comparison.
+    fn function_builder<'a>(
+        &self,
+        id: FuncId,
+        context: &'a mut cranelift_codegen::Context,
+        function_context: &'a mut FunctionBuilderContext,
+    ) -> builder::Builder<'a> {
+        let declaration = self.declarations().get_function_decl(id);
+        context.func.signature = declaration.signature.clone();
+        match &self.llvm {
+            Some(llvm)
+                if !self.stage_recipes.contains(&id)
+                    && CLIF_DUMP.with(|dump| dump.borrow().is_none())
+                    && std::env::var_os("KUSH_LLVM_TRANSLATE").is_none() =>
+            {
+                builder::Builder::Llvm(Box::new(llvm_builder::LlvmBuilder::new(
+                    llvm.shared(),
+                    declaration.linkage_name(id).into_owned(),
+                    declaration.linkage,
+                    declaration.signature.clone(),
+                )))
+            }
+            _ => builder::Builder::Cranelift(emit::Cranelift::new(FunctionBuilder::new(
+                &mut context.func,
+                function_context,
+            ))),
+        }
+    }
+    /// Define a body the typed LLVM builder built.
+    fn define_typed(&mut self, id: FuncId, built: llvm_builder::LlvmBuilder) -> Result<()> {
+        self.referenced.extend(built.referenced.iter().copied());
+        let started = std::time::Instant::now();
+        let llvm = self.llvm.as_mut().expect("the LLVM backend");
+        let defined = llvm.define_built(id, built, self.object.declarations());
+        crate::timing::add("Cranelift codegen or LLVM IR text", started.elapsed());
+        defined
+    }
     fn literal(&mut self, bytes: &[u8]) -> Result<DataId> {
         if let Some(&id) = self.literals.get(bytes) {
             return Ok(id);
@@ -2062,10 +2118,7 @@ fn lower(
         } else {
             std::collections::BTreeSet::new()
         };
-        let builder = emit::Cranelift::new(FunctionBuilder::new(
-            &mut context.func,
-            &mut function_context,
-        ));
+        let builder = module.function_builder(ids[index], &mut context, &mut function_context);
         let mut g = Generator {
             builder,
             module: &mut module,
@@ -2338,7 +2391,16 @@ fn lower(
             }
         }
         g.builder.seal_all_blocks();
-        g.builder.finalize(g.module.target_config());
+        let builder = match g.builder {
+            builder::Builder::Cranelift(builder) => builder,
+            // The typed LLVM builder's body is defined now: there is no
+            // inlining step for it.
+            builder::Builder::Llvm(built) => {
+                module.define_typed(ids[index], *built)?;
+                continue;
+            }
+        };
+        builder.finalize(module.target_config());
         // Reachability reads the references of each body as it is built,
         // since bodies are defined only after inlining.
         for (_, name) in context.func.params.user_named_funcs().iter() {
@@ -3307,13 +3369,8 @@ fn synthesize_context_drops(
     for (index, spec) in program.allocator_contexts.iter().enumerate() {
         let id = ids[index];
         let mut context = module.make_context();
-        context.func.signature = module
-            .declarations()
-            .get_function_decl(id)
-            .signature
-            .clone();
         let mut fc = FunctionBuilderContext::new();
-        let mut builder = emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
+        let mut builder = module.function_builder(id, &mut context, &mut fc);
         let entry = builder.create_block();
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
@@ -3327,8 +3384,7 @@ fn synthesize_context_drops(
         emit_drop(&mut builder, module, free, &[state]);
         builder.return_(&[]);
         builder.seal_all_blocks();
-        builder.finalize(module.target_config());
-        module.define_function(id, &mut context).map_err(error)?;
+        define_body!(module, id, builder, context)?;
     }
     Ok(ids)
 }
@@ -3406,13 +3462,8 @@ fn synthesize_drops(
     for ty in types {
         let id = ids[&ty];
         let mut context = module.make_context();
-        context.func.signature = module
-            .declarations()
-            .get_function_decl(id)
-            .signature
-            .clone();
         let mut fc = FunctionBuilderContext::new();
-        let mut builder = emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
+        let mut builder = module.function_builder(id, &mut context, &mut fc);
         let entry = builder.create_block();
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
@@ -3728,18 +3779,12 @@ fn synthesize_drops(
             _ => unreachable!(),
         }
         builder.seal_all_blocks();
-        builder.finalize(module.target_config());
-        module.define_function(id, &mut context).map_err(error)?;
+        define_body!(module, id, builder, context)?;
     }
     for (captures, id) in closure_ids.clone() {
         let mut context = module.make_context();
-        context.func.signature = module
-            .declarations()
-            .get_function_decl(id)
-            .signature
-            .clone();
         let mut fc = FunctionBuilderContext::new();
-        let mut builder = emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
+        let mut builder = module.function_builder(id, &mut context, &mut fc);
         let entry = builder.create_block();
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
@@ -3768,8 +3813,7 @@ fn synthesize_drops(
         emit_drop(&mut builder, module, free, &[environment]);
         builder.return_(&[]);
         builder.seal_all_blocks();
-        builder.finalize(module.target_config());
-        module.define_function(id, &mut context).map_err(error)?;
+        define_body!(module, id, builder, context)?;
     }
     Ok((ids, closure_ids))
 }
@@ -3821,14 +3865,8 @@ fn synthesize_task_wrappers(
                 )
                 .map_err(error)?;
             let mut context = module.make_context();
-            context.func.signature = module
-                .declarations()
-                .get_function_decl(function)
-                .signature
-                .clone();
             let mut fc = FunctionBuilderContext::new();
-            let mut builder =
-                emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
+            let mut builder = module.function_builder(function, &mut context, &mut fc);
             let entry = builder.create_block();
             builder.append_block_params_for_function_params(entry);
             builder.switch_to_block(entry);
@@ -3840,10 +3878,7 @@ fn synthesize_task_wrappers(
             emit_drop(&mut builder, module, drops[&result.full()], &words);
             builder.return_(&[]);
             builder.seal_all_blocks();
-            builder.finalize(module.target_config());
-            module
-                .define_function(function, &mut context)
-                .map_err(error)?;
+            define_body!(module, function, builder, context)?;
             pointer_drops.insert(result.full(), function);
         }
     }
@@ -3864,13 +3899,8 @@ fn synthesize_task_wrappers(
             )
             .map_err(error)?;
         let mut context = module.make_context();
-        context.func.signature = module
-            .declarations()
-            .get_function_decl(wrapper)
-            .signature
-            .clone();
         let mut fc = FunctionBuilderContext::new();
-        let mut builder = emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
+        let mut builder = module.function_builder(wrapper, &mut context, &mut fc);
         let entry = builder.create_block();
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
@@ -3897,10 +3927,7 @@ fn synthesize_task_wrappers(
         }
         builder.return_(&[]);
         builder.seal_all_blocks();
-        builder.finalize(module.target_config());
-        module
-            .define_function(wrapper, &mut context)
-            .map_err(error)?;
+        define_body!(module, wrapper, builder, context)?;
         wrappers.insert(*id, wrapper);
     }
     Ok((wrappers, pointer_drops))

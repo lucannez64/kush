@@ -28,6 +28,7 @@ use cranelift_codegen::ir::{
 use cranelift_module::{DataId, FuncId, Linkage, ModuleDeclarations};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 /// A first-class LLVM type used at a C ABI boundary.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -42,7 +43,7 @@ pub(super) enum Ty {
     Ptr,
 }
 impl Ty {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Ty::Void => "void",
             Ty::I8 => "i8",
@@ -67,7 +68,7 @@ impl Ty {
             _ => return None,
         })
     }
-    fn of(ty: ir::Type) -> Option<Self> {
+    pub(super) fn of(ty: ir::Type) -> Option<Self> {
         Some(match ty {
             types::I8 => Ty::I8,
             types::I16 => Ty::I16,
@@ -78,7 +79,7 @@ impl Ty {
             _ => return None,
         })
     }
-    fn bits(self) -> u32 {
+    pub(super) fn bits(self) -> u32 {
         match self {
             Ty::I8 => 8,
             Ty::I16 => 16,
@@ -335,10 +336,10 @@ struct Typed {
 
 /// The program's LLVM module under construction.
 pub(super) struct LlvmModule {
-    runtime: RuntimeInterface,
+    runtime: Rc<RuntimeInterface>,
     /// Ownership facts: per function name, the parameters that are owning
     /// handles or exclusive borrows. They become `ptr noalias` parameters.
-    exclusive: BTreeMap<String, Vec<usize>>,
+    exclusive: Rc<BTreeMap<String, Vec<usize>>>,
     typed: BTreeMap<String, Typed>,
     /// Functions whose address is taken; each gets a word-typed thunk.
     address_taken: BTreeSet<String>,
@@ -360,8 +361,8 @@ pub(super) enum DataPointer {
 impl LlvmModule {
     pub fn new(runtime: RuntimeInterface) -> Self {
         Self {
-            runtime,
-            exclusive: BTreeMap::new(),
+            runtime: Rc::new(runtime),
+            exclusive: Rc::new(BTreeMap::new()),
             typed: BTreeMap::new(),
             address_taken: BTreeSet::new(),
             functions: Vec::new(),
@@ -375,8 +376,57 @@ impl LlvmModule {
     /// Must be called before any function body is translated.
     pub fn exclusive_parameters(&mut self, name: &str, parameters: Vec<usize>) {
         if !parameters.is_empty() {
-            self.exclusive.insert(name.to_owned(), parameters);
+            Rc::make_mut(&mut self.exclusive).insert(name.to_owned(), parameters);
         }
+    }
+    /// What the typed builder shares across bodies (FND-LLVM-BUILDER).
+    pub fn shared(&self) -> super::llvm_builder::Shared {
+        super::llvm_builder::Shared {
+            runtime: self.runtime.clone(),
+            exclusive: self.exclusive.clone(),
+        }
+    }
+    /// Define a function from the typed builder's finished text.
+    pub fn define_built(
+        &mut self,
+        id: FuncId,
+        built: super::llvm_builder::LlvmBuilder,
+        declarations: &ModuleDeclarations,
+    ) -> Result<()> {
+        let declaration = declarations.get_function_decl(id);
+        let name = declaration.linkage_name(id).into_owned();
+        let signature = &declaration.signature;
+        self.intrinsics.extend(built.intrinsics.iter().cloned());
+        self.address_taken
+            .extend(built.address_taken.iter().cloned());
+        let text = built
+            .finish()
+            .map_err(|message| error(format!("LLVM backend: in {name}: {message}")))?;
+        self.record(id, name, signature, text)
+    }
+    fn record(
+        &mut self,
+        id: FuncId,
+        name: String,
+        signature: &ir::Signature,
+        text: String,
+    ) -> Result<()> {
+        if let Some(exclusive) = self.exclusive.get(&name) {
+            let (ret, params) = clif_signature(signature)
+                .map_err(|message| error(format!("LLVM backend: {name}: {message}")))?;
+            let exclusive = (0..params.len()).map(|i| exclusive.contains(&i)).collect();
+            self.typed.insert(
+                name.clone(),
+                Typed {
+                    ret,
+                    params,
+                    exclusive,
+                },
+            );
+        }
+        self.functions.push((name, text));
+        self.defined.insert(id);
+        Ok(())
     }
     /// Define a data object. Each pointer replaces the eight bytes at its
     /// offset with an address the linker fills in.
@@ -467,22 +517,7 @@ impl LlvmModule {
         )
         .function(&name, declaration.linkage)
         .map_err(|message| error(format!("LLVM backend: in {name}: {message}")))?;
-        if let Some(exclusive) = self.exclusive.get(&name) {
-            let (ret, params) = clif_signature(&func.signature)
-                .map_err(|message| error(format!("LLVM backend: {name}: {message}")))?;
-            let exclusive = (0..params.len()).map(|i| exclusive.contains(&i)).collect();
-            self.typed.insert(
-                name.clone(),
-                Typed {
-                    ret,
-                    params,
-                    exclusive,
-                },
-            );
-        }
-        self.functions.push((name, text));
-        self.defined.insert(id);
-        Ok(())
+        self.record(id, name, &func.signature, text)
     }
     /// The program as LLVM modules, each compiled on its own (see
     /// [`partition`] and [`super::Split`]). One partition is exactly the
@@ -884,7 +919,7 @@ fn partition(functions: &[(String, String)], wanted: usize) -> Partitioning {
 type Tx<T> = std::result::Result<T, String>;
 
 /// Lane count and LLVM lane type of a 128-bit vector type.
-fn lanes(ty: ir::Type) -> Option<(u32, &'static str)> {
+pub(super) fn lanes(ty: ir::Type) -> Option<(u32, &'static str)> {
     match ty {
         types::I8X16 => Some((16, "i8")),
         types::I16X8 => Some((8, "i16")),
@@ -894,7 +929,7 @@ fn lanes(ty: ir::Type) -> Option<(u32, &'static str)> {
     }
 }
 /// A vector constant with `value` in every lane.
-fn splat_constant(ty: ir::Type, value: &str) -> Option<String> {
+pub(super) fn splat_constant(ty: ir::Type, value: &str) -> Option<String> {
     let (count, lane) = lanes(ty)?;
     let items = (0..count)
         .map(|_| format!("{lane} {value}"))
@@ -902,7 +937,7 @@ fn splat_constant(ty: ir::Type, value: &str) -> Option<String> {
     Some(format!("<{}>", items.join(", ")))
 }
 
-fn ty_name(ty: ir::Type) -> Tx<&'static str> {
+pub(super) fn ty_name(ty: ir::Type) -> Tx<&'static str> {
     // SIMD-LLVM: the 128-bit vectors of std.simd's native lowering.
     match ty {
         types::I8X16 => return Ok("<16 x i8>"),
@@ -915,14 +950,14 @@ fn ty_name(ty: ir::Type) -> Tx<&'static str> {
         .map(Ty::name)
         .ok_or_else(|| format!("unsupported value type {ty}"))
 }
-fn extension(param: &ir::AbiParam) -> &'static str {
+pub(super) fn extension(param: &ir::AbiParam) -> &'static str {
     match param.extension {
         ir::ArgumentExtension::Uext => " zeroext",
         ir::ArgumentExtension::Sext => " signext",
         ir::ArgumentExtension::None => "",
     }
 }
-fn return_type(signature: &ir::Signature) -> Tx<String> {
+pub(super) fn return_type(signature: &ir::Signature) -> Tx<String> {
     Ok(match signature.returns.as_slice() {
         [] => "void".to_owned(),
         [one] => ty_name(one.value_type)?.to_owned(),
@@ -2294,7 +2329,7 @@ impl<'a> Translator<'a> {
 /// Remove `%vN = zext i1 ...` lines whose value is never used: flags reach
 /// branches and logic as `i1`, so most widened copies are dead. Nothing else
 /// is removed, and a zext has no effects.
-fn drop_unused_flags(text: String) -> String {
+pub(super) fn drop_unused_flags(text: String) -> String {
     let mut uses: BTreeMap<&str, usize> = BTreeMap::new();
     let bytes = text.as_bytes();
     let mut at = 0;
@@ -2335,7 +2370,7 @@ fn drop_unused_flags(text: String) -> String {
     out
 }
 
-fn intrinsic_suffix(ty: &str) -> &str {
+pub(super) fn intrinsic_suffix(ty: &str) -> &str {
     match ty {
         "float" => "f32",
         "double" => "f64",
@@ -2355,7 +2390,7 @@ const MODULE_METADATA: &str = "!0 = !{!\"branch_weights\", i32 1, i32 2000000}\n
 !5 = !{!3, !3, i64 0}\n";
 
 /// Suffix of the word-signature thunk of a function with pointer parameters.
-const WORD_THUNK: &str = ".words";
+pub(super) const WORD_THUNK: &str = ".words";
 
 #[cfg(test)]
 mod tests {
