@@ -544,3 +544,25 @@ calls, are recorded call by call and replayed to the machine, so effects
 that cannot happen twice (a file write, a clock, a process) happen once.
 Reads and writes of the standard streams run on the machine itself
 through the replayed input and output.
+
+EFFECTS is done; the machine runs 46 examples as the tree does, and only
+`Code.compile` (STAGING) is left in the suite.
+- Every call is a frame on the stack. A call's return site is a call
+  terminator, a statement that called (a `perform`, a `Vec.map`
+  callback), or the rest of a builtin, a continuation that takes the
+  result and may call again; a site can also catch a panic out of the
+  call (a task scope's epilogue). Runtime callbacks (allocators, release
+  and growth hooks, arena strategies, unwind cleanups) still run to their
+  result inside their operation: their effect rows cannot suspend, and
+  the scheduler refuses a switch inside one.
+- Handlers, aborts and the continuation stack follow `kush.c`, including
+  a function's handler-depth restore on every way out. For continuation
+  environments the tree counts each one and `kush.c` the 64 KiB chunks;
+  the machine counts as `kush.c`, so check mode does not compare the
+  stats of a run that pushes one.
+- Tasks, threads and channels follow the tree evaluator's scheduler (its
+  FIFO order and its two counted allocations per task, where `kush.c`
+  counts three): each task has its own stacks, a blocking operation
+  suspends with the rest of its work, and a task's panic is raised at its
+  join. In check mode a host call records how often it yielded (a
+  descriptor wait polls and yields), and the machine yields as often.

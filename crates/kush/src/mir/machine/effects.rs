@@ -27,6 +27,8 @@ pub(super) struct HandlerFrame {
     environment: i64,
     once: i64,
     consumed: bool,
+    /// An abort frame (its code is the payload buffer).
+    abort: bool,
 }
 
 /// The continuation stack: its chunks, innermost last, as `(allocation,
@@ -37,8 +39,6 @@ pub(super) struct KStack {
     chunks: Vec<(i64, i64)>,
     top: i64,
     spare: Option<(i64, i64)>,
-    /// Whether anything was pushed (the stats then differ from the tree's).
-    pub(super) used: bool,
 }
 
 const NO_HANDLER: &str = "no dynamically active handler for this operation";
@@ -81,6 +81,7 @@ impl Machine<'_, '_> {
                     environment,
                     once,
                     consumed: false,
+                    abort: false,
                 });
                 vec![0]
             }
@@ -99,6 +100,7 @@ impl Machine<'_, '_> {
                         environment: 0,
                         once: 1,
                         consumed: true,
+                        abort: false,
                     });
                 }
                 vec![before]
@@ -122,6 +124,7 @@ impl Machine<'_, '_> {
                     environment: 0,
                     once: 0,
                     consumed: false,
+                    abort: true,
                 });
                 vec![0]
             }
@@ -164,7 +167,30 @@ impl Machine<'_, '_> {
             args: vec![payload, resume],
             environment: (once != 0).then_some(environment),
             then: None,
+            catch: None,
         })
+    }
+
+    /// The frames a spawned task inherits: the innermost visible ones that
+    /// are copyable `fn` handlers, down to the first that is not (a
+    /// capturing, `once` or abort frame is a task boundary).
+    pub(super) fn inheritable_handlers(&self) -> Vec<HandlerFrame> {
+        let mut inherited = Vec::new();
+        let mut index = self.handlers.len();
+        while index > 0 {
+            index -= 1;
+            let frame = self.handlers[index];
+            if frame.operation == -1 {
+                index = frame.code.max(0) as usize;
+                continue;
+            }
+            if frame.environment != 0 || frame.once != 0 || frame.abort {
+                break;
+            }
+            inherited.push(frame);
+        }
+        inherited.reverse();
+        inherited
     }
 
     /// Pop the innermost handler frame, dropping an environment it still
@@ -221,7 +247,7 @@ impl Machine<'_, '_> {
 
     /// `kush_kstack_push`: a word-aligned environment of `bytes` bytes.
     pub(super) fn kstack_push(&mut self, bytes: i64) -> Run<i64> {
-        self.kstack.used = true;
+        self.continuations = true;
         let need = (bytes + 15) & !15;
         let room = self.kstack.chunks.last().map_or(0, |(chunk, capacity)| {
             chunk + KCHUNK_HEADER + capacity - self.kstack.top

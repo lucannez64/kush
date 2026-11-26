@@ -21,6 +21,7 @@ use std::rc::Rc;
 mod alloc;
 mod buffers;
 mod effects;
+mod tasks;
 
 /// The words of a value.
 type Words = Vec<i64>;
@@ -190,7 +191,13 @@ impl Memory {
 struct Return {
     site: Site,
     unwind: Option<BlockId>,
+    /// What a panic unwinding out of the callee does instead (a task
+    /// scope's epilogue): its flow goes where the call's final result would.
+    catch: Option<Catch>,
 }
+
+/// What a panic out of a call does, in place of unwinding further.
+type Catch = Box<dyn for<'p, 'o, 'm> FnOnce(&'m mut Machine<'p, 'o>, Diagnostic) -> Run<Flow>>;
 
 /// What made a call: every call is a frame on the task's stack, so a task
 /// can suspend anywhere in it.
@@ -203,6 +210,18 @@ enum Site {
     /// The rest of a builtin, which takes the result and goes on, then
     /// where its own result goes.
     Native { then: Then, site: Box<Site> },
+    /// The end of a task's body.
+    TaskEnd,
+}
+
+impl Site {
+    /// Where the final result goes, past any builtin's rest.
+    fn last(self) -> Site {
+        match self {
+            Site::Native { site, .. } => site.last(),
+            other => other,
+        }
+    }
 }
 
 /// What a statement or builtin does: produce its result, or call a
@@ -214,7 +233,13 @@ enum Flow {
         args: Vec<Words>,
         environment: Option<i64>,
         then: Option<Then>,
+        catch: Option<Catch>,
     },
+    /// Suspend the current task (already queued or blocked) and go on with
+    /// `then` when the scheduler picks it again.
+    Suspend(Then),
+    /// Raise a panic (or end the run with another error) here.
+    Panic(Diagnostic),
 }
 
 /// The rest of a builtin after a call it made.
@@ -269,6 +294,17 @@ struct Machine<'p, 'o> {
     /// Runtime callbacks running to their result inside an operation
     /// ([`Machine::call_nested`]); a task cannot switch while one runs.
     nested: usize,
+    /// Whether a continuation environment was pushed: the tree counts each
+    /// one, kush.c (and the machine) the chunks they live in.
+    continuations: bool,
+    /// With the task runtime, every task (the root first) and the one
+    /// running; `stack`, `handlers`, `kstack` and `unwinding` are its own.
+    tasks: Vec<tasks::TaskRecord>,
+    current: usize,
+    ready: std::collections::VecDeque<usize>,
+    channels: Vec<tasks::Channel>,
+    /// The yields of the host call just replayed, still to make.
+    pending_yields: usize,
 }
 
 /// Run the program's entry function on the machine. Returns its result word
@@ -305,11 +341,6 @@ fn run_program(
     hosts: Option<std::collections::VecDeque<HostRecord>>,
 ) -> Run<(i64, MemoryStats, bool)> {
     let entry = program.entry().map_err(Stop::Panic)?;
-    // The task runtime runs `main` as a task, whose allocations the stats
-    // count (FND-EVAL-EFFECTS).
-    if program.uses_tasks {
-        return unsupported("the task runtime");
-    }
     let mut machine = Machine {
         program,
         bodies: vec![None; program.functions.len()],
@@ -326,18 +357,29 @@ fn run_program(
         abort_word: 0,
         kstack: effects::KStack::default(),
         nested: 0,
+        continuations: false,
+        tasks: Vec::new(),
+        current: 0,
+        ready: Default::default(),
+        channels: Vec::new(),
+        pending_yields: 0,
     };
     machine.memory.stats.fusions = program.fusions;
+    // The task runtime runs `main` as the root task.
+    if program.uses_tasks {
+        machine.start_tasks();
+    }
     machine.enter(entry, Vec::new(), None, None)?;
     let result = machine.run()?.first().copied().unwrap_or(0);
     machine.kstack_drain()?;
+    machine.finish_tasks()?;
     if machine.memory.live_heap != 0 {
         return Err(Stop::Panic(Diagnostic::new(
             Span::default(),
             "internal ownership error: live owning allocations after normal program exit",
         )));
     }
-    Ok((result, machine.memory.stats, !machine.kstack.used))
+    Ok((result, machine.memory.stats, !machine.continuations))
 }
 
 /// The outcome of one read or write: what it moved, or its error.
@@ -373,6 +415,9 @@ pub(crate) struct HostRecord {
     pub(crate) ok: bool,
     pub(crate) value: i64,
     pub(crate) buffers: Vec<Option<Vec<u8>>>,
+    /// How often the calling task yielded during the call (a wait for a
+    /// descriptor yields between polls).
+    pub(crate) yields: usize,
 }
 
 /// The tree's reads, call by call.
@@ -637,17 +682,37 @@ impl Machine<'_, '_> {
                 )));
             }
             self.fuel -= 1;
-            match self.step() {
+            // A task the scheduler just picked first enters its body or
+            // resumes its suspended operation.
+            let step = match self.tasks.is_empty() {
+                true => self.step(),
+                false => match self.task_entry() {
+                    Ok(true) => Ok(None),
+                    Ok(false) => self.step(),
+                    Err(raise) => Err(raise),
+                },
+            };
+            match step {
                 Ok(Some(result)) => return Ok(result),
                 Ok(None) => {}
                 Err(Raise::Panic(diagnostic, target)) => self.raise(diagnostic, target)?,
+                // Say where a fault happened.
+                Err(Raise::Stop(Stop::Fault(fault))) => {
+                    let place = self.stack.last().map_or(String::new(), |frame| {
+                        format!(
+                            " (in {}, bb{} statement {})",
+                            frame.body.name, frame.block, frame.statement
+                        )
+                    });
+                    return Err(Stop::Fault(format!("{fault}{place}")));
+                }
                 Err(Raise::Stop(stop)) => return Err(stop),
             }
         }
     }
 
     /// Continue unwinding from the top frame at `target`, or out of it.
-    fn raise(&mut self, diagnostic: Diagnostic, mut target: Option<BlockId>) -> Run<()> {
+    fn raise(&mut self, mut diagnostic: Diagnostic, mut target: Option<BlockId>) -> Run<()> {
         loop {
             if let Some(block) = target {
                 let frame = self.stack.last_mut().expect("a frame");
@@ -657,9 +722,13 @@ impl Machine<'_, '_> {
                 return Ok(());
             }
             let frame = self.leave()?;
-            match frame.caller {
-                Some(caller) => target = caller.unwind,
-                None => return Err(Stop::Panic(diagnostic)),
+            match self.unwind_into(frame.caller, diagnostic) {
+                Ok(()) => return Ok(()),
+                Err(Raise::Panic(next, unwind)) => {
+                    diagnostic = next;
+                    target = unwind;
+                }
+                Err(Raise::Stop(stop)) => return Err(stop),
             }
         }
     }
@@ -727,6 +796,7 @@ impl Machine<'_, '_> {
                                 next: *next,
                             },
                             unwind: *unwind,
+                            catch: None,
                         };
                         self.enter(*index, values, Some(caller), None)
                             .map_err(Raise::Stop)?;
@@ -754,6 +824,7 @@ impl Machine<'_, '_> {
                                 next: *next,
                             },
                             unwind: *unwind,
+                            catch: None,
                         };
                         match body.builtins.0[*index] {
                             crate::executable::Target::DynCall { spec, .. } => {
@@ -773,11 +844,35 @@ impl Machine<'_, '_> {
                             .iter()
                             .map(|arg| body.operand_ty(*arg))
                             .collect::<Vec<_>>();
-                        let words = self
-                            .builtin(&target, &values.concat(), &types, ty, span)
-                            .map_err(|stop| Raise::at(stop, *unwind))?;
-                        self.finish_call(*destination, words, *next)
-                            .map_err(Raise::Stop)?;
+                        use crate::executable::{SliceOp, Target};
+                        let values = values.concat();
+                        // Channel operations may block the task.
+                        let flow = match target {
+                            Target::Slice(
+                                op @ (SliceOp::ChannelSend
+                                | SliceOp::ChannelRecv { .. }
+                                | SliceOp::ChannelClose),
+                                element,
+                            ) => self.channel_op(op, &values, element, span),
+                            Target::ChannelNew => self.channel_new(values[0], span).map(Flow::Done),
+                            _ => self
+                                .builtin(&target, &values, &types, ty, span)
+                                .map(Flow::Done),
+                        }
+                        .map_err(|stop| Raise::at(stop, *unwind))?;
+                        // A replayed host call yields as often as it did.
+                        let flow = match flow {
+                            Flow::Done(words) if self.pending_yields > 0 => {
+                                let yields = std::mem::take(&mut self.pending_yields);
+                                self.yield_then(yields, words)
+                            }
+                            other => other,
+                        };
+                        let site = Site::Call {
+                            destination: *destination,
+                            next: *next,
+                        };
+                        self.proceed(flow, site, *unwind)?;
                     }
                     Callee::Indirect(callable) => {
                         // A `fn` value is its code word; a `once` or `multi`
@@ -794,6 +889,7 @@ impl Machine<'_, '_> {
                                 next: *next,
                             },
                             unwind: *unwind,
+                            catch: None,
                         };
                         self.enter(function, values, Some(caller), environment)
                             .map_err(Raise::Stop)?;
@@ -831,10 +927,7 @@ impl Machine<'_, '_> {
                     .take()
                     .ok_or_else(|| Raise::Stop(Stop::Fault("resume without a panic".into())))?;
                 let frame = self.leave().map_err(Raise::Stop)?;
-                match frame.caller {
-                    Some(caller) => return Err(Raise::Panic(diagnostic, caller.unwind)),
-                    None => return Err(Raise::Stop(Stop::Panic(diagnostic))),
-                }
+                self.unwind_into(frame.caller, diagnostic)?;
             }
             TerminatorKind::Abort => {
                 // An abort travels to its handler: the function returns a
@@ -872,6 +965,7 @@ impl Machine<'_, '_> {
                     .collect::<Run<Vec<_>>>()?;
                 self.vec_map(op, handle, callbacks)
             }
+            Rvalue::Task(op, operands) => self.task_op(*op, operands, ty),
             _ => Ok(Flow::Done(self.rvalue(body, rvalue, ty, span)?)),
         }
     }
@@ -891,6 +985,7 @@ impl Machine<'_, '_> {
                 args,
                 environment,
                 then,
+                catch,
             } => {
                 let site = match then {
                     Some(then) => Site::Native {
@@ -899,9 +994,16 @@ impl Machine<'_, '_> {
                     },
                     None => site,
                 };
-                self.enter(function, args, Some(Return { site, unwind }), environment)
+                let caller = Return {
+                    site,
+                    unwind,
+                    catch,
+                };
+                self.enter(function, args, Some(caller), environment)
                     .map_err(Raise::Stop)
             }
+            Flow::Suspend(then) => self.suspend(then, site, unwind),
+            Flow::Panic(error) => Err(Raise::at(Stop::Panic(error), unwind)),
         }
     }
 
@@ -925,7 +1027,31 @@ impl Machine<'_, '_> {
                 let flow = then(self, words).map_err(|stop| Raise::at(stop, unwind))?;
                 self.proceed(flow, *site, unwind)
             }
+            Site::TaskEnd => {
+                let preserve = self.tasks[self.current].preserve;
+                self.task_end(tasks::Outcome::Completed(words, preserve))
+            }
         }
+    }
+
+    /// A panic unwinds out of a frame into its caller: to the caller's
+    /// cleanup block, into a scope's epilogue (`catch`), or out of a task.
+    fn unwind_into(
+        &mut self,
+        caller: Option<Return>,
+        diagnostic: Diagnostic,
+    ) -> std::result::Result<(), Raise> {
+        let Some(caller) = caller else {
+            return Err(Raise::Stop(Stop::Panic(diagnostic)));
+        };
+        if let Some(catch) = caller.catch {
+            let flow = catch(self, diagnostic).map_err(|stop| Raise::at(stop, caller.unwind))?;
+            return self.proceed(flow, caller.site.last(), caller.unwind);
+        }
+        if let Site::TaskEnd = caller.site {
+            return self.task_end(tasks::Outcome::Failed(diagnostic));
+        }
+        Err(Raise::Panic(diagnostic, caller.unwind))
     }
 
     /// A builtin call on its arguments' words (native's `call_target`).
@@ -1005,9 +1131,25 @@ impl Machine<'_, '_> {
         types: &[Type],
         ty: Type,
     ) -> Run<Words> {
+        self.replay(what, shape, values, types, ty)
+            .map_err(|stop| match stop {
+                Stop::Fault(fault) => Stop::Fault(format!("{what}: {fault}")),
+                other => other,
+            })
+    }
+
+    fn replay(
+        &mut self,
+        what: &str,
+        shape: crate::runtime_types::ResultShape,
+        values: &[i64],
+        types: &[Type],
+        ty: Type,
+    ) -> Run<Words> {
         let Some(record) = self.hosts.as_mut().and_then(|hosts| hosts.pop_front()) else {
             return unsupported(format!("the builtin {what} outside check mode"));
         };
+        self.pending_yields = record.yields;
         let mut owned = 0;
         for (index, arg_ty) in types.iter().enumerate() {
             let buffer = |ty: Type| matches!(ty, Type::Bytes | Type::String);
@@ -1701,6 +1843,10 @@ impl Machine<'_, '_> {
                 self.memory.free(words[0])
             }
             Type::Bytes | Type::String => self.memory.free(words[0]),
+            // Messages are plain data (THREAD-CHANNELS).
+            Type::Channel(_) => self.memory.free(words[0]),
+            // A task handle owns nothing: its scope joins it.
+            Type::Task(_) | Type::Thread(_) => Ok(()),
             Type::Arena => self.arena_release(words[0]),
             Type::AllocatorContext => self.context_release(words[0]),
             Type::AllocBox(pointee) => {
@@ -1750,8 +1896,22 @@ impl Machine<'_, '_> {
             }
             Type::Enum(index) => {
                 let definition = &self.program.enums[index];
-                if self.program.unwind_functions.contains_key(&index) {
-                    return unsupported("the unwind cleanup of a linear type");
+                if let Some(&cleanup) = self.program.unwind_functions.get(&index) {
+                    // PANIC-LINEAR-CLEANUP: only a panic unwinding leaves a
+                    // live value of this linear type to drop; its unwind
+                    // function takes it. A panic in it is dropped, and the
+                    // panic being unwound is kept for the cleanup's Resume.
+                    let unwinding = self.unwinding.take();
+                    let result = self.call_nested(cleanup, vec![words.to_vec()]);
+                    self.unwinding = unwinding;
+                    return match result {
+                        Ok(result) => {
+                            let ty = self.program.functions[cleanup].result;
+                            self.drop_value(ty, &result)
+                        }
+                        Err(Stop::Panic(error)) if error.message.starts_with("panic") => Ok(()),
+                        Err(other) => Err(other),
+                    };
                 }
                 if definition.foreign.is_some() {
                     return unsupported("a foreign resource");

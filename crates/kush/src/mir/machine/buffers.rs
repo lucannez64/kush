@@ -1036,6 +1036,7 @@ fn map_step(machine: &mut Machine<'_, '_>, mut state: Mapping) -> Run<Flow> {
                         state.callback += 1;
                         map_step(machine, state)
                     })),
+                    catch: None,
                 });
             }
             let slot = state.handle + 16 + state.index * (state.target * 8) as i64;

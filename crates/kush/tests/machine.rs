@@ -82,7 +82,7 @@ fn covered_examples_run_as_on_the_tree_evaluator() {
 }
 
 /// The examples the machine runs; raise it as nodes land.
-const MACHINE_FLOOR: usize = 42;
+const MACHINE_FLOOR: usize = 46;
 
 #[test]
 fn buffers_and_views_run_as_on_the_tree_evaluator() {

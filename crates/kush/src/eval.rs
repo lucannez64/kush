@@ -601,6 +601,7 @@ impl Executable {
             joined: BTreeSet::new(),
             root: id == 0,
             catch_depth: 0,
+            yields: 0,
         };
         let evaluator = Evaluator {
             program: self,
@@ -1657,9 +1658,12 @@ struct TaskComm {
     root: bool,
     /// Active `Task.catch` bodies in this task.
     catch_depth: usize,
+    /// Yields so far (`KUSH_MACHINE_CHECK` records those of a host call).
+    yields: usize,
 }
 impl TaskComm {
     fn yield_now(&mut self) -> Result<bool> {
+        self.yields += 1;
         self.events
             .send(TaskEvent::Yield)
             .map_err(|_| Diagnostic::new(Span::default(), "task scheduler disconnected"))?;
@@ -6025,7 +6029,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let yields = |this: &Self| this.task.as_ref().map_or(0, |task| task.yields);
+        let before = yields(self);
+        // The record takes its place when the call starts: a call that
+        // yields lets other tasks make (and record) theirs meanwhile.
+        let slot = {
+            let mut records = record.lock().unwrap();
+            records.push(crate::mir::machine::HostRecord {
+                ok: false,
+                value: 0,
+                buffers: Vec::new(),
+                yields: 0,
+            });
+            records.len() - 1
+        };
         let result = call(self, values)?;
+        let yields = yields(self) - before;
         let Value::Enum { tag, fields } = &result else {
             unreachable!("a host call's result is a Result")
         };
@@ -6041,10 +6060,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 _ => None,
             })
             .collect();
-        record
-            .lock()
-            .unwrap()
-            .push(crate::mir::machine::HostRecord { ok, value, buffers });
+        record.lock().unwrap()[slot] = crate::mir::machine::HostRecord {
+            ok,
+            value,
+            buffers,
+            yields,
+        };
         Ok(result)
     }
     /// Reference implementation of the checked host operations. Its observable
