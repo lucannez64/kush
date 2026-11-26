@@ -6002,6 +6002,51 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         };
         Ok(self.host_result(shape, status, Value::Scalar(value)))
     }
+    /// Run a host or `std.sys` call; under `KUSH_MACHINE_CHECK`, record its
+    /// result and what it left in its buffer arguments (or that it consumed
+    /// them) for the MIR machine to replay.
+    fn recorded(
+        &mut self,
+        values: Vec<Value>,
+        shape: ResultShape,
+        call: impl FnOnce(&mut Self, Vec<Value>) -> Result<Value>,
+    ) -> Result<Value> {
+        let Some(record) = self.host.record.clone() else {
+            return call(self, values);
+        };
+        let buffers = values
+            .iter()
+            .map(|value| match value {
+                Value::Borrowed(id) | Value::Owned(id)
+                    if matches!(self.heap.get(*id), Some(Value::Buffer { .. })) =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let result = call(self, values)?;
+        let Value::Enum { tag, fields } = &result else {
+            unreachable!("a host call's result is a Result")
+        };
+        let ok = *tag == shape.ok_tag;
+        let value = match fields.first() {
+            Some(Value::Scalar(value)) => *value,
+            _ => 0,
+        };
+        let buffers = buffers
+            .into_iter()
+            .map(|id| match id.and_then(|id| self.heap.get(id)) {
+                Some(Value::Buffer { data, .. }) => Some(data),
+                _ => None,
+            })
+            .collect();
+        record
+            .lock()
+            .unwrap()
+            .push(crate::mir::machine::HostRecord { ok, value, buffers });
+        Ok(result)
+    }
     /// Reference implementation of the checked host operations. Its observable
     /// contract (buffer ownership, errno values, bounded reads, explicit
     /// timeouts) mirrors the generated native runtime; the two implementations
@@ -8111,47 +8156,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         })
                     }
                     Target::Io(op, shape) => self.io_call(*op, *shape, values, expr.span)?,
-                    Target::Host(op, shape) => {
-                        let Some(record) = self.host.record.clone() else {
-                            return Ok(Flow::Value(
-                                self.host_call(*op, *shape, values, expr.span)?,
-                            ));
-                        };
-                        // The buffer arguments, to record what the call left
-                        // in them (or that it consumed them).
-                        let buffers = values
-                            .iter()
-                            .map(|value| match value {
-                                Value::Borrowed(id) | Value::Owned(id)
-                                    if matches!(self.heap.get(*id), Some(Value::Buffer { .. })) =>
-                                {
-                                    Some(*id)
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>();
-                        let result = self.host_call(*op, *shape, values, expr.span)?;
-                        let Value::Enum { tag, fields } = &result else {
-                            unreachable!("a host call's result is a Result")
-                        };
-                        let ok = *tag == shape.ok_tag;
-                        let value = match fields.first() {
-                            Some(Value::Scalar(value)) => *value,
-                            _ => 0,
-                        };
-                        let buffers = buffers
-                            .into_iter()
-                            .map(|id| match id.and_then(|id| self.heap.get(id)) {
-                                Some(Value::Buffer { data, .. }) => Some(data),
-                                _ => None,
-                            })
-                            .collect();
-                        record
-                            .lock()
-                            .unwrap()
-                            .push(crate::mir::machine::HostRecord { ok, value, buffers });
-                        result
-                    }
+                    Target::Host(op, shape) => self.recorded(values, *shape, |this, values| {
+                        this.host_call(*op, *shape, values, expr.span)
+                    })?,
                     Target::Bytes(op) => self.bytes_call(*op, values, expr.span)?,
                     Target::String(op) => self.string_call(*op, values, expr.span)?,
                     Target::Str(op) => self.str_call(*op, values, expr.span)?,
@@ -8187,7 +8194,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             (function.fallible, function.symbol.starts_with("kush_sys_"))
                         {
                             let symbol = function.symbol.clone();
-                            self.sys_call(&symbol, shape, values, expr.span)?
+                            self.recorded(values, shape, |this, values| {
+                                this.sys_call(&symbol, shape, values, expr.span)
+                            })?
                         } else {
                             return Err(Diagnostic::new(
                                 expr.span,

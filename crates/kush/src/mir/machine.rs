@@ -780,7 +780,10 @@ impl Machine<'_, '_> {
     ) -> Run<Words> {
         use crate::executable::Target;
         match *target {
-            Target::Host(op, shape) => self.host_replay(op, shape, values, types, ty),
+            Target::Host(op, shape) => {
+                self.host_replay(&format!("Host({op:?})"), shape, values, types, ty)
+            }
+            Target::Foreign(index) => self.foreign_call(index, values, types, ty, span),
             Target::Bytes(op) => self.bytes_call(op, values, span),
             Target::String(op) => self.string_call(op, values, ty, span),
             Target::Str(op) => self.str_call(op, values, ty, span),
@@ -837,15 +840,14 @@ impl Machine<'_, '_> {
     /// Outside check mode the machine does not run host calls yet.
     fn host_replay(
         &mut self,
-        op: crate::executable::HostOp,
+        what: &str,
         shape: crate::runtime_types::ResultShape,
         values: &[i64],
         types: &[Type],
         ty: Type,
     ) -> Run<Words> {
-        use crate::executable::HostPayload;
         let Some(record) = self.hosts.as_mut().and_then(|hosts| hosts.pop_front()) else {
-            return unsupported(format!("the builtin Host({op:?}) outside check mode"));
+            return unsupported(format!("the builtin {what} outside check mode"));
         };
         let mut owned = 0;
         for (index, arg_ty) in types.iter().enumerate() {
@@ -875,15 +877,129 @@ impl Machine<'_, '_> {
                 None => {}
             }
         }
+        // An ok payload is the owned buffer the call filled, or the recorded
+        // scalar (zero for `Unit`).
         let words = if record.ok {
-            let payload = match op.payload() {
-                HostPayload::Bytes => owned,
-                HostPayload::Unit => 0,
-                HostPayload::Bool | HostPayload::I64 => record.value,
-            };
+            let payload = if owned != 0 { owned } else { record.value };
             vec![shape.ok_tag as i64, payload]
         } else {
             vec![shape.err_tag as i64, record.value]
+        };
+        Ok(fit(words, self.width(ty)))
+    }
+
+    /// A foreign call: the `std.sys` shims as the tree runs them (replayed,
+    /// except reads and writes of the standard streams, which go through
+    /// the machine's own input and output). Any other foreign function
+    /// stops the run, as on the tree.
+    fn foreign_call(
+        &mut self,
+        index: usize,
+        values: &[i64],
+        types: &[Type],
+        ty: Type,
+        span: Span,
+    ) -> Run<Words> {
+        let program = self.program;
+        let Some(function) = program.foreign_functions[index].as_ref() else {
+            return fault("a call of an unchecked foreign function");
+        };
+        let symbol = function.symbol.as_str();
+        let Some(shape) = function
+            .fallible
+            .filter(|_| symbol.starts_with("kush_sys_"))
+        else {
+            return panic_at(
+                span,
+                &format!(
+                    "foreign C function '{symbol}' can only be executed by the native backend (kush build/run); the bounded reference interpreter rejects host FFI instead of guessing its behavior"
+                ),
+            );
+        };
+        let stream = matches!(
+            symbol,
+            "kush_sys_read" | "kush_sys_probe" | "kush_sys_write"
+        ) && (0..=2).contains(&values[0]);
+        if !stream {
+            return self.host_replay(&format!("Foreign({symbol})"), shape, values, types, ty);
+        }
+        // The tree recorded this call too; the machine makes it itself.
+        if let Some(hosts) = self.hosts.as_mut() {
+            hosts.pop_front();
+        }
+        let fd = values[0];
+        let positioned = symbol != "kush_sys_probe" && values[3] >= 0;
+        let readable = fd == 0 && symbol != "kush_sys_write";
+        let writable = fd == 1 && symbol == "kush_sys_write";
+        let code = |result: std::io::Result<usize>| match result {
+            Ok(count) => (0, count as i64),
+            Err(error) => (
+                error
+                    .raw_os_error()
+                    .filter(|code| *code > 0)
+                    .map_or(5, i64::from),
+                0,
+            ),
+        };
+        let (status, value) = match symbol {
+            "kush_sys_read" => {
+                let (handle, length) = (values[1], values[2]);
+                let (start, capacity) = self.header(handle)?;
+                let status = if !readable {
+                    9
+                } else if positioned {
+                    29
+                } else if length < 0 {
+                    22
+                } else if length > capacity - start {
+                    27
+                } else {
+                    let mut data = vec![0; length as usize];
+                    let (status, received) = loop {
+                        match self.input.read(&mut data) {
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                            result => break code(result),
+                        }
+                    };
+                    self.memory
+                        .store_bytes(handle + 16 + start, &data[..received as usize])?;
+                    self.memory.store(handle, &[start + received])?;
+                    status
+                };
+                if status != 0 {
+                    self.memory.free(handle)?;
+                }
+                (status, handle)
+            }
+            "kush_sys_probe" if !readable => (9, 0),
+            "kush_sys_probe" => loop {
+                let mut probe = [0u8; 1];
+                match self.input.read(&mut probe) {
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    result => break code(result),
+                }
+            },
+            _ => {
+                let handle = self.memory.load(values[1], 1)?[0];
+                let data = self
+                    .memory
+                    .load_bytes(handle + 16, self.header(handle)?.0 as usize)?;
+                let start = values[2];
+                if !writable {
+                    (9, 0)
+                } else if positioned {
+                    (29, 0)
+                } else if start < 0 || start as usize > data.len() {
+                    (22, 0)
+                } else {
+                    code(self.output.write(&data[start as usize..]))
+                }
+            }
+        };
+        let words = if status == 0 {
+            vec![shape.ok_tag as i64, value]
+        } else {
+            vec![shape.err_tag as i64, status]
         };
         Ok(fit(words, self.width(ty)))
     }
@@ -1578,9 +1694,13 @@ enum Raise {
 }
 
 impl Raise {
+    /// A Kush panic unwinds; any other error (a fatal abort, an exhausted
+    /// budget, a rejected foreign call) ends the run, as on the tree.
     fn at(stop: Stop, unwind: Option<BlockId>) -> Self {
         match stop {
-            Stop::Panic(diagnostic) => Raise::Panic(diagnostic, unwind),
+            Stop::Panic(diagnostic) if diagnostic.message.starts_with("panic") => {
+                Raise::Panic(diagnostic, unwind)
+            }
             other => Raise::Stop(other),
         }
     }
