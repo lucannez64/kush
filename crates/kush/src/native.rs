@@ -13,15 +13,13 @@ use crate::{
     lexer::Kind,
 };
 use cranelift_codegen::{
-    ir::{
-        self, AbiParam, InstBuilder, TrapCode, Value, condcodes::FloatCC, condcodes::IntCC,
-        types::I64,
-    },
+    ir::{self, AbiParam, TrapCode, Value, condcodes::FloatCC, condcodes::IntCC, types::I64},
     settings::{self, Configurable},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use emit::Emit as _;
 use std::{
     collections::BTreeMap,
     fs,
@@ -31,6 +29,7 @@ use std::{
 };
 
 mod deferred;
+mod emit;
 mod from_mir;
 mod llvm;
 mod runtime_cache;
@@ -58,7 +57,6 @@ fn error(message: impl std::fmt::Display) -> Diagnostic {
 }
 /// The C runtime linked into every native executable (FND-RUNTIME-C).
 const RUNTIME: &str = include_str!("../runtime/kush.c");
-
 
 /// Extra inputs for the native link step. Every path is passed to `cc` as one
 /// argument (no shell interpolation); library names are validated identifiers
@@ -2005,16 +2003,15 @@ fn lower(
     // FND-MIR: every function is lowered from its MIR body, after the loop
     // passes of docs/mir-design.md section 8 (`mir::optimize`). A function
     // the builder does not cover is an error only if a build reaches it.
-    let mir_bodies: Vec<std::result::Result<crate::mir::Body, String>> = (0..program
-        .functions
-        .len())
-        .map(|index| {
-            crate::mir::build(program, index).map(|mut body| {
-                crate::mir::optimize(program, &mut body, codegen);
-                body
+    let mir_bodies: Vec<std::result::Result<crate::mir::Body, String>> =
+        (0..program.functions.len())
+            .map(|index| {
+                crate::mir::build(program, index).map(|mut body| {
+                    crate::mir::optimize(program, &mut body, codegen);
+                    body
+                })
             })
-        })
-        .collect();
+            .collect();
     loop {
         for id in std::mem::take(&mut module.referenced) {
             if let Some(index) = index_of.get(&id)
@@ -2065,7 +2062,10 @@ fn lower(
         } else {
             std::collections::BTreeSet::new()
         };
-        let builder = FunctionBuilder::new(&mut context.func, &mut function_context);
+        let builder = emit::Cranelift::new(FunctionBuilder::new(
+            &mut context.func,
+            &mut function_context,
+        ));
         let mut g = Generator {
             builder,
             module: &mut module,
@@ -2218,15 +2218,11 @@ fn lower(
                     (width * 8) as u32,
                     STACK_SLOT_ALIGN_SHIFT,
                 ));
-                let pointer = g.builder.ins().stack_addr(I64, slot, 0);
+                let pointer = g.builder.stack_addr(I64, slot, 0);
                 for index in 0..width {
                     let zero = g.constant(0);
-                    g.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        zero,
-                        pointer,
-                        (index * 8) as i32,
-                    );
+                    g.builder
+                        .store(ir::MemFlagsData::new(), zero, pointer, (index * 8) as i32);
                 }
                 g.locations.push(Some(pointer));
             } else {
@@ -2235,7 +2231,7 @@ fn lower(
         }
         for ty in &f.resources {
             let active = g.builder.declare_var(ir::types::I8);
-            let zero = g.builder.ins().iconst(ir::types::I8, 0);
+            let zero = g.builder.iconst(ir::types::I8, 0);
             g.builder.def_var(active, zero);
             let mut words = Vec::new();
             for _ in 0..program.width(*ty) {
@@ -2261,12 +2257,9 @@ fn lower(
         if let Some(&(_, count)) = recipes.get(&index) {
             for slot in 0..count {
                 let id = capture_data[&(index, slot)];
-                let global = g.module.declare_data_in_func(id, g.builder.func);
-                let address = g.builder.ins().symbol_value(I64, global);
-                let value = g
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), address, 0);
+                let global = g.builder.declare_data(g.module, id);
+                let address = g.builder.symbol_value(I64, global);
+                let value = g.builder.load(I64, ir::MemFlagsData::new(), address, 0);
                 g.assign(slot, &[value]);
                 // Captures borrow immutable artifact storage. They are not
                 // activated as resources owned by an individual invocation.
@@ -2286,7 +2279,7 @@ fn lower(
                     if f.capture_refs.get(position).copied().unwrap_or(false) {
                         // The environment stores the caller's stack address.
                         // Reads and writes of this capture go through it.
-                        let pointer = g.builder.ins().load(
+                        let pointer = g.builder.load(
                             I64,
                             ir::MemFlagsData::new(),
                             environment,
@@ -2459,11 +2452,14 @@ fn lower(
                 .signature
                 .clone();
             let mut function_context = FunctionBuilderContext::new();
-            let mut builder = FunctionBuilder::new(&mut context.func, &mut function_context);
+            let mut builder = emit::Cranelift::new(FunctionBuilder::new(
+                &mut context.func,
+                &mut function_context,
+            ));
             let block = builder.create_block();
             builder.append_block_params_for_function_params(block);
             builder.switch_to_block(block);
-            builder.ins().trap(TrapCode::unwrap_user(2));
+            builder.trap(TrapCode::unwrap_user(2));
             builder.seal_all_blocks();
             builder.finalize(module.target_config());
             module.define_function(*id, &mut context).map_err(error)?;
@@ -2552,7 +2548,7 @@ fn define_exports(module: &mut ObjectModule, program: &Executable, ids: &[FuncId
         let mut context = module.make_context();
         context.func.signature = sig;
         let mut fc = FunctionBuilderContext::new();
-        let mut b = FunctionBuilder::new(&mut context.func, &mut fc);
+        let mut b = emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
         let block = b.create_block();
         b.append_block_params_for_function_params(block);
         b.switch_to_block(block);
@@ -2564,7 +2560,7 @@ fn define_exports(module: &mut ObjectModule, program: &Executable, ids: &[FuncId
                 (program.width(export.result) * 8) as u32,
                 STACK_SLOT_ALIGN_SHIFT,
             ));
-            b.ins().stack_addr(I64, slot, 0)
+            b.stack_addr(I64, slot, 0)
         });
         if let Some(pointer) = result_slot {
             words.push(pointer);
@@ -2576,22 +2572,22 @@ fn define_exports(module: &mut ObjectModule, program: &Executable, ids: &[FuncId
                 // buffer for the call and free it after.
                 let data = params.next().expect("data pointer");
                 let length = params.next().expect("length");
-                let from = module.declare_func_in_func(bytes_from, b.func);
-                let call = b.ins().call(from, &[data, length]);
+                let from = b.declare_func(module, bytes_from);
+                let call = b.call(from, &[data, length]);
                 let handle = b.inst_results(call)[0];
                 let slot = b.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     8,
                     STACK_SLOT_ALIGN_SHIFT,
                 ));
-                let address = b.ins().stack_addr(I64, slot, 0);
-                b.ins().store(ir::MemFlagsData::new(), handle, address, 0);
+                let address = b.stack_addr(I64, slot, 0);
+                b.store(ir::MemFlagsData::new(), handle, address, 0);
                 temporaries.push(handle);
                 words.push(address);
             } else if let Some(layout) = c_record(program, *ty) {
                 let pointer = params.next().expect("record pointer");
                 for (leaf, offset) in layout.leaves {
-                    let value = b.ins().load(
+                    let value = b.load(
                         c_scalar_type(leaf),
                         ir::MemFlagsData::new(),
                         pointer,
@@ -2605,45 +2601,40 @@ fn define_exports(module: &mut ObjectModule, program: &Executable, ids: &[FuncId
             }
         }
         let out = record_result.then(|| params.next().expect("result pointer"));
-        let callee = module.declare_func_in_func(ids[export.index], b.func);
-        let call = b.ins().call(callee, &words);
+        let callee = b.declare_func(module, ids[export.index]);
+        let call = b.call(callee, &words);
         let returned = b.inst_results(call).to_vec();
         for handle in temporaries {
-            let free = module.declare_func_in_func(bytes_free, b.func);
-            b.ins().call(free, &[handle]);
+            let free = b.declare_func(module, bytes_free);
+            b.call(free, &[handle]);
         }
         if let (Some(source), Some(out)) = (result_slot, out) {
             let layout = c_record(program, export.result).expect("record result");
             for (index, (leaf, offset)) in layout.leaves.into_iter().enumerate() {
-                let word = b
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), source, (index * 8) as i32);
+                let word = b.load(I64, ir::MemFlagsData::new(), source, (index * 8) as i32);
                 let value = word_to_c(&mut b, leaf, word);
-                b.ins()
-                    .store(ir::MemFlagsData::new(), value, out, offset as i32);
+                b.store(ir::MemFlagsData::new(), value, out, offset as i32);
             }
-            b.ins().return_(&[]);
+            b.return_(&[]);
         } else if export.result == Type::Unit {
-            b.ins().return_(&[]);
+            b.return_(&[]);
         } else {
             let word = returned[0];
             let value = match export.result {
-                Type::Bool => b.ins().ireduce(ir::types::I32, word),
+                Type::Bool => b.ireduce(ir::types::I32, word),
                 Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
-                    b.ins().ireduce(abi_value_type(export.result), word)
+                    b.ireduce(abi_value_type(export.result), word)
                 }
                 Type::Float(FloatKind::F64) => {
-                    b.ins()
-                        .bitcast(ir::types::F64, ir::MemFlagsData::new(), word)
+                    b.bitcast(ir::types::F64, ir::MemFlagsData::new(), word)
                 }
                 Type::Float(FloatKind::F32) => {
-                    let bits = b.ins().ireduce(ir::types::I32, word);
-                    b.ins()
-                        .bitcast(ir::types::F32, ir::MemFlagsData::new(), bits)
+                    let bits = b.ireduce(ir::types::I32, word);
+                    b.bitcast(ir::types::F32, ir::MemFlagsData::new(), bits)
                 }
                 _ => word,
             };
-            b.ins().return_(&[value]);
+            b.return_(&[value]);
         }
         b.seal_all_blocks();
         b.finalize(module.target_config());
@@ -2716,52 +2707,46 @@ fn c_scalar_type(ty: Type) -> ir::Type {
         other => abi_value_type(other),
     }
 }
-fn c_to_word(b: &mut FunctionBuilder, ty: Type, value: Value) -> Value {
+fn c_to_word(b: &mut emit::Cranelift, ty: Type, value: Value) -> Value {
     match ty {
         Type::Bool => {
-            let set = b.ins().icmp_imm_u(IntCC::NotEqual, value, 0);
-            b.ins().uextend(I64, set)
+            let set = b.icmp_imm_u(IntCC::NotEqual, value, 0);
+            b.uextend(I64, set)
         }
         other => abi_to_word(b, other, value),
     }
 }
-fn abi_to_word(b: &mut FunctionBuilder, ty: Type, value: Value) -> Value {
+fn abi_to_word(b: &mut emit::Cranelift, ty: Type, value: Value) -> Value {
     match ty {
         Type::Bool => {
-            let set = b.ins().icmp_imm_u(IntCC::NotEqual, value, 0);
-            b.ins().uextend(I64, set)
+            let set = b.icmp_imm_u(IntCC::NotEqual, value, 0);
+            b.uextend(I64, set)
         }
         Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
             if kind.signed() {
-                b.ins().sextend(I64, value)
+                b.sextend(I64, value)
             } else {
-                b.ins().uextend(I64, value)
+                b.uextend(I64, value)
             }
         }
-        Type::Float(FloatKind::F64) => b.ins().bitcast(I64, ir::MemFlagsData::new(), value),
+        Type::Float(FloatKind::F64) => b.bitcast(I64, ir::MemFlagsData::new(), value),
         Type::Float(FloatKind::F32) => {
-            let bits = b
-                .ins()
-                .bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
-            b.ins().uextend(I64, bits)
+            let bits = b.bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
+            b.uextend(I64, bits)
         }
         _ => value,
     }
 }
-fn word_to_c(b: &mut FunctionBuilder, ty: Type, word: Value) -> Value {
+fn word_to_c(b: &mut emit::Cranelift, ty: Type, word: Value) -> Value {
     match ty {
-        Type::Bool => b.ins().ireduce(ir::types::I8, word),
+        Type::Bool => b.ireduce(ir::types::I8, word),
         Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
-            b.ins().ireduce(abi_value_type(ty), word)
+            b.ireduce(abi_value_type(ty), word)
         }
-        Type::Float(FloatKind::F64) => {
-            b.ins()
-                .bitcast(ir::types::F64, ir::MemFlagsData::new(), word)
-        }
+        Type::Float(FloatKind::F64) => b.bitcast(ir::types::F64, ir::MemFlagsData::new(), word),
         Type::Float(FloatKind::F32) => {
-            let bits = b.ins().ireduce(ir::types::I32, word);
-            b.ins()
-                .bitcast(ir::types::F32, ir::MemFlagsData::new(), bits)
+            let bits = b.ireduce(ir::types::I32, word);
+            b.bitcast(ir::types::F32, ir::MemFlagsData::new(), bits)
         }
         _ => word,
     }
@@ -3212,13 +3197,13 @@ fn foreign_abi_signature(
     sig
 }
 fn emit_drop(
-    builder: &mut FunctionBuilder<'_>,
+    builder: &mut emit::Cranelift<'_>,
     module: &mut CodeModule,
     id: FuncId,
     values: &[Value],
 ) {
-    let reference = module.declare_func_in_func(id, builder.func);
-    builder.ins().call(reference, values);
+    let reference = builder.declare_func(module, id);
+    builder.call(reference, values);
 }
 /// Environment capture types introduced by checked coercions. A callable
 /// field adapter stores its source callable in an owned environment exactly
@@ -3333,23 +3318,19 @@ fn synthesize_context_drops(
             .signature
             .clone();
         let mut fc = FunctionBuilderContext::new();
-        let mut builder = FunctionBuilder::new(&mut context.func, &mut fc);
+        let mut builder = emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
         let entry = builder.create_block();
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
         let state = builder.block_params(entry)[0];
         if program.owns(spec.state) {
             let words = (0..program.width(spec.state))
-                .map(|word| {
-                    builder
-                        .ins()
-                        .load(I64, ir::MemFlagsData::new(), state, (word * 8) as i32)
-                })
+                .map(|word| builder.load(I64, ir::MemFlagsData::new(), state, (word * 8) as i32))
                 .collect::<Vec<_>>();
             emit_drop(&mut builder, module, drops[&spec.state.full()], &words);
         }
         emit_drop(&mut builder, module, free, &[state]);
-        builder.ins().return_(&[]);
+        builder.return_(&[]);
         builder.seal_all_blocks();
         builder.finalize(module.target_config());
         module.define_function(id, &mut context).map_err(error)?;
@@ -3436,7 +3417,7 @@ fn synthesize_drops(
             .signature
             .clone();
         let mut fc = FunctionBuilderContext::new();
-        let mut builder = FunctionBuilder::new(&mut context.func, &mut fc);
+        let mut builder = emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
         let entry = builder.create_block();
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
@@ -3444,12 +3425,12 @@ fn synthesize_drops(
         match ty {
             Type::Bytes | Type::String => {
                 emit_drop(&mut builder, module, bytes_free, &args);
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::GpuBuf(_) => {
                 // GPU-SUBSET: no CPU code creates a buffer yet; GPU-RUNTIME
                 // replaces this with the device release.
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::Channel(_) => {
                 // THREAD-CHANNELS: messages are plain data; free the channel.
@@ -3459,19 +3440,14 @@ fn synthesize_drops(
                     .declare_function("kush_channel_free", Linkage::Import, &signature)
                     .map_err(error)?;
                 emit_drop(&mut builder, module, channel_free, &args);
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::Box(index) | Type::ArenaBox(index) => {
                 let pointee = program.pointees[index];
                 if program.owns(pointee) {
                     let fields = (0..program.width(pointee))
                         .map(|i| {
-                            builder.ins().load(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                args[0],
-                                (i * 8) as i32,
-                            )
+                            builder.load(I64, ir::MemFlagsData::new(), args[0], (i * 8) as i32)
                         })
                         .collect::<Vec<_>>();
                     emit_drop(&mut builder, module, ids[&pointee.full()], &fields);
@@ -3481,15 +3457,15 @@ fn synthesize_drops(
                 } else {
                     emit_drop(&mut builder, module, free, &args);
                 }
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::Arena => {
                 emit_drop(&mut builder, module, arena_release, &args);
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::AllocatorContext => {
                 emit_drop(&mut builder, module, alloc_ops.context_release, &args);
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::DynObj(object) => {
                 // args = [member identifier, payload pointer]. The identifier
@@ -3499,125 +3475,103 @@ fn synthesize_drops(
                 for (index, entry) in members.iter().enumerate() {
                     let hit = builder.create_block();
                     let next = builder.create_block();
-                    let condition = builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, args[0], index as i64);
-                    builder.ins().brif(condition, hit, &[], next, &[]);
+                    let condition = builder.icmp_imm_s(IntCC::Equal, args[0], index as i64);
+                    builder.brif(condition, hit, &[], next, &[]);
                     builder.switch_to_block(hit);
                     if program.owns(entry.member) {
                         let fields = (0..program.width(entry.member))
                             .map(|i| {
-                                builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    args[1],
-                                    (i * 8) as i32,
-                                )
+                                builder.load(I64, ir::MemFlagsData::new(), args[1], (i * 8) as i32)
                             })
                             .collect::<Vec<_>>();
                         emit_drop(&mut builder, module, ids[&entry.member.full()], &fields);
                     }
                     emit_drop(&mut builder, module, free, &[args[1]]);
-                    builder.ins().return_(&[]);
+                    builder.return_(&[]);
                     builder.switch_to_block(next);
                 }
                 // No registered member can reach here, but release the
                 // payload allocation defensively rather than leaking it.
                 emit_drop(&mut builder, module, free, &[args[1]]);
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::AllocBox(index) => {
                 let pointee = program.pointees[index];
-                let payload_function =
-                    module.declare_func_in_func(alloc_ops.box_payload, builder.func);
-                let payload_call = builder.ins().call(payload_function, &[args[0]]);
+                let payload_function = builder.declare_func(module, alloc_ops.box_payload);
+                let payload_call = builder.call(payload_function, &[args[0]]);
                 let data = builder.inst_results(payload_call)[0];
                 if program.owns(pointee) {
                     let fields = (0..program.width(pointee))
-                        .map(|i| {
-                            builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), data, (i * 8) as i32)
-                        })
+                        .map(|i| builder.load(I64, ir::MemFlagsData::new(), data, (i * 8) as i32))
                         .collect::<Vec<_>>();
                     emit_drop(&mut builder, module, ids[&pointee.full()], &fields);
                 }
                 emit_drop(&mut builder, module, alloc_ops.box_release, &args);
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::AllocVec(index) => {
                 let element = program.pointees[index];
                 if program.owns(element) {
                     let width = program.width(element);
-                    let length = builder.ins().load(I64, ir::MemFlagsData::new(), args[0], 0);
-                    let data_function =
-                        module.declare_func_in_func(alloc_ops.vec_data, builder.func);
-                    let data_call = builder.ins().call(data_function, &[args[0]]);
+                    let length = builder.load(I64, ir::MemFlagsData::new(), args[0], 0);
+                    let data_function = builder.declare_func(module, alloc_ops.vec_data);
+                    let data_call = builder.call(data_function, &[args[0]]);
                     let data = builder.inst_results(data_call)[0];
                     let head = builder.create_block();
                     let body = builder.create_block();
                     let done = builder.create_block();
                     builder.append_block_param(head, I64);
-                    let zero = builder.ins().iconst(I64, 0);
-                    builder.ins().jump(head, &[zero.into()]);
+                    let zero = builder.iconst(I64, 0);
+                    builder.jump(head, &[zero]);
                     builder.switch_to_block(head);
                     let i = builder.block_params(head)[0];
-                    let more = builder.ins().icmp(IntCC::UnsignedLessThan, i, length);
-                    builder.ins().brif(more, body, &[], done, &[]);
+                    let more = builder.icmp(IntCC::UnsignedLessThan, i, length);
+                    builder.brif(more, body, &[], done, &[]);
                     builder.switch_to_block(body);
-                    let stride = builder.ins().imul_imm_s(i, (width * 8) as i64);
-                    let base = builder.ins().iadd(data, stride);
+                    let stride = builder.imul_imm_s(i, (width * 8) as i64);
+                    let base = builder.iadd(data, stride);
                     let fields = (0..width)
-                        .map(|j| {
-                            builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), base, (j * 8) as i32)
-                        })
+                        .map(|j| builder.load(I64, ir::MemFlagsData::new(), base, (j * 8) as i32))
                         .collect::<Vec<_>>();
                     emit_drop(&mut builder, module, ids[&element.full()], &fields);
-                    let next = builder.ins().iadd_imm_s(i, 1);
-                    builder.ins().jump(head, &[next.into()]);
+                    let next = builder.iadd_imm_s(i, 1);
+                    builder.jump(head, &[next]);
                     builder.switch_to_block(done);
                 }
                 emit_drop(&mut builder, module, alloc_ops.vec_release, &args);
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::Vec(index) => {
                 let element = program.pointees[index];
                 if program.owns(element) {
                     // for (i = 0; i < length; i++) drop(data[i])
                     let width = program.width(element);
-                    let length = builder.ins().load(I64, ir::MemFlagsData::new(), args[0], 0);
+                    let length = builder.load(I64, ir::MemFlagsData::new(), args[0], 0);
                     let head = builder.create_block();
                     let body = builder.create_block();
                     let done = builder.create_block();
                     builder.append_block_param(head, I64);
-                    let zero = builder.ins().iconst(I64, 0);
-                    builder.ins().jump(head, &[zero.into()]);
+                    let zero = builder.iconst(I64, 0);
+                    builder.jump(head, &[zero]);
                     builder.switch_to_block(head);
                     let i = builder.block_params(head)[0];
-                    let more = builder.ins().icmp(IntCC::UnsignedLessThan, i, length);
-                    builder.ins().brif(more, body, &[], done, &[]);
+                    let more = builder.icmp(IntCC::UnsignedLessThan, i, length);
+                    builder.brif(more, body, &[], done, &[]);
                     builder.switch_to_block(body);
-                    let stride = builder.ins().imul_imm_s(i, (width * 8) as i64);
-                    let base = builder.ins().iadd(args[0], stride);
+                    let stride = builder.imul_imm_s(i, (width * 8) as i64);
+                    let base = builder.iadd(args[0], stride);
                     let fields = (0..width)
                         .map(|k| {
-                            builder.ins().load(
-                                I64,
-                                ir::MemFlagsData::new(),
-                                base,
-                                (16 + k * 8) as i32,
-                            )
+                            builder.load(I64, ir::MemFlagsData::new(), base, (16 + k * 8) as i32)
                         })
                         .collect::<Vec<_>>();
                     emit_drop(&mut builder, module, ids[&element.full()], &fields);
-                    let next = builder.ins().iadd_imm_s(i, 1);
-                    builder.ins().jump(head, &[next.into()]);
+                    let next = builder.iadd_imm_s(i, 1);
+                    builder.jump(head, &[next]);
                     builder.switch_to_block(done);
                 }
                 emit_drop(&mut builder, module, buffer_free, &args);
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::Enum(index) if program.unwind_functions.contains_key(&index) => {
                 // PANIC-LINEAR-CLEANUP: only a panic unwinding leaves a live
@@ -3646,13 +3600,13 @@ fn synthesize_drops(
                 let restore = module
                     .declare_function("kush_unwind_restore", Linkage::Import, &restore_signature)
                     .map_err(error)?;
-                let hold = module.declare_func_in_func(hold, builder.func);
-                let call = builder.ins().call(hold, &[]);
+                let hold = builder.declare_func(module, hold);
+                let call = builder.call(hold, &[]);
                 let held = builder.inst_results(call)[0];
-                let cleanup = module.declare_func_in_func(cleanup, builder.func);
-                builder.ins().call(cleanup, &args);
+                let cleanup = builder.declare_func(module, cleanup);
+                builder.call(cleanup, &args);
                 emit_drop(&mut builder, module, restore, &[held]);
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::Enum(index) => {
                 if let Some(foreign) = program.enums[index].foreign.clone() {
@@ -3667,7 +3621,7 @@ fn synthesize_drops(
                         .declare_function(&foreign.release, Linkage::Import, &signature)
                         .map_err(error)?;
                     emit_drop(&mut builder, module, release, &[args[0]]);
-                    builder.ins().return_(&[]);
+                    builder.return_(&[]);
                 } else if let Some((element, capacity)) = program.enums[index].dynamic_array {
                     if program.owns(element) {
                         // The runtime length is word zero; fields at or beyond
@@ -3678,14 +3632,11 @@ fn synthesize_drops(
                         let width = program.width(element);
                         let length = args[0];
                         for slot in (0..capacity).rev() {
-                            let active = builder.ins().icmp_imm_s(
-                                IntCC::UnsignedGreaterThan,
-                                length,
-                                slot as i64,
-                            );
+                            let active =
+                                builder.icmp_imm_s(IntCC::UnsignedGreaterThan, length, slot as i64);
                             let body = builder.create_block();
                             let next = builder.create_block();
-                            builder.ins().brif(active, body, &[], next, &[]);
+                            builder.brif(active, body, &[], next, &[]);
                             builder.switch_to_block(body);
                             emit_drop(
                                 &mut builder,
@@ -3693,24 +3644,24 @@ fn synthesize_drops(
                                 ids[&element.full()],
                                 &args[1 + slot * width..1 + (slot + 1) * width],
                             );
-                            builder.ins().jump(next, &[]);
+                            builder.jump(next, &[]);
                             builder.switch_to_block(next);
                         }
                     }
-                    builder.ins().return_(&[]);
+                    builder.return_(&[]);
                 } else {
                     for (tag, variant) in program.enums[index].variants.iter().enumerate() {
                         let hit = builder.create_block();
                         let next = builder.create_block();
                         let condition = if let Some(niche) = program.enums[index].niche() {
                             let (cc, constant) = decoder_test(niche.decoder(tag));
-                            builder.ins().icmp_imm_s(cc, args[0], constant)
+                            builder.icmp_imm_s(cc, args[0], constant)
                         } else if program.enums[index].tag_words() == 0 {
-                            builder.ins().iconst(ir::types::I8, 1)
+                            builder.iconst(ir::types::I8, 1)
                         } else {
-                            builder.ins().icmp_imm_s(IntCC::Equal, args[0], tag as i64)
+                            builder.icmp_imm_s(IntCC::Equal, args[0], tag as i64)
                         };
-                        builder.ins().brif(condition, hit, &[], next, &[]);
+                        builder.brif(condition, hit, &[], next, &[]);
                         builder.switch_to_block(hit);
                         let mut offset = program.enums[index].tag_words();
                         let mut fields = Vec::new();
@@ -3728,18 +3679,18 @@ fn synthesize_drops(
                                 );
                             }
                         }
-                        builder.ins().return_(&[]);
+                        builder.return_(&[]);
                         builder.switch_to_block(next);
                     }
-                    builder.ins().trap(TrapCode::unwrap_user(2));
+                    builder.trap(TrapCode::unwrap_user(2));
                 }
             }
             Type::Union(index) => {
                 for (tag, member) in program.unions[index].members.iter().enumerate() {
                     let hit = builder.create_block();
                     let next = builder.create_block();
-                    let condition = builder.ins().icmp_imm_s(IntCC::Equal, args[0], tag as i64);
-                    builder.ins().brif(condition, hit, &[], next, &[]);
+                    let condition = builder.icmp_imm_s(IntCC::Equal, args[0], tag as i64);
+                    builder.brif(condition, hit, &[], next, &[]);
                     builder.switch_to_block(hit);
                     if program.owns(*member) {
                         emit_drop(
@@ -3749,37 +3700,35 @@ fn synthesize_drops(
                             &args[1..1 + program.width(*member)],
                         );
                     }
-                    builder.ins().return_(&[]);
+                    builder.return_(&[]);
                     builder.switch_to_block(next);
                 }
-                builder.ins().trap(TrapCode::unwrap_user(2));
+                builder.trap(TrapCode::unwrap_user(2));
             }
             Type::Once(_) => {
                 // args = [code, environment]. A noncapturing function coerced to
                 // once has a null environment and owns nothing.
                 let environment = args[1];
-                let present = builder.ins().icmp_imm_s(IntCC::NotEqual, environment, 0);
+                let present = builder.icmp_imm_s(IntCC::NotEqual, environment, 0);
                 let close = builder.create_block();
                 let done = builder.create_block();
-                builder.ins().brif(present, close, &[], done, &[]);
+                builder.brif(present, close, &[], done, &[]);
                 builder.switch_to_block(close);
-                let drop = builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), environment, 0);
+                let drop = builder.load(I64, ir::MemFlagsData::new(), environment, 0);
                 let signature = {
                     let mut signature = module.make_signature();
                     signature.params.push(AbiParam::new(I64));
                     signature
                 };
                 let signature = builder.import_signature(signature);
-                builder.ins().call_indirect(signature, drop, &[environment]);
-                builder.ins().return_(&[]);
+                builder.call_indirect(signature, drop, &[environment]);
+                builder.return_(&[]);
                 builder.switch_to_block(done);
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             Type::Task(_) | Type::Thread(_) => {
                 // A task handle owns no heap cell. Scope completion joins it.
-                builder.ins().return_(&[]);
+                builder.return_(&[]);
             }
             _ => unreachable!(),
         }
@@ -3795,7 +3744,7 @@ fn synthesize_drops(
             .signature
             .clone();
         let mut fc = FunctionBuilderContext::new();
-        let mut builder = FunctionBuilder::new(&mut context.func, &mut fc);
+        let mut builder = emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
         let entry = builder.create_block();
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
@@ -3810,7 +3759,7 @@ fn synthesize_drops(
             if program.owns(ty) {
                 let values = (0..program.width(ty))
                     .map(|i| {
-                        builder.ins().load(
+                        builder.load(
                             I64,
                             ir::MemFlagsData::new(),
                             environment,
@@ -3822,7 +3771,7 @@ fn synthesize_drops(
             }
         }
         emit_drop(&mut builder, module, free, &[environment]);
-        builder.ins().return_(&[]);
+        builder.return_(&[]);
         builder.seal_all_blocks();
         builder.finalize(module.target_config());
         module.define_function(id, &mut context).map_err(error)?;
@@ -3883,21 +3832,18 @@ fn synthesize_task_wrappers(
                 .signature
                 .clone();
             let mut fc = FunctionBuilderContext::new();
-            let mut builder = FunctionBuilder::new(&mut context.func, &mut fc);
+            let mut builder =
+                emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
             let entry = builder.create_block();
             builder.append_block_params_for_function_params(entry);
             builder.switch_to_block(entry);
             let pointer = builder.block_params(entry)[0];
             let width = program.width(result);
             let words = (0..width)
-                .map(|i| {
-                    builder
-                        .ins()
-                        .load(I64, ir::MemFlagsData::new(), pointer, (i * 8) as i32)
-                })
+                .map(|i| builder.load(I64, ir::MemFlagsData::new(), pointer, (i * 8) as i32))
                 .collect::<Vec<_>>();
             emit_drop(&mut builder, module, drops[&result.full()], &words);
-            builder.ins().return_(&[]);
+            builder.return_(&[]);
             builder.seal_all_blocks();
             builder.finalize(module.target_config());
             module
@@ -3929,7 +3875,7 @@ fn synthesize_task_wrappers(
             .signature
             .clone();
         let mut fc = FunctionBuilderContext::new();
-        let mut builder = FunctionBuilder::new(&mut context.func, &mut fc);
+        let mut builder = emit::Cranelift::new(FunctionBuilder::new(&mut context.func, &mut fc));
         let entry = builder.create_block();
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
@@ -3949,16 +3895,12 @@ fn synthesize_task_wrappers(
             arguments.push(result_pointer);
         }
         arguments.push(env);
-        let call = builder
-            .ins()
-            .call_indirect(body_signature, code, &arguments);
+        let call = builder.call_indirect(body_signature, code, &arguments);
         if !aggregate {
             let value = builder.inst_results(call)[0];
-            builder
-                .ins()
-                .store(ir::MemFlagsData::new(), value, result_pointer, 0);
+            builder.store(ir::MemFlagsData::new(), value, result_pointer, 0);
         }
-        builder.ins().return_(&[]);
+        builder.return_(&[]);
         builder.seal_all_blocks();
         builder.finalize(module.target_config());
         module
@@ -4034,17 +3976,17 @@ impl ScalarCallback {
         }
         Self::expression(function.body.tail.as_deref()?, &mut 32)
     }
-    fn emit(&self, builder: &mut FunctionBuilder<'_>, input: Value) -> Value {
+    fn emit(&self, builder: &mut emit::Cranelift<'_>, input: Value) -> Value {
         match self {
             Self::Input => input,
-            Self::Constant(value) => builder.ins().iconst(I64, *value),
+            Self::Constant(value) => builder.iconst(I64, *value),
             Self::Bitwise(op, left, right) => {
                 let left = left.emit(builder, input);
                 let right = right.emit(builder, input);
                 match op {
-                    Kind::Amp => builder.ins().band(left, right),
-                    Kind::Pipe => builder.ins().bor(left, right),
-                    Kind::Caret => builder.ins().bxor(left, right),
+                    Kind::Amp => builder.band(left, right),
+                    Kind::Pipe => builder.bor(left, right),
+                    Kind::Caret => builder.bxor(left, right),
                     _ => unreachable!("validated scalar callback operator"),
                 }
             }
@@ -4077,7 +4019,7 @@ const FAILING_RUNTIME: &[&str] = &[
     "kush_print_f32",
 ];
 struct Generator<'a, 'b> {
-    builder: FunctionBuilder<'a>,
+    builder: emit::Cranelift<'a>,
     module: &'b mut CodeModule,
     ids: &'b [FuncId],
     foreign_ids: &'b [Option<FuncId>],
@@ -4212,13 +4154,13 @@ impl Generator<'_, '_> {
             for (v, value) in self.tracked[id].words.iter().zip(values) {
                 self.builder.def_var(*v, *value);
             }
-            let one = self.builder.ins().iconst(ir::types::I8, 1);
+            let one = self.builder.iconst(ir::types::I8, 1);
             self.builder.def_var(self.tracked[id].active, one);
         }
     }
     fn deactivate(&mut self, id: Option<usize>) {
         if let Some(id) = id {
-            let zero = self.builder.ins().iconst(ir::types::I8, 0);
+            let zero = self.builder.iconst(ir::types::I8, 0);
             self.builder.def_var(self.tracked[id].active, zero);
         }
     }
@@ -4254,7 +4196,7 @@ impl Generator<'_, '_> {
             let active = self.builder.use_var(self.tracked[id].active);
             let yes = self.builder.create_block();
             let no = self.builder.create_block();
-            self.builder.ins().brif(active, yes, &[], no, &[]);
+            self.builder.brif(active, yes, &[], no, &[]);
             self.builder.switch_to_block(yes);
             self.deactivate(Some(id));
             let values = if let Some(pointer) = self.tracked[id].location {
@@ -4278,10 +4220,8 @@ impl Generator<'_, '_> {
         if self.program.uses_threads {
             return self.runtime_call(self.abort_word_local, &[]);
         }
-        let data = self
-            .module
-            .declare_data_in_func(self.abort_word, self.builder.func);
-        self.builder.ins().symbol_value(I64, data)
+        let data = self.builder.declare_data(self.module, self.abort_word);
+        self.builder.symbol_value(I64, data)
     }
     /// Leave the function on an abort path: the caller ignores the result.
     fn return_dummy(&mut self) {
@@ -4300,38 +4240,31 @@ impl Generator<'_, '_> {
         }
     }
     fn constant(&mut self, n: i64) -> Value {
-        self.builder.ins().iconst(I64, n)
+        self.builder.iconst(I64, n)
     }
     /// Interpret a one-word float representation as a hardware float value.
     fn float_value(&mut self, kind: FloatKind, bits: Value) -> Value {
         match kind {
             FloatKind::F32 => {
-                let low = self.builder.ins().ireduce(ir::types::I32, bits);
+                let low = self.builder.ireduce(ir::types::I32, bits);
                 self.builder
-                    .ins()
                     .bitcast(ir::types::F32, ir::MemFlagsData::new(), low)
             }
-            FloatKind::F64 => {
-                self.builder
-                    .ins()
-                    .bitcast(ir::types::F64, ir::MemFlagsData::new(), bits)
-            }
+            FloatKind::F64 => self
+                .builder
+                .bitcast(ir::types::F64, ir::MemFlagsData::new(), bits),
         }
     }
     /// Store a hardware float back into its canonical one-word bit form.
     fn float_bits(&mut self, kind: FloatKind, value: Value) -> Value {
         match kind {
             FloatKind::F32 => {
-                let low =
-                    self.builder
-                        .ins()
-                        .bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
-                self.builder.ins().uextend(I64, low)
+                let low = self
+                    .builder
+                    .bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
+                self.builder.uextend(I64, low)
             }
-            FloatKind::F64 => self
-                .builder
-                .ins()
-                .bitcast(I64, ir::MemFlagsData::new(), value),
+            FloatKind::F64 => self.builder.bitcast(I64, ir::MemFlagsData::new(), value),
         }
     }
     fn float_binary(&mut self, kind: FloatKind, op: &Kind, a: Value, b: Value) -> Value {
@@ -4345,14 +4278,14 @@ impl Generator<'_, '_> {
             _ => None,
         };
         if let Some(condition) = comparison {
-            let value = self.builder.ins().fcmp(condition, a, b);
-            return self.builder.ins().uextend(I64, value);
+            let value = self.builder.fcmp(condition, a, b);
+            return self.builder.uextend(I64, value);
         }
         let result = match op {
-            Kind::Plus => self.builder.ins().fadd(a, b),
-            Kind::Minus => self.builder.ins().fsub(a, b),
-            Kind::Star => self.builder.ins().fmul(a, b),
-            Kind::Slash => self.builder.ins().fdiv(a, b),
+            Kind::Plus => self.builder.fadd(a, b),
+            Kind::Minus => self.builder.fsub(a, b),
+            Kind::Star => self.builder.fmul(a, b),
+            Kind::Slash => self.builder.fdiv(a, b),
             Kind::Percent => {
                 let is_f32 = self.constant(i64::from(matches!(kind, FloatKind::F32)));
                 let a = self.float_bits(kind, a);
@@ -4371,7 +4304,7 @@ impl Generator<'_, '_> {
             FloatKind::F64 => wide,
             FloatKind::F32 => {
                 let wide = self.float_value(FloatKind::F64, wide);
-                let narrow = self.builder.ins().fdemote(ir::types::F32, wide);
+                let narrow = self.builder.fdemote(ir::types::F32, wide);
                 self.float_bits(FloatKind::F32, narrow)
             }
         }
@@ -4390,43 +4323,41 @@ impl Generator<'_, '_> {
                     FloatKind::F64 => i64::MAX,
                 };
                 let mask = self.constant(mask);
-                vec![self.builder.ins().band(word, mask)]
+                vec![self.builder.band(word, mask)]
             }
             FloatOp::Sqrt(kind) => {
                 let value = self.float_value(kind, word);
-                let result = self.builder.ins().sqrt(value);
+                let result = self.builder.sqrt(value);
                 vec![self.float_bits(kind, result)]
             }
             FloatOp::IsNan(kind) => {
                 let value = self.float_value(kind, word);
-                let result = self.builder.ins().fcmp(FloatCC::Unordered, value, value);
-                vec![self.builder.ins().uextend(I64, result)]
+                let result = self.builder.fcmp(FloatCC::Unordered, value, value);
+                vec![self.builder.uextend(I64, result)]
             }
             FloatOp::IsInfinite(kind) => {
                 let mask = self.constant(match kind {
                     FloatKind::F32 => 0x7fff_ffffi64,
                     FloatKind::F64 => i64::MAX,
                 });
-                let magnitude = self.builder.ins().band(word, mask);
-                let result = self.builder.ins().icmp_imm_u(
-                    IntCC::Equal,
-                    magnitude,
-                    kind.infinity_bits() as i64,
-                );
-                vec![self.builder.ins().uextend(I64, result)]
+                let magnitude = self.builder.band(word, mask);
+                let result =
+                    self.builder
+                        .icmp_imm_u(IntCC::Equal, magnitude, kind.infinity_bits() as i64);
+                vec![self.builder.uextend(I64, result)]
             }
             FloatOp::IsFinite(kind) => {
                 let mask = self.constant(match kind {
                     FloatKind::F32 => 0x7fff_ffffi64,
                     FloatKind::F64 => i64::MAX,
                 });
-                let magnitude = self.builder.ins().band(word, mask);
-                let result = self.builder.ins().icmp_imm_u(
+                let magnitude = self.builder.band(word, mask);
+                let result = self.builder.icmp_imm_u(
                     IntCC::UnsignedLessThan,
                     magnitude,
                     kind.infinity_bits() as i64,
                 );
-                vec![self.builder.ins().uextend(I64, result)]
+                vec![self.builder.uextend(I64, result)]
             }
             FloatOp::FromInt { source, target } | FloatOp::FromIntRounded { source, target } => {
                 vec![self.float_from_integer(source, target, word)]
@@ -4441,14 +4372,14 @@ impl Generator<'_, '_> {
                 let signed = self.constant(i64::from(source.signed()));
                 let mantissa = self.constant(i64::from(target.mantissa_bits()));
                 let exact = self.runtime_call(self.int_exact_in_float, &[word, signed, mantissa]);
-                let present = self.builder.ins().icmp_imm_s(IntCC::NotEqual, exact, 0);
+                let present = self.builder.icmp_imm_s(IntCC::NotEqual, exact, 0);
                 option(self, present, payload, some_tag, none_tag)
             }
             FloatOp::ToF64(source) => match source {
                 FloatKind::F64 => vec![word],
                 FloatKind::F32 => {
                     let value = self.float_value(FloatKind::F32, word);
-                    let wide = self.builder.ins().fpromote(ir::types::F64, value);
+                    let wide = self.builder.fpromote(ir::types::F64, value);
                     vec![self.float_bits(FloatKind::F64, wide)]
                 }
             },
@@ -4459,31 +4390,31 @@ impl Generator<'_, '_> {
             } => match source {
                 FloatKind::F32 => {
                     let one = self.constant(1);
-                    let present = self.builder.ins().icmp_imm_s(IntCC::NotEqual, one, 0);
+                    let present = self.builder.icmp_imm_s(IntCC::NotEqual, one, 0);
                     option(self, present, word, some_tag, none_tag)
                 }
                 FloatKind::F64 => {
                     let wide = self.float_value(FloatKind::F64, word);
-                    let narrow = self.builder.ins().fdemote(ir::types::F32, wide);
+                    let narrow = self.builder.fdemote(ir::types::F32, wide);
                     let payload = self.float_bits(FloatKind::F32, narrow);
                     let wide_mask = self.constant(i64::MAX);
                     let narrow_mask = self.constant(0x7fff_ffffi64);
-                    let wide_magnitude = self.builder.ins().band(word, wide_mask);
-                    let narrow_magnitude = self.builder.ins().band(payload, narrow_mask);
-                    let wide_finite = self.builder.ins().icmp_imm_u(
+                    let wide_magnitude = self.builder.band(word, wide_mask);
+                    let narrow_magnitude = self.builder.band(payload, narrow_mask);
+                    let wide_finite = self.builder.icmp_imm_u(
                         IntCC::UnsignedLessThan,
                         wide_magnitude,
                         0x7ff0_0000_0000_0000,
                     );
-                    let narrow_finite = self.builder.ins().icmp_imm_u(
+                    let narrow_finite = self.builder.icmp_imm_u(
                         IntCC::UnsignedLessThan,
                         narrow_magnitude,
                         0x7f80_0000,
                     );
                     // Reject only a finite wide value that overflowed to an
                     // f32 infinity. NaN and infinity are representable.
-                    let overflowed = self.builder.ins().band_not(wide_finite, narrow_finite);
-                    let present = self.builder.ins().icmp_imm_s(IntCC::Equal, overflowed, 0);
+                    let overflowed = self.builder.band_not(wide_finite, narrow_finite);
+                    let present = self.builder.icmp_imm_s(IntCC::Equal, overflowed, 0);
                     option(self, present, payload, some_tag, none_tag)
                 }
             },
@@ -4497,13 +4428,13 @@ impl Generator<'_, '_> {
                     FloatKind::F64 => word,
                     FloatKind::F32 => {
                         let value = self.float_value(FloatKind::F32, word);
-                        let wide = self.builder.ins().fpromote(ir::types::F64, value);
+                        let wide = self.builder.fpromote(ir::types::F64, value);
                         self.float_bits(FloatKind::F64, wide)
                     }
                 };
                 let target_index = self.constant(target.index());
                 let present = self.runtime_call(self.float_int_present, &[wide, target_index]);
-                let present = self.builder.ins().icmp_imm_s(IntCC::NotEqual, present, 0);
+                let present = self.builder.icmp_imm_s(IntCC::NotEqual, present, 0);
                 let payload = self.runtime_call(self.float_to_int, &[wide, target_index]);
                 option(self, present, payload, some_tag, none_tag)
             }
@@ -4515,12 +4446,8 @@ impl Generator<'_, '_> {
         }
         if let Some(pointer) = self.locations[slot] {
             for (index, value) in values.iter().enumerate() {
-                self.builder.ins().store(
-                    ir::MemFlagsData::new(),
-                    *value,
-                    pointer,
-                    (index * 8) as i32,
-                );
+                self.builder
+                    .store(ir::MemFlagsData::new(), *value, pointer, (index * 8) as i32);
             }
         }
     }
@@ -4534,21 +4461,16 @@ impl Generator<'_, '_> {
         self.restore_handler_depth(self.handler_base);
         if let Some(pointer) = self.return_pointer {
             for (index, value) in values.iter().enumerate() {
-                self.builder.ins().store(
-                    ir::MemFlagsData::new(),
-                    *value,
-                    pointer,
-                    (index * 8) as i32,
-                );
+                self.builder
+                    .store(ir::MemFlagsData::new(), *value, pointer, (index * 8) as i32);
             }
-            self.builder.ins().return_(&[]);
+            self.builder.return_(&[]);
         } else {
-            self.builder.ins().return_(values);
+            self.builder.return_(values);
         }
     }
     fn jump(&mut self, block: ir::Block, values: &[Value]) {
-        let values = values.iter().copied().map(Into::into).collect::<Vec<_>>();
-        self.builder.ins().jump(block, &values);
+        self.builder.jump(block, values);
     }
     fn join(&mut self, ty: Type) -> Option<ir::Block> {
         if ty == Type::Never {
@@ -4561,8 +4483,8 @@ impl Generator<'_, '_> {
         Some(block)
     }
     fn runtime_call(&mut self, id: FuncId, values: &[Value]) -> Value {
-        let callee = self.module.declare_func_in_func(id, self.builder.func);
-        let call = self.builder.ins().call(callee, values);
+        let callee = self.builder.declare_func(self.module, id);
+        let call = self.builder.call(callee, values);
         let result = self.builder.inst_results(call)[0];
         if self.failing.contains(&id) {
             self.test_panic();
@@ -4570,8 +4492,8 @@ impl Generator<'_, '_> {
         result
     }
     fn runtime_void(&mut self, id: FuncId, values: &[Value]) {
-        let callee = self.module.declare_func_in_func(id, self.builder.func);
-        self.builder.ins().call(callee, values);
+        let callee = self.builder.declare_func(self.module, id);
+        self.builder.call(callee, values);
         if self.failing.contains(&id) {
             self.test_panic();
         }
@@ -4604,10 +4526,9 @@ impl Generator<'_, '_> {
                 .expect("the checker registers every upcast member in the target object");
             let hit = self
                 .builder
-                .ins()
                 .icmp_imm_s(IntCC::Equal, values[0], index as i64);
             let value = self.constant(position as i64);
-            mapped = self.builder.ins().select(hit, value, mapped);
+            mapped = self.builder.select(hit, value, mapped);
         }
         vec![mapped, values[1]]
     }
@@ -4630,7 +4551,6 @@ impl Generator<'_, '_> {
             values[0]
         } else {
             self.builder
-                .ins()
                 .load(I64, ir::MemFlagsData::new(), values[0], 0)
         };
         let argument_start = if owned { 2 } else { 1 };
@@ -4639,20 +4559,15 @@ impl Generator<'_, '_> {
             let next = self.builder.create_block();
             let condition = self
                 .builder
-                .ins()
                 .icmp_imm_s(IntCC::Equal, member_id, index as i64);
-            self.builder.ins().brif(condition, hit, &[], next, &[]);
+            self.builder.brif(condition, hit, &[], next, &[]);
             self.builder.switch_to_block(hit);
             let mut arguments = if owned {
                 let pointer = values[1];
                 let payload = (0..self.program.width(entry.member))
                     .map(|word| {
-                        self.builder.ins().load(
-                            I64,
-                            ir::MemFlagsData::new(),
-                            pointer,
-                            (word * 8) as i32,
-                        )
+                        self.builder
+                            .load(I64, ir::MemFlagsData::new(), pointer, (word * 8) as i32)
                     })
                     .collect::<Vec<_>>();
                 emit_drop(&mut self.builder, self.module, self.free, &[pointer]);
@@ -4660,7 +4575,6 @@ impl Generator<'_, '_> {
             } else {
                 let pointer = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), values[0], 8);
                 vec![pointer]
             };
@@ -4713,19 +4627,15 @@ impl Generator<'_, '_> {
         };
         let join = self.join(result_ty);
         let pointer = values[0];
-        let tag = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), pointer, 0);
-        let payload = self.builder.ins().iadd_imm_s(pointer, 8);
+        let tag = self.builder.load(I64, ir::MemFlagsData::new(), pointer, 0);
+        let payload = self.builder.iadd_imm_s(pointer, 8);
         for (member_tag, _member, function) in &spec.members {
             let hit = self.builder.create_block();
             let next = self.builder.create_block();
             let condition = self
                 .builder
-                .ins()
                 .icmp_imm_s(IntCC::Equal, tag, *member_tag as i64);
-            self.builder.ins().brif(condition, hit, &[], next, &[]);
+            self.builder.brif(condition, hit, &[], next, &[]);
             self.builder.switch_to_block(hit);
             let mut arguments = vec![payload];
             arguments.extend(self.physical_dyn_arguments(&spec.parameter_grades, &values[1..]));
@@ -4763,13 +4673,12 @@ impl Generator<'_, '_> {
                 Type::Ref(pointer) | Type::RefMut(pointer) => {
                     let handle =
                         self.builder
-                            .ins()
                             .load(I64, ir::MemFlagsData::new(), values[position], 0);
                     if foreign_pointee_kind(self.program, *pointer) == PointeeKind::Buffer {
                         // KushBytes/KushString: length at +0, capacity at +8,
                         // payload bytes at +16.
-                        let data = self.builder.ins().iadd_imm_s(handle, 16);
-                        let length = self.builder.ins().load(
+                        let data = self.builder.iadd_imm_s(handle, 16);
+                        let length = self.builder.load(
                             I64,
                             ir::MemFlagsData::new(),
                             handle,
@@ -4786,20 +4695,18 @@ impl Generator<'_, '_> {
                     let word = values[position];
                     position += 1;
                     match ty {
-                        Type::Bool => {
-                            arguments.push(self.builder.ins().ireduce(ir::types::I32, word))
-                        }
+                        Type::Bool => arguments.push(self.builder.ireduce(ir::types::I32, word)),
                         Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
-                            arguments.push(self.builder.ins().ireduce(abi_value_type(*ty), word))
+                            arguments.push(self.builder.ireduce(abi_value_type(*ty), word))
                         }
-                        Type::Float(FloatKind::F64) => arguments.push(self.builder.ins().bitcast(
+                        Type::Float(FloatKind::F64) => arguments.push(self.builder.bitcast(
                             ir::types::F64,
                             ir::MemFlagsData::new(),
                             word,
                         )),
                         Type::Float(FloatKind::F32) => {
-                            let bits = self.builder.ins().ireduce(ir::types::I32, word);
-                            arguments.push(self.builder.ins().bitcast(
+                            let bits = self.builder.ireduce(ir::types::I32, word);
+                            arguments.push(self.builder.bitcast(
                                 ir::types::F32,
                                 ir::MemFlagsData::new(),
                                 bits,
@@ -4820,20 +4727,20 @@ impl Generator<'_, '_> {
                 (width * 8) as u32,
                 STACK_SLOT_ALIGN_SHIFT,
             ));
-            let pointer = self.builder.ins().stack_addr(I64, slot, 0);
+            let pointer = self.builder.stack_addr(I64, slot, 0);
             arguments.push(pointer);
             out = Some((pointer, width));
         }
-        let callee = self.module.declare_func_in_func(id, self.builder.func);
-        let call = self.builder.ins().call(callee, &arguments);
+        let callee = self.builder.declare_func(self.module, id);
+        let call = self.builder.call(callee, &arguments);
         let returned = self.builder.inst_results(call).to_vec();
         if let Some(shape) = foreign.fallible {
             let status = returned[0];
             let join = self.join(foreign.result).unwrap();
             let success = self.builder.create_block();
             let failure = self.builder.create_block();
-            let ok = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
-            self.builder.ins().brif(ok, success, &[], failure, &[]);
+            let ok = self.builder.icmp_imm_s(IntCC::Equal, status, 0);
+            self.builder.brif(ok, success, &[], failure, &[]);
             self.builder.switch_to_block(success);
             let mut values = vec![self.constant(shape.ok_tag as i64)];
             if let Some((pointer, width)) = out {
@@ -4861,26 +4768,23 @@ impl Generator<'_, '_> {
         let value = returned[0];
         Some(vec![match foreign.result {
             Type::Float(FloatKind::F64) => {
-                self.builder
-                    .ins()
-                    .bitcast(I64, ir::MemFlagsData::new(), value)
+                self.builder.bitcast(I64, ir::MemFlagsData::new(), value)
             }
             Type::Float(FloatKind::F32) => {
-                let low =
-                    self.builder
-                        .ins()
-                        .bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
-                self.builder.ins().uextend(I64, low)
+                let low = self
+                    .builder
+                    .bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
+                self.builder.uextend(I64, low)
             }
             // A foreign `int32_t` Bool may be any nonzero value; the proof
             // fragment relies on 0 or 1.
             Type::Bool => {
-                let truth = self.builder.ins().icmp_imm_s(IntCC::NotEqual, value, 0);
-                self.builder.ins().uextend(I64, truth)
+                let truth = self.builder.icmp_imm_s(IntCC::NotEqual, value, 0);
+                self.builder.uextend(I64, truth)
             }
             Type::Int(IntKind::I64 | IntKind::U64) => value,
-            Type::Int(kind) if kind.signed() => self.builder.ins().sextend(I64, value),
-            Type::Int(_) => self.builder.ins().uextend(I64, value),
+            Type::Int(kind) if kind.signed() => self.builder.sextend(I64, value),
+            Type::Int(_) => self.builder.uextend(I64, value),
             _ => value,
         }])
     }
@@ -4901,16 +4805,14 @@ impl Generator<'_, '_> {
                 (self.program.width(result) * 8) as u32,
                 STACK_SLOT_ALIGN_SHIFT,
             ));
-            let pointer = self.builder.ins().stack_addr(I64, slot, 0);
+            let pointer = self.builder.stack_addr(I64, slot, 0);
             values.insert(0, pointer);
             Some(pointer)
         } else {
             None
         };
-        let callee = self
-            .module
-            .declare_func_in_func(self.ids[index], self.builder.func);
-        let call = self.builder.ins().call(callee, &values);
+        let callee = self.builder.declare_func(self.module, self.ids[index]);
+        let call = self.builder.call(callee, &values);
         // The callee's row is not kept on executable functions; a call
         // that cannot panic never sets the word, so testing it is only code.
         self.test_panic();
@@ -4921,7 +4823,6 @@ impl Generator<'_, '_> {
             (0..self.program.width(result))
                 .map(|i| {
                     self.builder
-                        .ins()
                         .load(I64, ir::MemFlagsData::new(), pointer, (i * 8) as i32)
                 })
                 .collect()
@@ -4956,10 +4857,7 @@ impl Generator<'_, '_> {
         let result_erased = signature.result_erased();
         let ir_signature = self.indirect_signature_mode(id, environment);
         let ir_signature = self.builder.import_signature(ir_signature);
-        let call = self
-            .builder
-            .ins()
-            .call_indirect(ir_signature, code, &values);
+        let call = self.builder.call_indirect(ir_signature, code, &values);
         // FND-ROWS-PANIC: any callee may panic; rows no longer say otherwise.
         self.test_panic();
         if result_erased {
@@ -4969,7 +4867,6 @@ impl Generator<'_, '_> {
             return (0..self.program.width(result))
                 .map(|i| {
                     self.builder
-                        .ins()
                         .load(I64, ir::MemFlagsData::new(), pointer, (i * 8) as i32)
                 })
                 .collect();
@@ -5013,18 +4910,14 @@ impl Generator<'_, '_> {
         if self.program.uses_unwinding && !self.unwind_emitting {
             // `kush_unwind_panic` aborts unless a catch boundary is active;
             // then it sets the panic word, and this frame unwinds.
-            let unwind = self
-                .module
-                .declare_func_in_func(self.unwind_panic, self.builder.func);
-            self.builder.ins().call(unwind, &[]);
+            let unwind = self.builder.declare_func(self.module, self.unwind_panic);
+            self.builder.call(unwind, &[]);
             self.unwind_exit();
             return;
         }
-        let panic = self
-            .module
-            .declare_func_in_func(self.panic, self.builder.func);
-        self.builder.ins().call(panic, &[]);
-        self.builder.ins().trap(TrapCode::unwrap_user(1));
+        let panic = self.builder.declare_func(self.module, self.panic);
+        self.builder.call(panic, &[]);
+        self.builder.trap(TrapCode::unwrap_user(1));
     }
     /// Leave the function while a panic unwinds: drop every live value and
     /// return a dummy result; the caller tests the word in turn.
@@ -5045,10 +4938,10 @@ impl Generator<'_, '_> {
         if !self.program.uses_unwinding {
             return;
         }
-        let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 2);
+        let panicked = self.builder.icmp_imm_s(IntCC::Equal, status, 2);
         let rethrow = self.builder.create_block();
         let normal = self.builder.create_block();
-        self.builder.ins().brif(panicked, rethrow, &[], normal, &[]);
+        self.builder.brif(panicked, rethrow, &[], normal, &[]);
         self.builder.switch_to_block(rethrow);
         self.runtime_void_raw(self.unwind_rethrow, &[]);
         self.unwind_exit();
@@ -5056,8 +4949,8 @@ impl Generator<'_, '_> {
     }
     /// A runtime call that is never followed by a panic test.
     fn runtime_void_raw(&mut self, id: FuncId, values: &[Value]) {
-        let callee = self.module.declare_func_in_func(id, self.builder.func);
-        self.builder.ins().call(callee, values);
+        let callee = self.builder.declare_func(self.module, id);
+        self.builder.call(callee, values);
     }
     /// After a call that may panic: unwind when the panic word is set.
     fn test_panic(&mut self) {
@@ -5067,14 +4960,11 @@ impl Generator<'_, '_> {
         let emitting = std::mem::replace(&mut self.unwind_emitting, true);
         let address = self.abort_word_address();
         self.unwind_emitting = emitting;
-        let word = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), address, 0);
-        let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, word, 1);
+        let word = self.builder.load(I64, ir::MemFlagsData::new(), address, 0);
+        let panicked = self.builder.icmp_imm_s(IntCC::Equal, word, 1);
         let unwind = self.builder.create_block();
         let normal = self.builder.create_block();
-        self.builder.ins().brif(panicked, unwind, &[], normal, &[]);
+        self.builder.brif(panicked, unwind, &[], normal, &[]);
         self.builder.switch_to_block(unwind);
         self.unwind_exit();
         self.builder.switch_to_block(normal);
@@ -5082,15 +4972,11 @@ impl Generator<'_, '_> {
     /// Trap when a runtime index is negative or outside `0..length`.
     fn check_index(&mut self, index: Value, length: i64) {
         let limit = self.constant(length);
-        let negative = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::SignedLessThan, index, 0);
+        let negative = self.builder.icmp_imm_s(IntCC::SignedLessThan, index, 0);
         let beyond = self
             .builder
-            .ins()
             .icmp(IntCC::SignedGreaterThanOrEqual, index, limit);
-        let invalid = self.builder.ins().bor(negative, beyond);
+        let invalid = self.builder.bor(negative, beyond);
         self.guard(invalid);
     }
     /// PROOF-FUZZ: mark the start of the checked operation of an obligation
@@ -5148,7 +5034,7 @@ impl Generator<'_, '_> {
     fn guard(&mut self, fail: Value) {
         let bad = self.builder.create_block();
         let good = self.builder.create_block();
-        self.builder.ins().brif(fail, bad, &[], good, &[]);
+        self.builder.brif(fail, bad, &[], good, &[]);
         self.builder.switch_to_block(bad);
         self.abort();
         self.builder.switch_to_block(good);
@@ -5161,7 +5047,6 @@ impl Generator<'_, '_> {
         let pointer = self.runtime_call(self.allocate, &[bytes]);
         for (index, value) in values.iter().enumerate() {
             self.builder
-                .ins()
                 .store(ir::MemFlagsData::new(), *value, pointer, (index * 8) as i32);
         }
         pointer
@@ -5172,7 +5057,7 @@ impl Generator<'_, '_> {
             (words.max(1) * 8) as u32,
             STACK_SLOT_ALIGN_SHIFT,
         ));
-        self.builder.ins().stack_addr(I64, slot, 0)
+        self.builder.stack_addr(I64, slot, 0)
     }
     /// Read one local's words without moving it.
     fn local_words(&mut self, slot: usize) -> Words {
@@ -5217,9 +5102,8 @@ impl Generator<'_, '_> {
             8,
             STACK_SLOT_ALIGN_SHIFT,
         ));
-        let pointer = self.builder.ins().stack_addr(I64, stack, 0);
+        let pointer = self.builder.stack_addr(I64, stack, 0);
         self.builder
-            .ins()
             .store(ir::MemFlagsData::new(), variable, pointer, 0);
         vec![pointer]
     }
@@ -5235,32 +5119,24 @@ impl Generator<'_, '_> {
             (self.variables[slot].len().max(1) * 8) as u32,
             STACK_SLOT_ALIGN_SHIFT,
         ));
-        let pointer = self.builder.ins().stack_addr(I64, stack, 0);
+        let pointer = self.builder.stack_addr(I64, stack, 0);
         self.builder
-            .ins()
             .store(ir::MemFlagsData::new(), variable, pointer, 0);
         pointer
     }
     /// The address of a slice view's element after the bound check; a
     /// byte-backed view has no word-sized element and traps instead.
     fn slice_element_address(&mut self, descriptor: &[Value], index: Value) -> Value {
-        let negative = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::SignedLessThan, index, 0);
+        let negative = self.builder.icmp_imm_s(IntCC::SignedLessThan, index, 0);
         let beyond = self
             .builder
-            .ins()
             .icmp(IntCC::SignedGreaterThanOrEqual, index, descriptor[1]);
-        let bytes = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::NotEqual, descriptor[3], 0);
-        let invalid = self.builder.ins().bor(negative, beyond);
-        let invalid = self.builder.ins().bor(invalid, bytes);
+        let bytes = self.builder.icmp_imm_s(IntCC::NotEqual, descriptor[3], 0);
+        let invalid = self.builder.bor(negative, beyond);
+        let invalid = self.builder.bor(invalid, bytes);
         self.guard(invalid);
-        let offset = self.builder.ins().imul(index, descriptor[2]);
-        self.builder.ins().iadd(descriptor[0], offset)
+        let offset = self.builder.imul(index, descriptor[2]);
+        self.builder.iadd(descriptor[0], offset)
     }
     /// The address of an element of the vector or inline array stored at
     /// `location`, after the bound check.
@@ -5276,21 +5152,20 @@ impl Generator<'_, '_> {
             .expect("checked array index place");
         self.check_index(index, length as i64);
         let stride = (self.program.width(element) * 8) as i64;
-        let offset = self.builder.ins().imul_imm_s(index, stride);
-        let data = self.builder.ins().iadd_imm_s(location, 8);
-        self.builder.ins().iadd(data, offset)
+        let offset = self.builder.imul_imm_s(index, stride);
+        let data = self.builder.iadd_imm_s(location, 8);
+        self.builder.iadd(data, offset)
     }
     fn store_words(&mut self, pointer: Value, values: &[Value]) {
         for (i, v) in values.iter().enumerate() {
             self.builder
-                .ins()
                 .store(ir::MemFlagsData::new(), *v, pointer, (i * 8) as i32);
         }
     }
     fn load_words(&mut self, pointer: Value, offset: i32, words: usize) -> Words {
         (0..words)
             .map(|i| {
-                self.builder.ins().load(
+                self.builder.load(
                     I64,
                     ir::MemFlagsData::new(),
                     pointer,
@@ -5303,21 +5178,20 @@ impl Generator<'_, '_> {
     /// sequence. `index` must already be in `0..=length`; `index == length` is
     /// always a boundary and is not dereferenced.
     fn check_text_boundary(&mut self, pointer: Value, index: Value, length: Value) {
-        let at_end = self.builder.ins().icmp(IntCC::Equal, index, length);
+        let at_end = self.builder.icmp(IntCC::Equal, index, length);
         let check = self.builder.create_block();
         let good = self.builder.create_block();
-        self.builder.ins().brif(at_end, good, &[], check, &[]);
+        self.builder.brif(at_end, good, &[], check, &[]);
         self.builder.switch_to_block(check);
-        let address = self.builder.ins().iadd(pointer, index);
+        let address = self.builder.iadd(pointer, index);
         let byte = self
             .builder
-            .ins()
             .uload8(I64, ir::MemFlagsData::new(), address, 0);
-        let masked = self.builder.ins().band_imm_s(byte, 0xC0);
-        let continuation = self.builder.ins().icmp_imm_s(IntCC::Equal, masked, 0x80);
+        let masked = self.builder.band_imm_s(byte, 0xC0);
+        let continuation = self.builder.icmp_imm_s(IntCC::Equal, masked, 0x80);
         let bad = self.builder.create_block();
         let ok = self.builder.create_block();
-        self.builder.ins().brif(continuation, bad, &[], ok, &[]);
+        self.builder.brif(continuation, bad, &[], ok, &[]);
         self.builder.switch_to_block(bad);
         self.abort();
         self.builder.switch_to_block(ok);
@@ -5325,20 +5199,11 @@ impl Generator<'_, '_> {
         self.builder.switch_to_block(good);
     }
     fn check_range(&mut self, start: Value, end: Value, length: Value) {
-        let negative = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::SignedLessThan, start, 0);
-        let reversed = self
-            .builder
-            .ins()
-            .icmp(IntCC::SignedGreaterThan, start, end);
-        let beyond = self
-            .builder
-            .ins()
-            .icmp(IntCC::SignedGreaterThan, end, length);
-        let invalid = self.builder.ins().bor(negative, reversed);
-        let invalid = self.builder.ins().bor(invalid, beyond);
+        let negative = self.builder.icmp_imm_s(IntCC::SignedLessThan, start, 0);
+        let reversed = self.builder.icmp(IntCC::SignedGreaterThan, start, end);
+        let beyond = self.builder.icmp(IntCC::SignedGreaterThan, end, length);
+        let invalid = self.builder.bor(negative, reversed);
+        let invalid = self.builder.bor(invalid, beyond);
         self.guard(invalid);
     }
     fn encode_variant(&mut self, ty: Type, tag: usize, payload: &[Value]) -> Words {
@@ -5377,7 +5242,7 @@ impl Generator<'_, '_> {
         let none = self.encode_variant(ty, none, &[]);
         some.into_iter()
             .zip(none)
-            .map(|(some, none)| self.builder.ins().select(present, some, none))
+            .map(|(some, none)| self.builder.select(present, some, none))
             .collect()
     }
     fn str_call(&mut self, op: StrOp, values: Words, ty: Type) -> Words {
@@ -5393,7 +5258,6 @@ impl Generator<'_, '_> {
                     self.runtime_call(self.str_scalar_at, &[pointer, length, values[4]]);
                 let present =
                     self.builder
-                        .ins()
                         .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, codepoint, 0);
                 self.optional_words(ty, present, &[codepoint], some_tag, none_tag)
             }
@@ -5434,12 +5298,10 @@ impl Generator<'_, '_> {
                         &right[offset..offset + width],
                     )
                 } else {
-                    self.builder
-                        .ins()
-                        .icmp(IntCC::Equal, left[offset], right[offset])
+                    self.builder.icmp(IntCC::Equal, left[offset], right[offset])
                 };
                 result = Some(match result {
-                    Some(previous) => self.builder.ins().band(previous, equal),
+                    Some(previous) => self.builder.band(previous, equal),
                     None => equal,
                 });
             }
@@ -5449,7 +5311,7 @@ impl Generator<'_, '_> {
             Some(value) => value,
             None => {
                 let zero = self.constant(0);
-                self.builder.ins().icmp_imm_s(IntCC::Equal, zero, 0i64)
+                self.builder.icmp_imm_s(IntCC::Equal, zero, 0i64)
             }
         }
     }
@@ -5523,9 +5385,8 @@ impl Generator<'_, '_> {
                     let next = self.builder.create_block();
                     let condition =
                         self.builder
-                            .ins()
                             .icmp_imm_s(IntCC::Equal, values[0], source_tag as i64);
-                    self.builder.ins().brif(condition, hit, &[], next, &[]);
+                    self.builder.brif(condition, hit, &[], next, &[]);
                     self.builder.switch_to_block(hit);
                     let mut out = Vec::with_capacity(width);
                     out.push(self.constant(*target_tag as i64));
@@ -5536,7 +5397,7 @@ impl Generator<'_, '_> {
                     self.jump(exit, &out);
                     self.builder.switch_to_block(next);
                 }
-                self.builder.ins().trap(TrapCode::unwrap_user(2));
+                self.builder.trap(TrapCode::unwrap_user(2));
                 self.builder.switch_to_block(exit);
                 self.builder.block_params(exit).to_vec()
             }
@@ -5554,10 +5415,8 @@ impl Generator<'_, '_> {
                 capture,
                 target,
             } => {
-                let reference = self
-                    .module
-                    .declare_func_in_func(self.ids[*function], self.builder.func);
-                let code = self.builder.ins().func_addr(I64, reference);
+                let reference = self.builder.declare_func(self.module, self.ids[*function]);
+                let code = self.builder.func_addr(I64, reference);
                 if !matches!(target, Type::Once(_)) {
                     return vec![code];
                 }
@@ -5569,14 +5428,13 @@ impl Generator<'_, '_> {
                 let size = self.constant(bytes as i64);
                 let environment = self.runtime_call(self.allocate, &[size]);
                 let drop = self.closure_drops[&types];
-                let drop = self.module.declare_func_in_func(drop, self.builder.func);
-                let drop = self.builder.ins().func_addr(I64, drop);
+                let drop = self.builder.declare_func(self.module, drop);
+                let drop = self.builder.func_addr(I64, drop);
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), drop, environment, 0);
                 let width = self.program.width(*capture_ty);
                 for (index, value) in values.iter().take(width).enumerate() {
-                    self.builder.ins().store(
+                    self.builder.store(
                         ir::MemFlagsData::new(),
                         *value,
                         environment,
@@ -5589,35 +5447,24 @@ impl Generator<'_, '_> {
     }
     fn dyn_array_call(&mut self, op: DynArrayOp, element: Type, values: Words) -> Words {
         let pointer = values[0];
-        let length = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), pointer, 0);
+        let length = self.builder.load(I64, ir::MemFlagsData::new(), pointer, 0);
         match op {
             DynArrayOp::Len => vec![length],
             DynArrayOp::Get => {
                 let index = values[1];
-                let negative = self
+                let negative = self.builder.icmp_imm_s(IntCC::SignedLessThan, index, 0);
+                let past_end = self
                     .builder
-                    .ins()
-                    .icmp_imm_s(IntCC::SignedLessThan, index, 0);
-                let past_end =
-                    self.builder
-                        .ins()
-                        .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length);
-                let bad = self.builder.ins().bor(negative, past_end);
+                    .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length);
+                let bad = self.builder.bor(negative, past_end);
                 self.guard(bad);
                 let width = self.program.width(element);
-                let stride = self.builder.ins().imul_imm_s(index, (width * 8) as i64);
-                let base = self.builder.ins().iadd(pointer, stride);
+                let stride = self.builder.imul_imm_s(index, (width * 8) as i64);
+                let base = self.builder.iadd(pointer, stride);
                 (0..width)
                     .map(|word| {
-                        self.builder.ins().load(
-                            I64,
-                            ir::MemFlagsData::new(),
-                            base,
-                            (8 + word * 8) as i32,
-                        )
+                        self.builder
+                            .load(I64, ir::MemFlagsData::new(), base, (8 + word * 8) as i32)
                     })
                     .collect()
             }
@@ -5629,34 +5476,21 @@ impl Generator<'_, '_> {
     fn bytes_access(&mut self, op: BytesOp, values: &[Value]) -> Value {
         let handle = values[0];
         match op {
-            BytesOp::Len => self
-                .builder
-                .ins()
-                .load(I64, ir::MemFlagsData::new(), handle, 0),
-            BytesOp::Capacity => self
-                .builder
-                .ins()
-                .load(I64, ir::MemFlagsData::new(), handle, 8),
+            BytesOp::Len => self.builder.load(I64, ir::MemFlagsData::new(), handle, 0),
+            BytesOp::Capacity => self.builder.load(I64, ir::MemFlagsData::new(), handle, 8),
             BytesOp::Get => {
-                let length = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), handle, 0);
+                let length = self.builder.load(I64, ir::MemFlagsData::new(), handle, 0);
                 let invalid =
                     self.builder
-                        .ins()
                         .icmp(IntCC::UnsignedGreaterThanOrEqual, values[1], length);
                 self.guard(invalid);
-                let address = self.builder.ins().iadd(handle, values[1]);
+                let address = self.builder.iadd(handle, values[1]);
                 self.builder
-                    .ins()
                     .uload8(I64, ir::MemFlagsData::new(), address, 16)
             }
             BytesOp::Clear => {
                 let zero = self.constant(0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), zero, handle, 0);
+                self.builder.store(ir::MemFlagsData::new(), zero, handle, 0);
                 handle
             }
             _ => unreachable!("checked byte-buffer access"),
@@ -5673,30 +5507,18 @@ impl Generator<'_, '_> {
         class: llvm::MemoryClass,
         build: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        // Locations are stored relative to a base; fix it at zero so that no
-        // class can coincide with "no location".
-        self.builder
-            .func
-            .params
-            .ensure_base_srcloc(ir::SourceLoc::new(0));
-        let previous = self.builder.srcloc();
-        self.builder.set_srcloc(ir::SourceLoc::new(class as u32));
+        let previous = self.builder.set_memory_class(Some(class as u32));
         let built = build(self);
-        self.builder.set_srcloc(previous);
+        self.builder.set_memory_class(previous);
         built
     }
     fn buffer_capacity(&mut self, handle: Value) -> Value {
         let word = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
-            g.builder
-                .ins()
-                .load(I64, ir::MemFlagsData::new(), handle, 8)
+            g.builder.load(I64, ir::MemFlagsData::new(), handle, 8)
         });
-        let raw = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::SignedLessThan, word, 0);
-        let decoded = self.builder.ins().band_imm_s(word, 0xffff);
-        self.builder.ins().select(raw, decoded, word)
+        let raw = self.builder.icmp_imm_s(IntCC::SignedLessThan, word, 0);
+        let decoded = self.builder.band_imm_s(word, 0xffff);
+        self.builder.select(raw, decoded, word)
     }
     /// Release-mode byte append avoids a C call when capacity is available.
     /// The unsigned range check also rejects negative values. The cold helper
@@ -5704,16 +5526,13 @@ impl Generator<'_, '_> {
     fn push_bytes(&mut self, handle: Value, value: Value, op: BytesOp) -> Value {
         let invalid = self
             .builder
-            .ins()
             .icmp_imm_u(IntCC::UnsignedGreaterThan, value, 255);
         if self.program.uses_unwinding {
             // The buffer was moved into the push: let the runtime free it
             // when the byte is invalid, then unwind.
             let slow_invalid = self.builder.create_block();
             let valid = self.builder.create_block();
-            self.builder
-                .ins()
-                .brif(invalid, slow_invalid, &[], valid, &[]);
+            self.builder.brif(invalid, slow_invalid, &[], valid, &[]);
             self.builder.switch_to_block(slow_invalid);
             let _ = self.runtime_call(self.bytes_ops[&op], &[handle, value]);
             self.unwind_exit();
@@ -5723,35 +5542,25 @@ impl Generator<'_, '_> {
         }
         let (length, capacity) = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
             (
-                g.builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), handle, 0),
-                g.builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), handle, 8),
+                g.builder.load(I64, ir::MemFlagsData::new(), handle, 0),
+                g.builder.load(I64, ir::MemFlagsData::new(), handle, 8),
             )
         });
-        let room = self
-            .builder
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, length, capacity);
+        let room = self.builder.icmp(IntCC::UnsignedLessThan, length, capacity);
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();
         let join = self.builder.create_block();
         self.builder.append_block_param(join, I64);
-        self.builder.ins().brif(room, fast, &[], slow, &[]);
+        self.builder.brif(room, fast, &[], slow, &[]);
         self.builder.switch_to_block(fast);
-        let address = self.builder.ins().iadd(handle, length);
+        let address = self.builder.iadd(handle, length);
         self.memory_class(llvm::MemoryClass::BufferElements, |g| {
             g.builder
-                .ins()
                 .istore8(ir::MemFlagsData::new(), value, address, 16);
         });
-        let next = self.builder.ins().iadd_imm_s(length, 1);
+        let next = self.builder.iadd_imm_s(length, 1);
         self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
-            g.builder
-                .ins()
-                .store(ir::MemFlagsData::new(), next, handle, 0);
+            g.builder.store(ir::MemFlagsData::new(), next, handle, 0);
         });
         self.jump(join, &[handle]);
         self.builder.switch_to_block(slow);
@@ -5765,13 +5574,13 @@ impl Generator<'_, '_> {
     /// ownership; the original helper handles all capacity/overflow cases.
     fn push_vector(&mut self, handle: Value, words: &[Value]) -> Value {
         let callee = self
-            .module
-            .declare_func_in_func(self.vec_ops[&VecOp::Push], self.builder.func);
+            .builder
+            .declare_func(self.module, self.vec_ops[&VecOp::Push]);
         let width = self.constant(words.len() as i64);
         if self.codegen.optimization != Optimization::Speed {
             let item = self.stack_words(words.len());
             self.store_words(item, words);
-            let call = self.builder.ins().call(callee, &[handle, item, width]);
+            let call = self.builder.call(callee, &[handle, item, width]);
             return self.builder.inst_results(call)[0];
         }
         let shadow = self.push_shadow.take();
@@ -5781,32 +5590,24 @@ impl Generator<'_, '_> {
             }
             None => {
                 let length = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
-                    g.builder
-                        .ins()
-                        .load(I64, ir::MemFlagsData::new(), handle, 0)
+                    g.builder.load(I64, ir::MemFlagsData::new(), handle, 0)
                 });
                 (length, self.buffer_capacity(handle))
             }
         };
-        let room = self
-            .builder
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, length, capacity);
-        let next = self.builder.ins().iadd_imm_s(length, 1);
+        let room = self.builder.icmp(IntCC::UnsignedLessThan, length, capacity);
+        let next = self.builder.iadd_imm_s(length, 1);
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();
         let join = self.builder.create_block();
         self.builder.append_block_param(join, I64);
-        self.builder.ins().brif(room, fast, &[], slow, &[]);
+        self.builder.brif(room, fast, &[], slow, &[]);
         self.builder.switch_to_block(fast);
-        let offset = self
-            .builder
-            .ins()
-            .imul_imm_s(length, (words.len() * 8) as i64);
-        let address = self.builder.ins().iadd(handle, offset);
+        let offset = self.builder.imul_imm_s(length, (words.len() * 8) as i64);
+        let address = self.builder.iadd(handle, offset);
         self.memory_class(llvm::MemoryClass::BufferElements, |g| {
             for (word, value) in words.iter().enumerate() {
-                g.builder.ins().store(
+                g.builder.store(
                     ir::MemFlagsData::new(),
                     *value,
                     address,
@@ -5815,15 +5616,13 @@ impl Generator<'_, '_> {
             }
         });
         self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
-            g.builder
-                .ins()
-                .store(ir::MemFlagsData::new(), next, handle, 0);
+            g.builder.store(ir::MemFlagsData::new(), next, handle, 0);
         });
         self.jump(join, &[handle]);
         self.builder.switch_to_block(slow);
         let item = self.stack_words(words.len());
         self.store_words(item, words);
-        let call = self.builder.ins().call(callee, &[handle, item, width]);
+        let call = self.builder.call(callee, &[handle, item, width]);
         let grown = self.builder.inst_results(call)[0];
         if let Some((_, capacity)) = shadow {
             // The push succeeded or panicked, so the length is one more
@@ -5845,14 +5644,11 @@ impl Generator<'_, '_> {
             // (FND-MIR-BOUNDS). A negative index can still pass a signed
             // test, so retain its check at the access, after all preceding
             // effects.
-            self.builder
-                .ins()
-                .icmp_imm_s(IntCC::SignedLessThan, index, 0)
+            self.builder.icmp_imm_s(IntCC::SignedLessThan, index, 0)
         } else {
             // Length is always nonnegative; unsigned comparison rejects both
             // negative indices and indices at/above length in one test.
             self.builder
-                .ins()
                 .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length)
         }
     }
@@ -5870,12 +5666,9 @@ impl Generator<'_, '_> {
         ) {
             let invalid = self.slice_out_of_bounds(index, length);
             self.guard(invalid);
-            let offset = self.builder.ins().imul(index, stride);
-            let address = self.builder.ins().iadd(pointer, offset);
-            let handle = self
-                .builder
-                .ins()
-                .load(I64, ir::MemFlagsData::new(), address, 0);
+            let offset = self.builder.imul(index, stride);
+            let address = self.builder.iadd(pointer, offset);
+            let handle = self.builder.load(I64, ir::MemFlagsData::new(), address, 0);
             let Type::Channel(message) = element else {
                 unreachable!("checked channel view")
             };
@@ -5885,7 +5678,7 @@ impl Generator<'_, '_> {
                 SliceOp::ChannelSend => {
                     let slot = self.stack_words(width.max(1));
                     for (word, value) in values[5..5 + width].iter().enumerate() {
-                        self.builder.ins().store(
+                        self.builder.store(
                             ir::MemFlagsData::new(),
                             *value,
                             slot,
@@ -5912,7 +5705,7 @@ impl Generator<'_, '_> {
                     for _ in 0..self.program.enums[option].words {
                         self.builder.append_block_param(join, I64);
                     }
-                    self.builder.ins().brif(got, some, &[], none, &[]);
+                    self.builder.brif(got, some, &[], none, &[]);
                     self.builder.switch_to_block(some);
                     let payload = self.load_words(slot, 0, width);
                     let some_values = self.encode_variant(Type::Enum(option), some_tag, &payload);
@@ -5939,36 +5732,29 @@ impl Generator<'_, '_> {
             let _ = bytes;
             let invalid = self.slice_out_of_bounds(index, length);
             self.guard(invalid);
-            let offset = self.builder.ins().imul(index, stride);
-            let address = self.builder.ins().iadd(pointer, offset);
+            let offset = self.builder.imul(index, stride);
+            let address = self.builder.iadd(pointer, offset);
             let flags = ir::MemFlagsData::trusted();
             return vec![match op {
-                SliceOp::AtomicLoad => self.builder.ins().atomic_load(I64, flags, address),
+                SliceOp::AtomicLoad => self.builder.atomic_load(I64, flags, address),
                 SliceOp::AtomicStore => {
-                    self.builder.ins().atomic_store(flags, values[5], address);
+                    self.builder.atomic_store(flags, values[5], address);
                     self.constant(0)
                 }
-                SliceOp::AtomicFetchAdd => self.builder.ins().atomic_rmw(
-                    I64,
-                    flags,
-                    ir::AtomicRmwOp::Add,
-                    address,
-                    values[5],
-                ),
-                SliceOp::AtomicSwap => self.builder.ins().atomic_rmw(
-                    I64,
-                    flags,
-                    ir::AtomicRmwOp::Xchg,
-                    address,
-                    values[5],
-                ),
+                SliceOp::AtomicFetchAdd => {
+                    self.builder
+                        .atomic_rmw(I64, flags, ir::AtomicRmwOp::Add, address, values[5])
+                }
+                SliceOp::AtomicSwap => {
+                    self.builder
+                        .atomic_rmw(I64, flags, ir::AtomicRmwOp::Xchg, address, values[5])
+                }
                 _ => {
                     let old = self
                         .builder
-                        .ins()
                         .atomic_cas(flags, address, values[5], values[6]);
-                    let hit = self.builder.ins().icmp(IntCC::Equal, old, values[5]);
-                    self.builder.ins().uextend(I64, hit)
+                    let hit = self.builder.icmp(IntCC::Equal, old, values[5]);
+                    self.builder.uextend(I64, hit)
                 }
             }];
         }
@@ -5977,12 +5763,12 @@ impl Generator<'_, '_> {
                 let invalid = self.slice_out_of_bounds(index, length);
                 self.guard(invalid);
             }
-            let offset = self.builder.ins().imul(index, stride);
-            let address = self.builder.ins().iadd(pointer, offset);
+            let offset = self.builder.imul(index, stride);
+            let address = self.builder.iadd(pointer, offset);
             let value = values[5];
             if element_width != 1 {
                 for word in 0..element_width {
-                    self.builder.ins().store(
+                    self.builder.store(
                         ir::MemFlagsData::new(),
                         values[5 + word],
                         address,
@@ -5991,39 +5777,32 @@ impl Generator<'_, '_> {
                 }
             } else {
                 let store_byte = |this: &mut Self| {
-                    let negative = this
+                    let negative = this.builder.icmp_imm_s(IntCC::SignedLessThan, value, 0);
+                    let too_large = this
                         .builder
-                        .ins()
-                        .icmp_imm_s(IntCC::SignedLessThan, value, 0);
-                    let too_large =
-                        this.builder
-                            .ins()
-                            .icmp_imm_s(IntCC::SignedGreaterThan, value, 255);
-                    let invalid = this.builder.ins().bor(negative, too_large);
+                        .icmp_imm_s(IntCC::SignedGreaterThan, value, 255);
+                    let invalid = this.builder.bor(negative, too_large);
                     this.guard(invalid);
                     this.builder
-                        .ins()
                         .istore8(ir::MemFlagsData::new(), value, address, 0);
                 };
                 match self.byte_layout(bytes) {
                     Some(true) => store_byte(self),
                     Some(false) => {
                         self.builder
-                            .ins()
                             .store(ir::MemFlagsData::new(), value, address, 0);
                     }
                     None => {
-                        let byte = self.builder.ins().icmp_imm_s(IntCC::NotEqual, bytes, 0);
+                        let byte = self.builder.icmp_imm_s(IntCC::NotEqual, bytes, 0);
                         let scalar = self.builder.create_block();
                         let words = self.builder.create_block();
                         let join = self.builder.create_block();
-                        self.builder.ins().brif(byte, scalar, &[], words, &[]);
+                        self.builder.brif(byte, scalar, &[], words, &[]);
                         self.builder.switch_to_block(scalar);
                         store_byte(self);
                         self.jump(join, &[]);
                         self.builder.switch_to_block(words);
                         self.builder
-                            .ins()
                             .store(ir::MemFlagsData::new(), value, address, 0);
                         self.jump(join, &[]);
                         self.builder.switch_to_block(join);
@@ -6039,7 +5818,7 @@ impl Generator<'_, '_> {
         } = op
         {
             let invalid = self.slice_out_of_bounds(index, length);
-            let valid = self.builder.ins().icmp_imm_s(IntCC::Equal, invalid, 0);
+            let valid = self.builder.icmp_imm_s(IntCC::Equal, invalid, 0);
             // Use the real instantiated enum layout rather than deriving it
             // from the element width, so aggregate and union payloads keep
             // the exact ABI of `Option<T>`.
@@ -6050,12 +5829,12 @@ impl Generator<'_, '_> {
             for _ in 0..option_width {
                 self.builder.append_block_param(join, I64);
             }
-            self.builder.ins().brif(valid, some, &[], none, &[]);
+            self.builder.brif(valid, some, &[], none, &[]);
             self.builder.switch_to_block(some);
             // The element is only read on the in-bounds branch; nothing is
             // loaded from the view before the bounds test.
-            let offset = self.builder.ins().imul(index, stride);
-            let address = self.builder.ins().iadd(pointer, offset);
+            let offset = self.builder.imul(index, stride);
+            let address = self.builder.iadd(pointer, offset);
             let payload: Vec<Value> = if element_width != 1 {
                 self.load_words(address, 0, element_width)
             } else {
@@ -6073,8 +5852,8 @@ impl Generator<'_, '_> {
             let invalid = self.slice_out_of_bounds(index, length);
             self.guard(invalid);
         }
-        let offset = self.builder.ins().imul(index, stride);
-        let address = self.builder.ins().iadd(pointer, offset);
+        let offset = self.builder.imul(index, stride);
+        let address = self.builder.iadd(pointer, offset);
         // Only byte-backed slices (`&[i64]` over Bytes) can set the flag, and
         // their elements are one word wide. Wider elements always use word loads.
         if element_width != 1 {
@@ -6084,50 +5863,36 @@ impl Generator<'_, '_> {
     }
     /// The value of an `iconst`, if `value` is one.
     fn constant_value(&self, value: Value) -> Option<i64> {
-        let ir::ValueDef::Result(inst, _) = self.builder.func.dfg.value_def(value) else {
-            return None;
-        };
-        match self.builder.func.dfg.insts[inst] {
-            ir::InstructionData::UnaryImm {
-                opcode: ir::Opcode::Iconst,
-                imm,
-            } => Some(imm.bits()),
-            _ => None,
-        }
+        self.builder.constant_of(value)
     }
     /// Two words (low first) as one 128-bit vector of `lanes`.
     fn simd_pack(&mut self, low: Value, high: Value, lanes: ir::Type) -> Value {
-        let vector = self.builder.ins().scalar_to_vector(ir::types::I64X2, low);
-        let vector = self.builder.ins().insertlane(vector, high, 1);
+        let vector = self.builder.scalar_to_vector(ir::types::I64X2, low);
+        let vector = self.builder.insertlane(vector, high, 1);
         self.simd_cast(vector, lanes)
     }
     /// A 128-bit vector back to its two words (low first).
     fn simd_unpack(&mut self, vector: Value) -> Words {
         let vector = self.simd_cast(vector, ir::types::I64X2);
         vec![
-            self.builder.ins().extractlane(vector, 0),
-            self.builder.ins().extractlane(vector, 1),
+            self.builder.extractlane(vector, 0),
+            self.builder.extractlane(vector, 1),
         ]
     }
     /// Reinterpret a 128-bit vector (x86 lane order on both sides).
     fn simd_cast(&mut self, vector: Value, lanes: ir::Type) -> Value {
-        if self.builder.func.dfg.value_type(vector) == lanes {
+        if self.builder.value_type(vector) == lanes {
             return vector;
         }
         let flags = ir::MemFlagsData::new().with_endianness(ir::Endianness::Little);
-        self.builder.ins().bitcast(lanes, flags, vector)
+        self.builder.bitcast(lanes, flags, vector)
     }
     /// A byte shuffle of `a` then `b` (indices 16 and up select `b`).
     fn simd_shuffle(&mut self, a: Value, b: Value, bytes: &[u8]) -> Value {
         let a = self.simd_cast(a, ir::types::I8X16);
         let b = self.simd_cast(b, ir::types::I8X16);
-        let mask = self
-            .builder
-            .func
-            .dfg
-            .immediates
-            .push(ir::ConstantData::from(bytes.to_vec()));
-        self.builder.ins().shuffle(a, b, mask)
+        let mask = self.builder.shuffle_mask(bytes);
+        self.builder.shuffle(a, b, mask)
     }
     /// SIMD-X86-SHA: an intrinsic of std.x86 as a call to the runtime routine
     /// that runs the instruction (`kush_x86_*`, compiled with
@@ -6162,8 +5927,8 @@ impl Generator<'_, '_> {
         let arguments = (0..vectors)
             .map(|k| self.simd_pack(values[1 + 2 * k], values[2 + 2 * k], ir::types::I64X2))
             .collect::<Vec<_>>();
-        let callee = self.module.declare_func_in_func(id, self.builder.func);
-        let call = self.builder.ins().call(callee, &arguments);
+        let callee = self.builder.declare_func(self.module, id);
+        let call = self.builder.call(callee, &arguments);
         let result = self.builder.inst_results(call)[0];
         Some(self.simd_unpack(result))
     }
@@ -6213,20 +5978,20 @@ impl Generator<'_, '_> {
                         lanes,
                     );
                     match op {
-                        "and" => self.builder.ins().band(a, b),
-                        "or" => self.builder.ins().bor(a, b),
-                        "xor" => self.builder.ins().bxor(a, b),
-                        "wrapping_add" => self.builder.ins().iadd(a, b),
-                        "wrapping_sub" => self.builder.ins().isub(a, b),
-                        _ => self.builder.ins().icmp(IntCC::Equal, a, b),
+                        "and" => self.builder.band(a, b),
+                        "or" => self.builder.bor(a, b),
+                        "xor" => self.builder.bxor(a, b),
+                        "wrapping_add" => self.builder.iadd(a, b),
+                        "wrapping_sub" => self.builder.isub(a, b),
+                        _ => self.builder.icmp(IntCC::Equal, a, b),
                     }
                 } else {
                     // The amount was proved below the lane width.
                     match (op, signed) {
-                        ("not", _) => self.builder.ins().bnot(a),
-                        ("shl", _) => self.builder.ins().ishl(a, values[words]),
-                        (_, true) => self.builder.ins().sshr(a, values[words]),
-                        _ => self.builder.ins().ushr(a, values[words]),
+                        ("not", _) => self.builder.bnot(a),
+                        ("shl", _) => self.builder.ishl(a, values[words]),
+                        (_, true) => self.builder.sshr(a, values[words]),
+                        _ => self.builder.ushr(a, values[words]),
                     }
                 };
                 result.extend(self.simd_unpack(vector));
@@ -6294,22 +6059,12 @@ impl Generator<'_, '_> {
     /// Whether a slice's byte flag is a known constant: `Some(true)` for a
     /// byte-backed view, `Some(false)` for a word-backed one.
     fn byte_layout(&self, bytes: Value) -> Option<bool> {
-        let ir::ValueDef::Result(inst, _) = self.builder.func.dfg.value_def(bytes) else {
-            return None;
-        };
-        match self.builder.func.dfg.insts[inst] {
-            ir::InstructionData::UnaryImm {
-                opcode: ir::Opcode::Iconst,
-                imm,
-            } => Some(imm.bits() != 0),
-            _ => None,
-        }
+        self.builder.constant_of(bytes).map(|flag| flag != 0)
     }
     /// Load a one-word slice element, as a byte when the view is byte-backed.
     fn load_element(&mut self, address: Value, bytes: Value) -> Value {
         let load_byte = |this: &mut Self| {
             this.builder
-                .ins()
                 .uload8(I64, ir::MemFlagsData::new(), address, 0)
         };
         match self.byte_layout(bytes) {
@@ -6317,12 +6072,12 @@ impl Generator<'_, '_> {
             Some(false) => return self.load_words(address, 0, 1)[0],
             None => {}
         }
-        let byte = self.builder.ins().icmp_imm_s(IntCC::NotEqual, bytes, 0);
+        let byte = self.builder.icmp_imm_s(IntCC::NotEqual, bytes, 0);
         let scalar = self.builder.create_block();
         let words = self.builder.create_block();
         let join = self.builder.create_block();
         self.builder.append_block_param(join, I64);
-        self.builder.ins().brif(byte, scalar, &[], words, &[]);
+        self.builder.brif(byte, scalar, &[], words, &[]);
         self.builder.switch_to_block(scalar);
         let value = load_byte(self);
         self.jump(join, &[value]);
@@ -6347,14 +6102,12 @@ impl Generator<'_, '_> {
             AllocVecOp::Len => {
                 let handle = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
                 vec![self.runtime_call(self.alloc_ops.vec_len, &[handle])]
             }
             AllocVecOp::Get => {
                 let handle = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
                 let out = self.stack_words(width);
                 self.runtime_void(self.alloc_ops.vec_get, &[handle, values[1], out]);
@@ -6374,7 +6127,7 @@ impl Generator<'_, '_> {
                     .layout()
                     .and_then(|id| self.program.enums[id].result)
                     .expect("checked AllocVec.try_push result");
-                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, success, 0);
+                let failed = self.builder.icmp_imm_s(IntCC::Equal, success, 0);
                 let ok = self.builder.create_block();
                 let error = self.builder.create_block();
                 let done = self.builder.create_block();
@@ -6384,12 +6137,12 @@ impl Generator<'_, '_> {
                     (result_width * 8).max(1) as u32,
                     STACK_SLOT_ALIGN_SHIFT,
                 ));
-                let destination = self.builder.ins().stack_addr(I64, slot, 0);
+                let destination = self.builder.stack_addr(I64, slot, 0);
                 let zero = self.constant(0);
-                self.builder.ins().brif(failed, error, &[], ok, &[]);
+                self.builder.brif(failed, error, &[], ok, &[]);
                 self.builder.switch_to_block(ok);
                 for index in 0..result_width {
-                    self.builder.ins().store(
+                    self.builder.store(
                         ir::MemFlagsData::new(),
                         zero,
                         destination,
@@ -6398,25 +6151,20 @@ impl Generator<'_, '_> {
                 }
                 let tag = self.constant(shape.ok_tag as i64);
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), tag, destination, 0);
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), values[0], destination, 8);
-                self.builder.ins().jump(done, &[]);
+                self.builder.jump(done, &[]);
                 self.builder.switch_to_block(error);
                 let tag = self.constant(shape.err_tag as i64);
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), tag, destination, 0);
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), zero, destination, 8);
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), values[0], destination, 16);
                 for index in 0..width {
-                    self.builder.ins().store(
+                    self.builder.store(
                         ir::MemFlagsData::new(),
                         values[1 + index],
                         destination,
@@ -6424,18 +6172,18 @@ impl Generator<'_, '_> {
                     );
                 }
                 for index in (3 + width)..result_width {
-                    self.builder.ins().store(
+                    self.builder.store(
                         ir::MemFlagsData::new(),
                         zero,
                         destination,
                         (index * 8) as i32,
                     );
                 }
-                self.builder.ins().jump(done, &[]);
+                self.builder.jump(done, &[]);
                 self.builder.switch_to_block(done);
                 (0..result_width)
                     .map(|index| {
-                        self.builder.ins().load(
+                        self.builder.load(
                             I64,
                             ir::MemFlagsData::new(),
                             destination,
@@ -6465,10 +6213,7 @@ impl Generator<'_, '_> {
             AllocVecOp::Clear => {
                 let handle = values[0];
                 if self.program.owns(element) {
-                    let length = self
-                        .builder
-                        .ins()
-                        .load(I64, ir::MemFlagsData::new(), handle, 0);
+                    let length = self.builder.load(I64, ir::MemFlagsData::new(), handle, 0);
                     let data = self.runtime_call(self.alloc_ops.vec_data, &[handle]);
                     let head = self.builder.create_block();
                     let body = self.builder.create_block();
@@ -6477,12 +6222,12 @@ impl Generator<'_, '_> {
                     self.jump(head, &[length]);
                     self.builder.switch_to_block(head);
                     let index = self.builder.block_params(head)[0];
-                    let more = self.builder.ins().icmp_imm_s(IntCC::NotEqual, index, 0);
-                    self.builder.ins().brif(more, body, &[], done, &[]);
+                    let more = self.builder.icmp_imm_s(IntCC::NotEqual, index, 0);
+                    self.builder.brif(more, body, &[], done, &[]);
                     self.builder.switch_to_block(body);
-                    let previous = self.builder.ins().iadd_imm_s(index, -1);
-                    let stride = self.builder.ins().imul_imm_s(previous, (width * 8) as i64);
-                    let slot = self.builder.ins().iadd(data, stride);
+                    let previous = self.builder.iadd_imm_s(index, -1);
+                    let stride = self.builder.imul_imm_s(previous, (width * 8) as i64);
+                    let slot = self.builder.iadd(data, stride);
                     let fields = self.load_words(slot, 0, width);
                     self.drop_value(element, &fields);
                     self.jump(head, &[previous]);
@@ -6496,14 +6241,12 @@ impl Generator<'_, '_> {
     fn vec_call(&mut self, op: VecOp, element: Type, values: Words) -> Words {
         let width = self.program.width(element);
         let call = |g: &mut Self, op: VecOp, args: &[Value]| {
-            let callee = g
-                .module
-                .declare_func_in_func(g.vec_ops[&op], g.builder.func);
+            let callee = g.builder.declare_func(g.module, g.vec_ops[&op]);
             let mut args = args.to_vec();
             if !matches!(op, VecOp::WithCapacity | VecOp::Len) {
                 args.push(g.constant(width as i64));
             }
-            let call = g.builder.ins().call(callee, &args);
+            let call = g.builder.call(callee, &args);
             g.builder.inst_results(call).to_vec()
         };
         match op {
@@ -6521,21 +6264,19 @@ impl Generator<'_, '_> {
                     },
                     &[values[0], values[1]],
                 )[0];
-                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, grown, 0);
+                let failed = self.builder.icmp_imm_s(IntCC::Equal, grown, 0);
                 let ok = self.constant(ok_tag as i64);
                 let error = self.constant(err_tag as i64);
-                let tag = self.builder.ins().select(failed, error, ok);
-                let owner = self.builder.ins().select(failed, values[0], grown);
+                let tag = self.builder.select(failed, error, ok);
+                let owner = self.builder.select(failed, values[0], grown);
                 vec![tag, owner]
             }
             VecOp::ReplaceBorrowed => {
                 let reference = values[0];
                 let old = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), reference, 0);
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), values[1], reference, 0);
                 vec![old]
             }
@@ -6543,13 +6284,9 @@ impl Generator<'_, '_> {
                 let reference = values[0];
                 let handle = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), reference, 0);
                 if self.program.owns(element) {
-                    let length = self
-                        .builder
-                        .ins()
-                        .load(I64, ir::MemFlagsData::new(), handle, 0);
+                    let length = self.builder.load(I64, ir::MemFlagsData::new(), handle, 0);
                     let head = self.builder.create_block();
                     let body = self.builder.create_block();
                     let done = self.builder.create_block();
@@ -6557,32 +6294,28 @@ impl Generator<'_, '_> {
                     self.jump(head, &[length]);
                     self.builder.switch_to_block(head);
                     let index = self.builder.block_params(head)[0];
-                    let more = self.builder.ins().icmp_imm_s(IntCC::NotEqual, index, 0);
-                    self.builder.ins().brif(more, body, &[], done, &[]);
+                    let more = self.builder.icmp_imm_s(IntCC::NotEqual, index, 0);
+                    self.builder.brif(more, body, &[], done, &[]);
                     self.builder.switch_to_block(body);
-                    let previous = self.builder.ins().iadd_imm_s(index, -1);
-                    let stride = self.builder.ins().imul_imm_s(previous, (width * 8) as i64);
-                    let slot = self.builder.ins().iadd(handle, stride);
+                    let previous = self.builder.iadd_imm_s(index, -1);
+                    let stride = self.builder.imul_imm_s(previous, (width * 8) as i64);
+                    let slot = self.builder.iadd(handle, stride);
                     let fields = self.load_words(slot, 16, width);
                     self.drop_value(element, &fields);
                     self.jump(head, &[previous]);
                     self.builder.switch_to_block(done);
                 }
                 let zero = self.constant(0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), zero, handle, 0);
+                self.builder.store(ir::MemFlagsData::new(), zero, handle, 0);
                 vec![self.constant(0)]
             }
             VecOp::ReserveBorrowed => {
                 let reference = values[0];
                 let handle = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), reference, 0);
                 let grown = call(self, VecOp::Reserve, &[handle, values[1]])[0];
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), grown, reference, 0);
                 vec![self.constant(0)]
             }
@@ -6590,11 +6323,9 @@ impl Generator<'_, '_> {
                 let reference = values[0];
                 let handle = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), reference, 0);
                 let grown = self.push_vector(handle, &values[1..1 + width]);
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), grown, reference, 0);
                 vec![self.constant(0)]
             }
@@ -6602,7 +6333,6 @@ impl Generator<'_, '_> {
                 let reference = values[0];
                 let handle = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), reference, 0);
                 let item = self.stack_words(width);
                 self.store_words(item, &values[2..2 + width]);
@@ -6617,11 +6347,10 @@ impl Generator<'_, '_> {
                 // 16-byte header, nothing to drop.
                 let handle = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                let stride = self.builder.ins().imul_imm_s(values[1], (width * 8) as i64);
-                let base = self.builder.ins().iadd(handle, stride);
-                let slot = self.builder.ins().iadd_imm_s(base, 16);
+                let stride = self.builder.imul_imm_s(values[1], (width * 8) as i64);
+                let base = self.builder.iadd(handle, stride);
+                let slot = self.builder.iadd_imm_s(base, 16);
                 self.store_words(slot, &values[2..2 + width]);
                 vec![self.constant(0)]
             }
@@ -6630,10 +6359,7 @@ impl Generator<'_, '_> {
                 if self.program.owns(element) {
                     // Release elements from the end. Each slot is dropped
                     // exactly once; the vector header and storage stay alive.
-                    let length = self
-                        .builder
-                        .ins()
-                        .load(I64, ir::MemFlagsData::new(), handle, 0);
+                    let length = self.builder.load(I64, ir::MemFlagsData::new(), handle, 0);
                     let head = self.builder.create_block();
                     let body = self.builder.create_block();
                     let done = self.builder.create_block();
@@ -6641,21 +6367,19 @@ impl Generator<'_, '_> {
                     self.jump(head, &[length]);
                     self.builder.switch_to_block(head);
                     let index = self.builder.block_params(head)[0];
-                    let more = self.builder.ins().icmp_imm_s(IntCC::NotEqual, index, 0);
-                    self.builder.ins().brif(more, body, &[], done, &[]);
+                    let more = self.builder.icmp_imm_s(IntCC::NotEqual, index, 0);
+                    self.builder.brif(more, body, &[], done, &[]);
                     self.builder.switch_to_block(body);
-                    let previous = self.builder.ins().iadd_imm_s(index, -1);
-                    let stride = self.builder.ins().imul_imm_s(previous, (width * 8) as i64);
-                    let slot = self.builder.ins().iadd(handle, stride);
+                    let previous = self.builder.iadd_imm_s(index, -1);
+                    let stride = self.builder.imul_imm_s(previous, (width * 8) as i64);
+                    let slot = self.builder.iadd(handle, stride);
                     let fields = self.load_words(slot, 16, width);
                     self.drop_value(element, &fields);
                     self.jump(head, &[previous]);
                     self.builder.switch_to_block(done);
                 }
                 let zero = self.constant(0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), zero, handle, 0);
+                self.builder.store(ir::MemFlagsData::new(), zero, handle, 0);
                 vec![handle]
             }
             // Length, checked reads and copyable writes are inline: the header
@@ -6667,14 +6391,9 @@ impl Generator<'_, '_> {
             VecOp::Len => {
                 let handle = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
                 if self.codegen.optimization == Optimization::Speed {
-                    vec![
-                        self.builder
-                            .ins()
-                            .load(I64, ir::MemFlagsData::new(), handle, 0),
-                    ]
+                    vec![self.builder.load(I64, ir::MemFlagsData::new(), handle, 0)]
                 } else {
                     call(self, op, &[handle])
                 }
@@ -6682,7 +6401,6 @@ impl Generator<'_, '_> {
             VecOp::Get => {
                 let handle = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
                 let out = self.stack_words(width);
                 call(self, op, &[handle, values[1], out]);
@@ -6692,10 +6410,9 @@ impl Generator<'_, '_> {
                 // Proved in bounds: direct load after the 16-byte header.
                 let handle = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                let stride = self.builder.ins().imul_imm_s(values[1], (width * 8) as i64);
-                let base = self.builder.ins().iadd(handle, stride);
+                let stride = self.builder.imul_imm_s(values[1], (width * 8) as i64);
+                let base = self.builder.iadd(handle, stride);
                 self.load_words(base, 16, width)
             }
             VecOp::Push => {
@@ -6716,18 +6433,18 @@ impl Generator<'_, '_> {
     fn defer_sign(&mut self, word: Value) {
         let sticky = self.mir_sticky.expect("a deferred operation's sticky word");
         let previous = self.builder.use_var(sticky);
-        let merged = self.builder.ins().bor(previous, word);
+        let merged = self.builder.bor(previous, word);
         self.builder.def_var(sticky, merged);
     }
     /// Record a deferred overflow from a 0/1 flag.
     fn defer_flag(&mut self, flag: Value) {
-        let wide = self.builder.ins().uextend(I64, flag);
-        let word = self.builder.ins().ineg(wide);
+        let wide = self.builder.uextend(I64, flag);
+        let word = self.builder.ineg(wide);
         self.defer_sign(word);
     }
     fn defer_int_range(&mut self, kind: IntKind, value: Value) -> Value {
         let canonical = self.canonical(kind, value);
-        let wrong = self.builder.ins().icmp(IntCC::NotEqual, canonical, value);
+        let wrong = self.builder.icmp(IntCC::NotEqual, canonical, value);
         self.defer_flag(wrong);
         // The wrapped result, not the raw word: the rest of the lowering
         // relies on narrow values being in canonical form (for instance, a
@@ -6746,30 +6463,30 @@ impl Generator<'_, '_> {
     ) -> Value {
         if mode != deferred::Mode::Exact {
             return match op {
-                Kind::Plus => self.builder.ins().iadd(left, right),
-                Kind::Minus => self.builder.ins().isub(left, right),
-                _ => self.builder.ins().imul(left, right),
+                Kind::Plus => self.builder.iadd(left, right),
+                Kind::Minus => self.builder.isub(left, right),
+                _ => self.builder.imul(left, right),
             };
         }
         match op {
             Kind::Plus => {
-                let sum = self.builder.ins().iadd(left, right);
-                let a = self.builder.ins().bxor(left, sum);
-                let b = self.builder.ins().bxor(right, sum);
-                let overflow = self.builder.ins().band(a, b);
+                let sum = self.builder.iadd(left, right);
+                let a = self.builder.bxor(left, sum);
+                let b = self.builder.bxor(right, sum);
+                let overflow = self.builder.band(a, b);
                 self.defer_sign(overflow);
                 sum
             }
             Kind::Minus => {
-                let difference = self.builder.ins().isub(left, right);
-                let a = self.builder.ins().bxor(left, right);
-                let b = self.builder.ins().bxor(left, difference);
-                let overflow = self.builder.ins().band(a, b);
+                let difference = self.builder.isub(left, right);
+                let a = self.builder.bxor(left, right);
+                let b = self.builder.bxor(left, difference);
+                let overflow = self.builder.band(a, b);
                 self.defer_sign(overflow);
                 difference
             }
             _ => {
-                let (product, overflow) = self.builder.ins().smul_overflow(left, right);
+                let (product, overflow) = self.builder.smul_overflow(left, right);
                 self.defer_flag(overflow);
                 product
             }
@@ -6779,8 +6496,8 @@ impl Generator<'_, '_> {
     /// `|v| <= 2^(b - 1)`. Its highest set bit is one above the highest bit
     /// where `v` differs from its sign. Two cheap vector operations.
     fn magnitude(&mut self, value: Value) -> Value {
-        let doubled = self.builder.ins().iadd(value, value);
-        self.builder.ins().bxor(value, doubled)
+        let doubled = self.builder.iadd(value, value);
+        self.builder.bxor(value, doubled)
     }
     /// Leading zeros of a word, counting zero itself as one (63).
     ///
@@ -6791,17 +6508,17 @@ impl Generator<'_, '_> {
     /// build time grew with the square of the number of deferred loops
     /// inlined into one function.
     fn leading_zeros(&mut self, word: Value) -> Value {
-        let nonzero = self.builder.ins().bor_imm_s(word, 1);
-        self.builder.ins().clz(nonzero)
+        let nonzero = self.builder.bor_imm_s(word, 1);
+        self.builder.clz(nonzero)
     }
     /// The least tracked `u` with `|v| <= 2^u` for a magnitude word.
     fn magnitude_bound(&mut self, word: Value) -> Value {
         let zeros = self.leading_zeros(word);
         let sixty_four = self.constant(64);
-        let bits = self.builder.ins().isub(sixty_four, zeros);
+        let bits = self.builder.isub(sixty_four, zeros);
         let one = self.constant(1);
-        let floor = self.builder.ins().umax(bits, one);
-        self.builder.ins().iadd_imm_s(floor, -1)
+        let floor = self.builder.umax(bits, one);
+        self.builder.iadd_imm_s(floor, -1)
     }
     /// Whether an index `counter + offset` with `offset` in one of the
     /// `(length, least, most)` ranges could fall outside `0..length` while
@@ -6818,18 +6535,18 @@ impl Generator<'_, '_> {
             Kind::Lt | Kind::Le => {
                 let (high, overflow) = if *comparison == Kind::Lt {
                     let one = self.constant(1);
-                    self.builder.ins().ssub_overflow(bound, one)
+                    self.builder.ssub_overflow(bound, one)
                 } else {
-                    (bound, self.builder.ins().iconst(ir::types::I8, 0))
+                    (bound, self.builder.iconst(ir::types::I8, 0))
                 };
                 (start, high, overflow)
             }
             _ => {
                 let (low, overflow) = if *comparison == Kind::Gt {
                     let one = self.constant(1);
-                    self.builder.ins().sadd_overflow(bound, one)
+                    self.builder.sadd_overflow(bound, one)
                 } else {
-                    (bound, self.builder.ins().iconst(ir::types::I8, 0))
+                    (bound, self.builder.iconst(ir::types::I8, 0))
                 };
                 (low, start, overflow)
             }
@@ -6840,7 +6557,7 @@ impl Generator<'_, '_> {
                 low
             } else {
                 let offset = self.constant(least);
-                let (first, below) = self.builder.ins().sadd_overflow(low, offset);
+                let (first, below) = self.builder.sadd_overflow(low, offset);
                 flags.push(below);
                 first
             };
@@ -6848,22 +6565,17 @@ impl Generator<'_, '_> {
                 high
             } else {
                 let offset = self.constant(most);
-                let (last, above) = self.builder.ins().sadd_overflow(high, offset);
+                let (last, above) = self.builder.sadd_overflow(high, offset);
                 flags.push(above);
                 last
             };
+            flags.push(self.builder.icmp_imm_s(IntCC::SignedLessThan, first, 0));
             flags.push(
                 self.builder
-                    .ins()
-                    .icmp_imm_s(IntCC::SignedLessThan, first, 0),
-            );
-            flags.push(
-                self.builder
-                    .ins()
                     .icmp(IntCC::SignedGreaterThanOrEqual, last, length),
             );
             for flag in flags {
-                outside = self.builder.ins().bor(outside, flag);
+                outside = self.builder.bor(outside, flag);
             }
         }
         outside
@@ -6889,10 +6601,10 @@ impl Generator<'_, '_> {
             Some(span) => {
                 let span = self.constant(span);
                 let (moved, overflow) = match (ascending, unsigned) {
-                    (true, false) => self.builder.ins().sadd_overflow(start, span),
-                    (true, true) => self.builder.ins().uadd_overflow(start, span),
-                    (false, false) => self.builder.ins().ssub_overflow(start, span),
-                    (false, true) => self.builder.ins().usub_overflow(start, span),
+                    (true, false) => self.builder.sadd_overflow(start, span),
+                    (true, true) => self.builder.uadd_overflow(start, span),
+                    (false, false) => self.builder.ssub_overflow(start, span),
+                    (false, true) => self.builder.usub_overflow(start, span),
                 };
                 let end = match (ascending, unsigned) {
                     (true, false) => i64::MAX,
@@ -6901,16 +6613,16 @@ impl Generator<'_, '_> {
                     (false, true) => 0,
                 };
                 let end = self.constant(end);
-                self.builder.ins().select(overflow, end, moved)
+                self.builder.select(overflow, end, moved)
             }
             // So many steps that the bound always comes first.
             None => bound,
         };
         match (ascending, unsigned) {
-            (true, false) => self.builder.ins().smin(bound, far),
-            (true, true) => self.builder.ins().umin(bound, far),
-            (false, false) => self.builder.ins().smax(bound, far),
-            (false, true) => self.builder.ins().umax(bound, far),
+            (true, false) => self.builder.smin(bound, far),
+            (true, true) => self.builder.umin(bound, far),
+            (false, false) => self.builder.smax(bound, far),
+            (false, true) => self.builder.umax(bound, far),
         }
     }
     fn check_int_range(&mut self, kind: IntKind, value: Value) -> Value {
@@ -6918,7 +6630,7 @@ impl Generator<'_, '_> {
             return value;
         }
         let canonical = self.canonical(kind, value);
-        let wrong = self.builder.ins().icmp(IntCC::NotEqual, canonical, value);
+        let wrong = self.builder.icmp(IntCC::NotEqual, canonical, value);
         self.guard(wrong);
         value
     }
@@ -6930,11 +6642,11 @@ impl Generator<'_, '_> {
             32 => ir::types::I32,
             _ => return value,
         };
-        let low = self.builder.ins().ireduce(narrow, value);
+        let low = self.builder.ireduce(narrow, value);
         if kind.signed() {
-            self.builder.ins().sextend(I64, low)
+            self.builder.sextend(I64, low)
         } else {
-            self.builder.ins().uextend(I64, low)
+            self.builder.uextend(I64, low)
         }
     }
     fn int_binary(
@@ -6955,9 +6667,9 @@ impl Generator<'_, '_> {
                     // (a `u32` product modulo 2^64 is still the exact
                     // product), so the range test alone decides.
                     let value = match op {
-                        Kind::Plus => self.builder.ins().iadd(left, right),
-                        Kind::Minus => self.builder.ins().isub(left, right),
-                        _ => self.builder.ins().imul(left, right),
+                        Kind::Plus => self.builder.iadd(left, right),
+                        Kind::Minus => self.builder.isub(left, right),
+                        _ => self.builder.imul(left, right),
                     };
                     return self.defer_int_range(kind, value);
                 }
@@ -6966,19 +6678,16 @@ impl Generator<'_, '_> {
                 }
                 let (value, overflow) = match op {
                     Kind::Plus => {
-                        let sum = self.builder.ins().iadd(left, right);
-                        let carry = self.builder.ins().icmp(IntCC::UnsignedLessThan, sum, left);
+                        let sum = self.builder.iadd(left, right);
+                        let carry = self.builder.icmp(IntCC::UnsignedLessThan, sum, left);
                         (sum, carry)
                     }
                     Kind::Minus => {
-                        let difference = self.builder.ins().isub(left, right);
-                        let borrow = self
-                            .builder
-                            .ins()
-                            .icmp(IntCC::UnsignedLessThan, left, right);
+                        let difference = self.builder.isub(left, right);
+                        let borrow = self.builder.icmp(IntCC::UnsignedLessThan, left, right);
                         (difference, borrow)
                     }
-                    _ => self.builder.ins().umul_overflow(left, right),
+                    _ => self.builder.umul_overflow(left, right),
                 };
                 self.defer_flag(overflow);
                 value
@@ -6986,65 +6695,62 @@ impl Generator<'_, '_> {
             Kind::Plus | Kind::Minus | Kind::Star => {
                 let (value, overflow) = match (op, signed || !wide) {
                     // Narrow kinds compute exactly in 64 bits, then range-check.
-                    (Kind::Plus, true) => self.builder.ins().sadd_overflow(left, right),
-                    (Kind::Minus, true) => self.builder.ins().ssub_overflow(left, right),
-                    (Kind::Star, true) => self.builder.ins().smul_overflow(left, right),
-                    (Kind::Plus, false) => self.builder.ins().uadd_overflow(left, right),
-                    (Kind::Minus, false) => self.builder.ins().usub_overflow(left, right),
-                    (Kind::Star, false) => self.builder.ins().umul_overflow(left, right),
+                    (Kind::Plus, true) => self.builder.sadd_overflow(left, right),
+                    (Kind::Minus, true) => self.builder.ssub_overflow(left, right),
+                    (Kind::Star, true) => self.builder.smul_overflow(left, right),
+                    (Kind::Plus, false) => self.builder.uadd_overflow(left, right),
+                    (Kind::Minus, false) => self.builder.usub_overflow(left, right),
+                    (Kind::Star, false) => self.builder.umul_overflow(left, right),
                     _ => unreachable!(),
                 };
                 self.guard(overflow);
                 self.check_int_range(kind, value)
             }
             Kind::Slash | Kind::Percent => {
-                let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, right, 0);
+                let zero = self.builder.icmp_imm_s(IntCC::Equal, right, 0);
                 self.guard(zero);
                 if signed {
                     if wide || *op == Kind::Percent {
                         let min_value = kind.encode(kind.min()).unwrap();
-                        let min = self.builder.ins().icmp_imm_s(IntCC::Equal, left, min_value);
-                        let neg = self.builder.ins().icmp_imm_s(IntCC::Equal, right, -1);
-                        let invalid = self.builder.ins().band(min, neg);
+                        let min = self.builder.icmp_imm_s(IntCC::Equal, left, min_value);
+                        let neg = self.builder.icmp_imm_s(IntCC::Equal, right, -1);
+                        let invalid = self.builder.band(min, neg);
                         self.guard(invalid);
                     }
                     let value = if *op == Kind::Slash {
-                        self.builder.ins().sdiv(left, right)
+                        self.builder.sdiv(left, right)
                     } else {
-                        self.builder.ins().srem(left, right)
+                        self.builder.srem(left, right)
                     };
                     self.check_int_range(kind, value)
                 } else if *op == Kind::Slash {
-                    self.builder.ins().udiv(left, right)
+                    self.builder.udiv(left, right)
                 } else {
-                    self.builder.ins().urem(left, right)
+                    self.builder.urem(left, right)
                 }
             }
-            Kind::Amp => self.builder.ins().band(left, right),
-            Kind::Pipe => self.builder.ins().bor(left, right),
-            Kind::Caret => self.builder.ins().bxor(left, right),
+            Kind::Amp => self.builder.band(left, right),
+            Kind::Pipe => self.builder.bor(left, right),
+            Kind::Caret => self.builder.bxor(left, right),
             Kind::Shl | Kind::Shr => {
                 // The amount is checked against 0..bits in its own kind.
                 let amount_signed = right_kind.is_some_and(IntKind::signed);
                 if amount_signed {
-                    let negative = self
-                        .builder
-                        .ins()
-                        .icmp_imm_s(IntCC::SignedLessThan, right, 0);
+                    let negative = self.builder.icmp_imm_s(IntCC::SignedLessThan, right, 0);
                     self.guard(negative);
                 }
-                let too_far = self.builder.ins().icmp_imm_u(
+                let too_far = self.builder.icmp_imm_u(
                     IntCC::UnsignedGreaterThanOrEqual,
                     right,
                     i64::from(kind.bits()),
                 );
                 self.guard(too_far);
                 let value = if *op == Kind::Shl {
-                    self.builder.ins().ishl(left, right)
+                    self.builder.ishl(left, right)
                 } else if signed {
-                    self.builder.ins().sshr(left, right)
+                    self.builder.sshr(left, right)
                 } else {
-                    self.builder.ins().ushr(left, right)
+                    self.builder.ushr(left, right)
                 };
                 self.canonical(kind, value)
             }
@@ -7062,8 +6768,8 @@ impl Generator<'_, '_> {
                     (Kind::Ne, _) => IntCC::NotEqual,
                     _ => unreachable!(),
                 };
-                let value = self.builder.ins().icmp(condition, left, right);
-                self.builder.ins().uextend(I64, value)
+                let value = self.builder.icmp(condition, left, right);
+                self.builder.uextend(I64, value)
             }
         }
     }
@@ -7085,33 +6791,30 @@ impl Generator<'_, '_> {
             let hi = target.max();
             let (lt_min, gt_max) = if value_signed {
                 let lt = if lo <= i128::from(i64::MIN) {
-                    g.builder.ins().iconst(ir::types::I8, 0)
+                    g.builder.iconst(ir::types::I8, 0)
                 } else {
                     g.builder
-                        .ins()
                         .icmp_imm_s(IntCC::SignedLessThan, value, lo as i64)
                 };
                 let gt = if hi >= i128::from(i64::MAX) {
-                    g.builder.ins().iconst(ir::types::I8, 0)
+                    g.builder.iconst(ir::types::I8, 0)
                 } else {
                     g.builder
-                        .ins()
                         .icmp_imm_s(IntCC::SignedGreaterThan, value, hi as i64)
                 };
                 (lt, gt)
             } else {
-                let lt = g.builder.ins().iconst(ir::types::I8, 0);
+                let lt = g.builder.iconst(ir::types::I8, 0);
                 let gt = if hi >= i128::from(u64::MAX) {
-                    g.builder.ins().iconst(ir::types::I8, 0)
+                    g.builder.iconst(ir::types::I8, 0)
                 } else {
                     g.builder
-                        .ins()
                         .icmp_imm_u(IntCC::UnsignedGreaterThan, value, hi as u64 as i64)
                 };
                 (lt, gt)
             };
-            let bad = g.builder.ins().bor(lt_min, gt_max);
-            g.builder.ins().icmp_imm_s(IntCC::Equal, bad, 0)
+            let bad = g.builder.bor(lt_min, gt_max);
+            g.builder.icmp_imm_s(IntCC::Equal, bad, 0)
         };
         let option =
             |g: &mut Self, present: Value, payload: Value, some: usize, none: usize| -> Words {
@@ -7129,31 +6832,25 @@ impl Generator<'_, '_> {
                     (!source.signed() && source == IntKind::U64 && target != IntKind::U64)
                         || (source.signed() && !target.signed());
                 let ok = if high_half {
-                    let small =
-                        self.builder
-                            .ins()
-                            .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, a, 0);
-                    self.builder.ins().band(ok, small)
+                    let small = self
+                        .builder
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, a, 0);
+                    self.builder.band(ok, small)
                 } else {
                     ok
                 };
                 option(self, ok, a, some_tag, none_tag)
             }
             IntOp::CharFromCode { some_tag, none_tag } => {
-                let max =
-                    self.builder
-                        .ins()
-                        .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, a, 0x10FFFF);
-                let below = self
+                let max = self
                     .builder
-                    .ins()
-                    .icmp_imm_u(IntCC::UnsignedLessThan, a, 0xD800);
+                    .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, a, 0x10FFFF);
+                let below = self.builder.icmp_imm_u(IntCC::UnsignedLessThan, a, 0xD800);
                 let above = self
                     .builder
-                    .ins()
                     .icmp_imm_u(IntCC::UnsignedGreaterThan, a, 0xDFFF);
-                let not_surrogate = self.builder.ins().bor(below, above);
-                let ok = self.builder.ins().band(max, not_surrogate);
+                let not_surrogate = self.builder.bor(below, above);
+                let ok = self.builder.band(max, not_surrogate);
                 option(self, ok, a, some_tag, none_tag)
             }
             // Proved in range: the exact result is the machine result and is
@@ -7161,9 +6858,9 @@ impl Generator<'_, '_> {
             IntOp::Unchecked(arith) => {
                 let b = values[1];
                 let value = match arith {
-                    ArithOp::Add => self.builder.ins().iadd(a, b),
-                    ArithOp::Sub => self.builder.ins().isub(a, b),
-                    ArithOp::Mul => self.builder.ins().imul(a, b),
+                    ArithOp::Add => self.builder.iadd(a, b),
+                    ArithOp::Sub => self.builder.isub(a, b),
+                    ArithOp::Mul => self.builder.imul(a, b),
                 };
                 // In a deferred chunk the proof may rest on an operation
                 // whose overflow panic is not reported yet; there the MIR
@@ -7174,9 +6871,9 @@ impl Generator<'_, '_> {
             IntOp::UncheckedShift(shift) => {
                 let b = values[1];
                 let value = match shift {
-                    crate::int::Shift::Left => self.builder.ins().ishl(a, b),
-                    crate::int::Shift::Right if source.signed() => self.builder.ins().sshr(a, b),
-                    crate::int::Shift::Right => self.builder.ins().ushr(a, b),
+                    crate::int::Shift::Left => self.builder.ishl(a, b),
+                    crate::int::Shift::Right if source.signed() => self.builder.sshr(a, b),
+                    crate::int::Shift::Right => self.builder.ushr(a, b),
                 };
                 vec![self.canonical(source, value)]
             }
@@ -7186,18 +6883,18 @@ impl Generator<'_, '_> {
                 let signed = kind.signed();
                 let wide = kind.bits() == 64;
                 let (value, overflow) = match (arith, signed || !wide) {
-                    (ArithOp::Add, true) => self.builder.ins().sadd_overflow(a, b),
-                    (ArithOp::Sub, true) => self.builder.ins().ssub_overflow(a, b),
-                    (ArithOp::Mul, true) => self.builder.ins().smul_overflow(a, b),
-                    (ArithOp::Add, false) => self.builder.ins().uadd_overflow(a, b),
-                    (ArithOp::Sub, false) => self.builder.ins().usub_overflow(a, b),
-                    (ArithOp::Mul, false) => self.builder.ins().umul_overflow(a, b),
+                    (ArithOp::Add, true) => self.builder.sadd_overflow(a, b),
+                    (ArithOp::Sub, true) => self.builder.ssub_overflow(a, b),
+                    (ArithOp::Mul, true) => self.builder.smul_overflow(a, b),
+                    (ArithOp::Add, false) => self.builder.uadd_overflow(a, b),
+                    (ArithOp::Sub, false) => self.builder.usub_overflow(a, b),
+                    (ArithOp::Mul, false) => self.builder.umul_overflow(a, b),
                 };
                 // Exact result fits the kind: no 64-bit overflow and in range.
                 let canonical = self.canonical(kind, value);
-                let same = self.builder.ins().icmp(IntCC::Equal, canonical, value);
-                let no_overflow = self.builder.ins().icmp_imm_s(IntCC::Equal, overflow, 0);
-                let fits = self.builder.ins().band(same, no_overflow);
+                let same = self.builder.icmp(IntCC::Equal, canonical, value);
+                let no_overflow = self.builder.icmp_imm_s(IntCC::Equal, overflow, 0);
+                let fits = self.builder.band(same, no_overflow);
                 match op {
                     IntOp::Wrapping(_) => vec![canonical],
                     IntOp::Checked(_, some, none) => option(self, fits, value, some, none),
@@ -7213,21 +6910,19 @@ impl Generator<'_, '_> {
                         } else {
                             let negative = match arith {
                                 ArithOp::Add => {
-                                    self.builder.ins().icmp_imm_s(IntCC::SignedLessThan, b, 0)
+                                    self.builder.icmp_imm_s(IntCC::SignedLessThan, b, 0)
                                 }
                                 ArithOp::Sub => {
-                                    self.builder
-                                        .ins()
-                                        .icmp_imm_s(IntCC::SignedGreaterThan, b, 0)
+                                    self.builder.icmp_imm_s(IntCC::SignedGreaterThan, b, 0)
                                 }
                                 ArithOp::Mul => {
-                                    let x = self.builder.ins().bxor(a, b);
-                                    self.builder.ins().icmp_imm_s(IntCC::SignedLessThan, x, 0)
+                                    let x = self.builder.bxor(a, b);
+                                    self.builder.icmp_imm_s(IntCC::SignedLessThan, x, 0)
                                 }
                             };
-                            self.builder.ins().select(negative, min, max)
+                            self.builder.select(negative, min, max)
                         };
-                        vec![self.builder.ins().select(fits, value, bound)]
+                        vec![self.builder.select(fits, value, bound)]
                     }
                 }
             }
@@ -7268,9 +6963,8 @@ impl Generator<'_, '_> {
                     let next = self.builder.create_block();
                     let condition =
                         self.builder
-                            .ins()
                             .icmp_imm_s(IntCC::Equal, values[0], source_tag as i64);
-                    self.builder.ins().brif(condition, hit, &[], next, &[]);
+                    self.builder.brif(condition, hit, &[], next, &[]);
                     self.builder.switch_to_block(hit);
                     let mut out = Vec::with_capacity(width);
                     out.push(self.constant(*target_tag as i64));
@@ -7281,7 +6975,7 @@ impl Generator<'_, '_> {
                     self.jump(exit, &out);
                     self.builder.switch_to_block(next);
                 }
-                self.builder.ins().trap(TrapCode::unwrap_user(2));
+                self.builder.trap(TrapCode::unwrap_user(2));
                 self.builder.switch_to_block(exit);
                 Some(self.builder.block_params(exit).to_vec())
             }
@@ -7310,13 +7004,13 @@ impl Generator<'_, '_> {
             unreachable!("checked task body is once")
         };
         let wrapper = self.task_wrappers[&id];
-        let wrapper = self.module.declare_func_in_func(wrapper, self.builder.func);
-        let wrapper = self.builder.ins().func_addr(I64, wrapper);
+        let wrapper = self.builder.declare_func(self.module, wrapper);
+        let wrapper = self.builder.func_addr(I64, wrapper);
         let bytes = self.constant((self.program.width(result).max(1) * 8) as i64);
         let drop = if self.program.owns(result) {
             let drop = self.task_pointer_drops[&result.full()];
-            let drop = self.module.declare_func_in_func(drop, self.builder.func);
-            self.builder.ins().func_addr(I64, drop)
+            let drop = self.builder.declare_func(self.module, drop);
+            self.builder.func_addr(I64, drop)
         } else {
             self.constant(0)
         };
@@ -7359,7 +7053,7 @@ impl Generator<'_, '_> {
                 (self.program.width(result_ty).max(1) * 8) as u32,
                 STACK_SLOT_ALIGN_SHIFT,
             ));
-            Some(self.builder.ins().stack_addr(I64, slot, 0))
+            Some(self.builder.stack_addr(I64, slot, 0))
         } else {
             None
         };
@@ -7377,27 +7071,20 @@ impl Generator<'_, '_> {
         arguments.push(values[1]);
         let signature = self.indirect_signature(id);
         let signature = self.builder.import_signature(signature);
-        let call = self
-            .builder
-            .ins()
-            .call_indirect(signature, values[0], &arguments);
+        let call = self.builder.call_indirect(signature, values[0], &arguments);
         if self.program.uses_unwinding {
             // A panic unwinding out of the body: cancel and join the
             // children with the word clear (other tasks run during
             // the join), then stop here (a catch) or go on unwinding.
             let address = self.abort_word_address();
-            let word = self
-                .builder
-                .ins()
-                .load(I64, ir::MemFlagsData::new(), address, 0);
-            let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, word, 1);
+            let word = self.builder.load(I64, ir::MemFlagsData::new(), address, 0);
+            let panicked = self.builder.icmp_imm_s(IntCC::Equal, word, 1);
             let unwind = self.builder.create_block();
             let normal = self.builder.create_block();
-            self.builder.ins().brif(panicked, unwind, &[], normal, &[]);
+            self.builder.brif(panicked, unwind, &[], normal, &[]);
             self.builder.switch_to_block(unwind);
             let zero = self.constant(0);
             self.builder
-                .ins()
                 .store(ir::MemFlagsData::new(), zero, address, 0);
             if !parallel {
                 self.runtime_void(self.task_cancel_scope, &[]);
@@ -7407,16 +7094,13 @@ impl Generator<'_, '_> {
             if let Some((shape, join)) = caught {
                 let zero = self.constant(0);
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), zero, address, 0);
                 self.runtime_void(self.catch_leave, &[]);
                 let values = self.encode_variant(ty, shape.err_tag, &[]);
                 self.jump(join, &values);
             } else {
                 let one = self.constant(1);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), one, address, 0);
+                self.builder.store(ir::MemFlagsData::new(), one, address, 0);
                 self.unwind_exit();
             }
             self.builder.switch_to_block(normal);
@@ -7429,7 +7113,7 @@ impl Generator<'_, '_> {
         if result_ty == Type::Never {
             self.runtime_void_raw(scope_end, &[]);
             if let Some((_, join)) = caught {
-                self.builder.ins().trap(TrapCode::unwrap_user(1));
+                self.builder.trap(TrapCode::unwrap_user(1));
                 self.builder.switch_to_block(join);
                 return Some(self.builder.block_params(join).to_vec());
             }
@@ -7442,11 +7126,8 @@ impl Generator<'_, '_> {
             let done = self.builder.create_block();
             let condition =
                 self.builder
-                    .ins()
                     .icmp_imm_s(IntCC::Equal, result_values[0], shape.err_tag as i64);
-            self.builder
-                .ins()
-                .brif(condition, failed, &[], succeeded, &[]);
+            self.builder.brif(condition, failed, &[], succeeded, &[]);
             self.builder.switch_to_block(failed);
             self.runtime_void(self.task_cancel_scope, &[]);
             self.jump(done, &[]);
@@ -7461,18 +7142,14 @@ impl Generator<'_, '_> {
             return Some(result_values);
         };
         let address = self.abort_word_address();
-        let word = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), address, 0);
-        let panicked = self.builder.ins().icmp_imm_s(IntCC::Equal, word, 1);
+        let word = self.builder.load(I64, ir::MemFlagsData::new(), address, 0);
+        let panicked = self.builder.icmp_imm_s(IntCC::Equal, word, 1);
         let child = self.builder.create_block();
         let fine = self.builder.create_block();
-        self.builder.ins().brif(panicked, child, &[], fine, &[]);
+        self.builder.brif(panicked, child, &[], fine, &[]);
         self.builder.switch_to_block(child);
         let zero = self.constant(0);
         self.builder
-            .ins()
             .store(ir::MemFlagsData::new(), zero, address, 0);
         // The body's result is dropped: the catch answers Err.
         self.drop_value(result_ty, &result_values);
@@ -7503,10 +7180,8 @@ impl Generator<'_, '_> {
         let completed = self.builder.create_block();
         let cancelled = self.builder.create_block();
         let join = self.join(exit.result).unwrap();
-        let condition = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
-        self.builder
-            .ins()
-            .brif(condition, completed, &[], cancelled, &[]);
+        let condition = self.builder.icmp_imm_s(IntCC::Equal, status, 0);
+        self.builder.brif(condition, completed, &[], cancelled, &[]);
         self.builder.switch_to_block(completed);
         let payload = self.load_words(out, 0, width);
         let values = self.encode_variant(exit.result, exit.completed_tag, &payload);
@@ -7531,20 +7206,11 @@ impl Generator<'_, '_> {
         let out = self.stack_words(3);
         let op = self.constant(operation as i64);
         let found = self.runtime_call(self.handler_lookup, &[op, out]);
-        let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
+        let missing = self.builder.icmp_imm_s(IntCC::Equal, found, 0);
         self.guard(missing);
-        let code = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), out, 0);
-        let environment = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), out, 8);
-        let once = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), out, 16);
+        let code = self.builder.load(I64, ir::MemFlagsData::new(), out, 0);
+        let environment = self.builder.load(I64, ir::MemFlagsData::new(), out, 8);
+        let once = self.builder.load(I64, ir::MemFlagsData::new(), out, 16);
         let signature = self.program.function_types[handler].clone();
         let result = signature.result;
         let pointer = if aggregate_result(self.program, result) {
@@ -7553,7 +7219,7 @@ impl Generator<'_, '_> {
                 (self.program.width(result) * 8) as u32,
                 STACK_SLOT_ALIGN_SHIFT,
             ));
-            Some(self.builder.ins().stack_addr(I64, slot, 0))
+            Some(self.builder.stack_addr(I64, slot, 0))
         } else {
             None
         };
@@ -7566,9 +7232,7 @@ impl Generator<'_, '_> {
         let Some(join) = self.join(result) else {
             unreachable!("a declared effect result is never Never")
         };
-        self.builder
-            .ins()
-            .brif(once, once_block, &[], fn_block, &[]);
+        self.builder.brif(once, once_block, &[], fn_block, &[]);
         for (call_once, block) in [(false, fn_block), (true, once_block)] {
             self.builder.switch_to_block(block);
             let mut values = Vec::new();
@@ -7582,17 +7246,13 @@ impl Generator<'_, '_> {
             values.extend(resume_values.iter().copied());
             let signature = self.indirect_signature_mode(handler, call_once);
             let signature = self.builder.import_signature(signature);
-            let call = self.builder.ins().call_indirect(signature, code, &values);
+            let call = self.builder.call_indirect(signature, code, &values);
             self.test_panic();
             let results = match pointer {
                 Some(pointer) => (0..self.program.width(result))
                     .map(|i| {
-                        self.builder.ins().load(
-                            I64,
-                            ir::MemFlagsData::new(),
-                            pointer,
-                            (i * 8) as i32,
-                        )
+                        self.builder
+                            .load(I64, ir::MemFlagsData::new(), pointer, (i * 8) as i32)
                     })
                     .collect::<Vec<_>>(),
                 None => self.builder.inst_results(call).to_vec(),
@@ -7630,10 +7290,7 @@ impl Generator<'_, '_> {
         } else {
             source_width
         };
-        let length = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), handle, 0);
+        let length = self.builder.load(I64, ir::MemFlagsData::new(), handle, 0);
         let head = self.builder.create_block();
         let body = self.builder.create_block();
         let done = self.builder.create_block();
@@ -7642,19 +7299,13 @@ impl Generator<'_, '_> {
         self.jump(head, &[zero]);
         self.builder.switch_to_block(head);
         let index = self.builder.block_params(head)[0];
-        let more = self
-            .builder
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, index, length);
-        self.builder.ins().brif(more, body, &[], done, &[]);
+        let more = self.builder.icmp(IntCC::UnsignedLessThan, index, length);
+        self.builder.brif(more, body, &[], done, &[]);
         self.builder.switch_to_block(body);
         // Elements are transferred to the callback by value; storage is
         // overwritten only with the callback's result.
-        let stride = self
-            .builder
-            .ins()
-            .imul_imm_s(index, (element_width * 8) as i64);
-        let address = self.builder.ins().iadd(handle, stride);
+        let stride = self.builder.imul_imm_s(index, (element_width * 8) as i64);
+        let address = self.builder.iadd(handle, stride);
         // The destination stride is the final width, but the value
         // currently in the slot still has the source width until the
         // first callback consumes it.
@@ -7676,7 +7327,7 @@ impl Generator<'_, '_> {
                     (self.program.width(result) * 8).max(1) as u32,
                     STACK_SLOT_ALIGN_SHIFT,
                 ));
-                Some(self.builder.ins().stack_addr(I64, slot, 0))
+                Some(self.builder.stack_addr(I64, slot, 0))
             } else {
                 None
             };
@@ -7687,7 +7338,7 @@ impl Generator<'_, '_> {
             values.extend(current.iter().copied());
             let signature = self.indirect_signature(id);
             let signature = self.builder.import_signature(signature);
-            let call = self.builder.ins().call_indirect(signature, *code, &values);
+            let call = self.builder.call_indirect(signature, *code, &values);
             self.test_panic();
             current = if let Some(pointer) = pointer {
                 self.load_words(pointer, 0, self.program.width(result))
@@ -7695,20 +7346,17 @@ impl Generator<'_, '_> {
                 self.builder.inst_results(call).to_vec()
             };
         }
-        let destination_stride = self
-            .builder
-            .ins()
-            .imul_imm_s(index, (target_width * 8) as i64);
-        let destination = self.builder.ins().iadd(handle, destination_stride);
+        let destination_stride = self.builder.imul_imm_s(index, (target_width * 8) as i64);
+        let destination = self.builder.iadd(handle, destination_stride);
         for (word, value) in current.iter().enumerate() {
-            self.builder.ins().store(
+            self.builder.store(
                 ir::MemFlagsData::new(),
                 *value,
                 destination,
                 (16 + word * 8) as i32,
             );
         }
-        let next = self.builder.ins().iadd_imm_s(index, 1);
+        let next = self.builder.iadd_imm_s(index, 1);
         self.jump(head, &[next]);
         self.builder.switch_to_block(done);
         // Subsequent monomorphized operations use the result's static width.
@@ -7734,20 +7382,18 @@ impl Generator<'_, '_> {
             (width * 8).max(1) as u32,
             STACK_SLOT_ALIGN_SHIFT,
         ));
-        let destination = self.builder.ins().stack_addr(I64, slot, 0);
-        self.builder
-            .ins()
-            .brif(failed, error_block, &[], ok_block, &[]);
+        let destination = self.builder.stack_addr(I64, slot, 0);
+        self.builder.brif(failed, error_block, &[], ok_block, &[]);
         self.builder.switch_to_block(ok_block);
         let mut words = vec![self.constant(shape.ok_tag as i64)];
         words.extend(ok(self));
         self.store_variant(destination, words, width);
-        self.builder.ins().jump(done, &[]);
+        self.builder.jump(done, &[]);
         self.builder.switch_to_block(error_block);
         let mut words = vec![self.constant(shape.err_tag as i64)];
         words.extend(error(self));
         self.store_variant(destination, words, width);
-        self.builder.ins().jump(done, &[]);
+        self.builder.jump(done, &[]);
         self.builder.switch_to_block(done);
         self.load_words(destination, 0, width)
     }
@@ -7768,7 +7414,7 @@ impl Generator<'_, '_> {
     ) -> Words {
         let bytes = self.constant((self.program.width(value_ty) * 8) as i64);
         let handle = self.runtime_call(self.try_allocate, &[bytes]);
-        let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, handle, 0);
+        let failed = self.builder.icmp_imm_s(IntCC::Equal, handle, 0);
         self.try_result(
             failed,
             ty,
@@ -7827,7 +7473,7 @@ impl Generator<'_, '_> {
         let previous = self.load_words(pointer, 0, self.program.width(old));
         let bytes = self.constant((self.program.width(payload_ty) * 8) as i64);
         let grown = self.runtime_call(self.try_grow, &[pointer, bytes]);
-        let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, grown, 0);
+        let failed = self.builder.icmp_imm_s(IntCC::Equal, grown, 0);
         self.try_result(
             failed,
             ty,
@@ -7850,7 +7496,7 @@ impl Generator<'_, '_> {
         shape: crate::runtime_types::ResultShape,
     ) -> Words {
         let handle = self.runtime_call(self.try_bytes_with_capacity, &[requested]);
-        let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, handle, 0);
+        let failed = self.builder.icmp_imm_s(IntCC::Equal, handle, 0);
         self.try_result(failed, ty, shape, |_| vec![handle], |_| vec![requested])
     }
     /// `Box.try_new_in`: a box of `payload` (a `value_ty`) from the
@@ -7868,7 +7514,7 @@ impl Generator<'_, '_> {
             self.alloc_ops.block_try,
             &[pair[0], pair[1], pair[3], bytes],
         );
-        let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, block, 0);
+        let failed = self.builder.icmp_imm_s(IntCC::Equal, block, 0);
         self.try_result(
             failed,
             ty,
@@ -7876,10 +7522,7 @@ impl Generator<'_, '_> {
             |g| {
                 let data = g.runtime_call(g.alloc_ops.block_data, &[block]);
                 g.store_words(data, payload);
-                vec![g.runtime_call(
-                    g.alloc_ops.box_create,
-                    &[pair[0], pair[1], block, pair[3]],
-                )]
+                vec![g.runtime_call(g.alloc_ops.box_create, &[pair[0], pair[1], block, pair[3]])]
             },
             |g| {
                 // Nothing retained the context on refusal; drop the
@@ -7901,7 +7544,7 @@ impl Generator<'_, '_> {
     ) -> Words {
         let bytes = self.constant((self.program.width(value_ty) * 8) as i64);
         let pointer = self.runtime_call(self.arena_try_alloc, &[handle, bytes]);
-        let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, pointer, 0);
+        let failed = self.builder.icmp_imm_s(IntCC::Equal, pointer, 0);
         self.try_result(
             failed,
             ty,
@@ -7939,10 +7582,9 @@ impl Generator<'_, '_> {
                 IoOp::Stdout => self.constant(1),
                 IoOp::ReadAll | IoOp::ReadLine | IoOp::ReadChunk | IoOp::Write => {
                     let ok_value = if matches!(op, IoOp::Write) {
-                        values[1] =
-                            self.builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), values[1], 0);
+                        values[1] = self
+                            .builder
+                            .load(I64, ir::MemFlagsData::new(), values[1], 0);
                         self.constant(0)
                     } else {
                         values[1]
@@ -7957,12 +7599,12 @@ impl Generator<'_, '_> {
                         self.write
                     };
                     let status = self.runtime_call(callee, &values);
-                    let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+                    let success = self.builder.icmp_imm_s(IntCC::Equal, status, 0);
                     let shape = shape.expect("checked I/O result shape");
                     let ok_tag = self.constant(shape.ok_tag as i64);
                     let err_tag = self.constant(shape.err_tag as i64);
-                    let tag = self.builder.ins().select(success, ok_tag, err_tag);
-                    let payload = self.builder.ins().select(success, ok_value, status);
+                    let tag = self.builder.select(success, ok_tag, err_tag);
+                    let payload = self.builder.select(success, ok_value, status);
                     return Some(vec![tag, payload]);
                 }
             },
@@ -7970,40 +7612,33 @@ impl Generator<'_, '_> {
                 let mut arguments = values.clone();
                 for (index, borrowed) in op.borrowed().iter().enumerate() {
                     if *borrowed {
-                        arguments[index] = self.builder.ins().load(
-                            I64,
-                            ir::MemFlagsData::new(),
-                            arguments[index],
-                            0,
-                        );
+                        arguments[index] =
+                            self.builder
+                                .load(I64, ir::MemFlagsData::new(), arguments[index], 0);
                     }
                 }
                 let out = self.stack_words(1);
                 arguments.push(out);
                 let status = self.runtime_call(self.host_ops[op], &arguments);
-                let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
-                let value = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), out, 0);
+                let success = self.builder.icmp_imm_s(IntCC::Equal, status, 0);
+                let value = self.builder.load(I64, ir::MemFlagsData::new(), out, 0);
                 let ok_tag = self.constant(shape.ok_tag as i64);
                 let err_tag = self.constant(shape.err_tag as i64);
-                let tag = self.builder.ins().select(success, ok_tag, err_tag);
-                let payload = self.builder.ins().select(success, value, status);
+                let tag = self.builder.select(success, ok_tag, err_tag);
+                let payload = self.builder.select(success, value, status);
                 return Some(vec![tag, payload]);
             }
             Target::Bytes(op) => {
                 if op.borrowed() {
                     values[0] = self
                         .builder
-                        .ins()
                         .load(I64, ir::MemFlagsData::new(), values[0], 0);
                 }
                 if *op == BytesOp::Get && self.access_proved {
                     // A deferred chunk proved it in range. Data
                     // follows the 16-byte header.
-                    let address = self.builder.ins().iadd(values[0], values[1]);
-                    return Some(vec![self.builder.ins().uload8(
+                    let address = self.builder.iadd(values[0], values[1]);
+                    return Some(vec![self.builder.uload8(
                         I64,
                         ir::MemFlagsData::new(),
                         address,
@@ -8030,7 +7665,6 @@ impl Generator<'_, '_> {
                 if op.borrowed() {
                     values[0] = self
                         .builder
-                        .ins()
                         .load(I64, ir::MemFlagsData::new(), values[0], 0);
                 }
                 match op {
@@ -8044,11 +7678,9 @@ impl Generator<'_, '_> {
                     StringOp::IntoBytes => values[0],
                     StringOp::ScalarAt { some_tag, none_tag } => {
                         let codepoint = self.runtime_call(self.string_scalar_at, &values);
-                        let present = self.builder.ins().icmp_imm_s(
-                            IntCC::SignedGreaterThanOrEqual,
-                            codepoint,
-                            0,
-                        );
+                        let present =
+                            self.builder
+                                .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, codepoint, 0);
                         return Some(self.optional_words(
                             ty,
                             present,
@@ -8059,10 +7691,10 @@ impl Generator<'_, '_> {
                     }
                     StringOp::FromUtf8 { ok_tag, err_tag } => {
                         let valid = self.runtime_call(self.string_validate, &values);
-                        let present = self.builder.ins().icmp_imm_s(IntCC::NotEqual, valid, 0);
+                        let present = self.builder.icmp_imm_s(IntCC::NotEqual, valid, 0);
                         let ok = self.constant(*ok_tag as i64);
                         let err = self.constant(*err_tag as i64);
-                        let tag = self.builder.ins().select(present, ok, err);
+                        let tag = self.builder.select(present, ok, err);
                         let width = self.program.width(ty);
                         let mut words = vec![tag, values[0]];
                         while words.len() < width {
@@ -8150,19 +7782,16 @@ impl Generator<'_, '_> {
                     8,
                     STACK_SLOT_ALIGN_SHIFT,
                 ));
-                let pointer = self.builder.ins().stack_addr(I64, slot, 0);
+                let pointer = self.builder.stack_addr(I64, slot, 0);
                 let status = self.runtime_call(self.stage_compile, &[values[0], pointer]);
-                let owner = self
-                    .builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), pointer, 0);
-                let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+                let owner = self.builder.load(I64, ir::MemFlagsData::new(), pointer, 0);
+                let success = self.builder.icmp_imm_s(IntCC::Equal, status, 0);
                 let ok = self.encode_variant(ty, shape.ok_tag, &[owner]);
                 let err = self.encode_variant(ty, shape.err_tag, &[status]);
                 return Some(
                     ok.into_iter()
                         .zip(err)
-                        .map(|(ok, err)| self.builder.ins().select(success, ok, err))
+                        .map(|(ok, err)| self.builder.select(success, ok, err))
                         .collect(),
                 );
             }
@@ -8170,11 +7799,8 @@ impl Generator<'_, '_> {
                 debug_assert_eq!(ty, Type::Fn(*signature));
                 let owner = self
                     .builder
-                    .ins()
                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                self.builder
-                    .ins()
-                    .load(I64, ir::MemFlagsData::new(), owner, 16)
+                self.builder.load(I64, ir::MemFlagsData::new(), owner, 16)
             }
             // GPU-SUBSET: `#[gpu]` bodies are compiled for the CPU
             // only as unreachable code; no CPU call reaches them.
@@ -8191,15 +7817,11 @@ impl Generator<'_, '_> {
         match base_ty {
             Type::Ref(p) | Type::RefMut(p) => match self.program.pointees[p] {
                 Type::String => {
-                    let handle =
-                        self.builder
-                            .ins()
-                            .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                    let data = self.builder.ins().iadd_imm_s(handle, 16);
-                    let length = self
+                    let handle = self
                         .builder
-                        .ins()
-                        .load(I64, ir::MemFlagsData::new(), handle, 0);
+                        .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                    let data = self.builder.iadd_imm_s(handle, 16);
+                    let length = self.builder.load(I64, ir::MemFlagsData::new(), handle, 0);
                     (data, length)
                 }
                 _ => unreachable!("checked text view source"),
@@ -8222,8 +7844,8 @@ impl Generator<'_, '_> {
             self.check_text_boundary(pointer, start, length);
             self.check_text_boundary(pointer, end, length);
         }
-        let pointer = self.builder.ins().iadd(pointer, start);
-        let length = self.builder.ins().isub(end, start);
+        let pointer = self.builder.iadd(pointer, start);
+        let length = self.builder.isub(end, start);
         vec![pointer, length, self.constant(1), self.constant(1)]
     }
     /// `(data, length, stride, byte flag)` of an element view's source: a
@@ -8242,14 +7864,11 @@ impl Generator<'_, '_> {
             let base_address = if word_offset == 0 {
                 location
             } else {
-                self.builder
-                    .ins()
-                    .iadd_imm_s(location, (word_offset * 8) as i64)
+                self.builder.iadd_imm_s(location, (word_offset * 8) as i64)
             };
-            let data = self.builder.ins().iadd_imm_s(base_address, 8);
+            let data = self.builder.iadd_imm_s(base_address, 8);
             let length = self
                 .builder
-                .ins()
                 .load(I64, ir::MemFlagsData::new(), base_address, 0);
             (
                 data,
@@ -8263,7 +7882,7 @@ impl Generator<'_, '_> {
                 .and_then(|id| self.program.enums[id].array)
                 .expect("checked array slice source");
             // Word 0 is the private array tag; elements follow it.
-            let data = self.builder.ins().iadd_imm_s(location, 8);
+            let data = self.builder.iadd_imm_s(location, 8);
             (
                 data,
                 self.constant(length as i64),
@@ -8276,7 +7895,7 @@ impl Generator<'_, '_> {
             let slot = self.stack_words(values.len());
             self.store_words(slot, values);
             // Word 0 is the private array tag; elements follow it.
-            let data = self.builder.ins().iadd_imm_s(slot, 8);
+            let data = self.builder.iadd_imm_s(slot, 8);
             (
                 data,
                 self.constant(length as i64),
@@ -8287,27 +7906,19 @@ impl Generator<'_, '_> {
             match base_ty {
                 Type::Ref(p) => match self.program.pointees[p] {
                     Type::Bytes => {
-                        let handle =
-                            self.builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                        let data = self.builder.ins().iadd_imm_s(handle, 16);
-                        let length =
-                            self.builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), handle, 0);
+                        let handle = self
+                            .builder
+                            .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                        let data = self.builder.iadd_imm_s(handle, 16);
+                        let length = self.builder.load(I64, ir::MemFlagsData::new(), handle, 0);
                         (data, length, self.constant(1), self.constant(1))
                     }
                     Type::Vec(_) => {
-                        let handle =
-                            self.builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                        let data = self.builder.ins().iadd_imm_s(handle, 16);
-                        let length =
-                            self.builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), handle, 0);
+                        let handle = self
+                            .builder
+                            .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                        let data = self.builder.iadd_imm_s(handle, 16);
+                        let length = self.builder.load(I64, ir::MemFlagsData::new(), handle, 0);
                         (
                             data,
                             length,
@@ -8337,9 +7948,9 @@ impl Generator<'_, '_> {
         if check {
             self.check_range(start, end, length);
         }
-        let offset = self.builder.ins().imul(start, stride);
-        let pointer = self.builder.ins().iadd(pointer, offset);
-        let length = self.builder.ins().isub(end, start);
+        let offset = self.builder.imul(start, stride);
+        let pointer = self.builder.iadd(pointer, offset);
+        let length = self.builder.isub(end, start);
         vec![pointer, length, stride, bytes]
     }
     /// A binary operation (not `&&`/`||`) on lowered non-float scalars.
@@ -8361,25 +7972,25 @@ impl Generator<'_, '_> {
             }
             Kind::Plus | Kind::Minus | Kind::Star => {
                 let (value, overflow) = match op {
-                    Kind::Plus => self.builder.ins().sadd_overflow(left, right),
-                    Kind::Minus => self.builder.ins().ssub_overflow(left, right),
-                    Kind::Star => self.builder.ins().smul_overflow(left, right),
+                    Kind::Plus => self.builder.sadd_overflow(left, right),
+                    Kind::Minus => self.builder.ssub_overflow(left, right),
+                    Kind::Star => self.builder.smul_overflow(left, right),
                     _ => unreachable!(),
                 };
                 self.guard(overflow);
                 value
             }
             Kind::Slash | Kind::Percent => {
-                let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, right, 0);
+                let zero = self.builder.icmp_imm_s(IntCC::Equal, right, 0);
                 self.guard(zero);
-                let min = self.builder.ins().icmp_imm_s(IntCC::Equal, left, i64::MIN);
-                let neg = self.builder.ins().icmp_imm_s(IntCC::Equal, right, -1);
-                let invalid = self.builder.ins().band(min, neg);
+                let min = self.builder.icmp_imm_s(IntCC::Equal, left, i64::MIN);
+                let neg = self.builder.icmp_imm_s(IntCC::Equal, right, -1);
+                let invalid = self.builder.band(min, neg);
                 self.guard(invalid);
                 if *op == Kind::Slash {
-                    self.builder.ins().sdiv(left, right)
+                    self.builder.sdiv(left, right)
                 } else {
-                    self.builder.ins().srem(left, right)
+                    self.builder.srem(left, right)
                 }
             }
             _ => {
@@ -8392,8 +8003,8 @@ impl Generator<'_, '_> {
                     Kind::Ne => IntCC::NotEqual,
                     _ => unreachable!(),
                 };
-                let value = self.builder.ins().icmp(condition, left, right);
-                self.builder.ins().uextend(I64, value)
+                let value = self.builder.icmp(condition, left, right);
+                self.builder.uextend(I64, value)
             }
         }
     }
@@ -8422,45 +8033,45 @@ impl Generator<'_, '_> {
                 FloatKind::F64 => i64::MIN,
             };
             let mask = self.constant(mask);
-            self.builder.ins().bxor(value, mask)
+            self.builder.bxor(value, mask)
         } else if let Some(kind) = operand_ty.int_kind().filter(|k| *k != IntKind::I64) {
             if *op == Kind::Minus {
                 let zero = self.constant(0);
                 if deferral.is_some() {
                     // A narrow value negates exactly in 64 bits.
-                    let negated = self.builder.ins().isub(zero, value);
+                    let negated = self.builder.isub(zero, value);
                     self.defer_int_range(kind, negated)
                 } else {
-                    let (negated, overflow) = self.builder.ins().ssub_overflow(zero, value);
+                    let (negated, overflow) = self.builder.ssub_overflow(zero, value);
                     self.guard(overflow);
                     self.check_int_range(kind, negated)
                 }
             } else {
-                let inverted = self.builder.ins().bnot(value);
+                let inverted = self.builder.bnot(value);
                 self.canonical(kind, inverted)
             }
         } else if *op == Kind::Bang && operand_ty == Type::I64 {
-            self.builder.ins().bnot(value)
+            self.builder.bnot(value)
         } else if *op == Kind::Minus {
             let zero = self.constant(0);
             if let Some(mode) = deferral {
-                let negated = self.builder.ins().isub(zero, value);
+                let negated = self.builder.isub(zero, value);
                 // A certified negation has its operand tracked by the
                 // MIR pass. `0 - v` overflows exactly when `v` and the
                 // result are both negative (`v == i64::MIN`).
                 if mode == deferred::Mode::Exact {
-                    let overflow = self.builder.ins().band(value, negated);
+                    let overflow = self.builder.band(value, negated);
                     self.defer_sign(overflow);
                 }
                 negated
             } else {
-                let (value, overflow) = self.builder.ins().ssub_overflow(zero, value);
+                let (value, overflow) = self.builder.ssub_overflow(zero, value);
                 self.guard(overflow);
                 value
             }
         } else {
-            let comparison = self.builder.ins().icmp_imm_s(IntCC::Equal, value, 0);
-            self.builder.ins().uextend(I64, comparison)
+            let comparison = self.builder.icmp_imm_s(IntCC::Equal, value, 0);
+            self.builder.uextend(I64, comparison)
         };
         Some(value)
     }
@@ -8482,12 +8093,10 @@ impl Generator<'_, '_> {
         for slot in prefix + index..=capacity - suffix + index {
             let here =
                 self.builder
-                    .ins()
                     .icmp_imm_s(IntCC::Equal, length, (slot + suffix - index) as i64);
             for (word, out) in words.iter_mut().enumerate() {
                 *out = self
                     .builder
-                    .ins()
                     .select(here, values[1 + slot * width + word], *out);
             }
         }
@@ -8506,22 +8115,19 @@ impl Generator<'_, '_> {
         let zero = self.constant(0);
         let length = values[0];
         let mut tail = vec![zero; 1 + width * capacity];
-        tail[0] = self
-            .builder
-            .ins()
-            .iadd_imm_s(length, -((prefix + suffix) as i64));
+        tail[0] = self.builder.iadd_imm_s(length, -((prefix + suffix) as i64));
         for position in 0..capacity.saturating_sub(prefix + suffix) {
             let source = prefix + position;
             // The middle slot `source` is live when it is before the
             // suffix: `length > source + suffix`.
-            let active = self.builder.ins().icmp_imm_s(
+            let active = self.builder.icmp_imm_s(
                 IntCC::UnsignedGreaterThan,
                 length,
                 (source + suffix) as i64,
             );
             for word in 0..width {
                 let value = values[1 + source * width + word];
-                tail[1 + position * width + word] = self.builder.ins().select(active, value, zero);
+                tail[1 + position * width + word] = self.builder.select(active, value, zero);
             }
         }
         tail
@@ -8537,13 +8143,12 @@ impl Generator<'_, '_> {
         index: usize,
     ) -> Value {
         let stride = (width * 8) as i64;
-        let data = self.builder.ins().iadd_imm_s(pointer, 8);
+        let data = self.builder.iadd_imm_s(pointer, 8);
         let position = self
             .builder
-            .ins()
             .iadd_imm_s(length, index as i64 - suffix as i64);
-        let offset = self.builder.ins().imul_imm_s(position, stride);
-        self.builder.ins().iadd(data, offset)
+        let offset = self.builder.imul_imm_s(position, stride);
+        self.builder.iadd(data, offset)
     }
     /// A `&[T]` view of the middle of the DynArray at `pointer`, without its
     /// `prefix` first and `suffix` last elements.
@@ -8556,12 +8161,9 @@ impl Generator<'_, '_> {
         suffix: usize,
     ) -> Words {
         let stride = (width * 8) as i64;
-        let data = self.builder.ins().iadd_imm_s(pointer, 8);
-        let start = self.builder.ins().iadd_imm_s(data, prefix as i64 * stride);
-        let middle = self
-            .builder
-            .ins()
-            .iadd_imm_s(length, -((prefix + suffix) as i64));
+        let data = self.builder.iadd_imm_s(pointer, 8);
+        let start = self.builder.iadd_imm_s(data, prefix as i64 * stride);
+        let middle = self.builder.iadd_imm_s(length, -((prefix + suffix) as i64));
         let stride = self.constant(stride);
         let bytes = self.constant(0);
         vec![start, middle, stride, bytes]
@@ -8579,22 +8181,18 @@ impl Generator<'_, '_> {
         let length = values[0];
         let full =
             self.builder
-                .ins()
                 .icmp_imm_s(IntCC::UnsignedGreaterThanOrEqual, length, capacity as i64);
         self.guard(full);
         let mut out = values;
-        out[0] = self.builder.ins().iadd_imm_s(length, 1);
+        out[0] = self.builder.iadd_imm_s(length, 1);
         // The inline storage is represented as SSA words, not memory.
         // Select the active capacity slot without a runtime index into
         // the value vector: each slot compares the length once.
         for slot in 0..capacity {
-            let active = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::Equal, length, slot as i64);
+            let active = self.builder.icmp_imm_s(IntCC::Equal, length, slot as i64);
             for (word, value) in item.iter().take(element_width).enumerate() {
                 let index = 1 + slot * element_width + word;
-                out[index] = self.builder.ins().select(active, *value, out[index]);
+                out[index] = self.builder.select(active, *value, out[index]);
             }
         }
         out
@@ -8612,7 +8210,6 @@ impl Generator<'_, '_> {
         // (the unsigned compare also rejects negatives).
         let bad = self
             .builder
-            .ins()
             .icmp_imm_s(IntCC::UnsignedGreaterThan, length, capacity as i64);
         self.guard(bad);
         let element_width = self.program.width(element);
@@ -8622,11 +8219,10 @@ impl Generator<'_, '_> {
         for slot in 0..capacity {
             let active = self
                 .builder
-                .ins()
                 .icmp_imm_s(IntCC::SignedGreaterThan, length, slot as i64);
             for (word, value) in item.iter().take(element_width).enumerate() {
                 let index = 1 + slot * element_width + word;
-                out[index] = self.builder.ins().select(active, *value, zero);
+                out[index] = self.builder.select(active, *value, zero);
             }
         }
         out
@@ -8644,18 +8240,14 @@ impl Generator<'_, '_> {
         let length = values[0];
         let bad = self
             .builder
-            .ins()
             .icmp(IntCC::UnsignedGreaterThanOrEqual, position, length);
         self.guard(bad);
         let element_width = self.program.width(element);
         for slot in 0..capacity {
-            let active = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::Equal, position, slot as i64);
+            let active = self.builder.icmp_imm_s(IntCC::Equal, position, slot as i64);
             for (word, value) in item.iter().take(element_width).enumerate() {
                 let index = 1 + slot * element_width + word;
-                values[index] = self.builder.ins().select(active, *value, values[index]);
+                values[index] = self.builder.select(active, *value, values[index]);
             }
         }
         values
@@ -8664,9 +8256,9 @@ impl Generator<'_, '_> {
     /// last element; panics when it is empty.
     fn dyn_array_pop(&mut self, mut values: Words, element: Type, capacity: usize) -> Words {
         let length = values[0];
-        let empty = self.builder.ins().icmp_imm_s(IntCC::Equal, length, 0);
+        let empty = self.builder.icmp_imm_s(IntCC::Equal, length, 0);
         self.guard(empty);
-        let next = self.builder.ins().iadd_imm_s(length, -1);
+        let next = self.builder.iadd_imm_s(length, -1);
         let zero = self.constant(0);
         // The result type is the checked tuple layout, whose first word is
         // the single (always zero) constructor tag.
@@ -8675,14 +8267,11 @@ impl Generator<'_, '_> {
         let element_width = self.program.width(element);
         let mut item = vec![zero; element_width];
         for slot in 0..capacity {
-            let active = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::Equal, next, slot as i64);
+            let active = self.builder.icmp_imm_s(IntCC::Equal, next, slot as i64);
             for (word, item_word) in item.iter_mut().enumerate() {
                 let index = 2 + slot * element_width + word;
-                *item_word = self.builder.ins().select(active, values[index], *item_word);
-                values[index] = self.builder.ins().select(active, zero, values[index]);
+                *item_word = self.builder.select(active, values[index], *item_word);
+                values[index] = self.builder.select(active, zero, values[index]);
             }
         }
         values.extend(item);
@@ -8700,15 +8289,14 @@ impl Generator<'_, '_> {
     ) -> Value {
         let width = self.program.width(element);
         let one = self.constant(1);
-        let length_equal = self.builder.ins().icmp(IntCC::Equal, left[0], right[0]);
-        let mut equal = self.builder.ins().uextend(I64, length_equal);
+        let length_equal = self.builder.icmp(IntCC::Equal, left[0], right[0]);
+        let mut equal = self.builder.uextend(I64, length_equal);
         for slot in 0..capacity {
             // A slot participates only while it is inside the live length
             // of both arrays; equal lengths make one test enough.
-            let active =
-                self.builder
-                    .ins()
-                    .icmp_imm_s(IntCC::UnsignedGreaterThan, left[0], slot as i64);
+            let active = self
+                .builder
+                .icmp_imm_s(IntCC::UnsignedGreaterThan, left[0], slot as i64);
             let mut slot_equal = one;
             for word in 0..width {
                 let a = left[1 + slot * width + word];
@@ -8718,17 +8306,17 @@ impl Generator<'_, '_> {
                     let b = self.float_value(kind, b);
                     self.float_binary(kind, &crate::lexer::Kind::EqEq, a, b)
                 } else {
-                    let value = self.builder.ins().icmp(IntCC::Equal, a, b);
-                    self.builder.ins().uextend(I64, value)
+                    let value = self.builder.icmp(IntCC::Equal, a, b);
+                    self.builder.uextend(I64, value)
                 };
-                slot_equal = self.builder.ins().band(slot_equal, comparison);
+                slot_equal = self.builder.band(slot_equal, comparison);
             }
-            let contribution = self.builder.ins().select(active, slot_equal, one);
-            equal = self.builder.ins().band(equal, contribution);
+            let contribution = self.builder.select(active, slot_equal, one);
+            equal = self.builder.band(equal, contribution);
         }
         if negate {
-            let value = self.builder.ins().icmp_imm_s(IntCC::Equal, equal, 0);
-            self.builder.ins().uextend(I64, value)
+            let value = self.builder.icmp_imm_s(IntCC::Equal, equal, 0);
+            self.builder.uextend(I64, value)
         } else {
             equal
         }
@@ -8855,7 +8443,10 @@ mod allocator_runtime_tests {
     fn every_stack_slot_uses_the_pointer_alignment_contract() {
         let marker = ["StackSlotData", "::new("].concat();
         let mut slots = 0;
-        for source in [include_str!("native.rs"), include_str!("native/from_mir.rs")] {
+        for source in [
+            include_str!("native.rs"),
+            include_str!("native/from_mir.rs"),
+        ] {
             for (start, _) in source.match_indices(&marker) {
                 let call = &source[start..start + source[start..].find("));").unwrap()];
                 assert!(

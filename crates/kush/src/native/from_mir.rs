@@ -7,8 +7,9 @@
 
 use super::*;
 use crate::mir::{
-    AllocOp, ArrayOp, BinOp, BlockId, Bound, BufferWord, CallHint, DeferMode, LoopOp, Body, Callee, Capture, ElementBase, Operand, Place, RuntimeOp, Rvalue,
-    StatementKind, TaskOp, Terminator, TerminatorKind, ViewSource,
+    AllocOp, ArrayOp, BinOp, BlockId, Body, Bound, BufferWord, CallHint, Callee, Capture,
+    DeferMode, ElementBase, LoopOp, Operand, Place, RuntimeOp, Rvalue, StatementKind, TaskOp,
+    Terminator, TerminatorKind, ViewSource,
 };
 
 impl Generator<'_, '_> {
@@ -82,7 +83,7 @@ impl Generator<'_, '_> {
             Some(field) if place.deref => {
                 let pointer = self.local_words(place.local)[0];
                 for (index, value) in values.iter().enumerate() {
-                    self.builder.ins().store(
+                    self.builder.store(
                         ir::MemFlagsData::new(),
                         *value,
                         pointer,
@@ -115,7 +116,7 @@ impl Generator<'_, '_> {
         if offset == 0 {
             base
         } else {
-            self.builder.ins().iadd_imm_s(base, offset)
+            self.builder.iadd_imm_s(base, offset)
         }
     }
 
@@ -179,12 +180,12 @@ impl Generator<'_, '_> {
                 let state = self.runtime_call(self.allocate, &[state_bytes]);
                 self.store_words(state, &words[0]);
                 let drop = self
-                    .module
-                    .declare_func_in_func(self.context_drops[spec_index], self.builder.func);
-                let drop = self.builder.ins().func_addr(I64, drop);
+                    .builder
+                    .declare_func(self.module, self.context_drops[spec_index]);
+                let drop = self.builder.func_addr(I64, drop);
                 let function = |g: &mut Self, index: usize| {
-                    let reference = g.module.declare_func_in_func(g.ids[index], g.builder.func);
-                    g.builder.ins().func_addr(I64, reference)
+                    let reference = g.builder.declare_func(g.module, g.ids[index]);
+                    g.builder.func_addr(I64, reference)
                 };
                 let alloc = function(self, checked.alloc);
                 let release = function(self, checked.free);
@@ -300,7 +301,7 @@ impl Generator<'_, '_> {
                     .collect::<Vec<_>>();
                 let outside =
                     self.ranges_outside(&comparison.kind(), scalar(0), scalar(1), &ranges);
-                self.builder.ins().uextend(I64, outside)
+                self.builder.uextend(I64, outside)
             }
             LoopOp::Certificate {
                 obligations,
@@ -312,62 +313,55 @@ impl Generator<'_, '_> {
                 // How many terms the reductions took in, at most (see
                 // `lower_deferred_while`).
                 let distance = match comparison {
-                    BinOp::Lt | BinOp::Le => self.builder.ins().isub(end, start),
-                    _ => self.builder.ins().isub(start, end),
+                    BinOp::Lt | BinOp::Le => self.builder.isub(end, start),
+                    _ => self.builder.isub(start, end),
                 };
                 let iterations = if *step == 1 {
                     distance
                 } else {
                     let step = self.constant(*step);
-                    self.builder.ins().udiv(distance, step)
+                    self.builder.udiv(distance, step)
                 };
-                let started = self.builder.ins().iadd_imm_s(iterations, 1);
-                let count = self.builder.ins().imul_imm_s(started, *accumulating);
+                let started = self.builder.iadd_imm_s(iterations, 1);
+                let count = self.builder.imul_imm_s(started, *accumulating);
                 let bounds = words[2..].iter().map(|word| word[0]).collect::<Vec<_>>();
                 let mut worst = self.constant(0);
                 for obligation in obligations {
                     let value = self.mir_bound(obligation, &bounds, count);
-                    worst = self.builder.ins().umax(worst, value);
+                    worst = self.builder.umax(worst, value);
                 }
-                let proved = self.builder.ins().icmp_imm_u(
-                    IntCC::UnsignedLessThanOrEqual,
-                    worst,
-                    deferred::LIMIT,
-                );
-                self.builder.ins().uextend(I64, proved)
+                let proved =
+                    self.builder
+                        .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, worst, deferred::LIMIT);
+                self.builder.uextend(I64, proved)
             }
             LoopOp::Unsuitable { overlaps, layouts } => {
                 let mut unsuitable = self.constant(0);
                 let range = |g: &mut Self, view: &Words| {
-                    let bytes = g.builder.ins().imul(view[1], view[2]);
-                    (view[0], g.builder.ins().iadd(view[0], bytes))
+                    let bytes = g.builder.imul(view[1], view[2]);
+                    (view[0], g.builder.iadd(view[0], bytes))
                 };
                 for (stored, loaded) in overlaps {
                     let (stored_start, stored_end) = range(self, &words[*stored]);
                     let (loaded_start, loaded_end) = range(self, &words[*loaded]);
                     let before =
                         self.builder
-                            .ins()
                             .icmp(IntCC::UnsignedLessThan, stored_start, loaded_end);
                     let after =
                         self.builder
-                            .ins()
                             .icmp(IntCC::UnsignedLessThan, loaded_start, stored_end);
-                    let both = self.builder.ins().band(before, after);
-                    let both = self.builder.ins().uextend(I64, both);
-                    unsuitable = self.builder.ins().bor(unsuitable, both);
+                    let both = self.builder.band(before, after);
+                    let both = self.builder.uextend(I64, both);
+                    unsuitable = self.builder.bor(unsuitable, both);
                 }
                 for (view, stride) in layouts {
                     let view = &words[*view];
-                    let other = self
-                        .builder
-                        .ins()
-                        .icmp_imm_s(IntCC::NotEqual, view[2], *stride);
-                    let other = self.builder.ins().uextend(I64, other);
-                    let flag = self.builder.ins().icmp_imm_s(IntCC::NotEqual, view[3], 0);
-                    let flag = self.builder.ins().uextend(I64, flag);
-                    unsuitable = self.builder.ins().bor(unsuitable, other);
-                    unsuitable = self.builder.ins().bor(unsuitable, flag);
+                    let other = self.builder.icmp_imm_s(IntCC::NotEqual, view[2], *stride);
+                    let other = self.builder.uextend(I64, other);
+                    let flag = self.builder.icmp_imm_s(IntCC::NotEqual, view[3], 0);
+                    let flag = self.builder.uextend(I64, flag);
+                    unsuitable = self.builder.bor(unsuitable, other);
+                    unsuitable = self.builder.bor(unsuitable, flag);
                 }
                 unsuitable
             }
@@ -383,24 +377,24 @@ impl Generator<'_, '_> {
             Bound::Sum(left, right) => {
                 let left = self.mir_bound(left, words, count);
                 let right = self.mir_bound(right, words, count);
-                let larger = self.builder.ins().umax(left, right);
-                self.builder.ins().iadd_imm_s(larger, 1)
+                let larger = self.builder.umax(left, right);
+                self.builder.iadd_imm_s(larger, 1)
             }
             Bound::Product(left, right) => {
                 let left = self.mir_bound(left, words, count);
                 let right = self.mir_bound(right, words, count);
-                self.builder.ins().iadd(left, right)
+                self.builder.iadd(left, right)
             }
             Bound::Accumulated { entry, operands } => {
                 let mut largest = self.magnitude_bound(words[*entry]);
                 for operand in operands {
                     let operand = self.mir_bound(operand, words, count);
-                    largest = self.builder.ins().umax(largest, operand);
+                    largest = self.builder.umax(largest, operand);
                 }
                 let zeros = self.leading_zeros(count);
                 let sixty_four = self.constant(64);
-                let bits = self.builder.ins().isub(sixty_four, zeros);
-                self.builder.ins().iadd(largest, bits)
+                let bits = self.builder.isub(sixty_four, zeros);
+                self.builder.iadd(largest, bits)
             }
         }
     }
@@ -481,10 +475,8 @@ impl Generator<'_, '_> {
         captures: &[Capture],
         ty: Type,
     ) -> Words {
-        let reference = self
-            .module
-            .declare_func_in_func(self.ids[function], self.builder.func);
-        let code = self.builder.ins().func_addr(I64, reference);
+        let reference = self.builder.declare_func(self.module, self.ids[function]);
+        let code = self.builder.func_addr(I64, reference);
         if captures.is_empty() {
             if matches!(ty, Type::Once(_) | Type::Multi(_)) {
                 let zero = self.constant(0);
@@ -506,12 +498,10 @@ impl Generator<'_, '_> {
             let size = self.constant(bytes as i64);
             let environment = self.runtime_call(self.kstack_push, &[size]);
             self.builder
-                .ins()
                 .store(ir::MemFlagsData::new(), size, environment, 0);
             let mut offset = 8;
             for word in words.iter().flatten() {
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), *word, environment, offset);
                 offset += 8;
             }
@@ -532,10 +522,9 @@ impl Generator<'_, '_> {
         let size = self.constant(bytes as i64);
         let environment = self.runtime_call(self.allocate, &[size]);
         let drop = self.closure_drops[&types];
-        let drop = self.module.declare_func_in_func(drop, self.builder.func);
-        let drop = self.builder.ins().func_addr(I64, drop);
+        let drop = self.builder.declare_func(self.module, drop);
+        let drop = self.builder.func_addr(I64, drop);
         self.builder
-            .ins()
             .store(ir::MemFlagsData::new(), drop, environment, 0);
         let mut offset = 8;
         for capture in captures {
@@ -545,7 +534,6 @@ impl Generator<'_, '_> {
             };
             for word in &words {
                 self.builder
-                    .ins()
                     .store(ir::MemFlagsData::new(), *word, environment, offset);
                 offset += 8;
             }
@@ -574,7 +562,7 @@ impl Generator<'_, '_> {
                 (self.program.width(result) * 8) as u32,
                 STACK_SLOT_ALIGN_SHIFT,
             ));
-            Some(self.builder.ins().stack_addr(I64, slot, 0))
+            Some(self.builder.stack_addr(I64, slot, 0))
         } else {
             None
         };
@@ -653,12 +641,8 @@ impl Generator<'_, '_> {
                 let bytes = self.constant((values.len() * 8) as i64);
                 let pointer = self.runtime_call(self.allocate, &[bytes]);
                 for (i, value) in values.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *value,
-                        pointer,
-                        (i * 8) as i32,
-                    );
+                    self.builder
+                        .store(ir::MemFlagsData::new(), *value, pointer, (i * 8) as i32);
                 }
                 Some(vec![pointer])
             }
@@ -718,9 +702,7 @@ impl Generator<'_, '_> {
                 let handle = self.mir_scalar(*vector);
                 Some(vec![match word {
                     BufferWord::Length => self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
-                        g.builder
-                            .ins()
-                            .load(I64, ir::MemFlagsData::new(), handle, 0)
+                        g.builder.load(I64, ir::MemFlagsData::new(), handle, 0)
                     }),
                     BufferWord::Capacity => self.buffer_capacity(handle),
                 }])
@@ -731,18 +713,18 @@ impl Generator<'_, '_> {
                 let right = self.mir_operand(*right);
                 let equal = self.struct_eq_words(ty, &left, &right);
                 let value = if *negated {
-                    self.builder.ins().bxor_imm_s(equal, 1)
+                    self.builder.bxor_imm_s(equal, 1)
                 } else {
                     equal
                 };
-                Some(vec![self.builder.ins().uextend(I64, value)])
+                Some(vec![self.builder.uextend(I64, value)])
             }
             Rvalue::ByteAt(handle, index) => {
                 let handle = self.mir_scalar(*handle);
                 let index = self.mir_scalar(*index);
                 // Data follows the 16-byte header.
-                let address = self.builder.ins().iadd(handle, index);
-                Some(vec![self.builder.ins().uload8(
+                let address = self.builder.iadd(handle, index);
+                Some(vec![self.builder.uload8(
                     I64,
                     ir::MemFlagsData::new(),
                     address,
@@ -777,7 +759,9 @@ impl Generator<'_, '_> {
                     let (pointer, length, stride, bytes) =
                         self.view_source(base_ty, width, None, Some((location, 0)), &[]);
                     let end = end.map_or(length, |end| self.mir_scalar(end));
-                    return Some(self.finish_view(pointer, length, stride, bytes, start, end, *check));
+                    return Some(
+                        self.finish_view(pointer, length, stride, bytes, start, end, *check),
+                    );
                 }
                 let (location, values) = match source {
                     ViewSource::Array(local) => {
@@ -900,32 +884,22 @@ impl Generator<'_, '_> {
                         let out = self.stack_words(3);
                         let op = self.constant(operation as i64);
                         let found = self.runtime_call(self.handler_lookup, &[op, out]);
-                        let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
+                        let missing = self.builder.icmp_imm_s(IntCC::Equal, found, 0);
                         self.guard(missing);
-                        let buffer = self
-                            .builder
-                            .ins()
-                            .load(I64, ir::MemFlagsData::new(), out, 0);
+                        let buffer = self.builder.load(I64, ir::MemFlagsData::new(), out, 0);
                         self.store_words(buffer, &words[0]);
                         let word = self.abort_word_address();
-                        self.builder
-                            .ins()
-                            .store(ir::MemFlagsData::new(), buffer, word, 0);
+                        self.builder.store(ir::MemFlagsData::new(), buffer, word, 0);
                         unit(self)
                     }
                     RuntimeOp::AbortWord => {
                         let address = self.abort_word_address();
-                        vec![
-                            self.builder
-                                .ins()
-                                .load(I64, ir::MemFlagsData::new(), address, 0),
-                        ]
+                        vec![self.builder.load(I64, ir::MemFlagsData::new(), address, 0)]
                     }
                     RuntimeOp::AbortClear => {
                         let address = self.abort_word_address();
                         let zero = self.constant(0);
                         self.builder
-                            .ins()
                             .store(ir::MemFlagsData::new(), zero, address, 0);
                         unit(self)
                     }
@@ -982,8 +956,8 @@ impl Generator<'_, '_> {
                         return None;
                     }
                 };
-                let gv = self.module.declare_data_in_func(id, self.builder.func);
-                let address = self.builder.ins().symbol_value(I64, gv);
+                let gv = self.builder.declare_data(self.module, id);
+                let address = self.builder.symbol_value(I64, gv);
                 let length = self.constant(bytes.len() as i64);
                 Some(vec![self.runtime_call(self.bytes_from, &[address, length])])
             }
@@ -1001,16 +975,13 @@ impl Generator<'_, '_> {
                 let value = self.mir_scalar(*value);
                 if let [(0, zero)] = targets[..] {
                     self.builder
-                        .ins()
                         .brif(value, blocks[*otherwise], &[], blocks[zero], &[]);
                     return;
                 }
                 for (case, target) in targets {
-                    let hit = self.builder.ins().icmp_imm_s(IntCC::Equal, value, *case);
+                    let hit = self.builder.icmp_imm_s(IntCC::Equal, value, *case);
                     let next = self.builder.create_block();
-                    self.builder
-                        .ins()
-                        .brif(hit, blocks[*target], &[], next, &[]);
+                    self.builder.brif(hit, blocks[*target], &[], next, &[]);
                     self.builder.switch_to_block(next);
                 }
                 self.jump(blocks[*otherwise], &[]);
@@ -1112,7 +1083,7 @@ impl Generator<'_, '_> {
             }
             TerminatorKind::Resume | TerminatorKind::Abort => self.return_dummy(),
             TerminatorKind::Unreachable => {
-                self.builder.ins().trap(TrapCode::unwrap_user(2));
+                self.builder.trap(TrapCode::unwrap_user(2));
             }
         }
     }
