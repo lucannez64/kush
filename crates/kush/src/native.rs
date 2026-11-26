@@ -2056,6 +2056,8 @@ fn lower(
     // NATIVE-INLINE: bodies are built first and defined after, so a
     // caller can absorb any small reachable callee.
     let mut bodies: Vec<Option<ir::Function>> = vec![None; program.functions.len()];
+    let mut typed_bodies: Vec<Option<Box<llvm_builder::LlvmBuilder>>> =
+        (0..program.functions.len()).map(|_| None).collect();
     // FND-MIR: every function is lowered from its MIR body, after the loop
     // passes of docs/mir-design.md section 8 (`mir::optimize`). A function
     // the builder does not cover is an error only if a build reaches it.
@@ -2393,10 +2395,12 @@ fn lower(
         g.builder.seal_all_blocks();
         let builder = match g.builder {
             builder::Builder::Cranelift(builder) => builder,
-            // The typed LLVM builder's body is defined now: there is no
-            // inlining step for it.
+            // A typed LLVM body is defined below with the others, so the
+            // module lists functions in program order whichever builder
+            // made them.
             builder::Builder::Llvm(built) => {
-                module.define_typed(ids[index], *built)?;
+                module.referenced.extend(built.referenced.iter().copied());
+                typed_bodies[index] = Some(built);
                 continue;
             }
         };
@@ -2432,6 +2436,10 @@ fn lower(
         Vec::new()
     };
     for (index, f) in program.functions.iter().enumerate() {
+        if let Some(built) = typed_bodies[index].take() {
+            module.define_typed(ids[index], *built)?;
+            continue;
+        }
         let Some(body) = bodies[index].take() else {
             continue;
         };
