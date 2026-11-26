@@ -522,7 +522,9 @@ covers:
 | FND-EVAL-BUFFERS | `Vec`, `Bytes`, `String`, slices, `str`, runtime-length arrays, views, `Vec.map` |
 | FND-EVAL-CALLABLES | Function values, closures and their environments, `dyn` objects, unions and coercions |
 | FND-EVAL-EFFECTS | Handlers, aborts, continuations and `multi fn`, tasks, threads, channels |
-| FND-EVAL-RUNTIME | Allocators and contexts, arenas, standard I/O, host operations, staging |
+| FND-EVAL-RUNTIME | Allocators and contexts, arenas, standard I/O, host operations (replayed in check mode) |
+| FND-EVAL-HOST | Host calls and the `std.sys` shims run on the machine itself: the host layer moves out of `eval.rs` |
+| FND-EVAL-STAGING | `Code.compile` and calls of compiled code: frames that run another program's functions |
 | FND-EVAL-SWITCH | `Executable::evaluate` runs the machine; `eval.rs` is deleted |
 
 **Status.** MACHINE, CALLABLES and BUFFERS are done. Buffers have the
@@ -533,3 +535,12 @@ buffer's allocation has the runtime's size class (16-byte classes up to
 `kush_buffer_grow` does. The machine runs 40 examples as the tree does. A
 program that uses tasks waits for EFFECTS: the tree and native run its
 `main` as a task, which the stats count.
+
+RUNTIME is done. Arenas and user allocators keep `kush.c`'s layouts and
+counts; the user's callbacks (allocators, growth hooks, arena strategies)
+are nested calls, and a panic in a release callback or a strategy aborts.
+In check mode the tree's reads and writes, and its host and `std.sys`
+calls, are recorded call by call and replayed to the machine, so effects
+that cannot happen twice (a file write, a clock, a process) happen once.
+Reads and writes of the standard streams run on the machine itself
+through the replayed input and output.
