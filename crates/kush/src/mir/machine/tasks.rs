@@ -54,7 +54,7 @@ pub(super) struct TaskRecord {
     pub(super) unwinding: Option<Diagnostic>,
     /// The body to enter when the task first runs: its function and
     /// environment.
-    pub(super) start: Option<(usize, i64)>,
+    pub(super) start: Option<(Code, i64)>,
     pub(super) resume: Option<Resume>,
     pub(super) cancelled: bool,
     pub(super) waiter: Option<usize>,
@@ -148,6 +148,9 @@ impl Machine<'_, '_> {
         self.kstack = std::mem::take(&mut record.kstack);
         self.unwinding = record.unwinding.take();
         record.state = State::Running;
+        if let Some(program) = self.stack.last().map(|frame| frame.program) {
+            self.select(program);
+        }
     }
 
     /// Run the next ready task. The run loop then enters its body or
@@ -171,7 +174,7 @@ impl Machine<'_, '_> {
                 unwind: None,
                 catch: None,
             };
-            self.enter(function, Vec::new(), Some(caller), Some(environment))
+            self.enter_code(function, Vec::new(), Some(caller), Some(environment))
                 .map_err(Raise::Stop)?;
             return Ok(true);
         }

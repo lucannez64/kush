@@ -293,7 +293,7 @@ impl Machine<'_, '_> {
             let [_, state, _, alloc, ..] = self.memory.load(binding.context, 6)?[..] else {
                 unreachable!("six words")
             };
-            self.call_nested(alloc as usize, vec![vec![state], vec![bytes]])?[0]
+            self.call_nested(self.code(alloc as usize), vec![vec![state], vec![bytes]])?[0]
         } else {
             let alloc = code_function(binding.alloc)?;
             self.call_nested(alloc, vec![vec![bytes]])?[0]
@@ -315,7 +315,7 @@ impl Machine<'_, '_> {
             let [_, state, _, _, free, _] = self.memory.load(binding.context, 6)?[..] else {
                 unreachable!("six words")
             };
-            self.call_nested(free as usize, vec![vec![state], vec![block]])
+            self.call_nested(self.code(free as usize), vec![vec![state], vec![block]])
         } else {
             let free = code_function(binding.free)?;
             self.call_nested(free, vec![vec![block]])
@@ -343,7 +343,7 @@ impl Machine<'_, '_> {
                 unreachable!("six words")
             };
             self.call_nested(
-                grow as usize,
+                self.code(grow as usize),
                 vec![vec![state], vec![block], vec![old], vec![bytes]],
             )?[0]
         } else {

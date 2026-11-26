@@ -229,7 +229,7 @@ impl Site {
 enum Flow {
     Done(Words),
     Call {
-        function: usize,
+        function: Code,
         args: Vec<Words>,
         environment: Option<i64>,
         then: Option<Then>,
@@ -246,6 +246,8 @@ enum Flow {
 type Then = Box<dyn for<'p, 'o, 'm> FnOnce(&'m mut Machine<'p, 'o>, Words) -> Run<Flow>>;
 
 struct Frame {
+    /// The program whose function this is.
+    program: usize,
     body: Rc<Body>,
     block: BlockId,
     statement: usize,
@@ -267,10 +269,16 @@ struct Frame {
 }
 
 struct Machine<'p, 'o> {
-    program: &'p Executable,
-    bodies: Vec<Option<Rc<Body>>>,
-    /// Whether each function's body installs a handler.
-    installs_handlers: Vec<bool>,
+    /// The program the top frame runs, and its number (0: `main`'s).
+    program: Program<'p>,
+    program_id: usize,
+    main: &'p Executable,
+    /// Compiled artifacts and their entry functions, numbered from 1.
+    artifacts: Vec<(std::sync::Arc<Executable>, usize)>,
+    /// Each program's built bodies, by function.
+    bodies: Vec<Vec<Option<Rc<Body>>>>,
+    /// Whether each function's body installs a handler, by program.
+    installs_handlers: Vec<Vec<bool>>,
     memory: Memory,
     input: &'o mut dyn Read,
     output: &'o mut dyn Write,
@@ -342,9 +350,12 @@ fn run_program(
 ) -> Run<(i64, MemoryStats, bool)> {
     let entry = program.entry().map_err(Stop::Panic)?;
     let mut machine = Machine {
-        program,
-        bodies: vec![None; program.functions.len()],
-        installs_handlers: vec![false; program.functions.len()],
+        program: Program::Main(program),
+        program_id: 0,
+        main: program,
+        artifacts: Vec::new(),
+        bodies: vec![vec![None; program.functions.len()]],
+        installs_handlers: vec![vec![false; program.functions.len()]],
         memory: Memory::default(),
         input,
         hosts,
@@ -557,19 +568,57 @@ fn report(program: &Executable, reason: &str) {
 
 impl Machine<'_, '_> {
     fn body(&mut self, function: usize) -> Run<Rc<Body>> {
-        if let Some(body) = &self.bodies[function] {
+        let id = self.program_id;
+        if let Some(body) = &self.bodies[id][function] {
             return Ok(body.clone());
         }
-        let body = Rc::new(build(self.program, function).map_err(|reason| {
+        let body = Rc::new(build(&self.program, function).map_err(|reason| {
             Stop::Unsupported(format!(
                 "fn {}: {reason}",
                 self.program.functions[function].name
             ))
         })?);
-        self.bodies[function] = Some(body.clone());
-        self.installs_handlers[function] =
+        self.bodies[id][function] = Some(body.clone());
+        self.installs_handlers[id][function] =
             crate::native::block_installs_handler(&self.program.functions[function].body);
         Ok(body)
+    }
+
+    /// Make program `id` the current one (the program of the frame on top).
+    fn select(&mut self, id: usize) {
+        if id == self.program_id {
+            return;
+        }
+        self.program_id = id;
+        self.program = match id {
+            0 => Program::Main(self.main),
+            _ => Program::Artifact(self.artifacts[id - 1].0.clone()),
+        };
+    }
+
+    /// The current program's function, as code.
+    fn code(&self, function: usize) -> Code {
+        Code {
+            program: self.program_id,
+            function,
+        }
+    }
+
+    /// Push a frame for `code` (entering its program).
+    fn enter_code(
+        &mut self,
+        code: Code,
+        args: Vec<Words>,
+        caller: Option<Return>,
+        environment: Option<i64>,
+    ) -> Run<()> {
+        let previous = self.program_id;
+        self.select(code.program);
+        let entered = self.enter(code.function, args, caller, environment);
+        if entered.is_err() {
+            self.select(previous);
+        }
+        entered
     }
     fn width(&self, ty: Type) -> usize {
         self.program.width(ty)
@@ -586,7 +635,7 @@ impl Machine<'_, '_> {
         environment: Option<i64>,
     ) -> Run<()> {
         let body = self.body(function)?;
-        let program = self.program;
+        let program = self.program.clone();
         let checked = &program.functions[function];
         let mut locals = body
             .locals
@@ -638,6 +687,7 @@ impl Machine<'_, '_> {
             owned[local] = true;
         }
         self.stack.push(Frame {
+            program: self.program_id,
             body,
             block: 0,
             statement: 0,
@@ -645,7 +695,8 @@ impl Machine<'_, '_> {
             homes,
             owned,
             temporaries: Vec::new(),
-            handler_base: self.installs_handlers[function].then_some(self.handlers.len()),
+            handler_base: self.installs_handlers[self.program_id][function]
+                .then_some(self.handlers.len()),
             caller,
         });
         Ok(())
@@ -667,6 +718,10 @@ impl Machine<'_, '_> {
         }
         for temporary in &frame.temporaries {
             self.memory.free(*temporary)?;
+        }
+        // The caller's program again.
+        if let Some(program) = self.stack.last().map(|frame| frame.program) {
+            self.select(program);
         }
         Ok(frame)
     }
@@ -738,8 +793,8 @@ impl Machine<'_, '_> {
     /// cannot suspend (the checker allows at most `alloc`), so no task
     /// switches while it runs; [`Machine::nested`] counts these runs. A
     /// panic leaves it as a [`Stop::Panic`].
-    fn call_nested(&mut self, function: usize, args: Vec<Words>) -> Run<Words> {
-        self.enter(function, args, None, None)?;
+    fn call_nested(&mut self, function: Code, args: Vec<Words>) -> Run<Words> {
+        self.enter_code(function, args, None, None)?;
         self.nested += 1;
         let result = self.run();
         self.nested -= 1;
@@ -883,6 +938,20 @@ impl Machine<'_, '_> {
                             _ => Some(words[1]),
                         };
                         let function = code_function(words[0]).map_err(Raise::Stop)?;
+                        // A compiled entry takes the arguments its erased
+                        // parameters leave (as the tree calls it).
+                        let mut values = values;
+                        if let Type::Fn(signature) = body.operand_ty(*callable)
+                            && function.program != 0
+                            && self.artifacts[function.program - 1].1 == function.function
+                        {
+                            let signature = &self.program.function_types[signature];
+                            let mut position = 0;
+                            values.retain(|_| {
+                                position += 1;
+                                !signature.parameter_erased(position - 1)
+                            });
+                        }
                         let caller = Return {
                             site: Site::Call {
                                 destination: *destination,
@@ -891,7 +960,7 @@ impl Machine<'_, '_> {
                             unwind: *unwind,
                             catch: None,
                         };
-                        self.enter(function, values, Some(caller), environment)
+                        self.enter_code(function, values, Some(caller), environment)
                             .map_err(Raise::Stop)?;
                     }
                 }
@@ -999,7 +1068,7 @@ impl Machine<'_, '_> {
                     unwind,
                     catch,
                 };
-                self.enter(function, args, Some(caller), environment)
+                self.enter_code(function, args, Some(caller), environment)
                     .map_err(Raise::Stop)
             }
             Flow::Suspend(then) => self.suspend(then, site, unwind),
@@ -1076,6 +1145,22 @@ impl Machine<'_, '_> {
             Target::Slice(op, element) => self.slice_call(op, element, values, span),
             Target::DynArray(op, element) => self.dyn_array_call(op, element, values, span),
             Target::Io(op, shape) => self.io_call(op, shape, values, ty),
+            Target::StageCompile(shape) => self.stage_compile(shape, values[0], ty),
+            Target::StageEntry(_) => {
+                // The compiled owner's word names its artifact.
+                let owner = self.memory.load(values[0], 1)?[0];
+                let id = self.memory.load(owner, 1)?[0] as usize;
+                let Some((_, entry)) = self.artifacts.get(id.wrapping_sub(1)) else {
+                    return fault(format!("a compiled owner of unknown artifact {id}"));
+                };
+                Ok(vec![
+                    Code {
+                        program: id,
+                        function: *entry,
+                    }
+                    .word(),
+                ])
+            }
             Target::AllocVec(op, element) => self.alloc_vec_call(op, element, values, ty, span),
             Target::Print | Target::PrintFloat(_) => {
                 let text = match *target {
@@ -1117,6 +1202,39 @@ impl Machine<'_, '_> {
             }
             _ => unsupported(format!("the builtin {}", target_name(target))),
         }
+    }
+
+    /// `Code.compile`: the template graph (an owned `Bytes`, consumed) as a
+    /// new artifact, owned by a counted handle naming it; or the error code
+    /// (95 for a template the runtime cannot compile, else 22).
+    fn stage_compile(
+        &mut self,
+        shape: crate::runtime_types::ResultShape,
+        graph: i64,
+        ty: Type,
+    ) -> Run<Words> {
+        let data = self.buffer_data(graph)?;
+        self.memory.free(graph)?;
+        let words = match crate::staging::runtime_compile(&self.program, &data) {
+            Ok(artifact) => {
+                let functions = artifact.program.functions.len();
+                self.artifacts.push((artifact.program, artifact.entry));
+                self.bodies.push(vec![None; functions]);
+                self.installs_handlers.push(vec![false; functions]);
+                let owner = self.memory.allocate(8, true);
+                self.memory.store(owner, &[self.artifacts.len() as i64])?;
+                vec![shape.ok_tag as i64, owner]
+            }
+            Err(error) => {
+                let status = if error.message == crate::staging::UNSUPPORTED_RUNTIME_TEMPLATE {
+                    95
+                } else {
+                    22
+                };
+                vec![shape.err_tag as i64, status]
+            }
+        };
+        Ok(fit(words, self.width(ty)))
     }
 
     /// A host call (filesystem, environment, clock, process, network) as the
@@ -1201,7 +1319,7 @@ impl Machine<'_, '_> {
         ty: Type,
         span: Span,
     ) -> Run<Words> {
-        let program = self.program;
+        let program = self.program.clone();
         let Some(function) = program.foreign_functions[index].as_ref() else {
             return fault("a call of an unchecked foreign function");
         };
@@ -1545,7 +1663,7 @@ impl Machine<'_, '_> {
     /// selects the method. An owned receiver's payload moves out of its
     /// allocation into the call; a borrowed one passes the payload pointer.
     fn dyn_call(&mut self, spec: usize, mut values: Vec<Words>, caller: Return) -> Run<()> {
-        let program = self.program;
+        let program = self.program.clone();
         let spec = &program.dyn_calls[spec];
         let members = program
             .dyn_members
@@ -1583,7 +1701,7 @@ impl Machine<'_, '_> {
     /// `union_borrow_call`): the tag behind the reference selects the
     /// member's method, which gets the payload's address.
     fn union_call(&mut self, spec: usize, mut values: Vec<Words>, caller: Return) -> Run<()> {
-        let program = self.program;
+        let program = self.program.clone();
         let spec = &program.union_calls[spec];
         let pointer = values[0][0];
         let tag = self.memory.load(pointer, 1)?[0];
@@ -1608,7 +1726,7 @@ impl Machine<'_, '_> {
         captures: &[Capture],
         ty: Type,
     ) -> Run<Words> {
-        let code = CODE | function as i64;
+        let code = self.code(function).word();
         if captures.is_empty() {
             return Ok(match ty {
                 Type::Once(_) | Type::Multi(_) => vec![code, 0],
@@ -1763,7 +1881,7 @@ impl Machine<'_, '_> {
                 capture,
                 target,
             } => {
-                let code = CODE | *function as i64;
+                let code = self.code(*function).word();
                 if !matches!(target, Type::Once(_)) {
                     return Ok(vec![code]);
                 }
@@ -1902,7 +2020,7 @@ impl Machine<'_, '_> {
                     // function takes it. A panic in it is dropped, and the
                     // panic being unwound is kept for the cleanup's Resume.
                     let unwinding = self.unwinding.take();
-                    let result = self.call_nested(cleanup, vec![words.to_vec()]);
+                    let result = self.call_nested(self.code(cleanup), vec![words.to_vec()]);
                     self.unwinding = unwinding;
                     return match result {
                         Ok(result) => {
@@ -1913,7 +2031,12 @@ impl Machine<'_, '_> {
                         Err(other) => Err(other),
                     };
                 }
-                if definition.foreign.is_some() {
+                if let Some(foreign) = &definition.foreign {
+                    // A compiled owner (`CompiledCode`): its handle; the
+                    // artifact stays until the run ends.
+                    if foreign.release == "kush_stage_release" {
+                        return self.memory.free(words[0]);
+                    }
                     return unsupported("a foreign resource");
                 }
                 if let Some((element, capacity)) = definition.dynamic_array {
@@ -2031,12 +2154,47 @@ impl Raise {
     }
 }
 
+/// A function of a program: the main program (0) or a compiled artifact.
+#[derive(Clone, Copy, PartialEq)]
+struct Code {
+    program: usize,
+    function: usize,
+}
+
+impl Code {
+    /// The code word of a function value: the program above the function.
+    fn word(self) -> i64 {
+        CODE | (self.program as i64) << 32 | self.function as i64
+    }
+}
+
 /// The function a code word names.
-fn code_function(word: i64) -> Run<usize> {
+fn code_function(word: i64) -> Run<Code> {
     if word & CODE != 0 && word & DROP == 0 {
-        Ok((word & !CODE) as usize)
+        Ok(Code {
+            program: ((word & !CODE) >> 32) as usize,
+            function: (word & 0xffff_ffff) as usize,
+        })
     } else {
         fault(format!("a call through the non-code word {word:#x}"))
+    }
+}
+
+/// The program a frame runs: the one being evaluated, or a compiled
+/// artifact (`Code.compile`: the program and its generated functions).
+#[derive(Clone)]
+enum Program<'p> {
+    Main(&'p Executable),
+    Artifact(std::sync::Arc<Executable>),
+}
+
+impl std::ops::Deref for Program<'_> {
+    type Target = Executable;
+    fn deref(&self) -> &Executable {
+        match self {
+            Program::Main(program) => program,
+            Program::Artifact(program) => program,
+        }
     }
 }
 

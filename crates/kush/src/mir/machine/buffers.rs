@@ -69,7 +69,7 @@ impl Machine<'_, '_> {
         Ok(handle)
     }
     /// The bytes of a `Bytes` or `String` handle.
-    fn buffer_data(&self, handle: i64) -> Run<Vec<u8>> {
+    pub(super) fn buffer_data(&self, handle: i64) -> Run<Vec<u8>> {
         let (length, _) = self.header(handle)?;
         self.memory.load_bytes(handle + 16, length as usize)
     }

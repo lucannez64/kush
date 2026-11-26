@@ -85,6 +85,34 @@ fn covered_examples_run_as_on_the_tree_evaluator() {
 const MACHINE_FLOOR: usize = 46;
 
 #[test]
+fn compiled_code_runs_as_on_the_tree_evaluator() {
+    // Two artifacts of the same program, called from `main`, and code words
+    // that name each artifact's own functions.
+    let source = "use std.result.Result;
+        fn power(n: i64) -> Code<fn(i64) -> i64 ! {}> ! {alloc} {
+            if n == 0 { quote fn(x: i64) -> i64 ! {} { 1 } }
+            else {
+                let smaller = power(n - 1);
+                quote fn(x: i64) -> i64 ! {} { x * splice(smaller)(x) }
+            }
+        }
+        fn main() -> Unit ! {io, alloc} {
+            let cube = match Code.compile(power(3)) {
+                Result.Ok(owner) => owner, Result.Err(e) => { print_i64(-e); return; },
+            };
+            let square = match Code.compile(power(2)) {
+                Result.Ok(owner) => owner, Result.Err(e) => { print_i64(-e); return; },
+            };
+            print_i64(Code.call(&cube, 3) + Code.call(&square, 4) + Code.call(&cube, 2));
+        }";
+    let program = kush::program::load_source("<machine-test>", source)
+        .map_err(|(_, error)| error.message)
+        .unwrap();
+    let program = executable::check_program(&program).unwrap();
+    assert_eq!(compare(&program), Ok(true));
+}
+
+#[test]
 fn buffers_and_views_run_as_on_the_tree_evaluator() {
     for source in [
         // Vector growth, owned elements, set and clear; byte growth.

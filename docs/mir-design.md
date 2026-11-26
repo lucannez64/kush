@@ -566,3 +566,10 @@ EFFECTS is done; the machine runs 46 examples as the tree does, and only
   suspends with the rest of its work, and a task's panic is raised at its
   join. In check mode a host call records how often it yielded (a
   descriptor wait polls and yields), and the machine yields as often.
+
+STAGING is done. `Code.compile` returns another program (the program and
+its generated functions); the machine keeps each artifact, a frame records
+the program whose function it runs, and a code word carries its program
+above the function index, so a function value made in compiled code calls
+back into it. In check mode the machine now covers every program the
+suite runs.
