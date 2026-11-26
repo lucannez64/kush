@@ -616,9 +616,12 @@ goes. Nothing is lowered twice, and the translator is deleted at the end.
 twice: the duplication FND-EVAL just removed from the evaluator.)
 
 **The trait.**
-- Associated types for the handles: `Value`, `Block`, `Var`, `Slot`,
-  `FuncRef`, `SigRef`. Value types are Cranelift's `ir::Type` (the integer,
-  float and vector types the lowering uses).
+- The handles are Cranelift's entity types (`ir::Value`, `ir::Block`,
+  `Variable`, `ir::StackSlot`, `ir::FuncRef`, `ir::SigRef`,
+  `ir::GlobalValue`, `ir::Inst`): plain indices an implementation numbers
+  as it likes, so the lowering keeps its types and only its builder is
+  generic. Value types are Cranelift's `ir::Type` (the integer, float and
+  vector types the lowering uses).
 - One method per operation the lowering uses, with Cranelift's names and
   argument order (`iadd`, `icmp_imm_s`, `load`, `brif`, `call`, ...), so
   migrating a call site is mechanical: `self.builder.ins().iadd(a, b)`

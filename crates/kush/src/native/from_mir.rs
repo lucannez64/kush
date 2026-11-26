@@ -12,7 +12,7 @@ use crate::mir::{
     Terminator, TerminatorKind, ViewSource,
 };
 
-impl Generator<'_, '_> {
+impl<E: Emit> Generator<'_, E> {
     pub(super) fn mir_body(&mut self, body: &Body) {
         // The MIR states every drop, including those on unwind edges; the
         // tree path's resource tracking stays empty.

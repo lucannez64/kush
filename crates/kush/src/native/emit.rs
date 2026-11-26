@@ -17,186 +17,171 @@ use cranelift_module::{DataId, FuncId, Module};
 
 /// An instruction builder for one function.
 pub(super) trait Emit {
-    type Value: Copy + PartialEq + std::fmt::Debug;
-    type Block: Copy + PartialEq + std::fmt::Debug;
-    type Var: Copy;
-    type Slot: Copy;
-    type FuncRef: Copy;
-    type SigRef: Copy;
-    type Global: Copy;
-    type Inst: Copy;
-
     // ---- blocks, variables, slots, references ----------------------------
-    fn create_block(&mut self) -> Self::Block;
-    fn switch_to_block(&mut self, block: Self::Block);
-    fn append_block_param(&mut self, block: Self::Block, ty: ir::Type) -> Self::Value;
-    fn append_block_params_for_function_params(&mut self, block: Self::Block);
-    fn block_params(&self, block: Self::Block) -> &[Self::Value];
+    fn create_block(&mut self) -> ir::Block;
+    fn switch_to_block(&mut self, block: ir::Block);
+    fn append_block_param(&mut self, block: ir::Block, ty: ir::Type) -> ir::Value;
+    fn append_block_params_for_function_params(&mut self, block: ir::Block);
+    fn block_params(&self, block: ir::Block) -> &[ir::Value];
     fn seal_all_blocks(&mut self);
-    fn declare_var(&mut self, ty: ir::Type) -> Self::Var;
-    fn def_var(&mut self, var: Self::Var, value: Self::Value);
-    fn use_var(&mut self, var: Self::Var) -> Self::Value;
-    fn create_sized_stack_slot(&mut self, data: ir::StackSlotData) -> Self::Slot;
-    fn import_signature(&mut self, signature: ir::Signature) -> Self::SigRef;
-    fn declare_func(&mut self, module: &mut impl Module, id: FuncId) -> Self::FuncRef;
-    fn declare_data(&mut self, module: &mut impl Module, id: DataId) -> Self::Global;
-    fn inst_results(&self, inst: Self::Inst) -> &[Self::Value];
+    fn declare_var(&mut self, ty: ir::Type) -> Variable;
+    fn def_var(&mut self, var: Variable, value: ir::Value);
+    fn use_var(&mut self, var: Variable) -> ir::Value;
+    fn create_sized_stack_slot(&mut self, data: ir::StackSlotData) -> ir::StackSlot;
+    fn import_signature(&mut self, signature: ir::Signature) -> ir::SigRef;
+    fn declare_func(&mut self, module: &mut impl Module, id: FuncId) -> ir::FuncRef;
+    fn declare_data(&mut self, module: &mut impl Module, id: DataId) -> ir::GlobalValue;
+    fn inst_results(&self, inst: ir::Inst) -> &[ir::Value];
     /// The integer a value is, when it is a constant.
-    fn constant_of(&self, value: Self::Value) -> Option<i64>;
-    fn value_type(&self, value: Self::Value) -> ir::Type;
+    fn constant_of(&self, value: ir::Value) -> Option<i64>;
+    fn value_type(&self, value: ir::Value) -> ir::Type;
     /// The memory class of the loads and stores built from now on (`None`:
     /// no class); returns the previous one.
     fn set_memory_class(&mut self, class: Option<u32>) -> Option<u32>;
 
     // ---- control -----------------------------------------------------------
-    fn jump(&mut self, block: Self::Block, args: &[Self::Value]) -> Self::Inst;
+    fn jump(&mut self, block: ir::Block, args: &[ir::Value]) -> ir::Inst;
     fn brif(
         &mut self,
-        condition: Self::Value,
-        then: Self::Block,
-        then_args: &[Self::Value],
-        otherwise: Self::Block,
-        otherwise_args: &[Self::Value],
-    ) -> Self::Inst;
-    fn return_(&mut self, values: &[Self::Value]) -> Self::Inst;
-    fn trap(&mut self, code: impl Into<TrapCode>) -> Self::Inst;
-    fn call(&mut self, callee: Self::FuncRef, args: &[Self::Value]) -> Self::Inst;
+        condition: ir::Value,
+        then: ir::Block,
+        then_args: &[ir::Value],
+        otherwise: ir::Block,
+        otherwise_args: &[ir::Value],
+    ) -> ir::Inst;
+    fn return_(&mut self, values: &[ir::Value]) -> ir::Inst;
+    fn trap(&mut self, code: impl Into<TrapCode>) -> ir::Inst;
+    fn call(&mut self, callee: ir::FuncRef, args: &[ir::Value]) -> ir::Inst;
     fn call_indirect(
         &mut self,
-        signature: Self::SigRef,
-        callee: Self::Value,
-        args: &[Self::Value],
-    ) -> Self::Inst;
+        signature: ir::SigRef,
+        callee: ir::Value,
+        args: &[ir::Value],
+    ) -> ir::Inst;
 
     // ---- constants and addresses ----------------------------------------------
-    fn iconst(&mut self, ty: ir::Type, value: impl Into<Imm64>) -> Self::Value;
+    fn iconst(&mut self, ty: ir::Type, value: impl Into<Imm64>) -> ir::Value;
     fn stack_addr(
         &mut self,
         ty: ir::Type,
-        slot: Self::Slot,
+        slot: ir::StackSlot,
         offset: impl Into<Offset32>,
-    ) -> Self::Value;
-    fn func_addr(&mut self, ty: ir::Type, callee: Self::FuncRef) -> Self::Value;
-    fn symbol_value(&mut self, ty: ir::Type, global: Self::Global) -> Self::Value;
+    ) -> ir::Value;
+    fn func_addr(&mut self, ty: ir::Type, callee: ir::FuncRef) -> ir::Value;
+    fn symbol_value(&mut self, ty: ir::Type, global: ir::GlobalValue) -> ir::Value;
 
     // ---- memory ------------------------------------------------------------
     fn load(
         &mut self,
         ty: ir::Type,
         flags: impl Into<MemFlagsData>,
-        pointer: Self::Value,
+        pointer: ir::Value,
         offset: impl Into<Offset32>,
-    ) -> Self::Value;
+    ) -> ir::Value;
     fn uload8(
         &mut self,
         ty: ir::Type,
         flags: impl Into<MemFlagsData>,
-        pointer: Self::Value,
+        pointer: ir::Value,
         offset: impl Into<Offset32>,
-    ) -> Self::Value;
+    ) -> ir::Value;
     fn store(
         &mut self,
         flags: impl Into<MemFlagsData>,
-        value: Self::Value,
-        pointer: Self::Value,
+        value: ir::Value,
+        pointer: ir::Value,
         offset: impl Into<Offset32>,
-    ) -> Self::Inst;
+    ) -> ir::Inst;
     fn istore8(
         &mut self,
         flags: impl Into<MemFlagsData>,
-        value: Self::Value,
-        pointer: Self::Value,
+        value: ir::Value,
+        pointer: ir::Value,
         offset: impl Into<Offset32>,
-    ) -> Self::Inst;
+    ) -> ir::Inst;
     fn atomic_load(
         &mut self,
         ty: ir::Type,
         flags: impl Into<MemFlagsData>,
-        pointer: Self::Value,
-    ) -> Self::Value;
+        pointer: ir::Value,
+    ) -> ir::Value;
     fn atomic_store(
         &mut self,
         flags: impl Into<MemFlagsData>,
-        value: Self::Value,
-        pointer: Self::Value,
-    ) -> Self::Inst;
+        value: ir::Value,
+        pointer: ir::Value,
+    ) -> ir::Inst;
     fn atomic_rmw(
         &mut self,
         ty: ir::Type,
         flags: impl Into<MemFlagsData>,
         op: impl Into<AtomicRmwOp>,
-        pointer: Self::Value,
-        value: Self::Value,
-    ) -> Self::Value;
+        pointer: ir::Value,
+        value: ir::Value,
+    ) -> ir::Value;
     fn atomic_cas(
         &mut self,
         flags: impl Into<MemFlagsData>,
-        pointer: Self::Value,
-        expected: Self::Value,
-        replacement: Self::Value,
-    ) -> Self::Value;
+        pointer: ir::Value,
+        expected: ir::Value,
+        replacement: ir::Value,
+    ) -> ir::Value;
 
     // ---- integers ----------------------------------------------------------
-    fn iadd(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn isub(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn imul(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn udiv(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn sdiv(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn urem(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn srem(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn band(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn bor(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn bxor(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn band_not(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn bnot(&mut self, x: Self::Value) -> Self::Value;
-    fn ineg(&mut self, x: Self::Value) -> Self::Value;
-    fn ishl(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn ushr(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn sshr(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn umax(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn umin(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn smax(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn smin(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn clz(&mut self, x: Self::Value) -> Self::Value;
-    fn iadd_imm_s(&mut self, x: Self::Value, y: impl Into<Imm64>) -> Self::Value;
-    fn imul_imm_s(&mut self, x: Self::Value, y: impl Into<Imm64>) -> Self::Value;
-    fn band_imm_s(&mut self, x: Self::Value, y: impl Into<Imm64>) -> Self::Value;
-    fn bor_imm_s(&mut self, x: Self::Value, y: impl Into<Imm64>) -> Self::Value;
-    fn bxor_imm_s(&mut self, x: Self::Value, y: impl Into<Imm64>) -> Self::Value;
-    fn icmp(&mut self, cond: impl Into<IntCC>, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn icmp_imm_s(&mut self, cond: IntCC, x: Self::Value, y: impl Into<Imm64>) -> Self::Value;
-    fn icmp_imm_u(&mut self, cond: IntCC, x: Self::Value, y: impl Into<Imm64>) -> Self::Value;
-    fn select(&mut self, c: Self::Value, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn uextend(&mut self, ty: ir::Type, x: Self::Value) -> Self::Value;
-    fn sextend(&mut self, ty: ir::Type, x: Self::Value) -> Self::Value;
-    fn ireduce(&mut self, ty: ir::Type, x: Self::Value) -> Self::Value;
-    fn sadd_overflow(&mut self, x: Self::Value, y: Self::Value) -> (Self::Value, Self::Value);
-    fn ssub_overflow(&mut self, x: Self::Value, y: Self::Value) -> (Self::Value, Self::Value);
-    fn smul_overflow(&mut self, x: Self::Value, y: Self::Value) -> (Self::Value, Self::Value);
-    fn uadd_overflow(&mut self, x: Self::Value, y: Self::Value) -> (Self::Value, Self::Value);
-    fn usub_overflow(&mut self, x: Self::Value, y: Self::Value) -> (Self::Value, Self::Value);
-    fn umul_overflow(&mut self, x: Self::Value, y: Self::Value) -> (Self::Value, Self::Value);
+    fn iadd(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn isub(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn imul(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn udiv(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn sdiv(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn urem(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn srem(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn band(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn bor(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn bxor(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn band_not(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn bnot(&mut self, x: ir::Value) -> ir::Value;
+    fn ineg(&mut self, x: ir::Value) -> ir::Value;
+    fn ishl(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn ushr(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn sshr(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn umax(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn umin(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn smax(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn smin(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn clz(&mut self, x: ir::Value) -> ir::Value;
+    fn iadd_imm_s(&mut self, x: ir::Value, y: impl Into<Imm64>) -> ir::Value;
+    fn imul_imm_s(&mut self, x: ir::Value, y: impl Into<Imm64>) -> ir::Value;
+    fn band_imm_s(&mut self, x: ir::Value, y: impl Into<Imm64>) -> ir::Value;
+    fn bor_imm_s(&mut self, x: ir::Value, y: impl Into<Imm64>) -> ir::Value;
+    fn bxor_imm_s(&mut self, x: ir::Value, y: impl Into<Imm64>) -> ir::Value;
+    fn icmp(&mut self, cond: impl Into<IntCC>, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn icmp_imm_s(&mut self, cond: IntCC, x: ir::Value, y: impl Into<Imm64>) -> ir::Value;
+    fn icmp_imm_u(&mut self, cond: IntCC, x: ir::Value, y: impl Into<Imm64>) -> ir::Value;
+    fn select(&mut self, c: ir::Value, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn uextend(&mut self, ty: ir::Type, x: ir::Value) -> ir::Value;
+    fn sextend(&mut self, ty: ir::Type, x: ir::Value) -> ir::Value;
+    fn ireduce(&mut self, ty: ir::Type, x: ir::Value) -> ir::Value;
+    fn sadd_overflow(&mut self, x: ir::Value, y: ir::Value) -> (ir::Value, ir::Value);
+    fn ssub_overflow(&mut self, x: ir::Value, y: ir::Value) -> (ir::Value, ir::Value);
+    fn smul_overflow(&mut self, x: ir::Value, y: ir::Value) -> (ir::Value, ir::Value);
+    fn uadd_overflow(&mut self, x: ir::Value, y: ir::Value) -> (ir::Value, ir::Value);
+    fn usub_overflow(&mut self, x: ir::Value, y: ir::Value) -> (ir::Value, ir::Value);
+    fn umul_overflow(&mut self, x: ir::Value, y: ir::Value) -> (ir::Value, ir::Value);
 
     // ---- floats and vectors -----------------------------------------------
-    fn fadd(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn fsub(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn fmul(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn fdiv(&mut self, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn sqrt(&mut self, x: Self::Value) -> Self::Value;
-    fn fcmp(&mut self, cond: impl Into<FloatCC>, x: Self::Value, y: Self::Value) -> Self::Value;
-    fn fpromote(&mut self, ty: ir::Type, x: Self::Value) -> Self::Value;
-    fn fdemote(&mut self, ty: ir::Type, x: Self::Value) -> Self::Value;
-    fn bitcast(
-        &mut self,
-        ty: ir::Type,
-        flags: impl Into<MemFlagsData>,
-        x: Self::Value,
-    ) -> Self::Value;
-    fn extractlane(&mut self, x: Self::Value, lane: impl Into<Uimm8>) -> Self::Value;
-    fn insertlane(&mut self, x: Self::Value, y: Self::Value, lane: impl Into<Uimm8>)
-    -> Self::Value;
-    fn scalar_to_vector(&mut self, ty: ir::Type, x: Self::Value) -> Self::Value;
-    fn shuffle(&mut self, a: Self::Value, b: Self::Value, mask: ir::Immediate) -> Self::Value;
+    fn fadd(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn fsub(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn fmul(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn fdiv(&mut self, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn sqrt(&mut self, x: ir::Value) -> ir::Value;
+    fn fcmp(&mut self, cond: impl Into<FloatCC>, x: ir::Value, y: ir::Value) -> ir::Value;
+    fn fpromote(&mut self, ty: ir::Type, x: ir::Value) -> ir::Value;
+    fn fdemote(&mut self, ty: ir::Type, x: ir::Value) -> ir::Value;
+    fn bitcast(&mut self, ty: ir::Type, flags: impl Into<MemFlagsData>, x: ir::Value) -> ir::Value;
+    fn extractlane(&mut self, x: ir::Value, lane: impl Into<Uimm8>) -> ir::Value;
+    fn insertlane(&mut self, x: ir::Value, y: ir::Value, lane: impl Into<Uimm8>) -> ir::Value;
+    fn scalar_to_vector(&mut self, ty: ir::Type, x: ir::Value) -> ir::Value;
+    fn shuffle(&mut self, a: ir::Value, b: ir::Value, mask: ir::Immediate) -> ir::Value;
     /// The immediate of a shuffle mask.
     fn shuffle_mask(&mut self, bytes: &[u8]) -> ir::Immediate;
 }
@@ -220,15 +205,6 @@ fn block_args(values: &[ir::Value]) -> Vec<BlockArg> {
 }
 
 impl Emit for Cranelift<'_> {
-    type Value = ir::Value;
-    type Block = ir::Block;
-    type Var = Variable;
-    type Slot = ir::StackSlot;
-    type FuncRef = ir::FuncRef;
-    type SigRef = ir::SigRef;
-    type Global = ir::GlobalValue;
-    type Inst = ir::Inst;
-
     fn create_block(&mut self) -> ir::Block {
         self.builder.create_block()
     }

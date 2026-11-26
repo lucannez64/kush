@@ -19,7 +19,7 @@ use cranelift_codegen::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use emit::Emit as _;
+use emit::Emit;
 use std::{
     collections::BTreeMap,
     fs,
@@ -2707,7 +2707,7 @@ fn c_scalar_type(ty: Type) -> ir::Type {
         other => abi_value_type(other),
     }
 }
-fn c_to_word(b: &mut emit::Cranelift, ty: Type, value: Value) -> Value {
+fn c_to_word(b: &mut impl Emit, ty: Type, value: Value) -> Value {
     match ty {
         Type::Bool => {
             let set = b.icmp_imm_u(IntCC::NotEqual, value, 0);
@@ -2716,7 +2716,7 @@ fn c_to_word(b: &mut emit::Cranelift, ty: Type, value: Value) -> Value {
         other => abi_to_word(b, other, value),
     }
 }
-fn abi_to_word(b: &mut emit::Cranelift, ty: Type, value: Value) -> Value {
+fn abi_to_word(b: &mut impl Emit, ty: Type, value: Value) -> Value {
     match ty {
         Type::Bool => {
             let set = b.icmp_imm_u(IntCC::NotEqual, value, 0);
@@ -2737,7 +2737,7 @@ fn abi_to_word(b: &mut emit::Cranelift, ty: Type, value: Value) -> Value {
         _ => value,
     }
 }
-fn word_to_c(b: &mut emit::Cranelift, ty: Type, word: Value) -> Value {
+fn word_to_c(b: &mut impl Emit, ty: Type, word: Value) -> Value {
     match ty {
         Type::Bool => b.ireduce(ir::types::I8, word),
         Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
@@ -3196,12 +3196,7 @@ fn foreign_abi_signature(
     }
     sig
 }
-fn emit_drop(
-    builder: &mut emit::Cranelift<'_>,
-    module: &mut CodeModule,
-    id: FuncId,
-    values: &[Value],
-) {
+fn emit_drop(builder: &mut impl Emit, module: &mut CodeModule, id: FuncId, values: &[Value]) {
     let reference = builder.declare_func(module, id);
     builder.call(reference, values);
 }
@@ -3976,7 +3971,7 @@ impl ScalarCallback {
         }
         Self::expression(function.body.tail.as_deref()?, &mut 32)
     }
-    fn emit(&self, builder: &mut emit::Cranelift<'_>, input: Value) -> Value {
+    fn emit(&self, builder: &mut impl Emit, input: Value) -> Value {
         match self {
             Self::Input => input,
             Self::Constant(value) => builder.iconst(I64, *value),
@@ -4018,8 +4013,8 @@ const FAILING_RUNTIME: &[&str] = &[
     "kush_print_f64",
     "kush_print_f32",
 ];
-struct Generator<'a, 'b> {
-    builder: emit::Cranelift<'a>,
+struct Generator<'b, E: Emit> {
+    builder: E,
     module: &'b mut CodeModule,
     ids: &'b [FuncId],
     foreign_ids: &'b [Option<FuncId>],
@@ -4148,7 +4143,7 @@ struct Generator<'a, 'b> {
     /// terminator unwinds to; `None` leaves the function directly.
     mir_unwind: Option<ir::Block>,
 }
-impl Generator<'_, '_> {
+impl<E: Emit> Generator<'_, E> {
     fn track(&mut self, id: Option<usize>, values: &[Value]) {
         if let Some(id) = id {
             for (v, value) in self.tracked[id].words.iter().zip(values) {
