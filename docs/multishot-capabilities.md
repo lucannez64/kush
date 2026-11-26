@@ -312,8 +312,8 @@ resumption restarts from its own copy of the loop state.
 
 ### 7.1 Native (Cranelift and LLVM)
 
-LLVM consumes the same verified Cranelift IR (`native/llvm.rs`), so there is
-one lowering, and the translator needs no new instruction: everything below
+Both backends share one lowering (the LLVM backend builds LLVM IR through
+the same `Emit` calls), so LLVM needs no new instruction: everything below
 is loads, stores, `call_indirect` and calls of C runtime helpers, which
 `llvm-link` inlines.
 

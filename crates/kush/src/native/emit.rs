@@ -264,8 +264,9 @@ impl Emit for Cranelift<'_> {
     }
     fn set_memory_class(&mut self, class: Option<u32>) -> Option<u32> {
         // The class travels as the instructions' source location, which
-        // Cranelift's code generator ignores and the LLVM translator turns
-        // into alias metadata. Locations are stored relative to a base: fix
+        // Cranelift's code generator ignores (it shows in IR dumps; the LLVM
+        // builder turns the class into alias metadata itself). Locations are
+        // stored relative to a base: fix
         // it at zero so that no class coincides with "no location".
         self.builder
             .func

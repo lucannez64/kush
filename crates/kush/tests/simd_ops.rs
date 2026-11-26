@@ -434,7 +434,7 @@ fn the_native_backend_emits_vector_instructions() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn the_llvm_backend_emits_vector_operations() {
-    // SIMD-LLVM: the translator turns the vector instructions into LLVM
+    // SIMD-LLVM: the LLVM builder turns the vector instructions into LLVM
     // vector IR (when `clang` is available, as for the other LLVM tests).
     if std::process::Command::new(std::env::var("KUSH_CLANG").unwrap_or_else(|_| "clang".into()))
         .arg("--version")

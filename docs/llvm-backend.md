@@ -28,7 +28,6 @@ Environment:
 | `KUSH_BACKEND=llvm\|llvm-release\|cranelift` | Override the backend of every native build in the process. Meant for replaying a test suite on the other backend; `llvm-release` also forces release settings, so the suite exercises `-O3` and deferred loops as users get them. |
 | `KUSH_EMIT_LLVM=path` | Also save the program's LLVM module (before linking with the runtime and optimizing). |
 | `KUSH_LLVM_NO_WHOLE_PROGRAM` | Do not use `llvm-link`: runtime operations stay calls into the runtime object. |
-| `KUSH_LLVM_TRANSLATE` | Build Cranelift IR and translate it, the backend's previous path, instead of the typed LLVM builder. Kept for comparison until FND-LLVM-SWITCH removes it. |
 | `KUSH_TRACE_DEFERRED` | Print why a loop keeps immediate overflow checks. |
 
 Requirements: Linux x86-64 and a `clang` with opaque pointers (LLVM 15 or
@@ -64,15 +63,19 @@ parameters become `phi` nodes. Variables become SSA values the way
 Cranelift's builder makes them: a variable read before any definition in a
 block is a `phi` of its values at the ends of the predecessors, resolved when
 the function is finished, and a `phi` whose operands are all one value is
-replaced by that value. The IR LLVM receives is therefore the translator's,
-instruction for instruction, without the loads and stores of `alloca`s.
-(With `alloca`s left to `mem2reg`, LLVM ordered the loop `phi`s differently
-and the vectorized `sum` loop of `benchmarks/checked-loops` ran 7% slower.)
-A staging recipe ([staging.md](staging.md)) is still built with Cranelift, because the
-staging runtime copies its machine code; Cranelift IR is then translated by
-`native/llvm.rs` for the LLVM module. The translator is also used for every
-function when a test asks for a Cranelift IR dump (`build_with_clif`), and
-with `KUSH_LLVM_TRANSLATE` set. Fuzz builds always use Cranelift. The translator goes away in FND-LLVM-SWITCH.
+replaced by that value. LLVM receives the IR it got from the earlier
+translator of finished Cranelift IR, instruction for instruction, without
+loads and stores of `alloca`s. (With `alloca`s left to `mem2reg`, LLVM
+ordered the loop `phi`s differently and the vectorized `sum` loop of
+`benchmarks/checked-loops` ran 7% slower.)
+
+A staging recipe ([staging.md](staging.md)) also needs Cranelift's machine
+code, because the staging runtime copies it, and a test that asks for a
+Cranelift IR dump (`build_with_clif`) needs Cranelift IR. Those functions
+are lowered into both builders at once (`native/both.rs`, an `Emit` that
+passes each call to both and answers with Cranelift's handles): the LLVM
+text goes into the module, and the Cranelift IR is dumped or compiled for
+the staging runtime. Fuzz builds always use Cranelift.
 
 No LLVM library is linked into `kush`, the workspace keeps
 `unsafe_code = "forbid"`, and the compiler's own build time is unchanged.

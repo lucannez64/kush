@@ -646,13 +646,15 @@ builder does (or lowered to `alloca` and left to `mem2reg`).
 the lowering calls it. Variables are SSA-renamed as Cranelift's builder does
 it (FND-LLVM-FACTS; `alloca`s left to `mem2reg` first, which ordered loop phis
 differently and cost 7% in a vectorized loop). A value's pointer form is
-rebuilt at each access the way the translator does it: `base + offset`
-becomes a `getelementptr`. `native/builder.rs` is an enum over the two
+rebuilt at each access the way the translator did it: `base + offset`
+becomes a `getelementptr`. `native/builder.rs` is an enum over the
 builders, so `Generator` is instantiated once and
-`CodeModule::function_builder` picks the backend per function. A staging
-recipe still builds with Cranelift (the staging runtime copies its machine
-code) and goes through the translator; `KUSH_LLVM_TRANSLATE` selects the
-translator for every function, for comparison.
+`CodeModule::function_builder` picks the backend per function. Since
+FND-LLVM-SWITCH the translator is gone: a staging recipe (whose Cranelift
+machine code the staging runtime copies) and a body whose Cranelift IR a
+test dumps are lowered once into both builders through `native/both.rs`,
+which passes every call to each and maps Cranelift's handles to the LLVM
+builder's.
 
 **Steps.**
 

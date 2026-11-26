@@ -28,6 +28,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+mod both;
 mod builder;
 mod deferred;
 mod emit;
@@ -976,10 +977,10 @@ impl Split {
     }
 }
 
-/// The module `Generator` lowers into. Declarations, signatures and function
-/// bodies are always built with Cranelift's module and IR builders. With the
-/// LLVM backend selected, each verified function body is translated to LLVM
-/// IR instead of being compiled by Cranelift.
+/// The module `Generator` lowers into. Declarations and signatures are
+/// always Cranelift's. With the LLVM backend selected, function bodies are
+/// built as LLVM IR by the typed builder (see [`CodeModule::function_builder`])
+/// instead of being compiled by Cranelift.
 struct CodeModule {
     object: ObjectModule,
     llvm: Option<llvm::LlvmModule>,
@@ -999,16 +1000,24 @@ macro_rules! define_body {
                 $module.define_function($id, &mut $context).map_err(error)
             }
             builder::Builder::Llvm(built) => $module.define_typed($id, *built),
+            builder::Builder::Both(both) => {
+                let both::Both {
+                    cranelift, llvm, ..
+                } = *both;
+                cranelift.finalize($module.target_config());
+                $module.define_function($id, &mut $context).map_err(error)?;
+                $module.define_typed($id, llvm)
+            }
         }
     };
 }
 
 impl CodeModule {
     /// The builder for the body of `id` (FND-LLVM-BUILDER): typed LLVM IR
-    /// with the LLVM backend, Cranelift IR otherwise. A staging recipe still
-    /// needs Cranelift's machine code, a CLIF dump (`build_with_clif`) asks
-    /// for Cranelift IR, and `KUSH_LLVM_TRANSLATE` keeps the Cranelift-IR
-    /// translator for comparison.
+    /// with the LLVM backend, Cranelift IR otherwise. Under the LLVM backend
+    /// a staging recipe also needs Cranelift's machine code (the staging
+    /// runtime copies it), and a CLIF dump (`build_with_clif`) asks for
+    /// Cranelift IR, so those get both ([`both::Both`]).
     fn function_builder<'a>(
         &self,
         id: FuncId,
@@ -1017,23 +1026,24 @@ impl CodeModule {
     ) -> builder::Builder<'a> {
         let declaration = self.declarations().get_function_decl(id);
         context.func.signature = declaration.signature.clone();
-        match &self.llvm {
-            Some(llvm)
-                if !self.stage_recipes.contains(&id)
-                    && CLIF_DUMP.with(|dump| dump.borrow().is_none())
-                    && std::env::var_os("KUSH_LLVM_TRANSLATE").is_none() =>
-            {
-                builder::Builder::Llvm(Box::new(llvm_builder::LlvmBuilder::new(
-                    llvm.shared(),
-                    declaration.linkage_name(id).into_owned(),
-                    declaration.linkage,
-                    declaration.signature.clone(),
-                )))
-            }
-            _ => builder::Builder::Cranelift(emit::Cranelift::new(FunctionBuilder::new(
+        let Some(llvm) = &self.llvm else {
+            return builder::Builder::Cranelift(emit::Cranelift::new(FunctionBuilder::new(
                 &mut context.func,
                 function_context,
-            ))),
+            )));
+        };
+        let typed = llvm_builder::LlvmBuilder::new(
+            llvm.shared(),
+            declaration.linkage_name(id).into_owned(),
+            declaration.linkage,
+            declaration.signature.clone(),
+        );
+        if self.stage_recipes.contains(&id) || CLIF_DUMP.with(|dump| dump.borrow().is_some()) {
+            let cranelift =
+                emit::Cranelift::new(FunctionBuilder::new(&mut context.func, function_context));
+            builder::Builder::Both(Box::new(both::Both::new(cranelift, typed)))
+        } else {
+            builder::Builder::Llvm(Box::new(typed))
         }
     }
     /// Define a body the typed LLVM builder built.
@@ -1118,7 +1128,7 @@ impl Module for CodeModule {
                 self.referenced.insert(FuncId::from_u32(name.index));
             }
         }
-        let Some(llvm) = &mut self.llvm else {
+        if self.llvm.is_none() {
             let result = self
                 .object
                 .define_function_with_control_plane(func, ctx, ctrl_plane);
@@ -1142,16 +1152,16 @@ impl Module for CodeModule {
                 );
             }
             return result;
-        };
-        // Same acceptance rule as the Cranelift backend: only verified IR.
+        }
+        // Under the LLVM backend this is the Cranelift twin of a body the
+        // typed builder defines (`both::Both`): a dumped body or a staging
+        // recipe. Same acceptance rule as the Cranelift backend: only
+        // verified IR.
         cranelift_codegen::verify_function(&ctx.func, self.object.isa()).map_err(|errors| {
             cranelift_module::ModuleError::Compilation(cranelift_codegen::CodegenError::Verifier(
                 errors,
             ))
         })?;
-        if let Err(diagnostic) = llvm.define_function(func, &ctx.func, self.object.declarations()) {
-            self.failure.get_or_insert(diagnostic);
-        }
         if self.stage_recipes.contains(&func) {
             // A runtime recipe is copied and linked by the staging runtime,
             // so it needs machine code and relocations in the image. Kush
@@ -2403,6 +2413,17 @@ fn lower(
                 typed_bodies[index] = Some(built);
                 continue;
             }
+            // A recipe or a dumped body: the LLVM text defines it in the
+            // module, and the Cranelift IR goes on below to be dumped or
+            // compiled for the staging runtime.
+            builder::Builder::Both(both) => {
+                let both::Both {
+                    cranelift, llvm, ..
+                } = *both;
+                module.referenced.extend(llvm.referenced.iter().copied());
+                typed_bodies[index] = Some(Box::new(llvm));
+                cranelift
+            }
         };
         builder.finalize(module.target_config());
         // Reachability reads the references of each body as it is built,
@@ -2438,7 +2459,6 @@ fn lower(
     for (index, f) in program.functions.iter().enumerate() {
         if let Some(built) = typed_bodies[index].take() {
             module.define_typed(ids[index], *built)?;
-            continue;
         }
         let Some(body) = bodies[index].take() else {
             continue;
@@ -4820,7 +4840,7 @@ impl<E: Emit> Generator<'_, E> {
     }
     fn function_call(&mut self, index: usize, mut values: Words) -> Words {
         // SIMD-NATIVE: vector instructions for recognised std.simd functions,
-        // on both backends (the LLVM translator knows vector types, SIMD-LLVM).
+        // on both backends (the LLVM builder knows vector types, SIMD-LLVM).
         if let Some(Some((ty, op))) = self.program.simd_functions.get(index).cloned()
             && let Some(words) = self.simd_lowering(&ty, &op, &values)
         {

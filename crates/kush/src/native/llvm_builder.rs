@@ -1,14 +1,14 @@
 //! The typed LLVM builder (FND-LLVM-BUILDER, docs/mir-design.md section 10).
 //!
-//! An [`Emit`] that writes LLVM IR text as the lowering calls it, instead of
-//! building Cranelift IR for the translator (`llvm.rs`) to read back. Every
+//! An [`Emit`] that writes LLVM IR text as the lowering calls it (it
+//! replaced a translator from finished Cranelift IR, FND-LLVM-SWITCH). Every
 //! value gets its LLVM type when it is made. Block parameters become `phi`
 //! nodes. Variables become SSA values as Cranelift's builder makes them: a
 //! read before any definition in a block is a phi, resolved when the
 //! function is finished (see [`LlvmBuilder::resolve_variables`]). Values
 //! with a known pointer origin (stack slots, symbols, exclusive parameters,
 //! pointers the runtime returns) keep a pointer form, and addresses are
-//! rebuilt as `getelementptr` from it, as the translator does.
+//! rebuilt as `getelementptr` from it.
 //!
 //! The handles are Cranelift's entity types, numbered here.
 use super::emit::Emit;
@@ -296,7 +296,7 @@ impl LlvmBuilder {
                 Some((right, left))
             } else if self.loaded(left) && !self.loaded(right) {
                 // A loaded word plus anything else is a handle plus an index
-                // far more often than the reverse (see the translator).
+                // far more often than the reverse.
                 Some((left, right))
             } else if self.loaded(right) && !self.loaded(left) {
                 Some((right, left))

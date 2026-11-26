@@ -132,7 +132,7 @@ inliner then removes the call boundary. On the x86-64 baseline (no SSSE3)
 Cranelift lowers a general byte shuffle to the libcall
 `__cranelift_x86_pshufb`, which the runtime implements in software;
 SIMD-CRANELIFT-FEATURES will let it use the instruction. The same lowering
-runs on the LLVM backend (SIMD-LLVM): the translator prints the 128-bit
+runs on the LLVM backend (SIMD-LLVM): the LLVM builder prints the 128-bit
 types as `<16 x i8>` .. `<2 x i64>` and maps `scalar_to_vector`,
 `insertlane`, `extractlane`, vector `bitcast`, lane-wise arithmetic and
 logic, shifts by a splatted amount (reduced modulo the lane width, as in
@@ -237,8 +237,8 @@ covers the eight wide types too.
 
 ## Lowering
 
-All code is lowered once into Cranelift IR; the LLVM backend translates
-that IR to LLVM IR ([llvm-backend.md](llvm-backend.md)). So:
+All code is lowered once, into Cranelift IR or, on the LLVM backend,
+directly into LLVM IR ([llvm-backend.md](llvm-backend.md)). So:
 
 | | Cranelift | LLVM |
 | --- | --- | --- |
@@ -250,7 +250,7 @@ that IR to LLVM IR ([llvm-backend.md](llvm-backend.md)). So:
 Expected: with LLVM, SHA-256 near the hardware's 1.5–2 GB/s; with
 Cranelift, a call per SHA instruction (about 64 per block) limits it to a few
 hundred MB/s, still faster than the portable code. [SIMD-LLVM] covers the
-translator; [SIMD-CRANELIFT-FEATURES] lets Cranelift use the host's features
+LLVM side; [SIMD-CRANELIFT-FEATURES] lets Cranelift use the host's features
 behind `--target-cpu native`, which the original SIMD node asked for.
 
 ## Trust and testing
