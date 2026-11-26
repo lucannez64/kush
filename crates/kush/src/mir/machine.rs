@@ -18,6 +18,8 @@ use crate::eval::MemoryStats;
 use std::io::Write;
 use std::rc::Rc;
 
+mod buffers;
+
 /// The words of a value.
 type Words = Vec<i64>;
 
@@ -99,6 +101,45 @@ impl Memory {
         }
         Ok((id, offset))
     }
+    /// A runtime buffer of `bytes` bytes (`kush_buffer_alloc`): its
+    /// allocation has the size the runtime's pool gives it, which growth
+    /// may use without moving.
+    fn allocate_buffer(&mut self, bytes: usize) -> i64 {
+        self.allocate(physical(bytes), true)
+    }
+    /// `kush_buffer_grow`: the buffer at `pointer` with room for `bytes`
+    /// bytes, in place when its allocation has it, else moved to a new one.
+    /// `exact` sizes a new allocation as asked (fallible growth). Neither
+    /// counts as an allocation or a free.
+    fn grow(&mut self, pointer: i64, bytes: usize, exact: bool) -> Run<i64> {
+        let (id, offset) = self.locate(pointer, 0)?;
+        if offset != 0 {
+            return fault(format!("growth of an interior pointer {pointer:#x}"));
+        }
+        let old = std::mem::take(&mut self.allocations[id].bytes);
+        if bytes <= old.len() {
+            self.allocations[id].bytes = old;
+            return Ok(pointer);
+        }
+        let mut new = vec![0; if exact { bytes } else { physical(bytes) }];
+        new[..old.len()].copy_from_slice(&old);
+        self.allocations[id].live = false;
+        self.allocations.push(Allocation {
+            bytes: new,
+            live: true,
+            heap: true,
+        });
+        Ok((self.allocations.len() as i64) << 32)
+    }
+    fn load_bytes(&self, pointer: i64, count: usize) -> Run<Vec<u8>> {
+        let (id, offset) = self.locate(pointer, count)?;
+        Ok(self.allocations[id].bytes[offset..offset + count].to_vec())
+    }
+    fn store_bytes(&mut self, pointer: i64, bytes: &[u8]) -> Run<()> {
+        let (id, offset) = self.locate(pointer, bytes.len())?;
+        self.allocations[id].bytes[offset..offset + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
     fn free(&mut self, pointer: i64) -> Run<()> {
         let (id, offset) = self.locate(pointer, 0)?;
         if offset != 0 {
@@ -151,7 +192,10 @@ struct Frame {
     homes: Vec<Option<i64>>,
     /// Which homes belong to this frame (the rest are borrowed).
     owned: Vec<bool>,
-    /// `None` for the entry function.
+    /// Stack storage the frame made for values without an address (an
+    /// array value a view looks at).
+    temporaries: Vec<i64>,
+    /// `None` for the entry function and a nested call.
     caller: Option<Return>,
 }
 
@@ -173,6 +217,11 @@ struct Machine<'p, 'o> {
 /// (zero for `Unit`) and the allocation stats a native build reports.
 pub fn evaluate(program: &Executable, output: &mut dyn Write) -> Run<(i64, MemoryStats)> {
     let entry = program.entry().map_err(Stop::Panic)?;
+    // The task runtime runs `main` as a task, whose allocations the stats
+    // count (FND-EVAL-EFFECTS).
+    if program.uses_tasks {
+        return unsupported("the task runtime");
+    }
     let mut machine = Machine {
         program,
         bodies: vec![None; program.functions.len()],
@@ -185,7 +234,7 @@ pub fn evaluate(program: &Executable, output: &mut dyn Write) -> Run<(i64, Memor
     };
     machine.memory.stats.fusions = program.fusions;
     machine.enter(entry, Vec::new(), None, None)?;
-    let result = machine.run()?;
+    let result = machine.run()?.first().copied().unwrap_or(0);
     if machine.memory.live_heap != 0 {
         return Err(Stop::Panic(Diagnostic::new(
             Span::default(),
@@ -361,6 +410,7 @@ impl Machine<'_, '_> {
             locals,
             homes,
             owned,
+            temporaries: Vec::new(),
             caller,
         });
         Ok(())
@@ -374,10 +424,15 @@ impl Machine<'_, '_> {
                 self.memory.free(*home)?;
             }
         }
+        for temporary in &frame.temporaries {
+            self.memory.free(*temporary)?;
+        }
         Ok(frame)
     }
 
-    fn run(&mut self) -> Run<i64> {
+    /// Run until a frame without a caller returns: the entry function, or
+    /// a nested call. Returns its result's words.
+    fn run(&mut self) -> Run<Words> {
         loop {
             if self.fuel == 0 {
                 return Err(Stop::Panic(Diagnostic::new(
@@ -413,9 +468,16 @@ impl Machine<'_, '_> {
         }
     }
 
-    /// Run one statement or terminator. `Some` is the entry function's
-    /// result.
-    fn step(&mut self) -> std::result::Result<Option<i64>, Raise> {
+    /// Call `function` from inside a statement (a `Vec.map` callback) and
+    /// run it to its result. A panic leaves it as a [`Stop::Panic`].
+    fn call_nested(&mut self, function: usize, args: Vec<Words>) -> Run<Words> {
+        self.enter(function, args, None, None)?;
+        self.run()
+    }
+
+    /// Run one statement or terminator. `Some` is the result of a frame
+    /// without a caller.
+    fn step(&mut self) -> std::result::Result<Option<Words>, Raise> {
         let frame = self.stack.last().expect("a frame");
         let body = frame.body.clone();
         let block = &body.blocks[frame.block];
@@ -501,10 +563,12 @@ impl Machine<'_, '_> {
                     }
                     Callee::Builtin { index, .. } => {
                         let target = body.builtins.0[*index];
-                        return Err(Raise::Stop(Stop::Unsupported(format!(
-                            "the builtin {}",
-                            target_name(&target)
-                        ))));
+                        let ty = body.locals[*destination].ty;
+                        let words = self
+                            .builtin(&target, &values.concat(), ty, span)
+                            .map_err(|stop| Raise::at(stop, *unwind))?;
+                        self.finish_call(*destination, words, *next)
+                            .map_err(Raise::Stop)?;
                     }
                     Callee::Indirect(callable) => {
                         // A `fn` value is its code word; a `once` or `multi`
@@ -538,7 +602,7 @@ impl Machine<'_, '_> {
                         self.finish_call(caller.destination, words, caller.next)
                             .map_err(Raise::Stop)?;
                     }
-                    None => return Ok(Some(words.first().copied().unwrap_or(0))),
+                    None => return Ok(Some(words)),
                 }
             }
             TerminatorKind::Panic { unwind } => {
@@ -579,6 +643,64 @@ impl Machine<'_, '_> {
             }
         }
         Ok(None)
+    }
+
+    /// A builtin call on its arguments' words (native's `call_target`).
+    fn builtin(
+        &mut self,
+        target: &crate::executable::Target,
+        values: &[i64],
+        ty: Type,
+        span: Span,
+    ) -> Run<Words> {
+        use crate::executable::Target;
+        match *target {
+            Target::Bytes(op) => self.bytes_call(op, values, span),
+            Target::String(op) => self.string_call(op, values, ty, span),
+            Target::Str(op) => self.str_call(op, values, ty, span),
+            Target::Vec(op, element) => self.vec_call(op, element, values, ty, span),
+            Target::Slice(op, element) => self.slice_call(op, element, values, span),
+            Target::DynArray(op, element) => self.dyn_array_call(op, element, values, span),
+            Target::Print | Target::PrintFloat(_) => {
+                let text = match *target {
+                    Target::PrintFloat(kind) => crate::float::format(kind, values[0]),
+                    _ => values[0].to_string(),
+                };
+                writeln!(self.output, "{text}").map_err(|e| {
+                    Stop::Panic(Diagnostic::new(span, format!("output failed: {e}")))
+                })?;
+                Ok(vec![0])
+            }
+            Target::Int(op, source, target) => {
+                use crate::int::IntOp;
+                let (present, word) = crate::int::builtin(op, source, target, values);
+                Ok(match op {
+                    IntOp::TryConvert { some_tag, none_tag }
+                    | IntOp::Checked(_, some_tag, none_tag)
+                    | IntOp::CharFromCode { some_tag, none_tag } => {
+                        self.optional(ty, present.then_some(word), some_tag, none_tag)
+                    }
+                    _ => vec![word],
+                })
+            }
+            Target::Float(op) => {
+                use crate::float::FloatOp;
+                let (present, word) = crate::float::builtin(op, values);
+                Ok(match op {
+                    FloatOp::TryFromInt {
+                        some_tag, none_tag, ..
+                    }
+                    | FloatOp::TryToF32 {
+                        some_tag, none_tag, ..
+                    }
+                    | FloatOp::TryToInt {
+                        some_tag, none_tag, ..
+                    } => self.optional(ty, present.then_some(word), some_tag, none_tag),
+                    _ => vec![word],
+                })
+            }
+            _ => unsupported(format!("the builtin {}", target_name(target))),
+        }
     }
 
     fn jump(&mut self, target: BlockId) {
@@ -778,6 +900,45 @@ impl Machine<'_, '_> {
                 let ty = body.operand_ty(*left);
                 let (left, right) = (self.operand(*left)?, self.operand(*right)?);
                 vec![i64::from(self.struct_eq(ty, &left, &right) != *negated)]
+            }
+            Rvalue::Bytes(data) => vec![self.bytes_from(data)?],
+            Rvalue::Buffer(vector, word) => {
+                let handle = self.scalar(*vector)?;
+                let offset = match word {
+                    BufferWord::Length => 0,
+                    BufferWord::Capacity => 8,
+                };
+                self.memory.load(handle + offset, 1)?
+            }
+            Rvalue::ByteAt(handle, index) => {
+                let address = self.scalar(*handle)? + 16 + self.scalar(*index)?;
+                vec![i64::from(self.memory.load_bytes(address, 1)?[0])]
+            }
+            Rvalue::ElementAddress(base, index) => {
+                vec![self.element_address(body, *base, *index, span)?]
+            }
+            Rvalue::View {
+                source,
+                start,
+                end,
+                element,
+                check,
+                text,
+            } => self.view(body, *source, *start, *end, *element, *check, *text, span)?,
+            Rvalue::Array(op, operands) => {
+                let words = operands
+                    .iter()
+                    .map(|operand| self.operand(*operand))
+                    .collect::<Run<Vec<_>>>()?;
+                self.array_op(*op, &words, span)?
+            }
+            Rvalue::Map(op, operands) => {
+                let handle = self.scalar(operands[0])?;
+                let callbacks = operands[1..]
+                    .iter()
+                    .map(|callback| self.scalar(*callback))
+                    .collect::<Run<Vec<_>>>()?;
+                vec![self.vec_map(op, handle, &callbacks)?]
             }
             other => return unsupported(rvalue_name(other)),
         })
@@ -1071,6 +1232,20 @@ impl Machine<'_, '_> {
                 }
                 self.memory.free(words[0])
             }
+            Type::Bytes | Type::String => self.memory.free(words[0]),
+            Type::Vec(element) => {
+                let element = self.program.pointees[element];
+                if self.program.owns(element) {
+                    let width = self.width(element);
+                    let length = self.memory.load(words[0], 1)?[0];
+                    for index in 0..length {
+                        let address = words[0] + 16 + index * (width * 8) as i64;
+                        let item = self.memory.load(address, width)?;
+                        self.drop_value(element, &item)?;
+                    }
+                }
+                self.memory.free(words[0])
+            }
             Type::Enum(index) => {
                 let definition = &self.program.enums[index];
                 if self.program.unwind_functions.contains_key(&index) {
@@ -1197,6 +1372,16 @@ fn code_function(word: i64) -> Run<usize> {
         Ok((word & !CODE) as usize)
     } else {
         fault(format!("a call through the non-code word {word:#x}"))
+    }
+}
+
+/// The bytes the runtime's allocator hands out for a request: a 16-byte
+/// size class up to its pool limit, the exact size above it.
+fn physical(bytes: usize) -> usize {
+    if bytes <= 1024 {
+        bytes.max(1).next_multiple_of(16)
+    } else {
+        bytes
     }
 }
 

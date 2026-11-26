@@ -78,7 +78,78 @@ fn covered_examples_run_as_on_the_tree_evaluator() {
 }
 
 /// The examples the machine runs; raise it as nodes land.
-const MACHINE_FLOOR: usize = 18;
+const MACHINE_FLOOR: usize = 40;
+
+#[test]
+fn buffers_and_views_run_as_on_the_tree_evaluator() {
+    for source in [
+        // Vector growth, owned elements, set and clear; byte growth.
+        "fn main() -> Unit ! {io, alloc} {
+            let mut values: Vec<i64> = Vec.new();
+            let mut i = 0;
+            while i < 9 { values = Vec.push(values, i * i); i = i + 1; }
+            values = Vec.set(values, 2, 100);
+            print_i64(Vec.len(&values));
+            print_i64(Vec.get(&values, 2) + Vec.get(&values, 8));
+            let mut boxes: Vec<Box<i64>> = Vec.with_capacity(1);
+            boxes = Vec.push(boxes, Box.new(1));
+            boxes = Vec.push(boxes, Box.new(2));
+            boxes = Vec.clear(boxes);
+            print_i64(Vec.len(&boxes));
+            let mut bytes = Bytes.with_capacity(0);
+            let mut b = 0;
+            while b < 20 { bytes = Bytes.push(bytes, 65 + b); b = b + 1; }
+            print_i64(Bytes.len(&bytes));
+            print_i64(Bytes.capacity(&bytes));
+            print_i64(Bytes.get(&bytes, 19));
+        }",
+        // Views of arrays, vectors and bytes, and text.
+        "fn head(view: &[i64], at: i64) -> i64 ! {} { view[at] }
+        fn main() -> Unit ! {io, alloc} {
+            let values: [i64; 5] = [10, 20, 30, 40, 50];
+            let middle = &values[1..4];
+            print_i64(Slice.len(middle));
+            print_i64(head(middle[1..], 1));
+            let mut v: Vec<i64> = Vec.new();
+            v = Vec.push(v, 7); v = Vec.push(v, 8);
+            let view: &[i64] = &v[1..];
+            print_i64(view[0]);
+            let bytes = Bytes.from(\"ABCD\");
+            let raw: &[i64] = &bytes[1..3];
+            print_i64(raw[1]);
+            let text = String.from(\"héllo\");
+            print_i64(text.len());
+            print_i64(text.scalar_len());
+            let copy = text.as_bytes();
+            print_i64(Bytes.len(&copy));
+        }",
+        // A widening, then narrowing, in-place map.
+        "fn pair(x: i64) -> [i64; 2] ! {} { [x, x + 1] }
+        fn sum_pair(pair: [i64; 2]) -> i64 ! {} { let [a, b] = pair; a + b }
+        fn main() -> Unit ! {io, alloc} {
+            let mut values: Vec<i64> = Vec.new();
+            values = Vec.push(values, 1);
+            values = Vec.push(values, 2);
+            let values = Vec.map_chain_in_place(values, pair, sum_pair);
+            print_i64(Vec.get(&values, 0) * 10 + Vec.get(&values, 1));
+        }",
+        // Out-of-bounds accesses panic with the tree's messages.
+        "fn main() -> Unit ! {io, alloc} {
+            let mut v: Vec<i64> = Vec.new();
+            v = Vec.push(v, 1);
+            print_i64(Vec.get(&v, 3));
+        }",
+        "fn main() -> Unit ! {io, alloc} {
+            let values: [i64; 3] = [1, 2, 3];
+            let view = &values[..];
+            let mut i = 0;
+            while i < 5 { print_i64(view[i]); i = i + 1; }
+        }",
+    ] {
+        let program = executable::check(source).unwrap();
+        assert_eq!(compare(&program), Ok(true), "{source}");
+    }
+}
 
 #[test]
 fn closures_and_trait_objects_run_as_on_the_tree_evaluator() {

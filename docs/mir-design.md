@@ -524,3 +524,12 @@ covers:
 | FND-EVAL-EFFECTS | Handlers, aborts, continuations and `multi fn`, tasks, threads, channels |
 | FND-EVAL-RUNTIME | Allocators and contexts, arenas, standard I/O, host operations, staging |
 | FND-EVAL-SWITCH | `Executable::evaluate` runs the machine; `eval.rs` is deleted |
+
+**Status.** MACHINE, CALLABLES and BUFFERS are done. Buffers have the
+layouts of `kush.c`: a `Bytes` or vector handle points at `[length,
+capacity, data...]`, and a view is `[data, length, stride, byte flag]`. A
+buffer's allocation has the runtime's size class (16-byte classes up to
+1024 bytes), so growth that fits the class keeps the allocation, as
+`kush_buffer_grow` does. The machine runs 40 examples as the tree does. A
+program that uses tasks waits for EFFECTS: the tree and native run its
+`main` as a task, which the stats count.
