@@ -57,7 +57,7 @@ impl Machine<'_, '_> {
         self.memory.store(handle, &[0, capacity])?;
         Ok(handle)
     }
-    fn header(&self, handle: i64) -> Run<(i64, i64)> {
+    pub(super) fn header(&self, handle: i64) -> Run<(i64, i64)> {
         let words = self.memory.load(handle, 2)?;
         Ok((words[0], words[1]))
     }

@@ -265,6 +265,10 @@ impl Executable {
             }
             let mut transcript = Transcript::default();
             let mut written = Transcript::default();
+            let mut recording = host.clone();
+            let hosts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            recording.record = Some(hosts.clone());
+            let host = &recording;
             let tree = self.tree_evaluate(
                 &mut Record {
                     input,
@@ -279,6 +283,7 @@ impl Executable {
             );
             transcript.writes = written.writes;
             transcript.written = written.written;
+            transcript.hosts = std::mem::take(&mut *hosts.lock().unwrap());
             crate::mir::machine::check(self, transcript, &tree)?;
             return tree;
         }
@@ -796,6 +801,9 @@ pub struct Host {
     monotonic_origin: Instant,
     /// Files opened by `FS.open`, by handle (STD-FILE). Shared by tasks.
     files: Arc<std::sync::Mutex<FileTable>>,
+    /// `KUSH_MACHINE_CHECK`: each host call's outcome, for the MIR machine
+    /// to replay (its effects happened once, here).
+    record: Option<Arc<std::sync::Mutex<Vec<crate::mir::machine::HostRecord>>>>,
 }
 /// The evaluator's open files. Handles are never reused, so a stale handle
 /// is always `EBADF` here (natively the descriptor number may be reused,
@@ -1042,6 +1050,7 @@ impl Host {
             environment: Arc::new(BTreeMap::new()),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
+            record: None,
         }
     }
     /// The current process arguments (including argv[0]) and environment.
@@ -1055,6 +1064,7 @@ impl Host {
             environment: Arc::new(environment),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
+            record: None,
         }
     }
     /// Replace argv while retaining this host's environment and clock origin.
@@ -1070,6 +1080,7 @@ impl Host {
             environment: Arc::new(environment.into_iter().collect()),
             monotonic_origin: Instant::now(),
             files: Arc::default(),
+            record: None,
         }
     }
     fn var(&self, name: &[u8]) -> Option<&[u8]> {
@@ -8100,7 +8111,47 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         })
                     }
                     Target::Io(op, shape) => self.io_call(*op, *shape, values, expr.span)?,
-                    Target::Host(op, shape) => self.host_call(*op, *shape, values, expr.span)?,
+                    Target::Host(op, shape) => {
+                        let Some(record) = self.host.record.clone() else {
+                            return Ok(Flow::Value(
+                                self.host_call(*op, *shape, values, expr.span)?,
+                            ));
+                        };
+                        // The buffer arguments, to record what the call left
+                        // in them (or that it consumed them).
+                        let buffers = values
+                            .iter()
+                            .map(|value| match value {
+                                Value::Borrowed(id) | Value::Owned(id)
+                                    if matches!(self.heap.get(*id), Some(Value::Buffer { .. })) =>
+                                {
+                                    Some(*id)
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        let result = self.host_call(*op, *shape, values, expr.span)?;
+                        let Value::Enum { tag, fields } = &result else {
+                            unreachable!("a host call's result is a Result")
+                        };
+                        let ok = *tag == shape.ok_tag;
+                        let value = match fields.first() {
+                            Some(Value::Scalar(value)) => *value,
+                            _ => 0,
+                        };
+                        let buffers = buffers
+                            .into_iter()
+                            .map(|id| match id.and_then(|id| self.heap.get(id)) {
+                                Some(Value::Buffer { data, .. }) => Some(data),
+                                _ => None,
+                            })
+                            .collect();
+                        record
+                            .lock()
+                            .unwrap()
+                            .push(crate::mir::machine::HostRecord { ok, value, buffers });
+                        result
+                    }
                     Target::Bytes(op) => self.bytes_call(*op, values, expr.span)?,
                     Target::String(op) => self.string_call(*op, values, expr.span)?,
                     Target::Str(op) => self.str_call(*op, values, expr.span)?,

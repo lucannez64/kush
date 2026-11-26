@@ -210,6 +210,9 @@ struct Machine<'p, 'o> {
     memory: Memory,
     input: &'o mut dyn Read,
     output: &'o mut dyn Write,
+    /// In check mode, the tree's host calls to replay: their effects
+    /// (files, processes, clocks) happened once, on the tree.
+    hosts: Option<std::collections::VecDeque<HostRecord>>,
     stack: Vec<Frame>,
     /// The panic a cleanup block runs for.
     unwinding: Option<Diagnostic>,
@@ -231,6 +234,15 @@ pub fn evaluate_with_input(
     input: &mut dyn Read,
     output: &mut dyn Write,
 ) -> Run<(i64, MemoryStats)> {
+    run_program(program, input, output, None)
+}
+
+fn run_program(
+    program: &Executable,
+    input: &mut dyn Read,
+    output: &mut dyn Write,
+    hosts: Option<std::collections::VecDeque<HostRecord>>,
+) -> Run<(i64, MemoryStats)> {
     let entry = program.entry().map_err(Stop::Panic)?;
     // The task runtime runs `main` as a task, whose allocations the stats
     // count (FND-EVAL-EFFECTS).
@@ -242,6 +254,7 @@ pub fn evaluate_with_input(
         bodies: vec![None; program.functions.len()],
         memory: Memory::default(),
         input,
+        hosts,
         output,
         stack: Vec::new(),
         unwinding: None,
@@ -280,6 +293,19 @@ pub(crate) struct Transcript {
     pub(crate) writes: Vec<IoOutcome<usize>>,
     /// The bytes the writer accepted.
     pub(crate) written: Vec<u8>,
+    /// Each host call's outcome.
+    pub(crate) hosts: Vec<HostRecord>,
+}
+
+/// What one host call did on the tree evaluator: its result (`value` is
+/// the error code, or a scalar payload), and for each argument that is a
+/// byte buffer, its contents after the call (`None` when the call consumed
+/// it, or for an argument that is not a buffer).
+#[derive(Debug)]
+pub(crate) struct HostRecord {
+    pub(crate) ok: bool,
+    pub(crate) value: i64,
+    pub(crate) buffers: Vec<Option<Vec<u8>>>,
 }
 
 /// The tree's reads, call by call.
@@ -354,7 +380,12 @@ pub(crate) fn check(
         written: Vec::new(),
     };
     let tree_output = &transcript.written;
-    let result = evaluate_with_input(program, &mut input, &mut echo);
+    let result = run_program(
+        program,
+        &mut input,
+        &mut echo,
+        Some(transcript.hosts.into()),
+    );
     let output = echo.written;
     let machine = match result {
         Err(Stop::Unsupported(reason)) => {
@@ -653,8 +684,12 @@ impl Machine<'_, '_> {
                     Callee::Builtin { index, .. } => {
                         let target = body.builtins.0[*index];
                         let ty = body.locals[*destination].ty;
+                        let types = args
+                            .iter()
+                            .map(|arg| body.operand_ty(*arg))
+                            .collect::<Vec<_>>();
                         let words = self
-                            .builtin(&target, &values.concat(), ty, span)
+                            .builtin(&target, &values.concat(), &types, ty, span)
                             .map_err(|stop| Raise::at(stop, *unwind))?;
                         self.finish_call(*destination, words, *next)
                             .map_err(Raise::Stop)?;
@@ -739,11 +774,13 @@ impl Machine<'_, '_> {
         &mut self,
         target: &crate::executable::Target,
         values: &[i64],
+        types: &[Type],
         ty: Type,
         span: Span,
     ) -> Run<Words> {
         use crate::executable::Target;
         match *target {
+            Target::Host(op, shape) => self.host_replay(op, shape, values, types, ty),
             Target::Bytes(op) => self.bytes_call(op, values, span),
             Target::String(op) => self.string_call(op, values, ty, span),
             Target::Str(op) => self.str_call(op, values, ty, span),
@@ -792,6 +829,63 @@ impl Machine<'_, '_> {
             }
             _ => unsupported(format!("the builtin {}", target_name(target))),
         }
+    }
+
+    /// A host call (filesystem, environment, clock, process, network) as the
+    /// tree ran it in check mode: the recorded result, the recorded contents
+    /// of its buffer arguments, and a free of each owned buffer it consumed.
+    /// Outside check mode the machine does not run host calls yet.
+    fn host_replay(
+        &mut self,
+        op: crate::executable::HostOp,
+        shape: crate::runtime_types::ResultShape,
+        values: &[i64],
+        types: &[Type],
+        ty: Type,
+    ) -> Run<Words> {
+        use crate::executable::HostPayload;
+        let Some(record) = self.hosts.as_mut().and_then(|hosts| hosts.pop_front()) else {
+            return unsupported(format!("the builtin Host({op:?}) outside check mode"));
+        };
+        let mut owned = 0;
+        for (index, arg_ty) in types.iter().enumerate() {
+            let buffer = |ty: Type| matches!(ty, Type::Bytes | Type::String);
+            let (handle, is_owned) = match arg_ty.full() {
+                ty if buffer(ty) => (values[index], true),
+                Type::Ref(pointee) | Type::RefMut(pointee)
+                    if buffer(self.program.pointees[pointee].full()) =>
+                {
+                    (self.memory.load(values[index], 1)?[0], false)
+                }
+                _ => continue,
+            };
+            match record.buffers.get(index).cloned().flatten() {
+                Some(data) => {
+                    let (_, capacity) = self.header(handle)?;
+                    if data.len() as i64 > capacity {
+                        return fault("a host call's buffer outgrew its capacity");
+                    }
+                    self.memory.store_bytes(handle + 16, &data)?;
+                    self.memory.store(handle, &[data.len() as i64])?;
+                    if is_owned {
+                        owned = handle;
+                    }
+                }
+                None if is_owned => self.memory.free(handle)?,
+                None => {}
+            }
+        }
+        let words = if record.ok {
+            let payload = match op.payload() {
+                HostPayload::Bytes => owned,
+                HostPayload::Unit => 0,
+                HostPayload::Bool | HostPayload::I64 => record.value,
+            };
+            vec![shape.ok_tag as i64, payload]
+        } else {
+            vec![shape.err_tag as i64, record.value]
+        };
+        Ok(fit(words, self.width(ty)))
     }
 
     fn jump(&mut self, target: BlockId) {
