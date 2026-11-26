@@ -1898,14 +1898,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 free,
                 realloc,
             }),
-            // The context's heap cell is only the owning handle; transferring
-            // the reference to a container releases the cell itself.
+            // The context's heap cell is only the owning handle; the
+            // container takes over its reference, and the last release
+            // frees the handle (as in kush.c).
             Value::AllocatorContext(state) => Ok(AllocatorBinding::Context(state)),
             Value::Owned(id) => match self.heap.take(id) {
-                Some(Value::AllocatorContext(state)) => {
-                    self.stats.deallocation();
-                    Ok(AllocatorBinding::Context(state))
-                }
+                Some(Value::AllocatorContext(state)) => Ok(AllocatorBinding::Context(state)),
                 other => {
                     if let Some(value) = other {
                         self.heap.insert(id, value);
@@ -2057,8 +2055,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
         let instance = std::mem::replace(&mut *state.instance.lock().unwrap(), Value::Scalar(0));
         self.drop_value(instance)?;
-        // The state cell is compiler-owned bookkeeping; the owning context
-        // handle is a normal heap cell and is counted when it is dropped.
+        // The state cell, then the context handle (`kush_alloc_context_release`).
+        self.stats.deallocation();
         self.stats.deallocation();
         Ok(())
     }
@@ -6820,7 +6818,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let value = self.heap.take(id).ok_or_else(|| {
                     Diagnostic::new(Span::default(), "internal ownership error: double free")
                 })?;
-                self.stats.deallocation();
+                // A context's handle is freed by its last release, as in
+                // kush.c, not with this owner.
+                if !matches!(value, Value::AllocatorContext(_)) {
+                    self.stats.deallocation();
+                }
                 self.drop_value(value)?;
             }
             Value::Enum { fields, .. } => {

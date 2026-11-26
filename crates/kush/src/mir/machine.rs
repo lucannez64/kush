@@ -42,6 +42,10 @@ type Run<T> = std::result::Result<T, Stop>;
 fn unsupported<T>(what: impl Into<String>) -> Run<T> {
     Err(Stop::Unsupported(what.into()))
 }
+/// A Kush panic with the tree evaluator's message.
+fn panic_at<T>(span: Span, message: &str) -> Run<T> {
+    Err(Stop::Panic(Diagnostic::new(span, message)))
+}
 fn fault<T>(what: impl Into<String>) -> Run<T> {
     Err(Stop::Fault(what.into()))
 }
@@ -747,6 +751,7 @@ impl Machine<'_, '_> {
             Target::Slice(op, element) => self.slice_call(op, element, values, span),
             Target::DynArray(op, element) => self.dyn_array_call(op, element, values, span),
             Target::Io(op, shape) => self.io_call(op, shape, values, ty),
+            Target::AllocVec(op, element) => self.alloc_vec_call(op, element, values, ty, span),
             Target::Print | Target::PrintFloat(_) => {
                 let text = match *target {
                     Target::PrintFloat(kind) => crate::float::format(kind, values[0]),
@@ -1018,7 +1023,7 @@ impl Machine<'_, '_> {
                     .collect::<Run<Vec<_>>>()?;
                 self.array_op(*op, &words, span)?
             }
-            Rvalue::Alloc(op, operands) => self.alloc_op(body, *op, operands, ty)?,
+            Rvalue::Alloc(op, operands) => self.alloc_op(body, *op, operands, ty, span)?,
             Rvalue::Map(op, operands) => {
                 let handle = self.scalar(operands[0])?;
                 let callbacks = operands[1..]
@@ -1321,6 +1326,31 @@ impl Machine<'_, '_> {
             }
             Type::Bytes | Type::String => self.memory.free(words[0]),
             Type::Arena => self.arena_release(words[0]),
+            Type::AllocatorContext => self.context_release(words[0]),
+            Type::AllocBox(pointee) => {
+                let pointee = self.program.pointees[pointee];
+                if self.program.owns(pointee) {
+                    let block = self.memory.load(words[0] + 24, 1)?[0];
+                    let fields = self.memory.load(block + 16, self.width(pointee))?;
+                    self.drop_value(pointee, &fields)?;
+                }
+                self.alloc_box_release(words[0])
+            }
+            Type::AllocVec(element) => {
+                let element = self.program.pointees[element];
+                if self.program.owns(element) {
+                    let width = self.width(element);
+                    let [length, .., block] = self.memory.load(words[0], 8)?[..] else {
+                        unreachable!("eight words")
+                    };
+                    for index in 0..length {
+                        let address = block + 16 + index * (width * 8) as i64;
+                        let item = self.memory.load(address, width)?;
+                        self.drop_value(element, &item)?;
+                    }
+                }
+                self.alloc_vec_release(words[0])
+            }
             Type::ArenaBox(pointee) => {
                 let pointee = self.program.pointees[pointee];
                 if self.program.owns(pointee) {

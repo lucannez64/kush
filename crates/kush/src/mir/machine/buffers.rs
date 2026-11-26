@@ -20,10 +20,6 @@ use crate::executable::{BytesOp, DynArrayOp, SliceOp, StrOp, StringOp, VecOp};
 const BYTES_LIMIT: usize = 16 * 1024 * 1024;
 const VEC_LIMIT: usize = 1 << 20;
 
-fn panic_at<T>(span: Span, message: &str) -> Run<T> {
-    Err(Stop::Panic(Diagnostic::new(span, message)))
-}
-
 /// A view's descriptor words.
 #[derive(Clone, Copy)]
 struct View {
