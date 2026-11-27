@@ -20,13 +20,12 @@ use crate::executable::{SliceOp, Target};
 /// terminators.
 const BUDGET: usize = 96;
 
+/// A loop's view, its element type, and its companions (see `companions`).
+type Candidate = (LocalId, Type, Vec<(LocalId, Type)>);
+
 /// The view and its element type, when `lp` is a small innermost loop
 /// testing `i < v.len()` with `v` unchanged in the loop.
-fn candidate(
-    body: &Body,
-    lp: &loops::Loop,
-    all: &[loops::Loop],
-) -> Option<(LocalId, Type, Vec<(LocalId, Type)>)> {
+fn candidate(body: &Body, lp: &loops::Loop, all: &[loops::Loop]) -> Option<Candidate> {
     if !loops::innermost(lp, all) {
         return None;
     }
