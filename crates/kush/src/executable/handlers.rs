@@ -412,10 +412,22 @@ impl Checker<'_, '_> {
         self.handlers.pop();
         let inner = checked?;
         let ty = inner.ty;
+        // FND-HANDLERS-ONE-EXPLICIT: a bound capability is the activation's
+        // cell, so a `handle .. as op` whose capability may be passed gets a
+        // frame; one that is not dynamically visible gets it under a private
+        // operation id, which no perform by name looks up. (A capturing
+        // handler that is not framed cannot be passed: it is performed in
+        // its own body only, through its local.)
         let pushed = declared
             .filter(|_| !multishot)
             .map(|declared| declared.id)
-            .or(private_operation);
+            .or(private_operation)
+            .or_else(|| {
+                (capability.is_some() && matches!(handler_type, Type::Fn(_))).then(|| {
+                    self.functions.private_operations += 1;
+                    PRIVATE_OPERATION_BASE + self.functions.private_operations
+                })
+            });
         let tail = match pushed {
             Some(operation) => Expr {
                 kind: ExprKind::HandlerPush {

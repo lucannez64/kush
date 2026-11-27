@@ -333,6 +333,26 @@ and the removal itself.
   handlers that abort through their token (E-ABORT-ENTRIES); they go with
   the other abort cases in HANDLERS-ONE-DELETE.
 
+### As built: HANDLERS-ONE-EXPLICIT
+
+- Written capabilities (`cap` parameters and capabilities a lambda
+  captures, `Function::capability_parameters`) are `i64` cells too. A perform
+  through one becomes a `DynamicPerform` naming it (operation `usize::MAX`:
+  not an operation by name), and a capability passed to a `cap` parameter
+  or captured becomes the cell of what it names: the caller's own cell, the
+  push of the `handle .. as op` whose handler it is, or the push a
+  capability trampoline would have searched for. Temporaries that ANF binds
+  to a capability are followed through a per-function alias map.
+- Every `handle .. as op` with a noncapturing handler now gets a frame (a
+  private operation id when it is not dynamically visible), so its
+  capability has a cell. A capturing handler that is not framed cannot be
+  passed and keeps being performed through its local.
+- `capability_multi` and the resumable-entry answer type read the recorded
+  arrow of a written capability.
+- A probe that faults on every by-name lookup leaves three tests that
+  still search: aborts that leave through continuations and multishot
+  resumptions (HANDLERS-ONE-DELETE).
+
 ## 8. Decisions (user, 2026-11-27)
 
 - **D1. A function value gets its handler at the call.** It is today's

@@ -65,6 +65,12 @@ struct Pass<'a> {
     /// Operations of each arrow's row, also for arrows that keep the
     /// dynamic stack.
     rows: &'a [Vec<usize>],
+    /// Each function's written capabilities (`cap` parameters, captured
+    /// capabilities): slot to handler arrow (FND-HANDLERS-ONE-EXPLICIT).
+    explicit: &'a [BTreeMap<usize, usize>],
+    /// The operation (declared or private) each capability trampoline
+    /// performs: the frame whose cell replaces it.
+    trampolines: &'a BTreeMap<usize, usize>,
 }
 
 impl Pass<'_> {
@@ -127,6 +133,99 @@ impl Pass<'_> {
             .collect()
     }
 
+    /// FND-HANDLERS-ONE-EXPLICIT: written capabilities are cells. A perform
+    /// through one names it; a capability passed to a `cap` parameter or
+    /// captured by a lambda becomes the cell of what it names.
+    fn written(&self, expr: &mut Expr, scope: &Scope) {
+        match &mut expr.kind {
+            ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
+                if scope.explicit.contains_key(slot) =>
+            {
+                expr.ty = Type::I64;
+            }
+            ExprKind::CallIndirect { callee, arguments } if arguments.len() == 2 => {
+                let Some(&arrow) = local_of(callee).and_then(|slot| scope.explicit.get(&slot))
+                else {
+                    return;
+                };
+                let cell = Box::new(Expr {
+                    kind: ExprKind::Local(local_of(callee).expect("checked above")),
+                    ty: Type::I64,
+                    span: callee.span,
+                    resource: None,
+                });
+                let mut arguments = std::mem::take(arguments);
+                let resume = arguments.pop().expect("two arguments");
+                let payload = arguments.pop().expect("two arguments");
+                expr.kind = ExprKind::DynamicPerform {
+                    // A written capability is not an operation by name.
+                    operation: usize::MAX,
+                    payload: Box::new(payload),
+                    resume: Box::new(resume),
+                    handler: arrow,
+                    cell: Some(cell),
+                };
+            }
+            ExprKind::Call(Target::Function(callee), arguments) => {
+                if let Some(explicit) = self.explicit.get(*callee) {
+                    for &slot in explicit.keys() {
+                        if let Some(argument) = arguments.get_mut(slot) {
+                            self.cell_argument(argument, scope);
+                        }
+                    }
+                }
+            }
+            ExprKind::FnValue { function, captures } => {
+                if let Some(explicit) = self.explicit.get(*function) {
+                    for &slot in explicit.keys() {
+                        if let Some(capture) = captures.get_mut(slot) {
+                            self.cell_argument(capture, scope);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The cell passed for a written capability: the caller's own (already
+    /// a cell), the push of the `handle .. as op` whose handler it names, or
+    /// the push a trampoline would have searched for.
+    fn cell_argument(&self, argument: &mut Expr, scope: &Scope) {
+        let cell = self.cell_of(argument, scope);
+        *argument = Expr {
+            kind: cell.map_or(ExprKind::Constant(0), ExprKind::Local),
+            ty: Type::I64,
+            span: argument.span,
+            resource: None,
+        };
+    }
+
+    /// The cell a written capability expression names, through coercions
+    /// and the temporaries that hold one.
+    fn cell_of(&self, expr: &Expr, scope: &Scope) -> Option<usize> {
+        match &expr.kind {
+            ExprKind::Coerce { value, .. } => self.cell_of(value, scope),
+            ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) => {
+                if scope.explicit.contains_key(slot) {
+                    Some(*slot)
+                } else {
+                    scope
+                        .handlers
+                        .get(slot)
+                        .or_else(|| scope.aliases.get(slot))
+                        .copied()
+                }
+            }
+            ExprKind::FnValue { function, .. } => self
+                .trampolines
+                .get(function)
+                .and_then(|operation| scope.pushes.get(operation))
+                .copied(),
+            _ => None,
+        }
+    }
+
     fn block(&mut self, block: &mut Block, scope: &Scope) {
         for statement in &mut block.statements {
             if let Statement::Let(_, value) | Statement::Expr(value) = statement {
@@ -135,6 +234,70 @@ impl Pass<'_> {
         }
         if let Some(tail) = block.tail.as_deref_mut() {
             self.expr(tail, scope);
+        }
+    }
+
+    /// The temporaries of a body that hold a written capability, and the
+    /// cell each names (ANF binds an argument to one before a call).
+    fn aliases(&self, block: &Block, scope: &Scope, out: &mut BTreeMap<usize, usize>) {
+        for statement in &block.statements {
+            if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                self.alias_expr(value, scope, out);
+            }
+            if let Statement::Let(slot, value) = statement {
+                self.alias(*slot, value, scope, out);
+            }
+        }
+        if let Some(tail) = &block.tail {
+            self.alias_expr(tail, scope, out);
+        }
+    }
+
+    fn alias(&self, slot: usize, value: &Expr, scope: &Scope, out: &mut BTreeMap<usize, usize>) {
+        if matches!(value.ty, Type::Fn(_) | Type::I64) {
+            let mut scope = scope.clone();
+            scope
+                .aliases
+                .extend(out.iter().map(|(slot, cell)| (*slot, *cell)));
+            if let Some(cell) = self.cell_of(value, &scope) {
+                out.insert(slot, cell);
+            }
+        }
+    }
+
+    fn alias_expr(&self, expr: &Expr, scope: &Scope, out: &mut BTreeMap<usize, usize>) {
+        if let ExprKind::HandlerPush {
+            operation,
+            handler,
+            body,
+            cell: Some(cell),
+            ..
+        } = &expr.kind
+        {
+            self.alias_expr(handler, scope, out);
+            let mut inner = scope.clone();
+            inner.pushes.insert(*operation, *cell);
+            if let Some(local) = local_of(handler) {
+                inner.handlers.insert(local, *cell);
+            }
+            self.aliases(body, &inner, out);
+            return;
+        }
+        if let ExprKind::Assign(slot, value) = &expr.kind {
+            self.alias_expr(value, scope, out);
+            self.alias(*slot, value, scope, out);
+            return;
+        }
+        let mut blocks = Vec::new();
+        let mut children = Vec::new();
+        super::block_children(expr, &mut |block| blocks.push(block), &mut |child| {
+            children.push(child)
+        });
+        for block in blocks {
+            self.aliases(block, scope, out);
+        }
+        for child in children {
+            self.alias_expr(child, scope, out);
         }
     }
 
@@ -177,6 +340,12 @@ impl Pass<'_> {
                     None => inner.capabilities.remove(operation),
                 };
             }
+            if let Some(cell) = cell {
+                inner.pushes.insert(*operation, *cell);
+                if let Some(local) = local_of(handler) {
+                    inner.handlers.insert(local, *cell);
+                }
+            }
             self.block(body, &inner);
             return;
         }
@@ -199,6 +368,7 @@ impl Pass<'_> {
             return;
         }
         expr.for_each_child_mut(&mut |child| self.expr(child, scope));
+        self.written(expr, scope);
         match &mut expr.kind {
             // A perform by name uses its operation's capability: the
             // innermost enclosing `handle`'s cell or the hidden parameter.
@@ -307,24 +477,91 @@ struct Scope {
     hidden: BTreeMap<usize, usize>,
     /// Innermost enclosing `handle` of each operation in this function.
     capabilities: BTreeMap<usize, Capability>,
+    /// This function's written capabilities, cells now: slot to arrow.
+    explicit: BTreeMap<usize, usize>,
+    /// The cell of the innermost enclosing push of each operation id,
+    /// private ones included, and of each pushed handler local.
+    pushes: BTreeMap<usize, usize>,
+    handlers: BTreeMap<usize, usize>,
+    /// Temporaries holding a capability: slot to cell.
+    aliases: BTreeMap<usize, usize>,
 }
 
 /// Hidden capability parameter slot of each copy, by operation.
 pub(super) type Hidden = BTreeMap<usize, BTreeMap<usize, usize>>;
 
+/// The local a capability expression reads, through coercions.
+fn local_of(expr: &Expr) -> Option<usize> {
+    match &expr.kind {
+        ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) => Some(*slot),
+        ExprKind::Coerce { value, .. } => local_of(value),
+        _ => None,
+    }
+}
+
+/// Each function's written capabilities, by slot: the handler arrow.
+pub(super) type Explicit = Vec<BTreeMap<usize, usize>>;
+
 /// Handler arrow of each resumptive declared operation performed by name.
 pub(super) type Arrows = BTreeMap<usize, usize>;
 
 /// Add the copies and redirect direct calls and function values to them.
-/// Returns the copies' capability slots and the operations' handler arrows.
-pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows)> {
+/// Returns the copies' capability slots, the operations' handler arrows and
+/// each function's written capabilities.
+pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows, Explicit)> {
+    // FND-HANDLERS-ONE-EXPLICIT: written capabilities become cells.
+    let mut explicit = program
+        .functions
+        .iter()
+        .map(|function| {
+            function
+                .capability_parameters
+                .iter()
+                .filter_map(
+                    |&slot| match function.locals.get(slot).map(|local| local.ty) {
+                        Some(Type::Fn(arrow)) => Some((slot, arrow)),
+                        _ => None,
+                    },
+                )
+                .collect::<BTreeMap<_, _>>()
+        })
+        .collect::<Explicit>();
+    for (function, written) in program.functions.iter_mut().zip(&explicit) {
+        for &slot in written.keys() {
+            function.locals[slot].ty = Type::I64;
+        }
+    }
+    let trampolines = program
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, function)| function.name == "<capability trampoline>")
+        .filter_map(|(index, function)| {
+            fn find(expr: &Expr, found: &mut Option<usize>) {
+                if let ExprKind::DynamicPerform { operation, .. } = &expr.kind {
+                    found.get_or_insert(*operation);
+                }
+                expr.for_each_child(&mut |child| find(child, found));
+            }
+            let mut found = None;
+            for statement in &function.body.statements {
+                if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                    find(value, &mut found);
+                }
+            }
+            if let Some(tail) = &function.body.tail {
+                find(tail, &mut found);
+            }
+            found.map(|operation| (index, operation))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut arrows = BTreeMap::new();
     let mut caps = BTreeSet::new();
     for function in &program.functions {
         collect_arrows(&function.body, &mut arrows, &mut caps);
     }
-    if caps.is_empty() {
-        return Ok((Hidden::new(), arrows));
+    if caps.is_empty() && explicit.iter().all(BTreeMap::is_empty) {
+        return Ok((Hidden::new(), arrows, explicit));
     }
     let performs = performs_with(program, true);
     let mut needs = (0..program.functions.len())
@@ -377,9 +614,6 @@ pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows)> {
         .iter()
         .map(|spec| members(&mut spec.members.iter().map(|member| member.2)))
         .collect::<Vec<_>>();
-    if needs.iter().all(Vec::is_empty) && values.iter().all(Vec::is_empty) {
-        return Ok((Hidden::new(), arrows));
-    }
     let originals = program.functions.len();
     needs.resize(originals, vec![]);
     let rows = (0..program.function_types.len())
@@ -401,6 +635,8 @@ pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows)> {
     // Copies start from the bodies as checked: the originals' calls get the
     // dynamic trampoline where a copy passes its own parameter.
     let sources = program.functions.clone();
+    explicit.resize(program.functions.len(), BTreeMap::new());
+    let written = explicit.clone();
     let mut pass = Pass {
         needs: &needs,
         caps: &caps,
@@ -412,9 +648,18 @@ pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows)> {
         originals,
         copies: BTreeMap::new(),
         order: Vec::new(),
+        explicit: &written,
+        trampolines: &trampolines,
     };
-    for function in &mut program.functions[..originals] {
-        pass.block(&mut function.body, &Scope::default());
+    for (index, function) in program.functions[..originals].iter_mut().enumerate() {
+        let mut scope = Scope {
+            explicit: written[index].clone(),
+            ..Scope::default()
+        };
+        let mut aliases = BTreeMap::new();
+        pass.aliases(&function.body, &scope, &mut aliases);
+        scope.aliases = aliases;
+        pass.block(&mut function.body, &scope);
     }
     for (spec, operations) in program.dyn_calls.iter().zip(&dyn_calls) {
         if operations.is_empty() {
@@ -492,13 +737,16 @@ pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows)> {
         copy.parameter_slots = Some(slots);
         copies.insert(originals + next, hidden.clone());
         copy.name = format!("{}::capabilities", copy.name);
-        pass.block(
-            &mut copy.body,
-            &Scope {
-                hidden,
-                ..Scope::default()
-            },
-        );
+        explicit.push(written[original].clone());
+        let mut scope = Scope {
+            hidden,
+            explicit: written[original].clone(),
+            ..Scope::default()
+        };
+        let mut aliases = BTreeMap::new();
+        pass.aliases(&copy.body, &scope, &mut aliases);
+        scope.aliases = aliases;
+        pass.block(&mut copy.body, &scope);
         program.functions.push(copy);
         program.foreign_functions.push(None);
         next += 1;
@@ -526,7 +774,7 @@ pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows)> {
                 .resize(arrow.parameters.len(), vec![]);
         }
     }
-    Ok((copies, arrows))
+    Ok((copies, arrows, explicit))
 }
 
 /// The resumptive declared operations performed by name somewhere that the

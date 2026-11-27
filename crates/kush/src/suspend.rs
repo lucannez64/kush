@@ -56,10 +56,11 @@ enum Step {
 
 pub(crate) fn lower(program: &mut Executable) -> Result<()> {
     check_task_tokens(program)?;
-    let (hidden, arrows) = implicit::add(program)?;
+    let (hidden, arrows, explicit) = implicit::add(program)?;
     let mut context = Context {
         hidden,
         arrows,
+        explicit,
         performs: performs(program),
         capability_performs: capability_performs(program),
         entries: BTreeMap::new(),
@@ -352,6 +353,8 @@ struct Context {
     /// Handler arrow of each resumptive operation: the answer type of a
     /// cell capability's resumable entry.
     arrows: implicit::Arrows,
+    /// Each function's written capabilities (cells now) and their arrows.
+    explicit: implicit::Explicit,
 }
 
 /// The entry key of an await of `callee` in a body resumable for `key`. A
@@ -2499,7 +2502,7 @@ fn lower_one(
             ),
         };
         let (entry, allocates) = resumable_entry(program, context, callee, key, result)?;
-        let token = entry_token(program, callee, slot, result);
+        let token = entry_token(program, context, callee, slot, result);
         entries.insert((callee, capability), (entry, token));
         awaited_allocates |= allocates;
     }
@@ -2635,30 +2638,39 @@ fn multi_function_type(program: &mut Executable, input: Type, result: Type) -> u
 
 /// Whether parameter `slot` of `function` is a `cap multi` capability: its
 /// handler arrow takes a `multi fn` token (docs/multishot-capabilities.md).
-fn capability_multi(program: &Executable, function: usize, slot: usize) -> bool {
-    match program.functions[function]
+fn capability_multi(program: &Executable, context: &Context, function: usize, slot: usize) -> bool {
+    let arrow = match program.functions[function]
         .locals
         .get(slot)
         .map(|local| local.ty)
     {
-        Some(Type::Fn(arrow)) => matches!(
+        Some(Type::Fn(arrow)) => Some(arrow),
+        // A written capability is a cell; its arrow is recorded.
+        _ => context
+            .explicit
+            .get(function)
+            .and_then(|written| written.get(&slot))
+            .copied(),
+    };
+    arrow.is_some_and(|arrow| {
+        matches!(
             program.function_types[arrow].parameters.get(1),
             Some(Type::Multi(_))
-        ),
-        _ => false,
-    }
+        )
+    })
 }
 
 /// The token a resumable entry of `callee` receives as its continuation:
 /// `multi fn` for a `cap multi` parameter, otherwise `linear once fn`.
 fn entry_token(
     program: &mut Executable,
+    context: &Context,
     callee: usize,
     capability: Option<usize>,
     result: Type,
 ) -> Type {
     let input = program.functions[callee].result;
-    if capability.is_some_and(|slot| capability_multi(program, callee, slot)) {
+    if capability.is_some_and(|slot| capability_multi(program, context, callee, slot)) {
         Type::Multi(multi_function_type(program, input, result))
     } else {
         Type::Once(function_type(program, input, result))
@@ -3528,8 +3540,7 @@ fn resumable_entry(
     context.entries.insert((function, key), (index, true));
     // A `cap multi` entry is resumed several times: its continuation and its
     // tokens are `multi fn` values on the continuation stack.
-    let multi =
-        matches!(key, EntryKey::Capability(slot) if capability_multi(program, function, slot));
+    let multi = matches!(key, EntryKey::Capability(slot) if capability_multi(program, context, function, slot));
     let continuation = if multi {
         Type::Multi(multi_function_type(program, source.result, result))
     } else {
@@ -3579,8 +3590,13 @@ fn resumable_entry(
             check_unresumable_paths(program, context, &body, operation)?;
         }
         EntryKey::Capability(slot) => {
-            let answer = match source.locals[slot].ty {
-                Type::Fn(arrow) => program.function_types[arrow].result,
+            let written = context
+                .explicit
+                .get(function)
+                .and_then(|written| written.get(&slot))
+                .copied();
+            let answer = match (source.locals[slot].ty, written) {
+                (Type::Fn(arrow), _) | (_, Some(arrow)) => program.function_types[arrow].result,
                 // A cell: the hidden parameter of a copy, for an operation
                 // whose handler arrow `implicit` recorded.
                 _ => {
@@ -3624,7 +3640,7 @@ fn resumable_entry(
             (None, key) => await_key(context, callee, key),
         };
         let (entry, allocates) = resumable_entry(program, context, callee, callee_key, result)?;
-        let token = entry_token(program, callee, slot, result);
+        let token = entry_token(program, context, callee, slot, result);
         entries.insert((callee, capability), (entry, token));
         awaited_allocates |= allocates;
     }
