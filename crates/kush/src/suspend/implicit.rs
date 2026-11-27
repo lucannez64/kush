@@ -1,17 +1,24 @@
-//! Declared operations as hidden capability parameters for direct calls
-//! (FND-HANDLERS-ONE-PARAMS, docs/one-handler-model.md section 2).
+//! Declared operations as hidden capability parameters
+//! (FND-HANDLERS-ONE-PARAMS and -VALUES, docs/one-handler-model.md section 2).
 //!
 //! A function that may perform declared operations it does not handle gets a
 //! copy taking one more `cap Op` parameter per such operation, after its
 //! written parameters and in operation-id order. In that copy a perform by
 //! name with no enclosing `handle Op` of its own calls the parameter, and a
 //! direct call passes, per operation of the callee, the innermost enclosing
-//! `handle Op` of the caller or the caller's own parameter. Calls from code
-//! that has neither (closures, function values, tasks, entry points) keep the
-//! original function, which still performs through the dynamic stack; so
-//! does a handler that is capturing, which is reached through the dynamic
-//! frame by a trampoline. An await point under a handler with code after
-//! `resume` then resumes the copy through its capability parameter.
+//! `handle Op` of the caller or the caller's own parameter. Code that has
+//! neither (task bodies, entry points) keeps the original function, which
+//! still performs through the dynamic stack; so does a handler that is
+//! capturing, which is reached through the dynamic frame by a trampoline. An
+//! await point under a handler with code after `resume` then resumes the copy
+//! through its capability parameter.
+//!
+//! A function value takes the capabilities its arrow's row names the same
+//! way (decision D1: bound at each call): its function is a copy for those
+//! operations, the arrow gains the parameters, and every indirect call passes
+//! them. Arrows whose values reach code that calls them without capabilities
+//! (handlers, task and callback builtins, foreign functions) keep the dynamic
+//! stack until HANDLERS-ONE-BUILTINS.
 use super::{Result, performs};
 use crate::executable::{Block, Executable, Expr, ExprKind, Local, Statement, Target, Type};
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,23 +39,76 @@ struct Pass<'a> {
     /// Handler arrow of each declared resumptive operation.
     arrows: &'a BTreeMap<usize, usize>,
     function_types: &'a [crate::runtime_types::FunctionType],
+    /// Operations whose capabilities a function value of each arrow type
+    /// takes; empty for arrows that keep the dynamic stack.
+    values: &'a [Vec<usize>],
+    /// Operations whose capabilities each trait-object call and each
+    /// closed-world union call passes to its members.
+    dyn_calls: &'a [Vec<usize>],
+    union_calls: &'a [Vec<usize>],
     originals: usize,
-    /// Copy index of each copied original, in request order.
-    copies: BTreeMap<usize, usize>,
-    order: Vec<usize>,
+    /// Copy index of each copied original and its capability operations,
+    /// in request order.
+    copies: BTreeMap<(usize, Vec<usize>), usize>,
+    order: Vec<(usize, Vec<usize>)>,
     /// Trampolines through the dynamic stack, by operation.
     trampolines: &'a BTreeMap<usize, (usize, Type)>,
 }
 
 impl Pass<'_> {
-    fn copy_of(&mut self, function: usize) -> usize {
-        if let Some(copy) = self.copies.get(&function) {
+    fn copy_of(&mut self, function: usize, operations: &[usize]) -> usize {
+        let key = (function, operations.to_vec());
+        if let Some(copy) = self.copies.get(&key) {
             return *copy;
         }
         let copy = self.originals + self.order.len();
-        self.order.push(function);
-        self.copies.insert(function, copy);
+        self.order.push(key.clone());
+        self.copies.insert(key, copy);
         copy
+    }
+
+    /// The operations whose capabilities a value of callable type `ty`
+    /// takes.
+    fn value_operations(&self, ty: Type) -> &[usize] {
+        match ty {
+            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => &self.values[id],
+            _ => &[],
+        }
+    }
+
+    /// The capability arguments for `operations` at this point.
+    fn supply(&self, operations: &[usize], scope: &Scope, span: crate::Span) -> Vec<Expr> {
+        operations
+            .iter()
+            .map(|operation| {
+                let capability = scope.capabilities.get(operation).copied().or_else(|| {
+                    scope
+                        .hidden
+                        .get(operation)
+                        .map(|&slot| Capability::Local(slot, Type::Fn(self.arrows[operation])))
+                });
+                match capability {
+                    Some(Capability::Local(slot, ty)) => Expr {
+                        kind: ExprKind::Local(slot),
+                        ty,
+                        span,
+                        resource: None,
+                    },
+                    Some(Capability::Dynamic) | None => {
+                        let (function, ty) = self.trampolines[operation];
+                        Expr {
+                            kind: ExprKind::FnValue {
+                                function,
+                                captures: vec![],
+                            },
+                            ty,
+                            span,
+                            resource: None,
+                        }
+                    }
+                }
+            })
+            .collect()
     }
 
     /// The handler local of a `HandlerPush` as a capability, when it can be
@@ -124,43 +184,44 @@ impl Pass<'_> {
             ExprKind::Call(Target::Function(callee), arguments)
                 if *callee < self.originals && !self.needs[*callee].is_empty() =>
             {
-                let supplied = self.needs[*callee]
-                    .iter()
-                    .map(|operation| {
-                        scope.capabilities.get(operation).copied().or_else(|| {
-                            scope.hidden.get(operation).map(|&slot| {
-                                Capability::Local(slot, Type::Fn(self.arrows[operation]))
-                            })
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                if supplied.iter().all(Option::is_none) {
+                // Code with no capability for any of them keeps the
+                // original, which performs through the dynamic stack.
+                let supplied = self.needs[*callee].iter().any(|operation| {
+                    scope.capabilities.contains_key(operation)
+                        || scope.hidden.contains_key(operation)
+                });
+                if !supplied {
                     return;
                 }
-                let span = expr.span;
-                for (operation, capability) in self.needs[*callee].iter().zip(supplied) {
-                    arguments.push(match capability {
-                        Some(Capability::Local(slot, ty)) => Expr {
-                            kind: ExprKind::Local(slot),
-                            ty,
-                            span,
-                            resource: None,
-                        },
-                        Some(Capability::Dynamic) | None => {
-                            let (function, ty) = self.trampolines[operation];
-                            Expr {
-                                kind: ExprKind::FnValue {
-                                    function,
-                                    captures: vec![],
-                                },
-                                ty,
-                                span,
-                                resource: None,
-                            }
-                        }
-                    });
-                }
-                *callee = self.copy_of(*callee);
+                let operations = self.needs[*callee].clone();
+                arguments.extend(self.supply(&operations, scope, expr.span));
+                *callee = self.copy_of(*callee, &operations);
+            }
+            // Call-time binding (decision D1): a function value receives the
+            // capabilities its arrow's row names from each caller.
+            ExprKind::CallIndirect { callee, arguments }
+                if !self.value_operations(callee.ty).is_empty() =>
+            {
+                let operations = self.value_operations(callee.ty).to_vec();
+                arguments.extend(self.supply(&operations, scope, expr.span));
+            }
+            ExprKind::Call(Target::DynCall { spec }, arguments)
+                if !self.dyn_calls[*spec].is_empty() =>
+            {
+                let operations = self.dyn_calls[*spec].clone();
+                arguments.extend(self.supply(&operations, scope, expr.span));
+            }
+            ExprKind::Call(Target::UnionBorrowCall { spec }, arguments)
+                if !self.union_calls[*spec].is_empty() =>
+            {
+                let operations = self.union_calls[*spec].clone();
+                arguments.extend(self.supply(&operations, scope, expr.span));
+            }
+            ExprKind::FnValue { function, .. }
+                if *function < self.originals && !self.value_operations(expr.ty).is_empty() =>
+            {
+                let operations = self.value_operations(expr.ty).to_vec();
+                *function = self.copy_of(*function, &operations);
             }
             ExprKind::Suspend {
                 call,
@@ -190,9 +251,8 @@ struct Scope {
 /// Hidden capability parameter slot of each copy, by operation.
 pub(super) type Hidden = BTreeMap<usize, BTreeMap<usize, usize>>;
 
-/// Add the copies and redirect direct calls to them.
+/// Add the copies and redirect direct calls and function values to them.
 pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
-    let originals = program.functions.len();
     let mut arrows = BTreeMap::new();
     for function in &program.functions {
         collect_arrows(&function.body, &mut arrows);
@@ -201,7 +261,7 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
         return Ok(Hidden::new());
     }
     let performs = performs(program);
-    let needs = (0..originals)
+    let mut needs = (0..program.functions.len())
         .map(|index| {
             let function = &program.functions[index];
             if function.closure.is_some()
@@ -217,7 +277,41 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
                 .collect()
         })
         .collect::<Vec<Vec<usize>>>();
-    if needs.iter().all(Vec::is_empty) {
+    let values = value_operations(program, &arrows);
+    // Dispatch calls every member directly, so the members of one key take
+    // the union of their operations. A member that performs operations but
+    // cannot be copied keeps the whole dispatch on the dynamic stack.
+    let members = |functions: &mut dyn Iterator<Item = usize>| -> Vec<usize> {
+        let mut operations = BTreeSet::new();
+        for function in functions {
+            if needs[function].is_empty()
+                && performs[function]
+                    .iter()
+                    .any(|operation| arrows.contains_key(operation))
+            {
+                return vec![];
+            }
+            operations.extend(needs[function].iter().copied());
+        }
+        operations.into_iter().collect()
+    };
+    let dyn_calls = program
+        .dyn_calls
+        .iter()
+        .map(|spec| {
+            members(
+                &mut program.dyn_members[spec.object]
+                    .iter()
+                    .filter_map(|member| member.methods.get(&spec.key).copied()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let union_calls = program
+        .union_calls
+        .iter()
+        .map(|spec| members(&mut spec.members.iter().map(|member| member.2)))
+        .collect::<Vec<_>>();
+    if needs.iter().all(Vec::is_empty) && values.iter().all(Vec::is_empty) {
         return Ok(Hidden::new());
     }
     let mut trampolines = BTreeMap::new();
@@ -225,13 +319,18 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
         trampolines.insert(operation, trampoline(program, operation, arrow));
     }
     let originals = program.functions.len();
-    let mut needs = needs;
     needs.resize(originals, vec![]);
+    // Copies start from the bodies as checked: the originals' calls get the
+    // dynamic trampoline where a copy passes its own parameter.
+    let sources = program.functions.clone();
     let function_types = program.function_types.clone();
     let mut pass = Pass {
         needs: &needs,
         arrows: &arrows,
         function_types: &function_types,
+        values: &values,
+        dyn_calls: &dyn_calls,
+        union_calls: &union_calls,
         originals,
         copies: BTreeMap::new(),
         order: Vec::new(),
@@ -240,14 +339,36 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
     for function in &mut program.functions[..originals] {
         pass.block(&mut function.body, &Scope::default());
     }
+    for (spec, operations) in program.dyn_calls.iter().zip(&dyn_calls) {
+        if operations.is_empty() {
+            continue;
+        }
+        for member in &mut program.dyn_members[spec.object] {
+            if let Some(method) = member.methods.get_mut(&spec.key)
+                && *method < originals
+            {
+                *method = pass.copy_of(*method, operations);
+            }
+        }
+    }
+    for (spec, operations) in program.union_calls.iter_mut().zip(&union_calls) {
+        if operations.is_empty() {
+            continue;
+        }
+        for member in &mut spec.members {
+            member.2 = pass.copy_of(member.2, operations);
+        }
+    }
     let mut copies = Hidden::new();
     let mut next = 0;
     while next < pass.order.len() {
-        let original = pass.order[next];
-        let mut copy = program.functions[original].clone();
+        let (original, operations) = pass.order[next].clone();
+        let mut copy = sources[original].clone();
         let mut slots = (0..copy.parameters).collect::<Vec<_>>();
         let mut hidden = BTreeMap::new();
-        for &operation in &needs[original] {
+        copy.parameter_grades.resize(copy.parameters, None);
+        copy.parameter_lifetimes.resize(copy.parameters, None);
+        for &operation in &operations {
             let slot = copy.locals.len();
             copy.locals.push(Local {
                 ty: Type::Fn(arrows[&operation]),
@@ -266,8 +387,6 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
             if !copy.local_copyable.is_empty() {
                 copy.local_copyable.push(true);
             }
-            copy.parameter_grades.resize(copy.parameters, None);
-            copy.parameter_lifetimes.resize(copy.parameters, None);
             copy.parameter_grades.push(None);
             copy.parameter_lifetimes.push(None);
             copy.capability_parameters.push(slot);
@@ -278,28 +397,135 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
         copy.parameter_slots = Some(slots);
         copies.insert(originals + next, hidden.clone());
         copy.name = format!("{}::capabilities", copy.name);
-        let mut body = std::mem::replace(&mut copy.body, empty());
         pass.block(
-            &mut body,
+            &mut copy.body,
             &Scope {
                 hidden,
                 ..Scope::default()
             },
         );
-        copy.body = body;
         program.functions.push(copy);
         program.foreign_functions.push(None);
         next += 1;
     }
+    // The arrows of function values take the capabilities last.
+    for (id, operations) in values.iter().enumerate() {
+        let arrow = &mut program.function_types[id];
+        let written = arrow.parameters.len();
+        for &operation in operations {
+            arrow.parameters.push(Type::Fn(arrows[&operation]));
+        }
+        if arrow.parameter_grades.len() == written {
+            arrow.parameter_grades.resize(arrow.parameters.len(), None);
+        }
+        if arrow.borrows.parameters.len() == written {
+            arrow
+                .borrows
+                .parameters
+                .resize(arrow.parameters.len(), None);
+        }
+        if arrow.borrows.parameter_leaves.len() == written {
+            arrow
+                .borrows
+                .parameter_leaves
+                .resize(arrow.parameters.len(), vec![]);
+        }
+    }
     Ok(copies)
 }
 
-fn empty() -> Block {
-    Block {
-        statements: vec![],
-        tail: None,
-        ty: Type::Unit,
+/// The resumptive declared operations whose capabilities a value of each
+/// arrow type takes after its written parameters (rule 4). An arrow keeps the
+/// dynamic stack when a value with its set of operations reaches code that
+/// calls it without capabilities: a handler, a task or callback builtin, a
+/// foreign function, or a function whose layout cannot take more parameters.
+/// Coercions between arrows with different sets go through checked adapters,
+/// so arrows with one set agree.
+fn value_operations(program: &Executable, arrows: &BTreeMap<usize, usize>) -> Vec<Vec<usize>> {
+    let operations = |ty: Type| -> Option<Vec<usize>> {
+        let (Type::Fn(id) | Type::Once(id) | Type::Multi(id)) = ty else {
+            return None;
+        };
+        let effects = program.function_types[id].effects;
+        let found = arrows
+            .keys()
+            .copied()
+            .filter(|&operation| {
+                program
+                    .effect_bits
+                    .get(operation)
+                    .is_some_and(|bit| *bit != 0 && effects & bit != 0)
+            })
+            .collect::<Vec<_>>();
+        (!found.is_empty()).then_some(found)
+    };
+    let mut pinned = BTreeSet::new();
+    let mut pin = |ty: Type| {
+        if let Some(found) = operations(ty) {
+            pinned.insert(found);
+        }
+    };
+    fn walk(expr: &Expr, program: &Executable, pin: &mut dyn FnMut(Type)) {
+        match &expr.kind {
+            ExprKind::HandlerPush { handler, .. } | ExprKind::AbortScope { handler, .. } => {
+                pin(handler.ty)
+            }
+            ExprKind::Suspend { call, .. } => {
+                if let ExprKind::CallIndirect { callee, .. } = &call.kind {
+                    pin(callee.ty);
+                }
+            }
+            ExprKind::VecMap { callbacks, .. } => {
+                for callback in callbacks {
+                    pin(callback.ty);
+                }
+            }
+            ExprKind::TaskScope { body, .. } | ExprKind::TaskSpawn { body, .. } => pin(body.ty),
+            ExprKind::Call(Target::Function(callee), arguments)
+                if program.foreign_functions[*callee].is_some() =>
+            {
+                for argument in arguments {
+                    pin(argument.ty);
+                }
+            }
+            ExprKind::Call(
+                Target::Function(_) | Target::DynCall { .. } | Target::UnionBorrowCall { .. },
+                _,
+            ) => {}
+            ExprKind::Call(_, arguments) => {
+                for argument in arguments {
+                    pin(argument.ty);
+                }
+            }
+            ExprKind::FnValue { function, .. } => {
+                let source = &program.functions[*function];
+                if source.parameter_slots.is_some()
+                    || program.foreign_functions[*function].is_some()
+                {
+                    pin(expr.ty);
+                }
+            }
+            _ => {}
+        }
+        expr.for_each_child(&mut |child| walk(child, program, pin));
     }
+    for function in &program.functions {
+        for statement in &function.body.statements {
+            if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                walk(value, program, &mut pin);
+            }
+        }
+        if let Some(tail) = &function.body.tail {
+            walk(tail, program, &mut pin);
+        }
+    }
+    (0..program.function_types.len())
+        .map(|id| {
+            operations(Type::Fn(id))
+                .filter(|found| !pinned.contains(found))
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 fn collect_arrows(block: &Block, arrows: &mut BTreeMap<usize, usize>) {

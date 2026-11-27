@@ -1479,6 +1479,12 @@ impl Checker<'_, '_> {
         if source.parameters.len() != target.parameters.len() {
             return true;
         }
+        // Each declared resumptive operation of the row is a hidden
+        // capability parameter (docs/one-handler-model.md rule 4).
+        let resumptive = self.resumptive_bits();
+        if source.effects & resumptive != target.effects & resumptive {
+            return true;
+        }
         let mut rep_change = false;
         for index in 0..source.parameters.len() {
             let source_erased = source.parameter_erased(index);

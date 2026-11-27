@@ -4,9 +4,10 @@
 //! A function that performs a declared operation it does not handle gets a
 //! copy taking the operation's capability after its written parameters.
 //! Direct calls under a `handle` (or from another copy) call the copy, which
-//! performs through the parameter instead of searching the dynamic stack.
-//! Function values still reach the original. Every program runs in the
-//! reference evaluator and natively with balanced allocations.
+//! performs through the parameter instead of searching the dynamic stack. A
+//! function value takes the capabilities its arrow's row names from each
+//! caller (FND-HANDLERS-ONE-VALUES). Every program runs in the reference
+//! evaluator and natively with balanced allocations.
 use kush::executable::check;
 
 fn agrees(source: &str, expected: i64) {
@@ -101,4 +102,101 @@ fn function_values_still_reach_the_handler() {
          }}"
     );
     agrees(&source, 38);
+}
+
+fn rejects(source: &str, fragment: &str) {
+    match check(source) {
+        Ok(_) => panic!("accepted:\n{source}"),
+        Err(error) => assert!(
+            error.message.contains(fragment),
+            "expected {fragment:?}, got {error:?}\n{source}"
+        ),
+    }
+}
+
+/// Handles `Ask` by resuming with the payload plus `add`.
+fn handle(add: &str, body: &str) -> String {
+    format!(
+        "handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{
+             k(x + {add})
+         }} {{ {body} }}"
+    )
+}
+
+#[test]
+fn a_function_value_gets_the_handler_active_at_its_call() {
+    // Decision D1: `installs` calls `f` under its own handler, so `f`
+    // performs there (1000 + 100000), not under `main`'s (+ 1).
+    let inner = handle("100000", "f(1000)");
+    let outer = handle("1", "installs(leaf) + 0");
+    let source = format!(
+        "{CALLEES}
+         fn installs(f: fn(i64) -> i64 ! {{Ask}}) -> i64 ! {{}} {{ {inner} }}
+         fn main() -> i64 ! {{}} {{ {outer} - 101000 }}"
+    );
+    agrees(&source, 1);
+}
+
+#[test]
+fn lambdas_perform_through_their_hidden_capability() {
+    let body = handle(
+        "10",
+        "let f = fn(x: i64) -> i64 ! {Ask} { perform Ask(x) * 3 }; f(1) + f(2)",
+    );
+    let source = format!("{CALLEES}\n fn main() -> i64 ! {{}} {{ {body} }}");
+    agrees(&source, 33 + 36);
+    let debug = format!("{:?}", check(&source).unwrap());
+    let copy = function(&debug, "lambda::capabilities");
+    assert!(!copy.contains("DynamicPerform"), "{copy}");
+}
+
+#[test]
+fn widening_a_row_with_declared_operations_adapts_named_functions() {
+    // A function without `Ask` used where the arrow allows it: an adapter
+    // takes the capability and drops it.
+    let body = handle("10", "apply(double, 4) + apply(leaf, 1)");
+    let source = format!(
+        "{CALLEES}
+         fn double(x: i64) -> i64 ! {{}} {{ x * 2 }}
+         fn apply(f: fn(i64) -> i64 ! {{Ask}}, x: i64) -> i64 ! {{Ask}} {{ f(x) }}
+         fn main() -> i64 ! {{}} {{ {body} }}"
+    );
+    agrees(&source, 8 + 12);
+    // A function value of unknown origin has no adapter without an
+    // environment.
+    rejects(
+        &format!(
+            "{CALLEES}
+             fn widen(f: fn(i64) -> i64 ! {{}}) -> i64 ! {{Ask}} {{
+                 let g: fn(i64) -> i64 ! {{Ask}} = f;
+                 g(1)
+             }}
+             fn main() -> i64 ! {{}} {{ 0 }}"
+        ),
+        "representation-changing conversion of a dynamic pure function value",
+    );
+}
+
+#[test]
+fn trait_object_members_take_the_capabilities_of_their_key() {
+    // Only `A` performs; the dispatch passes the capability to both members.
+    let body = handle(
+        "10",
+        "let a: dyn Asker = A { k: 100 };
+         let b: dyn Asker = B { u: 0 };
+         use_it(&a) + use_it(&b)",
+    );
+    let source = format!(
+        "{CALLEES}
+         trait Asker {{ fn ask(self: &Self, x: i64) -> i64 ! {{Ask}}; }}
+         struct A {{ k: i64 }}
+         struct B {{ u: i64 }}
+         impl Asker for A {{ fn ask(self: &Self, x: i64) -> i64 ! {{Ask}} {{ leaf(x) + self.k }} }}
+         impl Asker for B {{ fn ask(self: &Self, x: i64) -> i64 ! {{Ask}} {{ x }} }}
+         fn use_it(object: &dyn Asker) -> i64 ! {{Ask}} {{ object.ask(1) }}
+         fn main() -> i64 ! {{alloc}} {{ {body} }}"
+    );
+    agrees(&source, 112 + 1);
+    let debug = format!("{:?}", check(&source).unwrap());
+    assert!(!function(&debug, "ask::capabilities").contains("DynamicPerform"));
 }

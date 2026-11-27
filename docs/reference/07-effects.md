@@ -201,6 +201,21 @@ fn main() -> Unit ! {io, alloc} {
 60
 ```
 
+A function value whose row names declared operations uses the handlers
+active where it is called. Its operations are part of its representation, so
+a value of unknown origin cannot be widened to a row with more declared
+operations; a function name or a lambda can.
+
+```kush reject
+effect Ask: i64 -> i64;
+fn widen(f: fn(i64) -> i64 ! {}) -> i64 ! {Ask} {
+    let g: fn(i64) -> i64 ! {Ask} = f;
+    g(1)
+}
+fn main() -> i64 ! {} { 0 }
+// error: representation-changing conversion of a dynamic pure function value
+```
+
 ### Other handler forms
 
 | Form | Meaning |

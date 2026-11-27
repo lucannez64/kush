@@ -235,6 +235,31 @@ and grades. It does not change the checker: it works on the checked IR.
   original function, which performs through the dynamic stack
   (HANDLERS-ONE-VALUES and -BUILTINS).
 
+### As built: HANDLERS-ONE-VALUES
+
+- An arrow type whose row names declared resumptive operations takes their
+  capabilities after its written parameters. A function value of that type
+  (named function, lambda, closure or adapter) is a copy keyed by the
+  function and those operations, and every `CallIndirect` passes them like a
+  direct call. Lambdas and closures are copied like named functions, through
+  `parameter_slots`.
+- The checker treats a different set of declared resumptive operations in two
+  arrows as a representation change (`arrow_rep_change`), so widening goes
+  through the existing pure, once and closure adapters. A `fn` value of
+  unknown origin has no environment for an adapter and is rejected, like
+  other representation-changing conversions of dynamic pure function values
+  (reference chapter 7).
+- Arrows whose set of operations reaches code that calls values without
+  capabilities keep the dynamic stack: handler values, `Task.scope`,
+  `Task.spawn` and vector callbacks, builtin and foreign arguments, and
+  values of functions with a special parameter layout. They move in
+  HANDLERS-ONE-BUILTINS.
+- Trait objects and closed-world union calls dispatch with direct calls of
+  their members, so each member of a key becomes a copy taking the union of
+  the members' operations, and the dispatch passes them. A member that
+  performs operations but cannot be copied keeps that dispatch on the
+  dynamic stack.
+
 ## 8. Decisions (user, 2026-11-27)
 
 - **D1. A function value gets its handler at the call.** It is today's

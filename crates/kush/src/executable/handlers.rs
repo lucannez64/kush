@@ -745,6 +745,16 @@ impl Checker<'_, '_> {
             .map(|(name, _)| self.operation_effect(name))
             .fold(0, |bits, bit| bits | bit)
     }
+    /// Row bits of every declared resumptive operation: a function value
+    /// receives their capabilities as hidden parameters
+    /// (docs/one-handler-model.md rule 4).
+    pub(super) fn resumptive_bits(&self) -> u16 {
+        self.effect_operations
+            .iter()
+            .filter(|(_, operation)| operation.result != Type::Never)
+            .map(|(name, _)| self.operation_effect(name))
+            .fold(0, |bits, bit| bits | bit)
+    }
     /// Whether an abort of `bit` from the top of the handler stack may leave
     /// through every non-tail handler body above scope `index` (exclusive):
     /// each must be a one-shot lexical handler whose token row names it.
