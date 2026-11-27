@@ -34,6 +34,22 @@ __attribute__((noinline)) static uint32_t crc32(const uint32_t *table, uint32_t 
     return c ^ 0xFFFFFFFFu;
 }
 
+__attribute__((noinline)) static int64_t lookup(const int64_t *table, const uint8_t *data,
+                                                int64_t n) {
+    int64_t acc = 0;
+    for (int64_t i = 0; i < n; i++) acc = add(acc, table[data[i]]);
+    return acc;
+}
+
+__attribute__((noinline)) static int64_t follow(const int64_t *values, int64_t n) {
+    int64_t acc = 0, j = 0;
+    for (int64_t i = 0; i < n; i++) {
+        acc = add(acc, values[j]);
+        if (values[i] > 0) j = add(j, 1);
+    }
+    return acc;
+}
+
 static int argument(const char *text, int64_t *out) {
     char *end;
     long long value = strtoll(text, &end, 10);
@@ -48,7 +64,7 @@ int main(int argc, char **argv) {
         !argument(argv[3], &kernel) || !argument(argv[4], &trusted))
         return 2;
     if (n < 3 || n > 8000000 || repetitions < 0 || repetitions > 100000000 || kernel < 0 ||
-        kernel > 2 || trusted < 0 || trusted > 1)
+        kernel > 4 || trusted < 0 || trusted > 1)
         return 2;
     int64_t *values = malloc((size_t)n * sizeof *values);
     uint8_t *data = malloc((size_t)n);
@@ -63,16 +79,22 @@ int main(int argc, char **argv) {
         for (int bit = 0; bit < 8; bit++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
         table[k] = c;
     }
+    int64_t *codec = malloc(256 * sizeof *codec);
+    if (!codec) abort();
+    for (int64_t k = 0; k < 256; k++) codec[k] = ((k * 40503 + 7) & 1023) - 512;
     int64_t result = 0;
     for (int64_t round = 0; round < repetitions; round++) {
         int64_t step;
         if (kernel == 0) step = sum(values, n);
         else if (kernel == 1) step = stencil(data, n);
+        else if (kernel == 3) step = lookup(codec, data, n);
+        else if (kernel == 4) step = follow(values, n);
         else step = crc32(table, (uint32_t)round, data, n);
         result = add(result ^ step, round & 1);
     }
     printf("%lld\n", (long long)result);
     free(values);
     free(data);
+    free(codec);
     return 0;
 }

@@ -21,6 +21,8 @@ difference). Build a program both ways to see what its proofs buy.
 | sum | 4,096 `i64` × 200,001 | each `Slice.at` read is in bounds (loop guard) |
 | stencil | 65,536 bytes × 20,001 | three `Bytes.at` reads in bounds, and `a + 2*b + c` of three `u8` values fits |
 | crc32 | 65,536 bytes × 4,001 | `std.crc32`: byte reads in bounds, table index `x & 255` in bounds |
+| lookup | 65,536 bytes × 20,001 | a table field typed `Vec<i64> where len >= 256`, indexed by each byte, in a function that never sees it built |
+| follow | 4,096 `i64` × 200,001 | `values[j]` for a trailing index `j` that moves only past positive elements, from the invariant `j <= i` |
 
 In every language the accumulators and the loop counter stay checked for
 overflow, as Kush checks them.
@@ -40,29 +42,33 @@ fresh processes pinned to one CPU, shuffled, two warm-ups, median of 15.
 
 ## Results
 
-2026-11-27, Kush at 4c8fc95 plus the switch, tsar-bomba-2 (Ryzen 5 5500,
-clang 23.1.5, rustc 1.101.0-nightly, Zig 0.17.1), median ms:
+2026-11-27, Kush at 5e24b3b, tsar-bomba-2 (Ryzen 5 5500, clang 23.1.5,
+rustc 1.101.0-nightly, Zig 0.17.1), median ms:
 
 | Kernel | Kush, proofs | Kush, checks kept | Rust, safe | Rust, unsafe | C | Zig, safe | Zig, unchecked |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| sum | 244 | **147** | 247 | 240 | 239 | 246 | 236 |
-| stencil | 726 | 727 | 761 | 685 | 719 | 1045 | 684 |
-| crc32 | 512 | 512 | 511 | 510 | 512 | 511 | 510 |
+| sum | **112** | 121 | 234 | 234 | 237 | 234 | 237 |
+| stencil | 696 | 757 | 753 | 754 | 764 | 1069 | 692 |
+| crc32 | 516 | 518 | 518 | 515 | 517 | 515 | 515 |
+| lookup | 757 | 444 | 394 | 389 | 390 | 391 | 393 |
+| follow | **402** | 448 | 450 | 443 | 403 | 472 | 396 |
 
-- **The proof in `sum` makes it 1.66× slower.** A loop with a proved
-  unchecked read is never given deferred overflow checks
-  ([deferred-overflow.md](../../docs/deferred-overflow.md), rule 2), so the
-  accumulator is checked on every element and the loop stays scalar. With
-  the checks kept, the read is an ordinary checked `get`, the loop is
-  deferred and vectorized, and it beats every other checked build by 1.6×.
-- Elsewhere the proofs change nothing measurable: LLVM already removes these
-  bounds checks from the checked code (safe and unsafe Rust differ by 1% on
-  sum and crc32). On stencil Kush sits between safe and unsafe Rust (6%
-  behind unsafe); its loop bound and `i + 1` stay checked, which the unsafe
-  Rust and unchecked Zig forms skip.
-- crc32 takes the same time in every variant.
-- Zig's ReleaseSafe stencil is 1.4× slower than its unchecked form.
+- **follow is where a proof pays.** LLVM cannot bound the trailing index,
+  so safe Rust and Zig check every `values[j]`. Kush proves it from the
+  loop invariant and runs as fast as C and unchecked Zig, 10% ahead of its
+  own checked build.
+- **sum** no longer pays for its proof. A loop with a proved `Slice.at` is
+  now given deferred overflow checks (FND-DEFER-PROVED-READS); before, it
+  ran at 244 ms against 147 ms with the checks kept. Both Kush builds are
+  2× ahead of every other checked build.
+- **lookup** does not show what it was meant to. LLVM removes the table
+  check in every checked build (safe and unsafe Rust are within 1%). Kush's
+  proved and checked builds run the same seven instructions per byte. The
+  1.7× gap between them is where the loop lands: in the slower binary its
+  overflow branch straddles a 32-byte boundary.
+- stencil: Kush with its proofs matches unchecked Zig; its loop bound and
+  `i + 1` stay checked. crc32 takes the same time in every variant. Zig's
+  ReleaseSafe stencil is 1.5× slower than its unchecked form.
 
-These kernels use the bounds facts LLVM can find for itself. Proofs should
-pay where it cannot: indices read from data, or bounds carried by an
-invariant across calls.
+Earlier run (Kush at 4c8fc95, before proved reads were deferred): sum 244 /
+147, stencil 726 / 727, crc32 512 / 512 (proofs / checks kept).
