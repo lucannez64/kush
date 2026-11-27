@@ -360,10 +360,10 @@ impl Pass<'_> {
         } = &mut expr.kind
         {
             self.expr(handler, scope);
+            // Also for an operation performed only lexically: an exit a
+            // continuation carries away addresses the scope through it.
             let mut inner = scope.clone();
-            if self.caps.contains(operation) {
-                inner.capabilities.insert(*operation, *slot);
-            }
+            inner.capabilities.insert(*operation, *slot);
             self.block(body, &inner);
             return;
         }
@@ -379,6 +379,22 @@ impl Pass<'_> {
             } => {
                 if let Some(slot) = Self::capability(scope, *operation) {
                     *cell = Some(Box::new(Expr {
+                        kind: ExprKind::Local(slot),
+                        ty: Type::I64,
+                        span: expr.span,
+                        resource: None,
+                    }));
+                }
+            }
+            // An exit a continuation may carry away from its scope reads the
+            // scope's capability, so the continuation captures it.
+            ExprKind::AbortExit {
+                operation: Some(operation),
+                capability: capability @ None,
+                ..
+            } => {
+                if let Some(slot) = Self::capability(scope, *operation) {
+                    *capability = Some(Box::new(Expr {
                         kind: ExprKind::Local(slot),
                         ty: Type::I64,
                         span: expr.span,
@@ -560,7 +576,33 @@ pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows, Explicit)
     for function in &program.functions {
         collect_arrows(&function.body, &mut arrows, &mut caps);
     }
-    if caps.is_empty() && explicit.iter().all(BTreeMap::is_empty) {
+    // Abortive scopes' capabilities travel with the exits that
+    // continuations carry away, even without any perform by name.
+    if caps.is_empty()
+        && explicit.iter().all(BTreeMap::is_empty)
+        && !program.functions.iter().any(|function| {
+            fn scoped(expr: &Expr) -> bool {
+                let mut found = matches!(
+                    expr.kind,
+                    ExprKind::AbortScope {
+                        capability: Some(_),
+                        ..
+                    }
+                );
+                expr.for_each_child(&mut |child| found |= scoped(child));
+                found
+            }
+            function
+                .body
+                .statements
+                .iter()
+                .any(|statement| match statement {
+                    Statement::Let(_, value) | Statement::Expr(value) => scoped(value),
+                    Statement::Declare(_) => false,
+                })
+                || function.body.tail.as_deref().is_some_and(scoped)
+        })
+    {
         return Ok((Hidden::new(), arrows, explicit));
     }
     let performs = performs_with(program, true);
@@ -818,11 +860,6 @@ fn value_operations(program: &Executable, caps: &BTreeSet<usize>) -> Vec<Vec<usi
             ExprKind::HandlerPush { handler, .. } | ExprKind::AbortScope { handler, .. } => {
                 pin(handler.ty)
             }
-            ExprKind::Suspend { call, .. } => {
-                if let ExprKind::CallIndirect { callee, .. } = &call.kind {
-                    pin(callee.ty);
-                }
-            }
             // A task body takes its capabilities as captures, which needs a
             // closure with an ordinary layout (the checker requires a
             // written lambda).
@@ -871,13 +908,65 @@ fn value_operations(program: &Executable, caps: &BTreeSet<usize>) -> Vec<Vec<usi
             walk(tail, program, &mut pin);
         }
     }
+    // Resumption tokens: the lowering builds the continuations they call,
+    // which take only the operation's result. Compiler-made, they are never
+    // coerced to a written arrow, so they stay by type.
+    let mut tokens = BTreeSet::new();
+    for function in &program.functions {
+        collect_tokens(&function.body, program, &mut tokens);
+    }
     (0..program.function_types.len())
         .map(|id| {
             operations(Type::Fn(id))
-                .filter(|found| !pinned.contains(found))
+                .filter(|found| !pinned.contains(found) && !tokens.contains(&id))
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// The arrows of resumption tokens: of suspendable bodies, of the handler
+/// calls at their points, and of performs.
+fn collect_tokens(block: &Block, program: &Executable, tokens: &mut BTreeSet<usize>) {
+    fn id(ty: Type) -> Option<usize> {
+        match ty {
+            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => Some(id),
+            _ => None,
+        }
+    }
+    fn walk(expr: &Expr, program: &Executable, tokens: &mut BTreeSet<usize>) {
+        let token = match &expr.kind {
+            ExprKind::Suspendable(suspendable) => id(suspendable.token),
+            ExprKind::DynamicPerform { resume, .. } => id(resume.ty),
+            ExprKind::Suspend { call, .. } => match &call.kind {
+                ExprKind::CallIndirect { callee, .. } => id(callee.ty).and_then(|arrow| {
+                    program.function_types[arrow]
+                        .parameters
+                        .get(1)
+                        .copied()
+                        .and_then(id)
+                }),
+                _ => None,
+            },
+            ExprKind::HandlerPush { handler, .. } => id(handler.ty).and_then(|arrow| {
+                program.function_types[arrow]
+                    .parameters
+                    .get(1)
+                    .copied()
+                    .and_then(id)
+            }),
+            _ => None,
+        };
+        tokens.extend(token);
+        expr.for_each_child(&mut |child| walk(child, program, tokens));
+    }
+    for statement in &block.statements {
+        if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+            walk(value, program, tokens);
+        }
+    }
+    if let Some(tail) = &block.tail {
+        walk(tail, program, tokens);
+    }
 }
 
 /// Arrows of task bodies whose rows name operations with capabilities.

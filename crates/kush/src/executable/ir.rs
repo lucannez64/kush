@@ -1489,6 +1489,10 @@ pub(crate) enum ExprKind {
         /// continuation function carries away from its scope becomes an
         /// `AbortPerform` of it (E-ABORT-INTERACT).
         operation: Option<usize>,
+        /// The scope's capability, which that perform then addresses; read
+        /// here so a continuation carrying the exit captures it
+        /// (FND-HANDLERS-ONE-DELETE). Set by `crate::suspend`.
+        capability: Option<Box<Expr>>,
     },
     /// Lowered form only: the current depth of the dynamic handler stack.
     HandlerDepth,
@@ -1843,8 +1847,20 @@ impl Expr {
             ExprKind::ContinuationScope { body } => block(body, f),
             ExprKind::RegionExit { value, .. }
             | ExprKind::TryExit { value, .. }
-            | ExprKind::AbortExit { value, .. }
+            | ExprKind::AbortExit {
+                value,
+                capability: None,
+                ..
+            }
             | ExprKind::AbortCall { call: value, .. } => f(value),
+            ExprKind::AbortExit {
+                value,
+                capability: Some(capability),
+                ..
+            } => {
+                f(value);
+                f(capability);
+            }
             ExprKind::AbortPerform {
                 value, capability, ..
             } => {
@@ -2094,8 +2110,20 @@ impl Expr {
             ExprKind::ContinuationScope { body } => block(body, f),
             ExprKind::RegionExit { value, .. }
             | ExprKind::TryExit { value, .. }
-            | ExprKind::AbortExit { value, .. }
+            | ExprKind::AbortExit {
+                value,
+                capability: None,
+                ..
+            }
             | ExprKind::AbortCall { call: value, .. } => f(value),
+            ExprKind::AbortExit {
+                value,
+                capability: Some(capability),
+                ..
+            } => {
+                f(value);
+                f(capability);
+            }
             ExprKind::AbortPerform {
                 value, capability, ..
             } => {

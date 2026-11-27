@@ -131,15 +131,17 @@ fn retarget_aborts(expr: &mut Expr, labels: &mut Vec<usize>) -> Result<()> {
                     "internal error: an abort of a lexical operation was separated from its handle",
                 ));
             };
-            let ExprKind::AbortExit { value, .. } =
-                std::mem::replace(&mut expr.kind, ExprKind::Constant(0))
+            let ExprKind::AbortExit {
+                value, capability, ..
+            } = std::mem::replace(&mut expr.kind, ExprKind::Constant(0))
             else {
                 unreachable!()
             };
+            // The scope's capability travelled with the exit.
             expr.kind = ExprKind::AbortPerform {
                 operation,
                 value,
-                capability: None,
+                capability,
             };
         }
         ExprKind::AbortCall {
@@ -674,14 +676,24 @@ impl Live {
                 }
                 self.expr(call, &live)
             }
-            ExprKind::AbortExit { label, value, .. } => {
-                let exit = self
+            ExprKind::AbortExit {
+                label,
+                value,
+                capability,
+                ..
+            } => {
+                let mut exit = self
                     .aborts
                     .iter()
                     .rev()
                     .find(|(target, _)| target == label)
                     .map(|(_, live)| live.clone())
                     .unwrap_or_default();
+                // The scope's capability, which the exit addresses once a
+                // continuation carries it away.
+                if let Some(capability) = capability {
+                    exit = self.expr(capability, &exit);
+                }
                 self.expr(value, &exit)
             }
             ExprKind::Suspendable(suspendable) => {

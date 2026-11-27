@@ -900,6 +900,7 @@ impl Checker<'_, '_> {
                 value: Box::new(payload),
                 cleanup: Vec::new(),
                 operation: declared,
+                capability: None,
             },
             ty: Type::Never,
             span,
