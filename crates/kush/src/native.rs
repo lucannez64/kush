@@ -647,8 +647,19 @@ pub fn build_with_codegen(
     if program.uses_threads || program.main_stack.is_some() {
         command.arg("-pthread");
     }
-    let result = crate::timing::time("link", || command.output())
-        .map_err(|e| error(format!("could not start the native linker 'cc': {e}")))?;
+    // FND-LINK-FAST: mold or lld when installed; the system linker when the
+    // compiler driver does not accept it.
+    let fast = fast_linker();
+    let mut result = crate::timing::time("link", || {
+        let mut attempt = Command::new(command.get_program());
+        attempt.args(command.get_args()).args(fast);
+        attempt.output()
+    })
+    .map_err(|e| error(format!("could not start the native linker 'cc': {e}")))?;
+    if !result.status.success() && fast.is_some() {
+        result = crate::timing::time("link", || command.output())
+            .map_err(|e| error(format!("could not start the native linker 'cc': {e}")))?;
+    }
     if !result.status.success() {
         return Err(error(format!(
             "native link failed: {}",
@@ -660,6 +671,19 @@ pub fn build_with_codegen(
             "cannot install executable '{}': {e}",
             output.display()
         ))
+    })
+}
+
+/// The driver flag selecting a faster linker than the system `ld.bfd`, when
+/// one is on `PATH`: mold, then lld (FND-LINK-FAST). Looked up once.
+fn fast_linker() -> Option<&'static str> {
+    static FOUND: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        let path = std::env::var_os("PATH")?;
+        [("mold", "-fuse-ld=mold"), ("ld.lld", "-fuse-ld=lld")]
+            .into_iter()
+            .find(|(tool, _)| std::env::split_paths(&path).any(|dir| dir.join(tool).is_file()))
+            .map(|(_, flag)| flag)
     })
 }
 
