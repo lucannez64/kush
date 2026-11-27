@@ -102,6 +102,8 @@ mod handler_bookkeeping;
 mod headerless_buffers;
 #[path = "host_api.rs"]
 mod host_api;
+#[path = "implicit_capabilities.rs"]
+mod implicit_capabilities;
 #[path = "implied_bounds.rs"]
 mod implied_bounds;
 #[path = "import_alias.rs"]

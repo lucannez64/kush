@@ -208,6 +208,33 @@ backend agreeing:
 | HANDLERS-ONE-ABORT | abortive performs through capabilities | abortive tests pass with allocation balance |
 | HANDLERS-ONE-DELETE | remove the dynamic stack from IR, MIR, runtime and evaluator; multishot rule (D2); docs/reference chapter 7 | suite and check-reference pass; `benchmarks/effects` and the Game Boy frame time no slower |
 
+### As built: HANDLERS-ONE-PARAMS
+
+`crate::suspend::implicit` runs first in `suspend::lower`, after ownership
+and grades. It does not change the checker: it works on the checked IR.
+
+- A function that may perform declared resumptive operations it does not
+  handle (the `performs` analysis) gets a copy, `f::capabilities`, that takes
+  one more parameter per such operation, after the written ones in
+  operation-id order. The copy receives them past its locals through
+  `parameter_slots` and lists them in `capability_parameters`.
+- In a copy, a `DynamicPerform` with no enclosing `HandlerPush` of its
+  operation becomes a call through the parameter.
+- A direct call of such a function under a `handle` of one of its
+  operations, or from a copy, calls the copy. Per operation it passes the
+  innermost enclosing handler when that is a noncapturing `fn` with the
+  operation's arrow, the caller's own parameter, or else a trampoline that
+  performs through the dynamic stack (capturing handlers stay in their
+  frames until HANDLERS-ONE-DELETE).
+- An await point under a handler with code after `resume` resumes the copy
+  through `EntryKey::Capability` when the copy performs through that
+  parameter; otherwise (it reaches the operation only through a function
+  value) it stays keyed by the operation, which keeps the existing
+  rejection.
+- Function values, trait objects, tasks and entry points still call the
+  original function, which performs through the dynamic stack
+  (HANDLERS-ONE-VALUES and -BUILTINS).
+
 ## 8. Decisions (user, 2026-11-27)
 
 - **D1. A function value gets its handler at the call.** It is today's

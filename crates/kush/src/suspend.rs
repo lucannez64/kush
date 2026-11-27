@@ -39,6 +39,8 @@ use std::collections::{BTreeMap, BTreeSet};
 type Result<T> = std::result::Result<T, Diagnostic>;
 type Slots = BTreeSet<usize>;
 
+mod implicit;
+
 /// One step of a path from a handled body to a suspension point.
 #[derive(Debug, Clone, Copy)]
 enum Step {
@@ -54,11 +56,18 @@ enum Step {
 
 pub(crate) fn lower(program: &mut Executable) -> Result<()> {
     check_task_tokens(program)?;
+    let hidden = implicit::add(program)?;
     let mut context = Context {
+        hidden,
         performs: performs(program),
         capability_performs: capability_performs(program),
         entries: BTreeMap::new(),
         lowering: BTreeSet::new(),
+        parameter_slots: program
+            .functions
+            .iter()
+            .map(|function| function.parameter_slots.clone())
+            .collect(),
     };
     let mut index = 0;
     while index < program.functions.len() {
@@ -183,7 +192,13 @@ fn capability_performs(program: &Executable) -> Vec<BTreeSet<usize>> {
                     continue;
                 }
                 let mut uses = false;
-                fn walk(expr: &Expr, slot: usize, result: &[BTreeSet<usize>], uses: &mut bool) {
+                fn walk(
+                    expr: &Expr,
+                    slot: usize,
+                    program: &Executable,
+                    result: &[BTreeSet<usize>],
+                    uses: &mut bool,
+                ) {
                     if performs_through(expr, slot) {
                         *uses = true;
                     }
@@ -191,20 +206,23 @@ fn capability_performs(program: &Executable) -> Vec<BTreeSet<usize>> {
                         &expr.kind
                     {
                         for (index, argument) in arguments.iter().enumerate() {
-                            if passes_slot(argument, slot) && result[*callee].contains(&index) {
+                            if passes_slot(argument, slot)
+                                && result[*callee]
+                                    .contains(&parameter_slot(program, *callee, index))
+                            {
                                 *uses = true;
                             }
                         }
                     }
-                    expr.for_each_child(&mut |child| walk(child, slot, result, uses));
+                    expr.for_each_child(&mut |child| walk(child, slot, program, result, uses));
                 }
                 for statement in &function.body.statements {
                     if let Statement::Let(_, value) | Statement::Expr(value) = statement {
-                        walk(value, slot, &result, &mut uses);
+                        walk(value, slot, program, &result, &mut uses);
                     }
                 }
                 if let Some(tail) = &function.body.tail {
-                    walk(tail, slot, &result, &mut uses);
+                    walk(tail, slot, program, &result, &mut uses);
                 }
                 if uses {
                     found.insert(slot);
@@ -221,6 +239,35 @@ fn capability_performs(program: &Executable) -> Vec<BTreeSet<usize>> {
     }
 }
 
+/// The local slot receiving parameter `index` of `function`: a copy with
+/// hidden capability parameters (`implicit`) receives them past its locals.
+fn parameter_slot(program: &Executable, function: usize, index: usize) -> usize {
+    program.functions[function]
+        .parameter_slots
+        .as_ref()
+        .map_or(index, |slots| slots[index])
+}
+
+/// Parameters received at slots `0..n`: all of them, except for a copy with
+/// hidden capability parameters, whose capabilities (which borrow nothing)
+/// arrive past its locals.
+fn written_parameters(function: &Function) -> usize {
+    match &function.parameter_slots {
+        Some(slots)
+            if slots.iter().enumerate().all(|(index, slot)| {
+                *slot == index || function.capability_parameters.contains(slot)
+            }) =>
+        {
+            slots
+                .iter()
+                .enumerate()
+                .take_while(|(index, slot)| *index == **slot)
+                .count()
+        }
+        _ => function.parameters,
+    }
+}
+
 /// Replace capability await points of `target` whose callee never performs
 /// through that parameter by their plain call.
 fn unmark_capability_awaits(
@@ -229,15 +276,19 @@ fn unmark_capability_awaits(
     index: usize,
     target: *const Suspendable,
 ) {
-    fn walk(expr: &mut Expr, performs: &[BTreeSet<usize>]) {
+    fn walk(expr: &mut Expr, performs: &[BTreeSet<usize>], slots: &[Option<Vec<usize>>]) {
         if let ExprKind::Suspend {
             callee: Some(callee),
             capability: Some(parameter),
             ..
         } = &expr.kind
-            && !performs
-                .get(*callee)
-                .is_some_and(|set| set.contains(parameter))
+            && !performs.get(*callee).is_some_and(|set| {
+                let slot = slots
+                    .get(*callee)
+                    .and_then(Option::as_ref)
+                    .map_or(*parameter, |slots| slots[*parameter]);
+                set.contains(&slot)
+            })
         {
             let ExprKind::Suspend { call, .. } =
                 std::mem::replace(&mut expr.kind, ExprKind::Constant(0))
@@ -250,17 +301,18 @@ fn unmark_capability_awaits(
         if matches!(expr.kind, ExprKind::Suspendable(_)) {
             return;
         }
-        expr.for_each_child_mut(&mut |child| walk(child, performs));
+        expr.for_each_child_mut(&mut |child| walk(child, performs, slots));
     }
     let performs = &context.capability_performs;
+    let slots = &context.parameter_slots;
     let mut lower = |mut suspendable: Box<Suspendable>| -> Result<ExprKind> {
         for statement in &mut suspendable.body.statements {
             if let Statement::Let(_, value) | Statement::Expr(value) = statement {
-                walk(value, performs);
+                walk(value, performs, slots);
             }
         }
         if let Some(tail) = suspendable.body.tail.as_deref_mut() {
-            walk(tail, performs);
+            walk(tail, performs, slots);
         }
         Ok(ExprKind::Suspendable(suspendable))
     };
@@ -282,6 +334,27 @@ struct Context {
     entries: BTreeMap<(usize, EntryKey), (usize, bool)>,
     /// Functions whose suspendable bodies are being lowered.
     lowering: BTreeSet<usize>,
+    /// `parameter_slots` of each function before lowering, to find the slot
+    /// of a capability parameter named by its index.
+    parameter_slots: Vec<Option<Vec<usize>>>,
+    /// Hidden capability parameter slots of the copies made by `implicit`.
+    hidden: implicit::Hidden,
+}
+
+/// The entry key of an await of `callee` in a body resumable for `key`. A
+/// copy with a hidden capability parameter for the awaited operation is
+/// resumed through that parameter when it performs through it.
+fn await_key(context: &Context, callee: usize, key: EntryKey) -> EntryKey {
+    if let EntryKey::Operation(operation) = key
+        && let Some(&slot) = context
+            .hidden
+            .get(&callee)
+            .and_then(|hidden| hidden.get(&operation))
+        && context.capability_performs[callee].contains(&slot)
+    {
+        return EntryKey::Capability(slot);
+    }
+    key
 }
 
 fn lower_function(program: &mut Executable, context: &mut Context, index: usize) -> Result<()> {
@@ -2394,14 +2467,19 @@ fn lower_one(
     let mut entries = BTreeMap::new();
     let mut awaited_allocates = false;
     for (callee, capability) in awaited {
-        let key = match capability {
-            Some(parameter) => EntryKey::Capability(parameter),
-            None => EntryKey::Operation(
-                operation.expect("await points only exist for declared operations"),
+        let slot = capability.map(|parameter| parameter_slot(program, callee, parameter));
+        let key = match slot {
+            Some(slot) => EntryKey::Capability(slot),
+            None => await_key(
+                context,
+                callee,
+                EntryKey::Operation(
+                    operation.expect("await points only exist for declared operations"),
+                ),
             ),
         };
         let (entry, allocates) = resumable_entry(program, context, callee, key, result)?;
-        let token = entry_token(program, callee, capability, result);
+        let token = entry_token(program, callee, slot, result);
         entries.insert((callee, capability), (entry, token));
         awaited_allocates |= allocates;
     }
@@ -2423,7 +2501,7 @@ fn lower_one(
     let origins = borrow_origins(
         &function.body,
         &function.locals,
-        function.parameters,
+        written_parameters(function),
         &|ty| carries_in(ty, &layouts, &program.pointees, 0),
     );
     let host = Host {
@@ -3384,7 +3462,11 @@ fn resumable_entry(
             ));
         }
         if source.closure.is_some()
-            || source.parameter_slots.is_some()
+            || source.parameter_slots.as_ref().is_some_and(|slots| {
+                !slots.iter().enumerate().all(|(index, slot)| {
+                    *slot == index || source.capability_parameters.contains(slot)
+                })
+            })
             || program.foreign_functions[function].is_some()
             || source.result_grade.is_some_and(Grade::is_zero)
             || source
@@ -3471,6 +3553,7 @@ fn resumable_entry(
                     value,
                     slot,
                     &context.capability_performs,
+                    &context.parameter_slots,
                     &mut points,
                     &mut awaited,
                     false,
@@ -3481,12 +3564,13 @@ fn resumable_entry(
     let mut entries = BTreeMap::new();
     let mut awaited_allocates = false;
     for (callee, capability) in awaited {
-        let callee_key = match (capability, key) {
-            (Some(parameter), _) => EntryKey::Capability(parameter),
-            (None, key) => key,
+        let slot = capability.map(|parameter| parameter_slot(program, callee, parameter));
+        let callee_key = match (slot, key) {
+            (Some(slot), _) => EntryKey::Capability(slot),
+            (None, key) => await_key(context, callee, key),
         };
         let (entry, allocates) = resumable_entry(program, context, callee, callee_key, result)?;
-        let token = entry_token(program, callee, capability, result);
+        let token = entry_token(program, callee, slot, result);
         entries.insert((callee, capability), (entry, token));
         awaited_allocates |= allocates;
     }
@@ -3507,7 +3591,7 @@ fn resumable_entry(
         rewrite_entry_exits(value, &cleanup, false)
     })?;
     let layouts = carrying_layouts(program);
-    let origins = borrow_origins(&body, &locals, source.parameters, &|ty| {
+    let origins = borrow_origins(&body, &locals, written_parameters(&source), &|ty| {
         carries_in(ty, &layouts, &program.pointees, 0)
     });
     let host = Host {
@@ -3545,7 +3629,10 @@ fn resumable_entry(
         build(&host, &spec, body, first_function, &owns)?
     };
     let allocates = built.allocates || awaited_allocates;
-    let mut parameter_slots = (0..source.parameters).collect::<Vec<_>>();
+    let mut parameter_slots = source
+        .parameter_slots
+        .clone()
+        .unwrap_or_else(|| (0..source.parameters).collect());
     parameter_slots.push(k);
     let mut parameter_grades = source.parameter_grades.clone();
     parameter_grades.resize(source.parameters, None);
@@ -3607,10 +3694,38 @@ fn resumable_entry(
 /// Mark the suspension points of a resumable entry for the capability
 /// parameter `slot`: performs through it and calls passing it to a `cap`
 /// parameter its callee performs through, outside nested handlers.
+/// Whether `expr` is a perform through the capability in `slot` or a call
+/// passing it to a parameter its callee performs through.
+fn capability_point(
+    expr: &Expr,
+    slot: usize,
+    performs: &[BTreeSet<usize>],
+    slots: &[Option<Vec<usize>>],
+) -> bool {
+    if performs_through(expr, slot) {
+        return true;
+    }
+    let ExprKind::Call(crate::executable::Target::Function(callee), arguments) = &expr.kind else {
+        return false;
+    };
+    arguments.iter().enumerate().any(|(index, argument)| {
+        passes_slot(argument, slot)
+            && performs.get(*callee).is_some_and(|set| {
+                set.contains(
+                    &slots
+                        .get(*callee)
+                        .and_then(Option::as_ref)
+                        .map_or(index, |slots| slots[index]),
+                )
+            })
+    })
+}
+
 fn mark_capability_points(
     expr: &mut Expr,
     slot: usize,
     performs: &[BTreeSet<usize>],
+    slots: &[Option<Vec<usize>>],
     points: &mut usize,
     awaited: &mut BTreeSet<(usize, Option<usize>)>,
     nested: bool,
@@ -3623,10 +3738,32 @@ fn mark_capability_points(
                 | ExprKind::Suspendable(_)
                 | ExprKind::AbortScope { .. }
         );
+    // As in `mark_entry_points`: the abort check of a point moves to the
+    // awaiting caller.
+    if let ExprKind::AbortCall { call, exits, .. } = &mut expr.kind
+        && exits.is_empty()
+        && !nested
+        && capability_point(call, slot, performs, slots)
+    {
+        let call = std::mem::replace(
+            call.as_mut(),
+            Expr {
+                kind: ExprKind::Constant(0),
+                ty: Type::Unit,
+                span: expr.span,
+                resource: None,
+            },
+        );
+        let resource = expr.resource;
+        *expr = call;
+        if expr.resource.is_none() {
+            expr.resource = resource;
+        }
+    }
     let mut result = Ok(());
     expr.for_each_child_mut(&mut |child| {
         if result.is_ok() {
-            result = mark_capability_points(child, slot, performs, points, awaited, nested);
+            result = mark_capability_points(child, slot, performs, slots, points, awaited, nested);
         }
     });
     result?;
@@ -3649,9 +3786,14 @@ fn mark_capability_points(
                 .position(|argument| passes_slot(argument, slot))
             {
                 Some(parameter)
-                    if performs
-                        .get(*callee)
-                        .is_some_and(|set| set.contains(&parameter)) =>
+                    if performs.get(*callee).is_some_and(|set| {
+                        set.contains(
+                            &slots
+                                .get(*callee)
+                                .and_then(Option::as_ref)
+                                .map_or(parameter, |slots| slots[parameter]),
+                        )
+                    }) =>
                 {
                     Some((*callee, parameter))
                 }
