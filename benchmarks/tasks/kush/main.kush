@@ -1,0 +1,162 @@
+module tasks;
+
+use std.result.Result;
+use std.task.TaskExit;
+use std.text;
+use std.net;
+use std.net.Conn;
+use std.net.Listener;
+
+// What the task runtime costs (TASKS-BENCH, docs/tasks-on-handlers.md):
+// the budget the move of tasks to std on fiber handlers is measured against.
+// Arguments: rounds, kernel (0 yield, 1 spawn-join, 2 spawn-scope, 3 echo).
+
+fn argument(index: i64) -> i64 ! {io, alloc} {
+    let bytes = match ENV.arg(index, Bytes.with_capacity(64)) { Ok(value) => value, Err(_) => { return -1; } };
+    match text.parse_i64(&bytes) { Ok(value) => value, Err(_) => -1 }
+}
+
+// Two tasks yield to each other: two switches per round.
+fn yields(rounds: i64) -> i64 ! {alloc, suspend} {
+    Task.scope(fn() -> i64 ! {alloc, suspend} {
+        let other = Task.spawn(fn() -> i64 ! {suspend} {
+            let mut count = 0;
+            while count < rounds {
+                let _ = Task.yield();
+                count = count + 1;
+            }
+            count
+        });
+        let mut count = 0;
+        while count < rounds {
+            let _ = Task.yield();
+            count = count + 1;
+        }
+        match Task.join(other) {
+            TaskExit.Completed(theirs) => count + theirs,
+            TaskExit.Cancelled => -1,
+        }
+    })
+}
+
+// Spawn a task and join it at once: a spawn, two switches and a release
+// per round.
+fn spawn_join(rounds: i64) -> i64 ! {alloc, suspend} {
+    Task.scope(fn() -> i64 ! {alloc, suspend} {
+        let mut total = 0;
+        let mut round = 0;
+        while round < rounds {
+            let seed = round;
+            let child = Task.spawn(fn() -> i64 ! {} { seed * 3 + 1 });
+            total = total + match Task.join(child) {
+                TaskExit.Completed(value) => value,
+                TaskExit.Cancelled => 0,
+            };
+            round = round + 1;
+        }
+        total
+    })
+}
+
+// Batches of 64 children that the scope's end joins: 64 tasks live at once.
+fn spawn_scope(rounds: i64) -> i64 ! {alloc, suspend} {
+    let mut batches = 0;
+    while batches * 64 < rounds {
+        Task.scope(fn() -> Unit ! {alloc, suspend} {
+            let mut child = 0;
+            while child < 64 {
+                let seed = child;
+                let _ = Task.spawn(fn() -> i64 ! {} { seed });
+                child = child + 1;
+            }
+        });
+        batches = batches + 1;
+    }
+    batches * 64
+}
+
+// Wait for one byte on the connection through the reactor: 1 when it came.
+fn receive(conn: &Conn) -> i64 ! {io, alloc, suspend} {
+    match net.read(conn, Bytes.with_capacity(1), 0) {
+        Result.Ok(data) => Bytes.len(&data),
+        Result.Err(_) => -1,
+    }
+}
+
+fn send(conn: &Conn, byte: &Bytes) -> Unit ! {io, alloc, suspend} {
+    let _ = net.write(conn, byte, 0);
+}
+
+// Answer `rounds` one-byte messages on the first connection.
+fn answer(listener: Listener, rounds: i64) -> i64 ! {io, alloc, suspend} {
+    let conn = match net.accept(&listener, 0) {
+        Result.Ok(conn) => conn,
+        Result.Err(code) => {
+            let _ = net.close_listener(listener);
+            return -code;
+        },
+    };
+    let _ = net.set_nodelay(&conn, true);
+    let byte = Bytes.push(Bytes.with_capacity(1), 1);
+    let mut count = 0;
+    while count < rounds {
+        count = count + receive(&conn);
+        send(&conn, &byte);
+    }
+    let _ = net.close(conn);
+    let _ = net.close_listener(listener);
+    count
+}
+
+// A byte goes back and forth over a loopback TCP connection between two
+// tasks, each waiting on the reactor: two reactor wake-ups per round.
+fn echo(rounds: i64) -> i64 ! {io, alloc, suspend} {
+    let host = Bytes.from("127.0.0.1");
+    let listener = match net.listen(&host, 0, 16, false) {
+        Result.Ok(listener) => listener,
+        Result.Err(code) => { return -code; },
+    };
+    let port = match net.local_port(&listener) {
+        Result.Ok(port) => port,
+        Result.Err(code) => {
+            let _ = net.close_listener(listener);
+            return -code;
+        },
+    };
+    Task.scope(fn() -> i64 ! {io, alloc, suspend} {
+        let answerer = Task.spawn(fn() -> i64 ! {io, alloc, suspend} { answer(listener, rounds) });
+        let conn = match net.connect(&host, port, 0) {
+            Result.Ok(conn) => conn,
+            Result.Err(code) => { return -code; },
+        };
+        let _ = net.set_nodelay(&conn, true);
+        let byte = Bytes.push(Bytes.with_capacity(1), 1);
+        let mut count = 0;
+        while count < rounds {
+            send(&conn, &byte);
+            count = count + receive(&conn);
+        }
+        let _ = net.close(conn);
+        match Task.join(answerer) {
+            TaskExit.Completed(theirs) => count + theirs,
+            TaskExit.Cancelled => -1,
+        }
+    })
+}
+
+fn main() -> i64 ! {io, alloc, suspend} {
+    let rounds = argument(1);
+    let kernel = argument(2);
+    if rounds < 1 || rounds > 100000000 || kernel < 0 || kernel > 3 { return 2; }
+    let result = if kernel == 0 {
+        yields(rounds)
+    } else if kernel == 1 {
+        spawn_join(rounds)
+    } else if kernel == 2 {
+        spawn_scope(rounds)
+    } else {
+        echo(rounds)
+    };
+    print_i64(result);
+    0
+}
