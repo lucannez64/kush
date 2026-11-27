@@ -3571,6 +3571,14 @@ int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
    cell answers as missing there. */
 int64_t kush_handler_perform(int64_t operation, int64_t cell, int64_t *out) {
     if (cell == 0) return kush_handler_lookup(operation, out);
+    if (cell < 0) {
+        /* A noncapturing handler's cell: its code address with the sign
+           bit set. */
+        out[0] = cell & INT64_MAX;
+        out[1] = 0;
+        out[2] = 0;
+        return 1;
+    }
     kush_handler_frame *frame = (kush_handler_frame *)(uintptr_t)cell;
     kush_handler_context *handlers = kush_handlers();
     int own = frame >= handlers->frames && frame < handlers->frames + KUSH_HANDLER_MAX;

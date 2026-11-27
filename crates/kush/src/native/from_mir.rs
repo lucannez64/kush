@@ -873,6 +873,13 @@ impl<E: Emit> Generator<'_, E> {
                         let op = self.constant(operation as i64);
                         vec![self.runtime_call(self.handler_push, &[op, code, environment, once])]
                     }
+                    // A noncapturing handler's cell is its code address with
+                    // the sign bit set (user addresses leave it clear, as do
+                    // frames, the other cells): a perform calls it without a
+                    // load.
+                    RuntimeOp::HandlerCell => {
+                        vec![self.builder.bor_imm_s(words[0][0], i64::MIN)]
+                    }
                     RuntimeOp::HandlerPop => {
                         self.runtime_void(self.handler_pop, &[]);
                         unit(self)

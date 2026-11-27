@@ -1380,20 +1380,34 @@ impl Builder<'_> {
                     return Ok(None);
                 };
                 self.consume(handler);
-                let op = RuntimeOp::HandlerPush {
-                    operation: *operation,
-                    reusable: *reusable,
+                // A noncapturing handler owns nothing, so its cell needs no
+                // runtime frame: no perform searches frames, and nothing is
+                // dropped when the activation ends (FND-HANDLERS-ONE-DELETE).
+                let framed = !matches!(handler.ty, Type::Fn(_));
+                let op = if framed {
+                    RuntimeOp::HandlerPush {
+                        operation: *operation,
+                        reusable: *reusable,
+                    }
+                } else {
+                    RuntimeOp::HandlerCell
                 };
                 // The push answers the activation's cell.
                 let pushed = self.runtime(op, vec![callable], Type::I64, span);
                 if let Some(cell) = cell {
-                    self.assign(*cell, Rvalue::Use(Operand::Copy(Place::local(pushed))), span);
+                    self.assign(
+                        *cell,
+                        Rvalue::Use(Operand::Copy(Place::local(pushed))),
+                        span,
+                    );
                 }
                 let Some(value) = self.block(body)? else {
                     return Ok(None);
                 };
                 let value = self.settle(value, expr.ty, span);
-                self.runtime(RuntimeOp::HandlerPop, vec![], Type::Unit, span);
+                if framed {
+                    self.runtime(RuntimeOp::HandlerPop, vec![], Type::Unit, span);
+                }
                 value
             }
             ExprKind::TaskSpawn {

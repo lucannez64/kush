@@ -365,6 +365,11 @@ pub(crate) enum RuntimeOp {
         reusable: bool,
     },
     HandlerPop,
+    /// The cell of an activation whose handler (operand 0) is a
+    /// noncapturing `fn`: it owns nothing, so it lives in the installing
+    /// function's frame rather than on the task's frame array, and nothing
+    /// releases it.
+    HandlerCell,
     /// Perform `operation` with a payload and a resume value (operands 0
     /// and 1) through the activation cell in operand 2, whose callable has
     /// signature `handler`. Without a cell (or a zero one) there is no

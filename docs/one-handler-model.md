@@ -371,8 +371,21 @@ and the removal itself.
   it captured (reference chapter 7 shows it). D3: a task gets the cells its
   body captured; a capturing handler's cell answers as missing in another
   task.
+- A noncapturing handler owns nothing, so its cell needs no frame
+  (`RuntimeOp::HandlerCell`): natively it is the handler's code address
+  with the sign bit set (user addresses leave it clear), which a perform
+  tests and calls without a load; in the evaluator it is the code word.
+  Functions whose handles are all noncapturing need no depth guards.
+- Timing against 24302cc (before this work), tsar-bomba-2:
+  `dynamic-perform-in-callee` 7.2 to 4.9 ns, `oneshot-resume-in-callee` 34
+  to 12.5 ns, `multishot-resume-in-callee` 24.9 to 25.0 ns,
+  `capability-perform-in-callee` 4.42 to 4.75 ns and
+  `multishot-perform-in-callee` 8.0 to 8.45 ns (the sign test before the
+  call; written capabilities used to be the code pointer itself); the Game
+  Boy runs 20,000 headless frames of a PPU test ROM in 12.19 s against
+  12.36 s, five alternating runs each.
 - Kept, as an as-built deviation from section 6: the per-task frame array
-  holds the cells. `HandlerPush`/`HandlerPop` and the depth restores at
+  holds the cells of capturing handlers. `HandlerPush`/`HandlerPop` and the depth restores at
   function exits and region exits allocate and release cells and drop a
   capturing handler's environment on every exit path; giving that job to
   stack slots would need the ownership pass to track handler environments

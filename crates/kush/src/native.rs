@@ -894,19 +894,21 @@ impl Drop for Scratch {
     }
 }
 
-/// Only HandlerPush changes the local dynamic-handler depth. The exhaustive
-/// child walker includes guards, initializers, conditions and capture operands;
-/// separately compiled callback bodies perform their own analysis.
+/// Only a HandlerPush of a capturing handler (a noncapturing one's cell needs
+/// no frame) and an abortive scope change the local frame depth. The
+/// exhaustive child walker includes guards, initializers, conditions and
+/// capture operands; separately compiled callback bodies perform their own
+/// analysis.
 pub(crate) fn block_installs_handler(block: &ex::Block) -> bool {
     fn expression(expr: &Expr) -> bool {
-        if matches!(
-            expr.kind,
-            ExprKind::HandlerPush { .. }
-                | ExprKind::AbortScope {
-                    operation: Some(_),
-                    ..
-                }
-        ) {
+        let framed = match &expr.kind {
+            ExprKind::HandlerPush { handler, .. } => !matches!(handler.ty, ex::Type::Fn(_)),
+            ExprKind::AbortScope {
+                operation: Some(_), ..
+            } => true,
+            _ => false,
+        };
+        if framed {
             return true;
         }
         let mut found = false;
@@ -1929,7 +1931,11 @@ fn lower(
         .extend((0..3).map(|_| AbiParam::new(I64)));
     handler_perform_sig.returns.push(AbiParam::new(I64));
     let handler_perform = module
-        .declare_function("kush_handler_perform", Linkage::Import, &handler_perform_sig)
+        .declare_function(
+            "kush_handler_perform",
+            Linkage::Import,
+            &handler_perform_sig,
+        )
         .map_err(error)?;
     let abort_word = module
         .declare_data("kush_abort_word", Linkage::Import, true, false)
@@ -7256,26 +7262,38 @@ impl<E: Emit> Generator<'_, E> {
         resume_values: &[Value],
         cell: Option<Value>,
     ) -> Words {
-        // `(code, environment, once)` of the handler to call.
-        let chosen = self.builder.create_block();
-        for _ in 0..3 {
-            self.builder.append_block_param(chosen, I64);
-        }
+        let signature = self.program.function_types[handler].clone();
+        let result = signature.result;
+        let pointer = if aggregate_result(self.program, result) {
+            let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                (self.program.width(result) * 8) as u32,
+                STACK_SLOT_ALIGN_SHIFT,
+            ));
+            Some(self.builder.stack_addr(I64, slot, 0))
+        } else {
+            None
+        };
+        // A handler is either a copyable noncapturing `fn` (no environment
+        // word in its ABI) or an owning `once` handler (an environment
+        // word); its frame records which. `fn_block` takes the code,
+        // `once_block` the code and the environment.
+        let fn_block = self.builder.create_block();
+        let fn_code = self.builder.append_block_param(fn_block, I64);
+        let once_block = self.builder.create_block();
+        let once_code = self.builder.append_block_param(once_block, I64);
+        let once_environment = self.builder.append_block_param(once_block, I64);
         let search = self.builder.create_block();
         if let Some(cell) = cell {
-            // FND-HANDLERS-ONE-CELLS: a cell whose frame holds a noncapturing
-            // `fn` (`once` word zero) is called without the runtime. Frame
-            // words: operation, code, environment, once, consumed.
-            let probe = self.builder.create_block();
+            // FND-HANDLERS-ONE-CELLS: the cell of a noncapturing `fn` is its
+            // code address with the sign bit set, called directly; a frame
+            // (bit clear) or zero goes through the runtime.
             let direct = self.builder.create_block();
-            self.builder.brif(cell, probe, &[], search, &[]);
-            self.builder.switch_to_block(probe);
-            let once = self.builder.load(I64, ir::MemFlagsData::new(), cell, 24);
-            self.builder.brif(once, search, &[], direct, &[]);
+            let tagged = self.builder.icmp_imm_s(IntCC::SignedLessThan, cell, 0);
+            self.builder.brif(tagged, direct, &[], search, &[]);
             self.builder.switch_to_block(direct);
-            let code = self.builder.load(I64, ir::MemFlagsData::new(), cell, 8);
-            let zero = self.constant(0);
-            self.builder.jump(chosen, &[code, zero, zero]);
+            let code = self.builder.band_imm_s(cell, i64::MAX);
+            self.builder.jump(fn_block, &[code]);
         } else {
             self.builder.jump(search, &[]);
         }
@@ -7291,42 +7309,20 @@ impl<E: Emit> Generator<'_, E> {
         let code = self.builder.load(I64, ir::MemFlagsData::new(), out, 0);
         let environment = self.builder.load(I64, ir::MemFlagsData::new(), out, 8);
         let once = self.builder.load(I64, ir::MemFlagsData::new(), out, 16);
-        self.builder.jump(chosen, &[code, environment, once]);
-        self.builder.switch_to_block(chosen);
-        let (code, environment, once) = {
-            let params = self.builder.block_params(chosen);
-            (params[0], params[1], params[2])
-        };
-        let signature = self.program.function_types[handler].clone();
-        let result = signature.result;
-        let pointer = if aggregate_result(self.program, result) {
-            let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                ir::StackSlotKind::ExplicitSlot,
-                (self.program.width(result) * 8) as u32,
-                STACK_SLOT_ALIGN_SHIFT,
-            ));
-            Some(self.builder.stack_addr(I64, slot, 0))
-        } else {
-            None
-        };
-        // A dynamic frame may hold either a copyable noncapturing `fn`
-        // (no environment word in its ABI) or an owning `once` handler
-        // (an environment word). The runtime frame records which, so
-        // generate both checked call shapes and select at run time.
-        let once_block = self.builder.create_block();
-        let fn_block = self.builder.create_block();
+        self.builder
+            .brif(once, once_block, &[code, environment], fn_block, &[code]);
         let Some(join) = self.join(result) else {
             unreachable!("a declared effect result is never Never")
         };
-        self.builder.brif(once, once_block, &[], fn_block, &[]);
-        for (call_once, block) in [(false, fn_block), (true, once_block)] {
+        for (call_once, block, code) in [(false, fn_block, fn_code), (true, once_block, once_code)]
+        {
             self.builder.switch_to_block(block);
             let mut values = Vec::new();
             if let Some(pointer) = pointer {
                 values.push(pointer);
             }
             if call_once {
-                values.push(environment);
+                values.push(once_environment);
             }
             values.extend(payload_values.iter().copied());
             values.extend(resume_values.iter().copied());
@@ -8432,11 +8428,14 @@ mod scalar_inline_codegen_tests {
         let program=ex::check(r#"
             effect Op:i64->i64;
             fn leaf(n:i64)->i64 ! {} {let mut i=0;while i<n {i=i+1;if i==2 {continue;}if i==4 {break;}}loop {break i;}}
-            fn install()->i64 ! {} {
-                handle Op:i64->i64 with fn(x:i64,r:linear once fn(i64)->i64 ! {})->i64 ! {} {r(x)} {leaf(8)}
+            fn install()->i64 ! {alloc} {
+                let k=1;
+                handle Op:i64->i64 with fn(x:i64,r:linear once fn(i64)->i64 ! {})->i64 ! {} {r(x+k)} {leaf(8)}
             }
-            fn main()->i64 ! {} {install()}
+            fn main()->i64 ! {alloc} {install()}
         "#).unwrap();
+        // A capturing handler's cell is a frame; a noncapturing one's needs
+        // none, and no guard (FND-HANDLERS-ONE-DELETE).
         let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
         for options in [CodegenOptions::default(), CodegenOptions::release()] {
             let path = scratch.path().join("guards.o");

@@ -85,6 +85,9 @@ impl Machine<'_, '_> {
                 });
                 vec![cell]
             }
+            // A noncapturing handler's cell is its code word (bit `CODE`
+            // set, unlike frame ids).
+            RuntimeOp::HandlerCell => vec![words[0][0]],
             RuntimeOp::HandlerPop => {
                 if !self.handlers.is_empty() {
                     self.pop_handler()?;
@@ -219,6 +222,9 @@ impl Machine<'_, '_> {
     /// this task or (for a capability a spawned task carries) another. A
     /// task does not get another task's capturing handler (decision D3).
     fn take_cell(&mut self, cell: i64) -> Run<Option<(i64, i64, i64)>> {
+        if cell & CODE != 0 {
+            return Ok(Some((cell, 0, 0)));
+        }
         if let Some(index) = self.handlers.iter().rposition(|frame| frame.cell == cell) {
             let (taken, frame) = self.take(self.handlers[index])?;
             self.handlers[index] = frame;
