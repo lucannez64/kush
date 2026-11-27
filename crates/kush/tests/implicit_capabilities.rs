@@ -230,3 +230,30 @@ fn a_spawned_task_keeps_each_noncapturing_handler() {
         }";
     agrees(source, 11);
 }
+
+#[test]
+fn task_bodies_capture_the_capabilities_where_the_builtin_is_called() {
+    // The scope and spawn bodies are lambdas (the checker requires it): each
+    // becomes a copy receiving `Ask`'s capability as a capture, beside the
+    // box the spawned body owns.
+    let source = "use std.task.TaskExit;
+        effect Ask: i64 -> i64;
+        fn main() -> i64 ! {alloc, suspend} {
+            handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
+                k(x + 10)
+            } {
+                Task.scope(fn() -> i64 ! {Ask, alloc, suspend} {
+                    let owned = Box.new(5);
+                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {Ask, alloc, suspend} {
+                        perform Ask(Box.take(owned))
+                    });
+                    let mine = perform Ask(1);
+                    match Task.join(t) {
+                        TaskExit.Completed(v) => v + mine,
+                        TaskExit.Cancelled => 0,
+                    }
+                })
+            }
+        }";
+    agrees(source, 15 + 11);
+}

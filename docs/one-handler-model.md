@@ -260,6 +260,25 @@ and grades. It does not change the checker: it works on the checked IR.
   performs operations but cannot be copied keeps that dispatch on the
   dynamic stack.
 
+### As built: HANDLERS-ONE-BUILTINS (in progress)
+
+- D4: `main` with a declared operation in its row is rejected. Test entry
+  points were already covered (the generated `main` has the fixed row
+  `{io, alloc, suspend}`), and exported functions must have the empty row.
+- Task bodies: the checker requires a written lambda for `Task.scope`,
+  `Task.catch` and `Task.spawn`, so no adapter closure is needed. The lambda
+  becomes a copy that receives its row's capabilities as closure captures
+  after its own, supplied where the builtin is called, and the builtin
+  receives it at a clone of its arrow without capability parameters. A
+  function that spawns such a task needs the capabilities too
+  (`performs_with(.., true)`). A spawned task keeps a noncapturing handler's
+  capability even under a capturing handler (D3); a capturing handler is
+  passed as the trampoline, which finds no frame in the new task.
+- Still on the dynamic stack: `VecMap` callbacks (copyable `fn` values with
+  no environment, called by the map loops), function arguments of other
+  builtins, and handler values whose rows name declared operations
+  (rule 6).
+
 ## 8. Decisions (user, 2026-11-27)
 
 - **D1. A function value gets its handler at the call.** It is today's

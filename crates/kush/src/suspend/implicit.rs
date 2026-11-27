@@ -32,6 +32,19 @@ enum Capability {
     Dynamic,
 }
 
+/// A function the pass adds.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Request {
+    /// A copy of `function` taking the capabilities of `operations` as
+    /// parameters after its written ones, or as closure captures after its
+    /// own when `captured`.
+    Copy {
+        function: usize,
+        operations: Vec<usize>,
+        captured: bool,
+    },
+}
+
 struct Pass<'a> {
     /// Operations each original function needs a capability for, in id
     /// order; empty for functions that are not copied.
@@ -47,18 +60,15 @@ struct Pass<'a> {
     dyn_calls: &'a [Vec<usize>],
     union_calls: &'a [Vec<usize>],
     originals: usize,
-    /// Copy index of each copied original and its capability operations,
-    /// in request order.
-    /// `true` in a key: the copy receives the capabilities as closure
-    /// captures instead of parameters.
-    copies: BTreeMap<(usize, Vec<usize>, bool), usize>,
-    order: Vec<(usize, Vec<usize>, bool)>,
+    /// Index of each added function, in request order.
+    copies: BTreeMap<Request, usize>,
+    order: Vec<Request>,
+    /// For an arrow whose values a task builtin calls: its form without
+    /// capability parameters, the type of the body the builtin receives.
+    split: &'a BTreeMap<usize, usize>,
     /// Operations of each arrow's row, also for arrows that keep the
     /// dynamic stack.
     rows: &'a [Vec<usize>],
-    /// Functions that can receive capabilities as extra captures: closures
-    /// with an ordinary layout.
-    capturable: &'a [bool],
     /// Trampolines through the dynamic stack, by operation.
     trampolines: &'a BTreeMap<usize, (usize, Type)>,
 }
@@ -69,7 +79,14 @@ impl Pass<'_> {
     }
 
     fn copy_with(&mut self, function: usize, operations: &[usize], captured: bool) -> usize {
-        let key = (function, operations.to_vec(), captured);
+        self.request(Request::Copy {
+            function,
+            operations: operations.to_vec(),
+            captured,
+        })
+    }
+
+    fn request(&mut self, key: Request) -> usize {
         if let Some(copy) = self.copies.get(&key) {
             return *copy;
         }
@@ -83,7 +100,9 @@ impl Pass<'_> {
     /// takes.
     fn value_operations(&self, ty: Type) -> &[usize] {
         match ty {
-            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => &self.values[id],
+            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
+                self.values.get(id).map_or(&[], Vec::as_slice)
+            }
             _ => &[],
         }
     }
@@ -151,6 +170,28 @@ impl Pass<'_> {
     }
 
     fn expr(&mut self, expr: &mut Expr, scope: &Scope) {
+        // Rule 8: the runtime calls a task body without capabilities. The
+        // checker requires a written lambda there, which captures them where
+        // the builtin is called; a spawned task thereby keeps each
+        // noncapturing handler, and a capturing one's trampoline finds no
+        // frame in the new task (decision D3). The builtin receives the
+        // lambda at its arrow without capability parameters.
+        if let ExprKind::TaskScope { body, .. } | ExprKind::TaskSpawn { body, .. } = &mut expr.kind
+            && let Type::Once(arrow) = body.ty
+            && let Some(&bare) = self.split.get(&arrow)
+            && let ExprKind::FnValue { function, captures } = &mut body.kind
+            && *function < self.originals
+        {
+            let operations = self.rows[arrow].clone();
+            let supplied = self.supply(&operations, scope, body.span);
+            for capture in captures.iter_mut() {
+                self.expr(capture, scope);
+            }
+            *function = self.copy_with(*function, &operations, true);
+            captures.extend(supplied);
+            body.ty = Type::Once(bare);
+            return;
+        }
         if let ExprKind::HandlerPush {
             operation,
             handler,
@@ -216,30 +257,6 @@ impl Pass<'_> {
             {
                 let operations = self.value_operations(callee.ty).to_vec();
                 arguments.extend(self.supply(&operations, scope, expr.span));
-            }
-            // Rule 8: a task body runs within the builtin's extent (a scope) or
-            // in a task of its own (a spawn); the runtime calls it without
-            // capabilities. A lambda written there captures them at the call
-            // instead. A spawned task keeps a noncapturing handler's
-            // capability; a capturing one stays behind and the trampoline
-            // finds no frame in the new task (decision D3).
-            ExprKind::TaskScope { body, .. } | ExprKind::TaskSpawn { body, .. } => {
-                let operations = match body.ty {
-                    Type::Once(id) => self.rows[id].clone(),
-                    _ => return,
-                };
-                if operations.is_empty() {
-                    return;
-                }
-                let span = body.span;
-                let supplied = self.supply(&operations, scope, span);
-                if let ExprKind::FnValue { function, captures } = &mut body.kind
-                    && *function < self.originals
-                    && self.capturable[*function]
-                {
-                    *function = self.copy_with(*function, &operations, true);
-                    captures.extend(supplied);
-                }
             }
             ExprKind::Call(Target::DynCall { spec }, arguments)
                 if !self.dyn_calls[*spec].is_empty() =>
@@ -359,11 +376,19 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
     let rows = (0..program.function_types.len())
         .map(|id| row_operations(program, &arrows, id))
         .collect::<Vec<_>>();
-    let capturable = program
-        .functions
-        .iter()
-        .map(|function| function.closure.is_some() && function.parameter_slots.is_none())
-        .collect::<Vec<_>>();
+    // A task builtin receives its body at the arrow without capability
+    // parameters: a clone made before the arrows change.
+    let mut split = BTreeMap::new();
+    for function in &program.functions {
+        collect_task_bodies(&function.body, &rows, &mut split);
+    }
+    split.retain(|arrow, _| !values[*arrow].is_empty());
+    for (arrow, bare) in split.iter_mut() {
+        program
+            .function_types
+            .push(program.function_types[*arrow].clone());
+        *bare = program.function_types.len() - 1;
+    }
     // Copies start from the bodies as checked: the originals' calls get the
     // dynamic trampoline where a copy passes its own parameter.
     let sources = program.functions.clone();
@@ -374,7 +399,7 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
         function_types: &function_types,
         values: &values,
         rows: &rows,
-        capturable: &capturable,
+        split: &split,
         dyn_calls: &dyn_calls,
         union_calls: &union_calls,
         originals,
@@ -408,7 +433,13 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
     let mut copies = Hidden::new();
     let mut next = 0;
     while next < pass.order.len() {
-        let (original, operations, captured) = pass.order[next].clone();
+        let (original, operations, captured) = match pass.order[next].clone() {
+            Request::Copy {
+                function,
+                operations,
+                captured,
+            } => (function, operations, captured),
+        };
         let mut copy = sources[original].clone();
         let mut slots = (0..copy.parameters).collect::<Vec<_>>();
         let mut hidden = BTreeMap::new();
@@ -544,7 +575,16 @@ fn value_operations(program: &Executable, arrows: &BTreeMap<usize, usize>) -> Ve
                     pin(callback.ty);
                 }
             }
-            ExprKind::TaskScope { body, .. } | ExprKind::TaskSpawn { body, .. } => pin(body.ty),
+            // A task body takes its capabilities as captures, which needs a
+            // closure with an ordinary layout (the checker requires a
+            // written lambda).
+            ExprKind::TaskScope { body, .. } | ExprKind::TaskSpawn { body, .. }
+                if !matches!(&body.kind, ExprKind::FnValue { function, .. }
+                    if program.functions[*function].closure.is_some()
+                        && program.functions[*function].parameter_slots.is_none()) =>
+            {
+                pin(body.ty)
+            }
             ExprKind::Call(Target::Function(callee), arguments)
                 if program.foreign_functions[*callee].is_some() =>
             {
@@ -590,6 +630,27 @@ fn value_operations(program: &Executable, arrows: &BTreeMap<usize, usize>) -> Ve
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// Arrows of task bodies whose rows name operations with capabilities.
+fn collect_task_bodies(block: &Block, rows: &[Vec<usize>], split: &mut BTreeMap<usize, usize>) {
+    fn walk(expr: &Expr, rows: &[Vec<usize>], split: &mut BTreeMap<usize, usize>) {
+        if let ExprKind::TaskScope { body, .. } | ExprKind::TaskSpawn { body, .. } = &expr.kind
+            && let Type::Once(arrow) = body.ty
+            && !rows[arrow].is_empty()
+        {
+            split.insert(arrow, 0);
+        }
+        expr.for_each_child(&mut |child| walk(child, rows, split));
+    }
+    for statement in &block.statements {
+        if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+            walk(value, rows, split);
+        }
+    }
+    if let Some(tail) = &block.tail {
+        walk(tail, rows, split);
+    }
 }
 
 fn collect_arrows(block: &Block, arrows: &mut BTreeMap<usize, usize>) {
