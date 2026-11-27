@@ -1,0 +1,78 @@
+module proofs;
+
+use std.result.Result;
+use std.text;
+use std.crc32;
+
+// Kernels whose checks Kush removes by proof. Build with
+// KUSH_KEEP_PROVED_CHECKS=1 to keep every check the proofs remove.
+// Arguments: elements, repetitions, kernel (0 sum, 1 stencil, 2 crc32).
+
+fn argument(index: i64) -> i64 ! {io, alloc} {
+    let bytes = match ENV.arg(index, Bytes.with_capacity(64)) { Ok(value) => value, Err(_) => { return -1; } };
+    match text.parse_i64(&bytes) { Ok(value) => value, Err(_) => -1 }
+}
+
+// The loop guard proves every read in bounds. The counter and the
+// accumulator stay checked.
+fn sum(values: &[i64]) -> i64 ! {} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) {
+        acc = acc + Slice.at(values, i, _);
+        i = i + 1;
+    }
+    acc
+}
+
+// Three byte reads proved in bounds, and their weighted sum (at most 1,020)
+// proved not to overflow: the `u8` locals carry the range 0..=255. The
+// loop bound, `i + 1` and the accumulator stay checked.
+fn stencil(data: &Bytes) -> i64 ! {} {
+    let mut acc = 0;
+    let mut i = 1;
+    while i < Bytes.len(data) - 1 {
+        let left: u8 = Int.truncate(Bytes.at(data, i - 1, _));
+        let middle: u8 = Int.truncate(Bytes.at(data, i, _));
+        let right: u8 = Int.truncate(Bytes.at(data, i + 1, _));
+        let a: i64 = Int.convert(left);
+        let b: i64 = Int.convert(middle);
+        let c: i64 = Int.convert(right);
+        acc = acc + (a + 2 * b + c);
+        i = i + 1;
+    }
+    acc
+}
+
+fn main() -> i64 ! {io, alloc} {
+    let n = argument(1);
+    let repetitions = argument(2);
+    let kernel = argument(3);
+    if n < 3 || n > 8000000 || repetitions < 0 || repetitions > 100000000 || kernel < 0 || kernel > 2 { return 2; }
+    let mut values: Vec<i64> = Vec.with_capacity(n);
+    let mut data = Bytes.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        values = Vec.push(values, ((i * 7919 + 17) & 4095) - 2048);
+        data = Bytes.push(data, (i * 7 + 3) & 255);
+        i = i + 1;
+    }
+    let table = crc32.table();
+    let mut result = 0;
+    let mut round = 0;
+    while round < repetitions {
+        let step = if kernel == 0 {
+            sum(&values[..])
+        } else if kernel == 1 {
+            stencil(&data)
+        } else {
+            let seed: u32 = Int.truncate(round);
+            let crc: u32 = crc32.update(&table, seed, &data, 0, Bytes.len(&data), _);
+            Int.convert::<i64>(crc)
+        };
+        result = (result ^ step) + (round & 1);
+        round = round + 1;
+    }
+    print_i64(result);
+    0
+}

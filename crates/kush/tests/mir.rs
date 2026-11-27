@@ -671,7 +671,10 @@ fn kush_mir_with_build_flags_prints_the_ir_after_the_loop_passes() {
     };
     // As built: no pass has run.
     let built = mir(&[]);
-    assert!(!built.contains(" below(") && !built.contains("deferred"), "{built}");
+    assert!(
+        !built.contains(" below(") && !built.contains("deferred"),
+        "{built}"
+    );
     // A release build marks the guarded read and versions the loop.
     let release = mir(&["--release"]);
     assert!(release.contains(" below("), "{release}");
@@ -689,4 +692,64 @@ fn kush_mir_with_build_flags_prints_the_ir_after_the_loop_passes() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
+}
+
+/// `KUSH_KEEP_PROVED_CHECKS=1` (benchmarks/proofs): the proofs still pass,
+/// and every check they removed is back: proved arithmetic, shifts, slice
+/// and byte reads become the checked operations. The result is the same.
+#[test]
+fn keep_proved_checks_restores_the_checks_proofs_removed() {
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    let file = scratch.path().join("program.kush");
+    fs::write(
+        &file,
+        "fn bump(x: u8) -> u8 ! {} { if x < 255 { x + 1 } else { x } }
+        fn spread(x: u64) -> u64 ! {} { x << 3 }
+        fn third(v: &[i64]) -> i64 ! {} { if Slice.len(v) > 2 { Slice.at(v, 2, _) } else { 0 } }
+        fn first(b: &Bytes) -> i64 ! {} { if Bytes.len(b) > 0 { Bytes.at(b, 0, _) } else { 0 } }
+        fn main() -> i64 ! {alloc} {
+            let a: [i64; 3] = [1, 2, 40];
+            let mut b = Bytes.with_capacity(1);
+            b = Bytes.push(b, 7);
+            let n: u8 = bump(2);
+            let k: i64 = Int.convert(n);
+            let s: u64 = spread(1);
+            let m: i64 = Int.truncate(s);
+            third(&a[..]) + first(&b) + k + m
+        }",
+    )
+    .unwrap();
+    let kush = |command: &str, keep: bool| {
+        let mut process = Command::new(env!("CARGO_BIN_EXE_kush"));
+        process.arg(command).arg(&file);
+        if keep {
+            process.env("KUSH_KEEP_PROVED_CHECKS", "1");
+        } else {
+            process.env_remove("KUSH_KEEP_PROVED_CHECKS");
+        }
+        process.output().unwrap()
+    };
+    let proved = String::from_utf8(kush("mir", false).stdout).unwrap();
+    let kept = String::from_utf8(kush("mir", true).stdout).unwrap();
+    let pairs = [
+        (
+            "unchecked_add u8 u8(copy _0, const 1: u8)",
+            "Add(copy _0, const 1: u8)",
+        ),
+        (
+            "unchecked_shl u64 u64(copy _0, const 3: i64)",
+            "Shl(copy _0, const 3: i64)",
+        ),
+        (r#"[\"At\",\"I64\"]"#, r#"[\"Get\",\"I64\"]"#),
+        ("byte_at(", r#"{\"Bytes\":\"Get\"}"#),
+    ];
+    for (unchecked, checked) in pairs {
+        assert!(proved.contains(unchecked), "{unchecked}\n{proved}");
+        assert!(!kept.contains(unchecked), "{unchecked}\n{kept}");
+        assert!(kept.contains(checked), "{checked}\n{kept}");
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    for keep in [false, true] {
+        assert_eq!(kush("run", keep).status.code(), Some(58), "keep: {keep}");
+    }
 }

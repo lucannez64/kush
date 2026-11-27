@@ -64,7 +64,9 @@ unless the facts prove it unnecessary. `Slice.at(v, i, _)`,
 `Bytes.at(b, i, _)` and `Vec.at(v, i, _)` *require* the proof and never
 check. `KUSH_PROOF_REPORT=1` prints how many accesses were proved and
 checked; `kush fuzz` generates inputs aimed at the checks that remain
-([proof-fuzz.md](../proof-fuzz.md)).
+([proof-fuzz.md](../proof-fuzz.md)). `KUSH_KEEP_PROVED_CHECKS=1` builds
+a program as if its proofs removed nothing (the proofs are still checked),
+to measure what they buy ([benchmarks/proofs](../../benchmarks/proofs/README.md)).
 
 ```kush eval
 fn third(v: &[i64]) -> i64 ! {} {

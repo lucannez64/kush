@@ -34,6 +34,7 @@ mod impl_patterns;
 mod index_expressions;
 mod instances;
 mod ir;
+mod keep_checks;
 mod lambdas;
 mod local_lifetimes;
 mod memory_calls;
@@ -2817,6 +2818,9 @@ fn check_program_pass(
                 bad.obligation
             ),
         ));
+    }
+    if keep_checks::keep_proved_checks() {
+        keep_checks::restore_checks(&mut functions.bodies);
     }
     // Fusion selection runs only after every body exists, so it can inspect
     // callee effect rows and structural termination instead of guessing from
