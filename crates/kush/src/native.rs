@@ -2261,6 +2261,7 @@ fn lower(
             handler_lookup,
             handler_perform,
             handler_base: None,
+            panic_block: None,
             task_wrappers: &task_wrappers,
             task_pointer_drops: &task_pointer_drops,
             store_proved: false,
@@ -4229,6 +4230,9 @@ struct Generator<'b, E: Emit> {
     /// Entry handler-stack depth for this function; every return restores it so
     /// an early `return` cannot leave a dynamic handler frame visible.
     handler_base: Option<Variable>,
+    /// The function's one panic block, which every failed check branches to
+    /// when no unwinding needs per-site cleanup (FND-LLVM-PANIC-SHARE).
+    panic_block: Option<ir::Block>,
     task_wrappers: &'b BTreeMap<usize, FuncId>,
     task_pointer_drops: &'b BTreeMap<Type, FuncId>,
     tracked: Vec<Tracked>,
@@ -5120,9 +5124,46 @@ impl<E: Emit> Generator<'_, E> {
         self.runtime_void(arith, &[id, code, a, b]);
         self.fuzz_depth += 1;
     }
+    /// The function's shared panic block, and whether it still needs its
+    /// body (`fill_panic`) once the current block is terminated.
+    fn panic_target(&mut self) -> (ir::Block, bool) {
+        match self.panic_block {
+            Some(block) => (block, false),
+            None => {
+                let block = self.builder.create_block();
+                self.panic_block = Some(block);
+                (block, true)
+            }
+        }
+    }
+    /// Give a fresh shared panic block its body: the panic call and trap.
+    fn fill_panic(&mut self, block: ir::Block) {
+        self.builder.switch_to_block(block);
+        self.abort();
+    }
+    /// End the current block in the function's shared panic block. Only
+    /// without unwinding, where a panic needs no per-site cleanup.
+    fn jump_to_panic(&mut self) {
+        let (bad, fresh) = self.panic_target();
+        self.builder.jump(bad, &[]);
+        if fresh {
+            self.fill_panic(bad);
+        }
+    }
     fn guard(&mut self, fail: Value) {
-        let bad = self.builder.create_block();
         let good = self.builder.create_block();
+        // Without unwinding a panic needs no per-site cleanup, so the checks
+        // of a function share one cold block (FND-LLVM-PANIC-SHARE).
+        if !self.program.uses_unwinding {
+            let (bad, fresh) = self.panic_target();
+            self.builder.brif(fail, bad, &[], good, &[]);
+            if fresh {
+                self.fill_panic(bad);
+            }
+            self.builder.switch_to_block(good);
+            return;
+        }
+        let bad = self.builder.create_block();
         self.builder.brif(fail, bad, &[], good, &[]);
         self.builder.switch_to_block(bad);
         self.abort();

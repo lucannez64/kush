@@ -1095,6 +1095,11 @@ impl<E: Emit> Generator<'_, E> {
                     self.return_value(&words);
                 }
             }
+            // Without unwinding, every panic of the function shares one
+            // block (FND-LLVM-PANIC-SHARE).
+            TerminatorKind::Panic { .. } if !self.program.uses_unwinding => {
+                self.jump_to_panic();
+            }
             TerminatorKind::Panic { unwind } => {
                 self.mir_unwind = Self::unwind_block(blocks, *unwind);
                 self.abort();
