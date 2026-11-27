@@ -1,11 +1,12 @@
 # One handler model: declared operations as implicit capabilities
 
-Status: **design, for approval** (FND-HANDLERS-ONE). Decided direction:
+Status: **accepted** (FND-HANDLERS-ONE; decisions D1-D4 taken by the user
+on 2026-11-27, section 8). Decided direction:
 [foundations-review.md](foundations-review.md) section 3, E4: lexical
 capabilities are the one handler model, and a declared effect becomes an
 implicit capability parameter. The plan node asks that existing programs keep
 the handlers they observe; section 4 lists the three places where they would
-not, and section 8 the decisions that needs.
+not, and section 8 the decisions taken for them.
 
 ## 1. Today
 
@@ -207,16 +208,17 @@ backend agreeing:
 | HANDLERS-ONE-ABORT | abortive performs through capabilities | abortive tests pass with allocation balance |
 | HANDLERS-ONE-DELETE | remove the dynamic stack from IR, MIR, runtime and evaluator; multishot rule (D2); docs/reference chapter 7 | suite and check-reference pass; `benchmarks/effects` and the Game Boy frame time no slower |
 
-## 8. Decisions asked
+## 8. Decisions (user, 2026-11-27)
 
-- **D1. Binding time for function values: at the call** (recommended; it is
-  today's behaviour) or when the closure is created (lexical capture, as in
-  Lexa; changes which handler a stored closure sees).
+- **D1. A function value gets its handler at the call.** It is today's
+  behaviour and what an implicit capability parameter means; binding at
+  closure creation would store a frame address in a closure and needs closure
+  lifetimes (FND-REF-DESIGN). Explicit `as op` capabilities cover the cases
+  that want lexical capture.
 - **D2. Multishot resumed code stops seeing handlers installed around
-  `resume`** (recommended; matches one-shot), or keep the current exception
-  (needs a redirect-like mechanism for multishot only).
-- **D3. Tasks inherit per operation** (recommended), or keep the contiguous
-  run of frames (keeps an ordering structure only for spawns).
-- **D4. Declared operations in an entry point's row become a compile error**
-  (recommended), or give entry points capabilities that panic when performed
-  (keeps today's run-time panic).
+  `resume`**, as one-shot already does. This removes the documented exception
+  and the redirect-like mechanism it would need.
+- **D3. Tasks inherit per operation**: a task may use a handler when that
+  handler can be shared with it. Only programs that panic today change.
+- **D4. A declared operation in an entry point's row is a compile error.**
+  Nothing can handle it, so the run-time panic becomes a static check.

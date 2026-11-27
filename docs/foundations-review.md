@@ -67,8 +67,8 @@ Decisions (user, 2026-11-24):
 - E3: `#[noalloc]` and `#[nosuspend]` are removed; the row is the contract.
   Done (FND-ROWS-ATTRS).
 - E4: lexical capabilities are the one handler model; a declared effect becomes
-  an implicit capability parameter. Design draft, with the decisions it
-  still needs: [one-handler-model.md](one-handler-model.md)
+  an implicit capability parameter. Design accepted with decisions D1-D4
+  (2026-11-27): [one-handler-model.md](one-handler-model.md)
   (FND-HANDLERS-ONE).
 - E5: tasks (`Task.scope`, `spawn`, `yield`, `join`, `cancel`) move to std on
   top of handlers, and `suspend` becomes a handled effect.

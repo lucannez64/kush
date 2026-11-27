@@ -6,9 +6,10 @@ EFF-CAP-RESUME-CAPTURING and EFF-CAP-RESUME-MULTISHOT; the "As built"
 subsections record where each departs from the design). The decisions below
 fix the semantics capabilities must have so that they coexist with declared
 handlers without changing which handler any existing program observes. The
-number of handler-lookup models is under review in
-[foundations-review.md](foundations-review.md) section 3; the draft that makes
-capabilities the only one is [one-handler-model.md](one-handler-model.md).
+number of handler-lookup models is reduced to one by
+[foundations-review.md](foundations-review.md) section 3; the accepted design
+that makes capabilities the only one is
+[one-handler-model.md](one-handler-model.md).
 
 Inputs, used as design references, not as transferred results:
 
