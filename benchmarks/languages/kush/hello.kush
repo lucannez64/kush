@@ -1,0 +1,6 @@
+use std.io;
+
+fn main() -> Unit ! {io, alloc} {
+    let line = Bytes.from("hello\n");
+    let written = io.write(io.stdout(), &line);
+}

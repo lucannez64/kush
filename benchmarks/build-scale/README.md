@@ -29,6 +29,10 @@ same work costs a C compiler; `cc` here is GCC 13.
 
 ## Results
 
+`--zig PATH` adds Zig builds. A run on the current compiler with all four
+languages (2026-11-27) is in [../languages](../languages/README.md); the
+table below is from 2026-11-12.
+
 Seconds, best of three, on a 2-core cloud machine with LLVM 18.1.3, rustc
 1.97 and GCC 13. "Warm" means the proof cache held this program's proofs;
 the C runtime cache was warm throughout.

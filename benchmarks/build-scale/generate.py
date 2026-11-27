@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate one synthetic program in Kush, Rust and C, of a chosen size.
+"""Generate one synthetic program in Kush, Rust, C and Zig, of a chosen size.
 
 Each unit is seven small functions (a checked reduction, an element-wise
 kernel, a vector fill, branchy scalar code, a recursion, a search and a
@@ -185,6 +185,72 @@ static int64_t unit_{u}(void) {{
 """
 
 
+def zig_unit(u):
+    a, b, c = 3 + u % 7, 11 + u % 13, 5 + u % 5
+    return f"""
+fn sum_{u}(values: []const i64) i64 {{
+    var acc: i64 = {u};
+    var i: usize = 0;
+    while (i < values.len) : (i += 1) acc = acc + values[i] * {a};
+    return acc;
+}}
+
+fn scale_{u}(source: []const i64, target: []i64, factor: i64) void {{
+    var i: usize = 0;
+    while (i < source.len) : (i += 1) target[i] = source[i] * factor - {b};
+}}
+
+fn fill_{u}(gpa: std.mem.Allocator, n: i64) []i64 {{
+    const values = gpa.alloc(i64, @intCast(n)) catch @panic("out of memory");
+    var i: i64 = 0;
+    while (i < n) : (i += 1) values[@intCast(i)] = ((i * {7919 + 2 * u} + {u}) & 1023) - 512;
+    return values;
+}}
+
+fn pick_{u}(x: i64, y: i64) i64 {{
+    if (x < y) return if ((x & 1) == 0) x * {a} + y else y - x * {c};
+    return if (y > {b}) (x - y) * {c} else x + y + {u};
+}}
+
+fn climb_{u}(n: i64, acc: i64) i64 {{
+    return if (n == 0) acc else climb_{u}(n - 1, acc + pick_{u}(n, acc & 63));
+}}
+
+fn find_{u}(values: []const i64, wanted: i64) i64 {{
+    for (values, 0..) |value, i| {{
+        if (value == wanted) return @intCast(i);
+    }}
+    return -1;
+}}
+
+fn unit_{u}(gpa: std.mem.Allocator) i64 {{
+    const source = fill_{u}(gpa, {64 + u % 32});
+    defer gpa.free(source);
+    const target = fill_{u}(gpa, {64 + u % 32});
+    defer gpa.free(target);
+    scale_{u}(source, target, {c});
+    const found = find_{u}(source, {(u * 37) % 512 - 256});
+    return sum_{u}(target) + climb_{u}({20 + u % 9}, {u}) + found;
+}}
+"""
+
+
+def zig_program(units):
+    body = "".join(zig_unit(u) for u in range(units))
+    calls = "\n".join(f"    result = (result ^ unit_{u}(gpa)) + {u & 1};" for u in range(units))
+    return f"""const std = @import("std");
+{body}
+pub fn main(init: std.process.Init) !void {{
+    const gpa = init.gpa;
+    var result: i64 = 0;
+{calls}
+    var buffer: [32]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{{d}}\\n", .{{result}});
+    try std.Io.File.stdout().writeStreamingAll(init.io, text);
+}}
+"""
+
+
 def c_program(units):
     body = "".join(c_unit(u) for u in range(units))
     calls = "\n".join(f"    result = (result ^ unit_{u}()) + {u & 1};" for u in range(units))
@@ -236,6 +302,7 @@ def main():
     (args.directory / "main.kush").write_text(kush_program(args.units))
     (args.directory / "main.rs").write_text(rust_program(args.units))
     (args.directory / "main.c").write_text(c_program(args.units))
+    (args.directory / "main.zig").write_text(zig_program(args.units))
 
 
 if __name__ == "__main__":

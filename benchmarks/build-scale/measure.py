@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--kush", required=True, type=Path)
     parser.add_argument("--units", type=int, nargs="+", default=[100, 500, 2000])
     parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--zig", help="also time `zig build-exe` (path to zig)")
     args = parser.parse_args()
     kush = str(args.kush.resolve())
     rows = {}
@@ -73,12 +74,30 @@ def main():
                 results[f"`cc {level}`"] = best(
                     ["cc", level, c, "-o", binary], args.repetitions, dict(os.environ)
                 )
-            outputs = set()
-            for command in (
+            checks = [
                 builds["Kush, LLVM `--release`"],
                 ["rustc", "-O", rust, "-o", binary],
                 ["cc", "-O2", c, "-o", binary],
-            ):
+            ]
+            if args.zig:
+                zig = str(root / "main.zig")
+                for mode in ["Debug", "ReleaseSafe", "ReleaseFast"]:
+                    times = []
+                    for repetition in range(args.repetitions):
+                        # A fresh local cache, so the program is compiled
+                        # (the global cache keeps Zig's prebuilt runtime).
+                        cache = str(root / f"zig-cache-{mode}-{repetition}")
+                        times.append(best(
+                            [args.zig, "build-exe", "-O", mode, "-mcpu", "baseline", zig,
+                             f"-femit-bin={binary}", "--cache-dir", cache],
+                            1,
+                            dict(os.environ),
+                        ))
+                    results[f"`zig` {mode}"] = min(times)
+                checks.append([args.zig, "build-exe", "-O", "ReleaseFast", zig,
+                               f"-femit-bin={binary}", "--cache-dir", str(root / "zig-cache-check")])
+            outputs = set()
+            for command in checks:
                 subprocess.run(command, check=True, capture_output=True, env=warm)
                 outputs.add(subprocess.run([binary], capture_output=True).stdout)
             if len(outputs) != 1:
