@@ -153,6 +153,7 @@ pub(super) fn rvalue_operands(rvalue: &Rvalue) -> Vec<Operand> {
             vec![*operand]
         }
         Rvalue::Binary(_, left, right)
+        | Rvalue::SetLength(left, right)
         | Rvalue::ByteAt(left, right)
         | Rvalue::StructEq(left, right, _) => vec![*left, *right],
         Rvalue::Int(_, _, _, operands)

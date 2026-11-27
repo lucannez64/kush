@@ -189,6 +189,18 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                     operand(*vector).map_err(here)?;
                     Type::I64
                 }
+                Rvalue::SetLength(vector, length) => {
+                    operand(*vector).map_err(here)?;
+                    operand(*length).map_err(here)?;
+                    if !matches!(body.operand_ty(*vector), Type::Vec(_))
+                        || body.operand_ty(*length) != Type::I64
+                    {
+                        return Err(here(
+                            "a length store that is not a vector and an i64".into(),
+                        ));
+                    }
+                    Type::Unit
+                }
                 Rvalue::Deferred(deferral, values) => {
                     for value in values {
                         operand(*value).map_err(here)?;
@@ -300,12 +312,19 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                 if let Callee::Indirect(code) = callee {
                     operand(*code).map_err(here)?;
                 }
-                if let Callee::Builtin {
-                    hint: CallHint::Shadow(length, capacity),
-                    ..
-                } = callee
+                let words = match callee {
+                    Callee::Builtin {
+                        hint: CallHint::Shadow(length, capacity),
+                        ..
+                    } => vec![*length, *capacity],
+                    Callee::Builtin {
+                        hint: CallHint::Fill(length),
+                        ..
+                    } => vec![*length],
+                    _ => Vec::new(),
+                };
                 {
-                    for word in [length, capacity] {
+                    for word in &words {
                         local(*word).map_err(here)?;
                         if body.locals[*word].ty != Type::I64 {
                             return Err(here(format!("a shadow word _{word} that is not an i64")));

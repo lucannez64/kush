@@ -14,7 +14,12 @@ use super::drop_flags::rvalue_operands;
 use super::loops::{self, Loop};
 use super::*;
 use crate::executable::{Target, VecOp};
+use crate::int::{ArithOp, IntKind, IntOp};
 use std::collections::BTreeSet;
+
+/// A shadowed vector of a loop: the vector, its length and capacity
+/// locals, and the blocks of its pushes.
+type Shadowed = (LocalId, LocalId, LocalId, Vec<BlockId>);
 
 fn whole(operand: Operand) -> Option<LocalId> {
     let place = operand.place()?;
@@ -153,6 +158,7 @@ pub(crate) fn shadow(body: &mut Body, trace: bool) -> usize {
     // A vector an enclosing loop shadows keeps that shadow inside: its
     // pushes there are already marked.
     let mut done: Vec<(BTreeSet<BlockId>, LocalId)> = Vec::new();
+    let mut shadows: Vec<Shadowed> = Vec::new();
     let mut count = 0;
     for lp in &all {
         let found = vectors
@@ -197,6 +203,7 @@ pub(crate) fn shadow(body: &mut Body, trace: bool) -> usize {
                 }
             }
             done.push((lp.blocks.clone(), *vector));
+            shadows.push((*vector, length, capacity, pushes.clone()));
         }
         if trace {
             eprintln!(
@@ -205,9 +212,192 @@ pub(crate) fn shadow(body: &mut Body, trace: bool) -> usize {
                 found.len()
             );
         }
+        if let [(vector, length, capacity, pushes)] = shadows.as_slice()
+            && loops::innermost(lp, &all)
+            && fill_with_room(body, lp, entry, *vector, *length, *capacity, pushes)
+            && trace
+        {
+            eprintln!(
+                "vector fill: a loop in {} fills a vector it checked has room",
+                body.name
+            );
+        }
+        shadows.clear();
         count += 1;
     }
     count
+}
+
+/// Whether a type has no drop glue and fits one word: a stale length left
+/// by an unwind out of a filling loop can then only hide elements, never
+/// skip or repeat a drop.
+fn plain(ty: Type) -> bool {
+    matches!(
+        ty,
+        Type::I64 | Type::Int(_) | Type::Float(_) | Type::Char | Type::Bool
+    )
+}
+
+/// FND-PUSH-FILL: version a counted loop `while i < bound { ...; i = i + 1 }`
+/// whose only shadowed vector holds plain values and is only pushed to.
+/// The preheader tests that the vector has room for every push the loop can
+/// make, `saturating(bound - i) * pushes <= capacity - length`; the copy
+/// taken then marks its pushes `fill` (no room test, no grow call, no
+/// header store), and each of its exits stores the length once. With
+/// neither a call nor a header store left in the loop, LLVM can vectorize
+/// it. Returns whether it versioned the loop.
+fn fill_with_room(
+    body: &mut Body,
+    lp: &Loop,
+    entry: BlockId,
+    vector: LocalId,
+    length: LocalId,
+    capacity: LocalId,
+    pushes: &[BlockId],
+) -> bool {
+    let Some(counted) = loops::counted(body, lp) else {
+        return false;
+    };
+    let bound = match counted.bound {
+        loops::Term::Local(local) if body.locals[local].ty == Type::I64 => {
+            Operand::Copy(Place::local(local))
+        }
+        loops::Term::Constant(value) => Operand::Constant(value, Type::I64),
+        _ => return false,
+    };
+    if counted.comparison != BinOp::Lt
+        || counted.step != 1
+        || body.locals[counted.counter].ty != Type::I64
+    {
+        return false;
+    }
+    // Every push stores a plain value, and nothing borrows the vector (its
+    // length or elements would be read from the stale header).
+    let plain_pushes = pushes.iter().all(|push| {
+        matches!(
+            &body.blocks[*push].terminator.kind,
+            TerminatorKind::Call {
+                callee: Callee::Builtin { index, .. },
+                ..
+            } if matches!(body.builtins.0[*index], Target::Vec(VecOp::Push, element) if plain(element))
+        )
+    });
+    let borrowed = lp.blocks.iter().any(|block| {
+        body.blocks[*block].statements.iter().any(|statement| {
+            let StatementKind::Assign(_, rvalue) = &statement.kind;
+            matches!(rvalue, Rvalue::Ref(source) if source.local == vector)
+        })
+    });
+    if !plain_pushes || borrowed {
+        return false;
+    }
+    let span = body.blocks[entry].terminator.span;
+    let mut temp = |ty: Type| {
+        body.locals.push(LocalDecl {
+            ty,
+            mutable: false,
+            temporary: true,
+        });
+        body.locals.len() - 1
+    };
+    let (trips, needed, room, fits) = (
+        temp(Type::I64),
+        temp(Type::I64),
+        temp(Type::I64),
+        temp(Type::Bool),
+    );
+    let assign = |local: LocalId, rvalue: Rvalue| Statement {
+        kind: StatementKind::Assign(Place::local(local), rvalue),
+        span,
+    };
+    let copy = |local: LocalId| Operand::Copy(Place::local(local));
+    let saturating = |op: ArithOp, left: Operand, right: Operand| {
+        Rvalue::Int(
+            IntOp::Saturating(op),
+            IntKind::I64,
+            IntKind::I64,
+            vec![left, right],
+        )
+    };
+    // Each block runs at most once per iteration of an innermost loop, so
+    // the loop pushes at most `trips` times per push site.
+    let statements = vec![
+        assign(
+            trips,
+            saturating(ArithOp::Sub, bound, copy(counted.counter)),
+        ),
+        assign(
+            needed,
+            saturating(
+                ArithOp::Mul,
+                copy(trips),
+                Operand::Constant(pushes.len() as i64, Type::I64),
+            ),
+        ),
+        assign(
+            room,
+            Rvalue::Int(
+                IntOp::Wrapping(ArithOp::Sub),
+                IntKind::I64,
+                IntKind::I64,
+                vec![copy(capacity), copy(length)],
+            ),
+        ),
+        assign(fits, Rvalue::Binary(BinOp::Le, copy(needed), copy(room))),
+    ];
+    let copies = loops::version(
+        body,
+        lp,
+        entry,
+        statements,
+        Operand::Move(Place::local(fits)),
+    );
+    for push in pushes {
+        if let TerminatorKind::Call {
+            callee: Callee::Builtin { hint, .. },
+            ..
+        } = &mut body.blocks[copies[push]].terminator.kind
+        {
+            *hint = CallHint::Fill(length);
+        }
+    }
+    // Every normal edge out of the copy goes through a block that stores
+    // the length.
+    let inside = copies.values().copied().collect::<BTreeSet<_>>();
+    for copy_block in copies.values() {
+        let targets = loops::successors(&body.blocks[*copy_block].terminator.kind);
+        for target in targets.into_iter().collect::<BTreeSet<_>>() {
+            if inside.contains(&target) {
+                continue;
+            }
+            let unit = body.locals.len();
+            body.locals.push(LocalDecl {
+                ty: Type::Unit,
+                mutable: false,
+                temporary: true,
+            });
+            let store = body.blocks.len();
+            body.blocks.push(BasicBlock {
+                statements: vec![Statement {
+                    kind: StatementKind::Assign(
+                        Place::local(unit),
+                        Rvalue::SetLength(
+                            Operand::Copy(Place::local(vector)),
+                            Operand::Copy(Place::local(length)),
+                        ),
+                    ),
+                    span,
+                }],
+                terminator: Terminator {
+                    kind: TerminatorKind::Goto(target),
+                    span,
+                },
+                unwind: None,
+            });
+            loops::retarget(&mut body.blocks[*copy_block].terminator.kind, target, store);
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -258,6 +448,22 @@ mod tests {
             assert!(printed.contains("buffer capacity(copy _1)"), "{printed}");
             assert!(printed.contains(" shadow _"), "{printed}");
         }
+    }
+
+    #[test]
+    fn a_counted_push_loop_gets_a_copy_that_fills() {
+        let (body, count) = shadowed(&fill("v = Vec.push(v, i * 2);"));
+        assert_eq!(count, 1);
+        let printed = text::print(&body);
+        assert!(printed.contains(" fill _"), "{printed}");
+        assert!(printed.contains("set_length(copy _1"), "{printed}");
+        // A loop that reads the vector keeps only the shadow.
+        let (body, _) = shadowed(&fill(
+            "v = Vec.push(v, i);
+            if Vec.len(&v) > 3 { v = Vec.push(v, 1); }",
+        ));
+        let printed = text::print(&body);
+        assert!(!printed.contains(" fill _"), "{printed}");
     }
 
     #[test]

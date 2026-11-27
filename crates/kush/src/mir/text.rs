@@ -256,6 +256,11 @@ fn rvalue_text(rvalue: &Rvalue) -> String {
             operand_text(*handle),
             operand_text(*index)
         ),
+        Rvalue::SetLength(vector, length) => format!(
+            "set_length({}, {})",
+            operand_text(*vector),
+            operand_text(*length)
+        ),
         Rvalue::Buffer(vector, word) => format!(
             "buffer {}({})",
             match word {
@@ -386,6 +391,7 @@ fn terminator_text(kind: &TerminatorKind) -> String {
                             format!(" shadow _{length} _{capacity}")
                         }
                         CallHint::Proved => " proved".into(),
+                        CallHint::Fill(length) => format!(" fill _{length}"),
                     };
                     format!("builtin {index}{hint}")
                 }
@@ -872,6 +878,15 @@ impl Parser {
             self.expect(")")?;
             return Ok(Rvalue::ByteAt(handle, index));
         }
+        if name == "set_length" {
+            self.at += 1;
+            self.expect("(")?;
+            let vector = self.operand()?;
+            self.expect(",")?;
+            let length = self.operand()?;
+            self.expect(")")?;
+            return Ok(Rvalue::SetLength(vector, length));
+        }
         if name == "buffer" {
             self.at += 1;
             let word = match self.next()?.as_str() {
@@ -1063,6 +1078,8 @@ impl Parser {
                             CallHint::Shadow(self.local()?, self.local()?)
                         } else if self.eat("proved") {
                             CallHint::Proved
+                        } else if self.eat("fill") {
+                            CallHint::Fill(self.local()?)
                         } else {
                             CallHint::None
                         },

@@ -2273,6 +2273,7 @@ fn lower(
             access_proved: false,
             mir_sticky: None,
             push_shadow: None,
+            push_fill: None,
             mir_unwind: None,
         };
         let entry = g.builder.create_block();
@@ -4131,6 +4132,9 @@ struct Generator<'b, E: Emit> {
     /// The length and capacity variables of the `Vec.push` being lowered,
     /// when a loop keeps them (`CallHint::Shadow`, FND-MIR-PUSH-SHADOWS).
     push_shadow: Option<(Variable, Variable)>,
+    /// The length variable of the `Vec.push` being lowered when its loop
+    /// copy checked there is room (`CallHint::Fill`, FND-PUSH-FILL).
+    push_fill: Option<Variable>,
     print: FuncId,
     stage_compile: FuncId,
     print_u64: FuncId,
@@ -5711,6 +5715,22 @@ impl<E: Emit> Generator<'_, E> {
             self.store_words(item, words);
             let call = self.builder.call(callee, &[handle, item, width]);
             return self.builder.inst_results(call)[0];
+        }
+        if let Some(length_var) = self.push_fill.take() {
+            // The loop checked there is room for every push it makes: store
+            // the element and count it; the loop's exits store the length.
+            let length = self.builder.use_var(length_var);
+            let offset = self.builder.imul_imm_s(length, (words.len() * 8) as i64);
+            let address = self.builder.iadd(handle, offset);
+            self.memory_class(llvm::MemoryClass::BufferElements, |g| {
+                for (word, value) in words.iter().enumerate() {
+                    g.builder
+                        .store(WORD, *value, address, (16 + word * 8) as i32);
+                }
+            });
+            let next = self.builder.iadd_imm_s(length, 1);
+            self.builder.def_var(length_var, next);
+            return handle;
         }
         let shadow = self.push_shadow.take();
         let (length, capacity) = match shadow {
@@ -7931,9 +7951,11 @@ impl<E: Emit> Generator<'_, E> {
                 return Some(self.union_borrow_call(*spec, values));
             }
             Target::Vec(op, element) => {
-                // A push marked `CallHint::Shadow` has its shadow set.
+                // A push marked `CallHint::Shadow` or `Fill` has its
+                // variables set.
                 if *op != VecOp::Push {
                     self.push_shadow = None;
+                    self.push_fill = None;
                 }
                 let op = match op {
                     VecOp::Get if self.access_proved => VecOp::At,
@@ -7941,6 +7963,7 @@ impl<E: Emit> Generator<'_, E> {
                 };
                 let result = self.vec_call(op, *element, values);
                 self.push_shadow = None;
+                self.push_fill = None;
                 return Some(result);
             }
             Target::AllocVec(op, element) => {

@@ -60,12 +60,16 @@ fn terminator_writes(kind: &TerminatorKind) -> Vec<LocalId> {
             ..
         } => {
             let mut writes = vec![*destination];
-            if let Callee::Builtin {
-                hint: CallHint::Shadow(length, capacity),
-                ..
-            } = callee
-            {
-                writes.extend([*length, *capacity]);
+            match callee {
+                Callee::Builtin {
+                    hint: CallHint::Shadow(length, capacity),
+                    ..
+                } => writes.extend([*length, *capacity]),
+                Callee::Builtin {
+                    hint: CallHint::Fill(length),
+                    ..
+                } => writes.push(*length),
+                _ => {}
             }
             writes
         }
@@ -316,6 +320,7 @@ fn substitute_rvalue(rvalue: &mut Rvalue, substitute: &dyn Fn(&mut Operand) -> b
         | Rvalue::Coerce(operand, _)
         | Rvalue::Buffer(operand, _) => substitute(operand),
         Rvalue::Binary(_, left, right)
+        | Rvalue::SetLength(left, right)
         | Rvalue::ByteAt(left, right)
         | Rvalue::StructEq(left, right, _) => substitute(left) || substitute(right),
         Rvalue::Int(_, _, _, operands)

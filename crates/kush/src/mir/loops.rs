@@ -30,7 +30,7 @@ pub(crate) fn successors(kind: &TerminatorKind) -> Vec<BlockId> {
 }
 
 /// Redirect the terminator's normal edges to `from` towards `to`.
-fn retarget(kind: &mut TerminatorKind, from: BlockId, to: BlockId) {
+pub(crate) fn retarget(kind: &mut TerminatorKind, from: BlockId, to: BlockId) {
     let edit = |target: &mut BlockId| {
         if *target == from {
             *target = to;
@@ -395,12 +395,18 @@ pub(crate) fn assigned(body: &Body, blocks: &BTreeSet<BlockId>) -> BTreeSet<Loca
         } = &data.terminator.kind
         {
             out.insert(*destination);
-            if let Callee::Builtin {
-                hint: CallHint::Shadow(length, capacity),
-                ..
-            } = callee
-            {
-                out.extend([*length, *capacity]);
+            match callee {
+                Callee::Builtin {
+                    hint: CallHint::Shadow(length, capacity),
+                    ..
+                } => out.extend([*length, *capacity]),
+                Callee::Builtin {
+                    hint: CallHint::Fill(length),
+                    ..
+                } => {
+                    out.insert(*length);
+                }
+                _ => {}
             }
         }
     }

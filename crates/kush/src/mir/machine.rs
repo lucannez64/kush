@@ -1552,6 +1552,12 @@ impl Machine<'_, '_> {
                 };
                 self.memory.load(handle + offset, 1)?
             }
+            Rvalue::SetLength(vector, length) => {
+                let handle = self.scalar(*vector)?;
+                let length = self.scalar(*length)?;
+                self.memory.store(handle, &[length])?;
+                Vec::new()
+            }
             Rvalue::ByteAt(handle, index) => {
                 let address = self.scalar(*handle)? + 16 + self.scalar(*index)?;
                 vec![i64::from(self.memory.load_bytes(address, 1)?[0])]

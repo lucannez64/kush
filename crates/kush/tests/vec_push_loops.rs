@@ -89,6 +89,64 @@ fn growth_from_empty_through_every_capacity() {
 }
 
 #[test]
+fn counted_loops_into_reserved_vectors_fill_or_grow() {
+    // In the LLVM release build each of these loops is versioned on having
+    // room for every push (FND-PUSH-FILL): an exact fit, one without room
+    // left, conditional pushes left early by a break, no trips at all, and
+    // narrow elements.
+    let printed = agree(
+        &format!(
+            "{SUM}
+        fn main() -> Unit ! {{io, alloc}} {{
+            let mut values: Vec<i64> = Vec.with_capacity(5000);
+            let mut i = 0;
+            while i < 5000 {{
+                values = Vec.push(values, i * 3 - 7);
+                i = i + 1;
+            }}
+            print_i64(Vec.len(&values));
+            print_i64(total_of(&values));
+            i = 0;
+            while i < 100 {{
+                values = Vec.push(values, i);
+                i = i + 1;
+            }}
+            print_i64(Vec.len(&values));
+            print_i64(total_of(&values));
+            let mut more: Vec<i64> = Vec.with_capacity(1000);
+            let mut j = 10;
+            while j < 1000 {{
+                if j & 3 == 0 {{ more = Vec.push(more, j); }}
+                if j == 900 {{ break; }}
+                more = Vec.push(more, 0 - j);
+                j = j + 1;
+            }}
+            print_i64(Vec.len(&more));
+            print_i64(total_of(&more));
+            let mut k = 50;
+            while k < 10 {{
+                more = Vec.push(more, k);
+                k = k + 1;
+            }}
+            print_i64(Vec.len(&more));
+            let mut narrow: Vec<u8> = Vec.with_capacity(300);
+            let mut m = 0;
+            while m < 300 {{
+                let byte: u8 = Int.truncate(m * 7);
+                narrow = Vec.push(narrow, byte);
+                m = m + 1;
+            }}
+            print_i64(Vec.len(&narrow));
+            let last: u8 = Vec.get(&narrow, 299);
+            print_int(last);
+        }}"
+        ),
+        5,
+    );
+    assert!(printed.starts_with("5000\n"), "{printed}");
+}
+
+#[test]
 fn conditional_double_and_interleaved_pushes() {
     agree(
         &format!(

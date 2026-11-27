@@ -702,6 +702,14 @@ impl<E: Emit> Generator<'_, E> {
                     .collect::<Vec<_>>();
                 Some(vec![self.mir_loop(op, &words)])
             }
+            Rvalue::SetLength(vector, length) => {
+                let handle = self.mir_scalar(*vector);
+                let length = self.mir_scalar(*length);
+                self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+                    g.builder.store(ir::MemFlagsData::new(), length, handle, 0);
+                });
+                Some(Vec::new())
+            }
             Rvalue::Buffer(vector, word) => {
                 let handle = self.mir_scalar(*vector);
                 Some(vec![match word {
@@ -1071,11 +1079,15 @@ impl<E: Emit> Generator<'_, E> {
                                     self.variables[*capacity][0],
                                 ));
                             }
+                            CallHint::Fill(length) => {
+                                self.push_fill = Some(self.variables[*length][0]);
+                            }
                         }
                         let words = self.call_target(&target, values, ty, terminator.span);
                         self.index_below = false;
                         self.access_proved = false;
                         self.push_shadow = None;
+                        self.push_fill = None;
                         let Some(words) = words else {
                             // The builtin always panics; the block has ended.
                             return;

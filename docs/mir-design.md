@@ -430,6 +430,20 @@ it and tests can check it without compiling.
   locals. The pass prints the tree path's `KUSH_TRACE_SHADOWS` report.
   With this port, only deferred overflow checks still send functions with
   `while` loops to the tree path.
+- Filling a reserved vector (FND-PUSH-FILL). A shadowed push still stores
+  the length on every element, and its room test and grow call keep the
+  loop scalar. A counted innermost loop `while i < bound` with step 1, whose
+  one shadowed vector holds plain values (no drop glue) and is only pushed
+  to, is therefore versioned. The preheader tests
+  `saturating(bound - i) * pushes <= capacity - length`, where `pushes` is
+  the number of push sites (each runs at most once per iteration). In the
+  copy each push is `call builtin N fill _len(...)`: it stores the element
+  at `_len` and increments it, with no room test, grow call or header
+  store. Every normal exit of the copy goes through a block that runs
+  `set_length(v, _len)`. An unwind out of the copy leaves the header short,
+  which with plain elements only hides elements from the drop that frees
+  the buffer. On the feature pipeline this took the program from 520M to
+  277M instructions (clang -O2 with checks: 352M).
 
 **Deferred overflow (FND-MIR-DEFERRED).**
 - The analysis of `native/deferred.rs` moves to the MIR:

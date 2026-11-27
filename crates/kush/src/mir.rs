@@ -156,6 +156,9 @@ pub(crate) enum Rvalue {
     StructEq(Operand, Operand, bool),
     /// A word of the buffer header of the vector (operand).
     Buffer(Operand, BufferWord),
+    /// Store the second operand as the length word of the vector's (first
+    /// operand) buffer header; the result is `Unit` (FND-PUSH-FILL).
+    SetLength(Operand, Operand),
     /// Arithmetic whose overflow check is deferred (FND-MIR-DEFERRED): the
     /// wrapped result, with an exact overflow ORed into the sign of the
     /// sticky local.
@@ -535,6 +538,12 @@ pub(crate) enum CallHint {
     /// (FND-MIR-PUSH-SHADOWS). The call reads them instead of the buffer
     /// header and updates them.
     Shadow(LocalId, LocalId),
+    /// A `Vec.push` in a loop copy whose entry checked that the vector has
+    /// room for every push of the loop (FND-PUSH-FILL): it stores the
+    /// element at the length the local holds and increments it, with no
+    /// room test and no header store. The copy's exits store the length
+    /// (`Rvalue::SetLength`).
+    Fill(LocalId),
     /// An element access a deferred chunk proved in range
     /// (FND-MIR-DEFERRED): no bound check.
     Proved,
