@@ -135,6 +135,11 @@ impl Machine<'_, '_> {
                 self.abort_word = buffer;
                 vec![0]
             }
+            RuntimeOp::AbortRaiseAt => {
+                self.memory.store(words[0][0], &words[1])?;
+                self.abort_word = words[0][0];
+                vec![0]
+            }
             RuntimeOp::AbortWord => vec![self.abort_word],
             RuntimeOp::AbortClear => {
                 self.abort_word = 0;

@@ -1252,7 +1252,10 @@ impl Builder<'_> {
                 body,
                 handler,
                 operation,
-            } => return self.abort_scope(expr, *label, body, handler, *operation),
+                capability,
+            } => {
+                return self.abort_scope(expr, *label, body, handler, *operation, *capability);
+            }
             ExprKind::AbortExit {
                 label,
                 value,
@@ -1273,7 +1276,11 @@ impl Builder<'_> {
                 self.goto(aborted, span);
                 return Ok(None);
             }
-            ExprKind::AbortPerform { operation, value } => {
+            ExprKind::AbortPerform {
+                operation,
+                value,
+                capability,
+            } => {
                 let Some(operand) = self.expr(value)? else {
                     return Ok(None);
                 };
@@ -1281,7 +1288,41 @@ impl Builder<'_> {
                 let op = RuntimeOp::AbortRaise {
                     operation: *operation,
                 };
-                self.runtime(op, vec![operand], Type::Unit, span);
+                match capability {
+                    // A zero capability (no scope supplied one) finds the
+                    // frame on the dynamic stack.
+                    Some(capability) => {
+                        let Some(target) = self.expr(capability)? else {
+                            return Ok(None);
+                        };
+                        let dynamic = self.new_block();
+                        let direct = self.new_block();
+                        let join = self.new_block();
+                        self.terminate(
+                            TerminatorKind::Switch {
+                                value: target,
+                                targets: vec![(0, dynamic)],
+                                otherwise: direct,
+                            },
+                            span,
+                        );
+                        self.enter(dynamic);
+                        self.runtime(op, vec![operand], Type::Unit, span);
+                        self.goto(join, span);
+                        self.enter(direct);
+                        self.runtime(
+                            RuntimeOp::AbortRaiseAt,
+                            vec![target, operand],
+                            Type::Unit,
+                            span,
+                        );
+                        self.goto(join, span);
+                        self.enter(join);
+                    }
+                    None => {
+                        self.runtime(op, vec![operand], Type::Unit, span);
+                    }
+                }
                 self.cleanup_all(span);
                 self.terminate(TerminatorKind::Abort, span);
                 return Ok(None);
@@ -1870,6 +1911,7 @@ impl Builder<'_> {
         body: &crate::executable::Block,
         handler: &Expr,
         operation: Option<usize>,
+        capability: Option<usize>,
     ) -> Result<Option<Operand>, String> {
         let span = expr.span;
         let (Type::Fn(id) | Type::Once(id)) = handler.ty else {
@@ -1900,6 +1942,13 @@ impl Builder<'_> {
                 Type::Unit,
                 span,
             );
+            if let Some(capability) = capability {
+                self.assign(
+                    capability,
+                    Rvalue::Use(Operand::Copy(Place::local(buffer))),
+                    span,
+                );
+            }
             buffer
         });
         let result = self.result_temp(expr.ty);

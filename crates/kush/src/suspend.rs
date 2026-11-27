@@ -134,7 +134,11 @@ fn retarget_aborts(expr: &mut Expr, labels: &mut Vec<usize>) -> Result<()> {
             else {
                 unreachable!()
             };
-            expr.kind = ExprKind::AbortPerform { operation, value };
+            expr.kind = ExprKind::AbortPerform {
+                operation,
+                value,
+                capability: None,
+            };
         }
         ExprKind::AbortCall {
             exits, propagates, ..
@@ -639,7 +643,14 @@ impl Live {
                 self.aborts.pop();
                 live
             }
-            ExprKind::AbortPerform { value, .. } => self.expr(value, &Slots::new()),
+            ExprKind::AbortPerform {
+                value, capability, ..
+            } => {
+                let after = capability
+                    .as_ref()
+                    .map_or_else(Slots::new, |capability| self.expr(capability, &Slots::new()));
+                self.expr(value, &after)
+            }
             ExprKind::AbortCall { call, exits, .. } => {
                 let mut live = after.clone();
                 for (label, _) in exits {
@@ -2926,6 +2937,7 @@ pub(crate) fn mark_abort_calls(program: &mut Executable) -> Result<()> {
                     body,
                     handler,
                     operation,
+                    ..
                 } => {
                     result = self.walk(handler, scopes, regions);
                     scopes.push((*label, *operation));

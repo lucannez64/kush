@@ -390,6 +390,10 @@ pub(crate) enum RuntimeOp {
     AbortRaise {
         operation: usize,
     },
+    /// Abort to the scope whose payload buffer is operand 0, a nonzero
+    /// capability (FND-HANDLERS-ONE-ABORT): store the payload (operand 1)
+    /// there and set the abort word to it.
+    AbortRaiseAt,
     /// The calling thread's abort word.
     AbortWord,
     /// Clear the abort word.

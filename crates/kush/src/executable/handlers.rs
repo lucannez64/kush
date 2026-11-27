@@ -666,6 +666,12 @@ impl Checker<'_, '_> {
         self.require(signature.effects, span)?;
         let handler_type = handler_value.ty;
         let slot = self.fresh_local(span, handler_type)?;
+        // FND-HANDLERS-ONE-ABORT: the payload buffer's address, set by the
+        // scope, is the declared operation's capability.
+        let capability = match declared {
+            Some(_) => Some(self.fresh_local(span, Type::I64)?),
+            None => None,
+        };
         let label = self.abort_labels;
         self.abort_labels += 1;
         self.handlers.push(HandlerScope {
@@ -721,6 +727,7 @@ impl Checker<'_, '_> {
                     resource: None,
                 }),
                 operation: declared,
+                capability,
             },
             ty,
             span,

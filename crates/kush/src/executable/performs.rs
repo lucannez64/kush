@@ -933,6 +933,7 @@ impl Checker<'_, '_> {
             kind: ExprKind::AbortPerform {
                 operation: declared.id,
                 value: Box::new(payload),
+                capability: None,
             },
             ty: Type::Never,
             span,

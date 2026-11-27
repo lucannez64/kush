@@ -257,3 +257,26 @@ fn task_bodies_capture_the_capabilities_where_the_builtin_is_called() {
         }";
     agrees(source, 15 + 11);
 }
+
+#[test]
+fn abortive_performs_address_the_scope_through_its_capability() {
+    // FND-HANDLERS-ONE-ABORT: `check`'s copy receives the scope's payload
+    // buffer; the abort stores there and sets the abort word without a
+    // search, and `keep` is dropped on the way out.
+    let source = "effect Fail: i64 -> Never;
+        fn check(x: i64) -> i64 ! {Fail} { if x < 0 { perform Fail(x) }; x * 2 }
+        fn twice(x: i64) -> i64 ! {Fail, alloc} {
+            let keep = Box.new(x);
+            let r = check(x - 10);
+            r + Box.take(keep)
+        }
+        fn main() -> i64 ! {alloc} {
+            let a = handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c + 100 } { twice(3) };
+            let b = handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c + 100 } { twice(20) };
+            a + b
+        }";
+    agrees(source, 93 + 40);
+    let debug = format!("{:?}", check(source).unwrap());
+    let copy = function(&debug, "check::capabilities");
+    assert!(copy.contains("capability: Some("), "{copy}");
+}

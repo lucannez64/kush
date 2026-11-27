@@ -1438,6 +1438,10 @@ pub(crate) enum ExprKind {
         /// A declared operation: the scope also pushes a dynamic handler frame
         /// so called functions can abort to it (E-ABORT-PROPAGATE).
         operation: Option<usize>,
+        /// With `operation`: an `i64` local the scope sets to the address of
+        /// its payload buffer, the operation's capability for the body
+        /// (FND-HANDLERS-ONE-ABORT). Unread until `crate::suspend` passes it.
+        capability: Option<usize>,
     },
     /// `perform F(value)` of a declared abortive operation with no enclosing
     /// abortive scope in this function: find the innermost dynamic frame for
@@ -1447,6 +1451,10 @@ pub(crate) enum ExprKind {
     AbortPerform {
         operation: usize,
         value: Box<Expr>,
+        /// The operation's capability (an `AbortScope` payload buffer
+        /// address) when the perform has one; zero or `None` finds the frame
+        /// on the dynamic stack.
+        capability: Option<Box<Expr>>,
     },
     /// A call that may abort (E-ABORT-PROPAGATE). After `call` returns, a set
     /// abort word names a handle activation: if it is one of the enclosing
@@ -1820,8 +1828,15 @@ impl Expr {
             ExprKind::RegionExit { value, .. }
             | ExprKind::TryExit { value, .. }
             | ExprKind::AbortExit { value, .. }
-            | ExprKind::AbortPerform { value, .. }
             | ExprKind::AbortCall { call: value, .. } => f(value),
+            ExprKind::AbortPerform {
+                value, capability, ..
+            } => {
+                f(value);
+                if let Some(capability) = capability {
+                    f(capability);
+                }
+            }
             ExprKind::HandlerRedirect { depth, body } => {
                 f(depth);
                 block(body, f);
@@ -2050,8 +2065,15 @@ impl Expr {
             ExprKind::RegionExit { value, .. }
             | ExprKind::TryExit { value, .. }
             | ExprKind::AbortExit { value, .. }
-            | ExprKind::AbortPerform { value, .. }
             | ExprKind::AbortCall { call: value, .. } => f(value),
+            ExprKind::AbortPerform {
+                value, capability, ..
+            } => {
+                f(value);
+                if let Some(capability) = capability {
+                    f(capability);
+                }
+            }
             ExprKind::HandlerRedirect { depth, body } => {
                 f(depth);
                 block(body, f);

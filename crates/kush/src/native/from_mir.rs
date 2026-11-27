@@ -892,6 +892,13 @@ impl<E: Emit> Generator<'_, E> {
                         self.builder.store(ir::MemFlagsData::new(), buffer, word, 0);
                         unit(self)
                     }
+                    RuntimeOp::AbortRaiseAt => {
+                        let buffer = words[0][0];
+                        self.store_words(buffer, &words[1]);
+                        let word = self.abort_word_address();
+                        self.builder.store(ir::MemFlagsData::new(), buffer, word, 0);
+                        unit(self)
+                    }
                     RuntimeOp::AbortWord => {
                         let address = self.abort_word_address();
                         vec![self.builder.load(I64, ir::MemFlagsData::new(), address, 0)]

@@ -279,6 +279,23 @@ and grades. It does not change the checker: it works on the checked IR.
   builtins, and handler values whose rows name declared operations
   (rule 6).
 
+### As built: HANDLERS-ONE-ABORT
+
+- An abortive `handle` of a declared operation gets an `i64` local
+  (`AbortScope::capability`) that the MIR sets to its payload buffer's
+  address. That address is the operation's capability, and it is already
+  the abort word that `AbortCall` compares against.
+- The pass treats abortive operations like resumptive ones, with `i64`
+  capabilities: copies, function values and dispatch receive them, and
+  `AbortPerform` carries the scope's local or the hidden parameter as
+  `capability`. A caller with none passes zero.
+- `AbortPerform` with a capability lowers to a branch: zero takes the
+  dynamic `AbortRaise`, anything else takes `AbortRaiseAt`, which stores the
+  payload at the capability and sets the abort word without a search.
+- Exits that a continuation carries away from their scope (E-ABORT-INTERACT)
+  still become dynamic `AbortPerform`s, as do performs in code without
+  capabilities. Both go away with the stack in HANDLERS-ONE-DELETE.
+
 ## 8. Decisions (user, 2026-11-27)
 
 - **D1. A function value gets its handler at the call.** It is today's
