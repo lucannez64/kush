@@ -106,16 +106,6 @@ impl Machine<'_, '_> {
                     .push(buffer);
                 vec![buffer]
             }
-            RuntimeOp::AbortHandlerPush { .. } => {
-                self.handlers.push(HandlerFrame {
-                    code: words[0][0],
-                    environment: 0,
-                    once: 0,
-                    consumed: false,
-                    cell: 0,
-                });
-                vec![0]
-            }
             RuntimeOp::AbortRaise { operation } => {
                 let Some((buffer, ..)) = self.lookup(operation as i64)? else {
                     return panic_at(span, NO_HANDLER);

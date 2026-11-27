@@ -871,30 +871,33 @@ impl<E: Emit> Generator<'_, E> {
                                 (self.constant(0), self.constant(0))
                             };
                         let op = self.constant(operation as i64);
-                        vec![self.runtime_call(self.handler_push, &[op, code, environment, once])]
+                        // The frame lives in this function's stack: operation,
+                        // code, environment, once, consumed, previous, owner.
+                        let slot = self.stack_words(7);
+                        vec![
+                            self.runtime_call(
+                                self.handler_push,
+                                &[op, code, environment, once, slot],
+                            ),
+                        ]
                     }
-                    // A noncapturing handler's cell is its code address with
-                    // the sign bit set (user addresses leave it clear, as do
-                    // frames, the other cells): a perform calls it without a
-                    // load.
-                    RuntimeOp::HandlerCell => {
-                        vec![self.builder.bor_imm_s(words[0][0], i64::MIN)]
-                    }
+                    // A noncapturing handler's cell is its code address
+                    // (positive: frames, the other cells, have the sign bit
+                    // set): a perform calls it without a load.
+                    RuntimeOp::HandlerCell => vec![words[0][0]],
                     RuntimeOp::HandlerPop => {
                         self.runtime_void(self.handler_pop, &[]);
                         unit(self)
                     }
-                    RuntimeOp::Perform { operation, handler } => {
+                    RuntimeOp::Perform {
+                        operation,
+                        handler,
+                        helper,
+                    } => {
                         let cell = words.get(2).map(|cell| cell[0]);
-                        self.dynamic_perform(operation, handler, &words[0], &words[1], cell)
+                        self.dynamic_perform(operation, handler, &words[0], &words[1], cell, helper)
                     }
                     RuntimeOp::AbortBuffer { words } => vec![self.stack_words(words)],
-                    RuntimeOp::AbortHandlerPush { operation } => {
-                        let op = self.constant(operation as i64);
-                        let zero = self.constant(0);
-                        self.runtime_call(self.handler_push, &[op, words[0][0], zero, zero]);
-                        unit(self)
-                    }
                     RuntimeOp::AbortRaise { operation } => {
                         let out = self.stack_words(3);
                         let op = self.constant(operation as i64);

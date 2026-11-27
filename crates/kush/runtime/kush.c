@@ -3331,20 +3331,26 @@ static KUSH_TLS int kush_initialized = 0;
 static KUSH_TLS uint64_t *kush_ready = NULL;
 static KUSH_TLS int kush_ready_capacity = 0;
 static KUSH_TLS int kush_ready_head = 0, kush_ready_tail = 0, kush_ready_count = 0;
-/* ---- Dynamic one-shot effect handlers -----------------------------------
-   Declared effect operations use a small per-task stack of handler code
-   pointers and optional owned one-shot environments. A lexical handle pushes one entry for
-   the duration of its body; a `perform` in a called function resolves the
-   innermost matching entry. A one-shot entry transfers its environment on
-   lookup, or drops it when popped without being consumed. */
-#define KUSH_HANDLER_MAX 1024
-typedef struct {
+/* ---- Handler cells (FND-HANDLERS-ONE, docs/one-handler-model.md) ---------
+   A capability names a handle activation's cell. A noncapturing handler's
+   cell is its code address. The cell of a handler that owns an environment
+   (a capturing one-shot or reusable handler) is a frame in the installing
+   function's stack, named by its address with the sign bit set. Frames are
+   linked per task, innermost first, only so that every exit from their
+   activation drops an environment no perform consumed: the depth a
+   function saves and restores is the innermost frame. A one-shot frame
+   transfers its environment to its first perform. */
+typedef struct KushHandlerFrame kush_handler_frame;
+struct KushHandlerFrame {
     int64_t operation;
     int64_t code;
     int64_t environment;
     int64_t once;
     int64_t consumed;
-} kush_handler_frame;
+    kush_handler_frame *previous;
+    void *owner; /* the context the frame is linked in */
+};
+#define KUSH_CELL_FRAME ((uint64_t)1 << 63)
 /* Continuation stack of multishot tokens (docs/multishot-capabilities.md):
    environments of `multi fn` tokens are bump-allocated in chunks, and every
    token call and multishot `handle` restores the top it saw on entry. */
@@ -3363,8 +3369,7 @@ typedef struct {
     KushKChunk *spare;
 } kush_kstack;
 typedef struct KushHandlerContext {
-    kush_handler_frame frames[KUSH_HANDLER_MAX];
-    int64_t depth;
+    kush_handler_frame *top;
     kush_kstack kstack;
 } kush_handler_context;
 /* The root task's context, also used before the task runtime starts. */
@@ -3498,37 +3503,42 @@ static KUSH_TLS int64_t kush_abort_word_local = 0;
 int64_t kush_abort_word_address(void) {
     return (int64_t)(uintptr_t)&kush_abort_word_local;
 }
+/* The depth: the innermost linked frame. */
 int64_t kush_handler_depth(void) {
-    return kush_handlers()->depth;
+    return (int64_t)(uintptr_t)kush_handlers()->top;
 }
+/* Unlink and release the frames above a saved depth. */
 void kush_handler_restore(int64_t depth) {
-    if (depth < 0) depth = 0;
     kush_handler_context *handlers = kush_handlers();
-    while (handlers->depth > depth) {
-        handlers->depth -= 1;
-        kush_handler_drop_frame(&handlers->frames[handlers->depth]);
+    kush_handler_frame *target = (kush_handler_frame *)(uintptr_t)depth;
+    while (handlers->top != NULL && handlers->top != target) {
+        kush_handler_frame *frame = handlers->top;
+        handlers->top = frame->previous;
+        kush_handler_drop_frame(frame);
     }
 }
-/* Returns the pushed frame: the activation's cell, which a capability names
-   (FND-HANDLERS-ONE-CELLS). A task's frames never move. */
+/* Fill and link the frame at `slot` (seven words in the
+   installing function's stack); returns the activation's cell. */
 int64_t kush_handler_push(int64_t operation, int64_t code, int64_t environment,
-                          int64_t once) {
+                          int64_t once, int64_t slot) {
     kush_handler_context *handlers = kush_handlers();
-    if (handlers->depth >= KUSH_HANDLER_MAX) kush_panic();
-    kush_handler_frame *frame = &handlers->frames[handlers->depth];
+    kush_handler_frame *frame = (kush_handler_frame *)(uintptr_t)slot;
     frame->operation = operation;
     frame->code = code;
     frame->environment = environment;
     frame->once = once;
     frame->consumed = 0;
-    handlers->depth += 1;
-    return (int64_t)(uintptr_t)frame;
+    frame->previous = handlers->top;
+    frame->owner = handlers;
+    handlers->top = frame;
+    return (int64_t)((uint64_t)(uintptr_t)frame | KUSH_CELL_FRAME);
 }
 void kush_handler_pop(void) {
     kush_handler_context *handlers = kush_handlers();
-    if (handlers->depth > 0) {
-        handlers->depth -= 1;
-        kush_handler_drop_frame(&handlers->frames[handlers->depth]);
+    kush_handler_frame *frame = handlers->top;
+    if (frame != NULL) {
+        handlers->top = frame->previous;
+        kush_handler_drop_frame(frame);
     }
 }
 /* What a perform takes from `frame`: its code, environment and whether the
@@ -3571,18 +3581,16 @@ int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
    cell answers as missing there. */
 int64_t kush_handler_perform(int64_t operation, int64_t cell, int64_t *out) {
     if (cell == 0) return kush_handler_lookup(operation, out);
-    if (cell < 0) {
-        /* A noncapturing handler's cell: its code address with the sign
-           bit set. */
-        out[0] = cell & INT64_MAX;
+    if (cell > 0) {
+        /* A noncapturing handler's cell: its code address. */
+        out[0] = cell;
         out[1] = 0;
         out[2] = 0;
         return 1;
     }
-    kush_handler_frame *frame = (kush_handler_frame *)(uintptr_t)cell;
-    kush_handler_context *handlers = kush_handlers();
-    int own = frame >= handlers->frames && frame < handlers->frames + KUSH_HANDLER_MAX;
-    if (!own && frame->once != 0) return 0;
+    kush_handler_frame *frame =
+        (kush_handler_frame *)(uintptr_t)((uint64_t)cell & ~KUSH_CELL_FRAME);
+    if (frame->owner != (void *)kush_handlers() && frame->once != 0) return 0;
     return kush_handler_take(frame, out);
 }
 /* Freed task stacks are kept for reuse (a server spawns a task per
@@ -3701,9 +3709,10 @@ static void kush_handler_drop_frame(kush_handler_frame *frame);
 static void kush_task_release_handlers(KushTask *t) {
     kush_handler_context *handlers = t->handlers;
     if (handlers == NULL) return;
-    while (handlers->depth > 0) {
-        handlers->depth -= 1;
-        kush_handler_drop_frame(&handlers->frames[handlers->depth]);
+    while (handlers->top != NULL) {
+        kush_handler_frame *frame = handlers->top;
+        handlers->top = frame->previous;
+        kush_handler_drop_frame(frame);
     }
     kush_kstack_drain(handlers);
     free(handlers);

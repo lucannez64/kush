@@ -1385,18 +1385,22 @@ pub(crate) enum ExprKind {
         /// Unread until `crate::suspend` passes it.
         cell: Option<usize>,
     },
-    /// `perform` resolved through the dynamic handler stack. The handler
-    /// contract is pure; a copyable function is reusable, while a capturing
-    /// once handler transfers its owned environment on the first lookup.
+    /// `perform` of a declared operation, through the activation cell
+    /// `cell` (FND-HANDLERS-ONE). The handler arrow is `handler`; a
+    /// copyable function is reusable, while a capturing once handler
+    /// transfers its owned environment on its first perform.
     DynamicPerform {
         operation: usize,
         payload: Box<Expr>,
         resume: Box<Expr>,
         handler: usize,
-        /// The activation's cell when the perform has the operation's
-        /// capability: the frame is used without a search. Zero or `None`
-        /// searches the dynamic stack.
+        /// The activation's cell. Zero or `None`: no handler, the perform
+        /// panics.
         cell: Option<Box<Expr>>,
+        /// A function `(cell, payload, token) -> result` performing through
+        /// a cell that is not a noncapturing handler's code address: native
+        /// code calls it out of line, so the direct path needs no frame.
+        helper: Option<usize>,
     },
     /// A handled body whose handler is not statically tail-resumptive and
     /// that performs its operation outside the body's tail. Produced by the

@@ -366,27 +366,23 @@ pub(crate) enum RuntimeOp {
     },
     HandlerPop,
     /// The cell of an activation whose handler (operand 0) is a
-    /// noncapturing `fn`: it owns nothing, so it lives in the installing
-    /// function's frame rather than on the task's frame array, and nothing
+    /// noncapturing `fn`: it owns nothing, so it needs no frame, and nothing
     /// releases it.
     HandlerCell,
     /// Perform `operation` with a payload and a resume value (operands 0
     /// and 1) through the activation cell in operand 2, whose callable has
     /// signature `handler`. Without a cell (or a zero one) there is no
-    /// handler: the perform panics.
+    /// handler: the perform panics. `helper` performs through a cell that
+    /// is a frame, out of line (`ExprKind::DynamicPerform::helper`).
     Perform {
         operation: usize,
         handler: usize,
+        helper: Option<usize>,
     },
     /// The address of a fresh stack buffer of `words` words: an abortive
     /// operation's payload lands there.
     AbortBuffer {
         words: usize,
-    },
-    /// Install an abort frame for `operation` whose payload buffer is
-    /// operand 0.
-    AbortHandlerPush {
-        operation: usize,
     },
     /// Abort to the frame handling `operation`: store the payload (operand
     /// 0) in its buffer and set the abort word to the buffer's address. A

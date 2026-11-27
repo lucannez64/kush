@@ -68,9 +68,6 @@ struct Pass<'a> {
     /// Each function's written capabilities (`cap` parameters, captured
     /// capabilities): slot to handler arrow (FND-HANDLERS-ONE-EXPLICIT).
     explicit: &'a [BTreeMap<usize, usize>],
-    /// The operation (declared or private) each capability trampoline
-    /// performs: the frame whose cell replaces it.
-    trampolines: &'a BTreeMap<usize, usize>,
 }
 
 impl Pass<'_> {
@@ -164,6 +161,7 @@ impl Pass<'_> {
                     resume: Box::new(resume),
                     handler: arrow,
                     cell: Some(cell),
+                    helper: None,
                 };
             }
             ExprKind::Call(Target::Function(callee), arguments) => {
@@ -217,10 +215,11 @@ impl Pass<'_> {
                         .copied()
                 }
             }
-            ExprKind::FnValue { function, .. } => self
-                .trampolines
-                .get(function)
-                .and_then(|operation| scope.pushes.get(operation))
+            // The checker's placeholder for a framed capability: a constant
+            // naming the handler's local, at the parameter's arrow.
+            ExprKind::Constant(slot) if matches!(expr.ty, Type::Fn(_)) => usize::try_from(*slot)
+                .ok()
+                .and_then(|slot| scope.handlers.get(&slot))
                 .copied(),
             _ => None,
         }
@@ -267,7 +266,6 @@ impl Pass<'_> {
 
     fn alias_expr(&self, expr: &Expr, scope: &Scope, out: &mut BTreeMap<usize, usize>) {
         if let ExprKind::HandlerPush {
-            operation,
             handler,
             body,
             cell: Some(cell),
@@ -276,7 +274,6 @@ impl Pass<'_> {
         {
             self.alias_expr(handler, scope, out);
             let mut inner = scope.clone();
-            inner.pushes.insert(*operation, *cell);
             if let Some(local) = local_of(handler) {
                 inner.handlers.insert(local, *cell);
             }
@@ -340,11 +337,10 @@ impl Pass<'_> {
                     None => inner.capabilities.remove(operation),
                 };
             }
-            if let Some(cell) = cell {
-                inner.pushes.insert(*operation, *cell);
-                if let Some(local) = local_of(handler) {
-                    inner.handlers.insert(local, *cell);
-                }
+            if let Some(cell) = cell
+                && let Some(local) = local_of(handler)
+            {
+                inner.handlers.insert(local, *cell);
             }
             self.block(body, &inner);
             return;
@@ -495,9 +491,7 @@ struct Scope {
     capabilities: BTreeMap<usize, Capability>,
     /// This function's written capabilities, cells now: slot to arrow.
     explicit: BTreeMap<usize, usize>,
-    /// The cell of the innermost enclosing push of each operation id,
-    /// private ones included, and of each pushed handler local.
-    pushes: BTreeMap<usize, usize>,
+    /// The cell of each enclosing push, by its handler's local.
     handlers: BTreeMap<usize, usize>,
     /// Temporaries holding a capability: slot to cell.
     aliases: BTreeMap<usize, usize>,
@@ -547,30 +541,6 @@ pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows, Explicit)
             function.locals[slot].ty = Type::I64;
         }
     }
-    let trampolines = program
-        .functions
-        .iter()
-        .enumerate()
-        .filter(|(_, function)| function.name == "<capability trampoline>")
-        .filter_map(|(index, function)| {
-            fn find(expr: &Expr, found: &mut Option<usize>) {
-                if let ExprKind::DynamicPerform { operation, .. } = &expr.kind {
-                    found.get_or_insert(*operation);
-                }
-                expr.for_each_child(&mut |child| find(child, found));
-            }
-            let mut found = None;
-            for statement in &function.body.statements {
-                if let Statement::Let(_, value) | Statement::Expr(value) = statement {
-                    find(value, &mut found);
-                }
-            }
-            if let Some(tail) = &function.body.tail {
-                find(tail, &mut found);
-            }
-            found.map(|operation| (index, operation))
-        })
-        .collect::<BTreeMap<_, _>>();
     let mut arrows = BTreeMap::new();
     let mut caps = BTreeSet::new();
     for function in &program.functions {
@@ -691,7 +661,6 @@ pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows, Explicit)
         copies: BTreeMap::new(),
         order: Vec::new(),
         explicit: &written,
-        trampolines: &trampolines,
     };
     for (index, function) in program.functions[..originals].iter_mut().enumerate() {
         let mut scope = Scope {
@@ -816,7 +785,133 @@ pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows, Explicit)
                 .resize(arrow.parameters.len(), vec![]);
         }
     }
+    add_perform_helpers(program);
     Ok((copies, arrows, explicit))
+}
+
+/// Give every perform through a cell its out-of-line helper, one per handler
+/// arrow: `(cell, payload, token) -> result`, performing through the
+/// runtime. Native code calls a noncapturing handler's cell directly and
+/// only calls the helper otherwise, so the direct path needs no frame.
+fn add_perform_helpers(program: &mut Executable) {
+    fn each(block: &mut Block, f: &mut dyn FnMut(&mut Expr)) {
+        fn walk(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
+            expr.for_each_child_mut(&mut |child| walk(child, f));
+            f(expr);
+        }
+        for statement in &mut block.statements {
+            if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                walk(value, f);
+            }
+        }
+        if let Some(tail) = block.tail.as_deref_mut() {
+            walk(tail, f);
+        }
+    }
+    let functions = program.functions.len();
+    let mut helpers = BTreeMap::new();
+    let mut wanted = Vec::new();
+    for function in &mut program.functions[..functions] {
+        each(&mut function.body, &mut |expr| {
+            if let ExprKind::DynamicPerform {
+                operation,
+                handler,
+                cell: Some(_),
+                helper,
+                ..
+            } = &mut expr.kind
+            {
+                let next = functions + wanted.len();
+                let index = *helpers.entry(*handler).or_insert_with(|| {
+                    wanted.push((*operation, *handler, expr.span));
+                    next
+                });
+                *helper = Some(index);
+            }
+        });
+    }
+    for (operation, arrow, span) in wanted {
+        let built = perform_helper(
+            &program.functions[0],
+            &program.function_types,
+            operation,
+            arrow,
+            span,
+        );
+        program.functions.push(built);
+        program.foreign_functions.push(None);
+    }
+}
+
+/// `(cell, payload, token) -> result`: a perform of arrow `arrow` through
+/// the cell, by the runtime path (`helper: None`).
+fn perform_helper(
+    template: &crate::executable::Function,
+    function_types: &[crate::runtime_types::FunctionType],
+    operation: usize,
+    arrow: usize,
+    span: crate::Span,
+) -> crate::executable::Function {
+    let payload = function_types[arrow].parameters[0];
+    let token = function_types[arrow].parameters[1];
+    let result = function_types[arrow].result;
+    let local = |ty: Type| Local {
+        ty,
+        mutable: false,
+        linear: false,
+        pinned: false,
+        grade: None,
+        span,
+    };
+    let read = |slot: usize, ty: Type| {
+        Box::new(Expr {
+            kind: ExprKind::Local(slot),
+            ty,
+            span,
+            resource: None,
+        })
+    };
+    let mut function = template.clone();
+    function.name = "<perform through a cell>".to_owned();
+    function.parameters = 3;
+    function.closure = None;
+    function.capture_refs = vec![];
+    function.capture_writes = vec![];
+    function.locals = vec![local(Type::I64), local(payload), local(token)];
+    function.result = result;
+    function.body = Block {
+        statements: vec![],
+        tail: Some(Box::new(Expr {
+            kind: ExprKind::DynamicPerform {
+                operation,
+                payload: read(1, payload),
+                resume: read(2, token),
+                handler: arrow,
+                cell: Some(read(0, Type::I64)),
+                helper: None,
+            },
+            ty: result,
+            span,
+            resource: None,
+        })),
+        ty: result,
+    };
+    function.span = span;
+    function.resources = vec![];
+    function.local_resources = vec![None; 3];
+    function.parameter_grades = vec![None; 3];
+    function.result_grade = None;
+    function.parameter_lifetimes = vec![None; 3];
+    function.result_lifetime = None;
+    function.lifetime_bounds = BTreeSet::new();
+    function.declared_lifetimes = BTreeSet::new();
+    function.index_relations = BTreeSet::new();
+    function.parameter_slots = None;
+    function.local_borrowed = vec![];
+    function.local_copyable = vec![];
+    function.capability_parameters = vec![];
+    function.shared_environment = false;
+    function
 }
 
 /// The resumptive declared operations performed by name somewhere that the

@@ -465,125 +465,24 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
-    /// EFF-CAP-RESUME-CAPTURING: a noncapturing function
-    /// `fn(P, token) -> R ! {}` that performs the declared operation
-    /// through the dynamic stack. Passed in place of a capturing capability,
-    /// it reaches the capability's own frame: callees perform through it only
-    /// in resumable entries, which never run under a nested handler for the
-    /// operation, and resumed continuations hide frames the handler pushed.
-    /// The frame's consumed flag makes a second perform panic.
-    pub(super) fn capability_thunk(
-        &mut self,
-        operation: usize,
-        arrow: usize,
-        effects: u16,
-        span: Span,
-    ) -> Result<(usize, Type)> {
-        if let Some(found) = self.functions.capability_thunks.get(&(operation, arrow)) {
-            return Ok(*found);
-        }
+    /// EFF-CAP-RESUME-CAPTURING: the arrow a capturing capability is passed
+    /// at: the handler's, with its effects (a capability-only handler may
+    /// have some) and `panic` for a consumed one-shot activation. The
+    /// argument itself is a placeholder naming the handler, which
+    /// `crate::suspend` replaces by the activation's cell.
+    pub(super) fn framed_capability_type(&mut self, arrow: usize, effects: u16) -> Type {
         let handler = self.types.function_types[arrow].clone();
         let parameters = handler.parameters.clone();
-        let result = handler.result;
-        // The trampoline has the handler's effects (a capability-only
-        // handler may have some) and `panic` for a consumed frame.
-        let id = self.types.function_type_with(
+        Type::Fn(self.types.function_type_with(
             parameters.clone(),
-            result,
+            handler.result,
             PANIC | effects,
             vec![None; parameters.len()],
             None,
             false,
             false,
             crate::runtime_types::BorrowSig::default(),
-        );
-        let ty = Type::Fn(id);
-        let locals = parameters
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| Local {
-                ty: *ty,
-                mutable: false,
-                linear: index == 1,
-                pinned: false,
-                grade: None,
-                span,
-            })
-            .collect();
-        let local = |slot: usize| Expr {
-            kind: ExprKind::Local(slot),
-            ty: parameters[slot],
-            span,
-            resource: None,
-        };
-        let body = Block {
-            statements: vec![],
-            tail: Some(Box::new(Expr {
-                kind: ExprKind::DynamicPerform {
-                    operation,
-                    payload: Box::new(local(0)),
-                    resume: Box::new(local(1)),
-                    handler: arrow,
-                    cell: None,
-                },
-                ty: result,
-                span,
-                resource: None,
-            })),
-            ty: result,
-        };
-        let function = Function {
-            name: "<capability trampoline>".to_owned(),
-            parameters: parameters.len(),
-            closure: None,
-            capture_refs: vec![],
-            capture_writes: vec![],
-            locals,
-            result,
-            body,
-            span,
-            resources: vec![],
-            local_resources: vec![],
-            parameter_grades: vec![None; parameters.len()],
-            result_grade: None,
-            parameter_lifetimes: vec![None; parameters.len()],
-            result_lifetime: None,
-            lifetime_bounds: BTreeSet::new(),
-            declared_lifetimes: BTreeSet::new(),
-            index_relations: BTreeSet::new(),
-            parameter_slots: None,
-            local_borrowed: vec![],
-            local_copyable: vec![],
-            capability_parameters: vec![],
-            shared_environment: false,
-        };
-        let signature = Signature {
-            call_contract: None,
-            binding: usize::MAX,
-            name: function.name.clone(),
-            parameters: parameters.clone(),
-            result,
-            effects: PANIC | effects,
-            span,
-            substitution: BTreeMap::new(),
-            consts: BTreeMap::new(),
-            grades: BTreeMap::new(),
-            effect_arguments: BTreeMap::new(),
-            origin: None,
-            parameter_grades: vec![None; parameters.len()],
-            result_grade: None,
-            parameter_lifetimes: vec![None; parameters.len()],
-            result_lifetime: None,
-            lifetime_bounds: BTreeSet::new(),
-            self_type: None,
-            default_trait: None,
-            associated_consts: BTreeMap::new(),
-        };
-        let index = self.functions.add_synthetic(signature, function)?;
-        self.functions
-            .capability_thunks
-            .insert((operation, arrow), (index, ty));
-        Ok((index, ty))
+        ))
     }
     /// `handle F: P -> Never with h { body }` (E-ABORT-LEXICAL,
     /// docs/abortive-handlers.md 3.1-3.2). `h` takes only the payload and

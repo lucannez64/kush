@@ -1342,9 +1342,10 @@ impl Builder<'_> {
                 resume,
                 handler,
                 cell,
+                helper,
             } => {
-                // FND-HANDLERS-ONE-CELLS: a third operand names the
-                // activation's cell (zero: search the stack).
+                // FND-HANDLERS-ONE: a third operand names the activation's
+                // cell (zero: no handler).
                 let mut operands = vec![&**payload, &**resume];
                 operands.extend(cell.as_deref());
                 let Some(values) = self.operands(&operands)? else {
@@ -1355,6 +1356,7 @@ impl Builder<'_> {
                 let op = RuntimeOp::Perform {
                     operation: *operation,
                     handler: *handler,
+                    helper: *helper,
                 };
                 let result = self.runtime(op, values, expr.ty, span);
                 Operand::Move(Place::local(result))
@@ -1941,16 +1943,11 @@ impl Builder<'_> {
             .iter()
             .any(|function| function.shared_environment)
             .then(|| self.runtime(RuntimeOp::ContinuationMark, vec![], Type::I64, span));
-        let buffer = operation.map(|operation| {
+        // The payload buffer is the operation's capability; no frame is
+        // needed since no abort searches for its scope.
+        let buffer = operation.map(|_| {
             let words = self.program.width(payload_ty);
             let buffer = self.runtime(RuntimeOp::AbortBuffer { words }, vec![], Type::I64, span);
-            let push = RuntimeOp::AbortHandlerPush { operation };
-            self.runtime(
-                push,
-                vec![Operand::Copy(Place::local(buffer))],
-                Type::Unit,
-                span,
-            );
             if let Some(capability) = capability {
                 self.assign(
                     capability,
@@ -1973,9 +1970,6 @@ impl Builder<'_> {
         let finished = self.block(body);
         self.aborts.pop();
         if let Some(value) = finished? {
-            if buffer.is_some() {
-                self.runtime(RuntimeOp::HandlerPop, vec![], Type::Unit, span);
-            }
             if let Some(result) = result {
                 self.assign(result, Rvalue::Use(value), span);
             }

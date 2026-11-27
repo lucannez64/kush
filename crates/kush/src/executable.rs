@@ -1418,8 +1418,6 @@ struct Functions<'a> {
     object_traits: BTreeMap<Type, Vec<(BindingId, TraitArguments)>>,
     /// Checked dynamic-dispatch functions, one per `(trait, arguments, method)`.
     dynamic_dispatch: BTreeMap<(BindingId, TraitArguments, String), (usize, Type)>,
-    /// EFF-CAP-RESUME-CAPTURING trampolines by (operation, handler arrow).
-    capability_thunks: BTreeMap<(usize, usize), (usize, Type)>,
     /// CAP-CAPTURING-LEXICAL: private operation ids handed out so far.
     private_operations: usize,
     /// FND-ROWS-INFER: private functions that omit their row.
@@ -1959,7 +1957,6 @@ fn check_program_pass(
         impl_instantiation_cache: BTreeMap::new(),
         object_traits: BTreeMap::new(),
         dynamic_dispatch: BTreeMap::new(),
-        capability_thunks: BTreeMap::new(),
         private_operations: 0,
         inferred_rows: BTreeSet::new(),
         rows,

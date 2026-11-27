@@ -204,14 +204,14 @@ impl Checker<'_, '_> {
         }
         if let Some(slot) = site.capability_slot {
             self.mark_capability_awaits_in_block(&mut block, slot)?;
-            if let Some((operation, arrow, effects)) = self.capability_framed.get(&slot).copied() {
+            if self.capability_framed.contains_key(&slot) {
                 for statement in &mut block.statements {
                     if let Statement::Let(_, value) | Statement::Expr(value) = statement {
-                        self.replace_framed_arguments(value, slot, operation, arrow, effects)?;
+                        self.replace_framed_arguments(value, slot);
                     }
                 }
                 if let Some(tail) = block.tail.as_deref_mut() {
-                    self.replace_framed_arguments(tail, slot, operation, arrow, effects)?;
+                    self.replace_framed_arguments(tail, slot);
                 }
             }
         }
@@ -394,38 +394,16 @@ impl Checker<'_, '_> {
     }
     /// EFF-CAP-RESUME-CAPTURING: replace the placeholders of a framed
     /// capability passed to `cap` parameters (the local at the parameter's
-    /// type) by the trampoline.
-    pub(super) fn replace_framed_arguments(
-        &mut self,
-        expr: &mut Expr,
-        slot: usize,
-        operation: usize,
-        arrow: usize,
-        effects: u16,
-    ) -> Result<()> {
+    /// type, which the frame has taken) by a constant naming the handler's
+    /// local: `crate::suspend` replaces it by the activation's cell.
+    pub(super) fn replace_framed_arguments(&mut self, expr: &mut Expr, slot: usize) {
         if matches!(expr.kind, ExprKind::Local(local) if local == slot)
             && expr.ty != self.locals[slot].ty
         {
-            let (function, ty) = self.capability_thunk(operation, arrow, effects, expr.span)?;
-            let thunk = Expr {
-                kind: ExprKind::FnValue {
-                    function,
-                    captures: vec![],
-                },
-                ty,
-                span: expr.span,
-                resource: None,
-            };
-            *expr = self.coerce(thunk, expr.ty, expr.span)?;
-            return Ok(());
+            expr.kind = ExprKind::Constant(slot as i64);
+            return;
         }
-        let mut result = Ok(());
-        expr.for_each_child_mut(&mut |child| {
-            if result.is_ok() {
-                result = self.replace_framed_arguments(child, slot, operation, arrow, effects);
-            }
-        });
-        result
+        expr.for_each_child_mut(&mut |child| self.replace_framed_arguments(child, slot));
     }
     pub(super) fn mark_capability_awaits(
         &mut self,
@@ -1011,6 +989,7 @@ impl Checker<'_, '_> {
                 resume: Box::new(resume),
                 handler,
                 cell: None,
+                helper: None,
             },
             ty: declared.result,
             span,

@@ -2165,14 +2165,12 @@ impl Checker<'_, '_> {
                         "a 'cap' parameter takes a capability bound by 'handle Op as op' or a 'cap' parameter, passed by name",
                     ));
                 };
-                // A capturing handler stays in its dynamic frame; the callee
-                // gets a trampoline that performs the operation there. The
-                // argument is a placeholder (the capability local at the
-                // parameter's type) until the body's await points are marked.
-                if let Some((operation, arrow, effects)) =
-                    self.capability_framed.get(&slot).copied()
-                {
-                    let (_, ty) = self.capability_thunk(operation, arrow, effects, value.span)?;
+                // A capturing handler lives in its frame; the callee gets the
+                // activation's cell. The argument is a placeholder (the
+                // capability local at the parameter's type) until the body's
+                // await points are marked.
+                if let Some((_, arrow, effects)) = self.capability_framed.get(&slot).copied() {
+                    let ty = self.framed_capability_type(arrow, effects);
                     let Some(wanted) = wanted else {
                         return Err(Diagnostic::new(
                             value.span,

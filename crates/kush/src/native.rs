@@ -901,13 +901,11 @@ impl Drop for Scratch {
 /// analysis.
 pub(crate) fn block_installs_handler(block: &ex::Block) -> bool {
     fn expression(expr: &Expr) -> bool {
-        let framed = match &expr.kind {
-            ExprKind::HandlerPush { handler, .. } => !matches!(handler.ty, ex::Type::Fn(_)),
-            ExprKind::AbortScope {
-                operation: Some(_), ..
-            } => true,
-            _ => false,
-        };
+        // Abortive scopes link no frame: their buffers are their cells.
+        let framed = matches!(
+            &expr.kind,
+            ExprKind::HandlerPush { handler, .. } if !matches!(handler.ty, ex::Type::Fn(_))
+        );
         if framed {
             return true;
         }
@@ -1908,8 +1906,9 @@ fn lower(
     let mut handler_push_sig = module.make_signature();
     handler_push_sig
         .params
-        .extend((0..4).map(|_| AbiParam::new(I64)));
-    // The pushed frame is the activation's cell (FND-HANDLERS-ONE-CELLS).
+        .extend((0..5).map(|_| AbiParam::new(I64)));
+    // Fills and links a frame in the caller's stack (the fifth argument) and
+    // answers the activation's cell (FND-HANDLERS-ONE).
     handler_push_sig.returns.push(AbiParam::new(I64));
     let handler_push = module
         .declare_function("kush_handler_push", Linkage::Import, &handler_push_sig)
@@ -7261,6 +7260,7 @@ impl<E: Emit> Generator<'_, E> {
         payload_values: &[Value],
         resume_values: &[Value],
         cell: Option<Value>,
+        helper: Option<usize>,
     ) -> Words {
         let signature = self.program.function_types[handler].clone();
         let result = signature.result;
@@ -7274,6 +7274,30 @@ impl<E: Emit> Generator<'_, E> {
         } else {
             None
         };
+        let Some(join) = self.join(result) else {
+            unreachable!("a declared effect result is never Never")
+        };
+        if let (Some(cell), Some(helper)) = (cell, helper) {
+            // FND-HANDLERS-ONE: a noncapturing handler's cell is its code
+            // address (positive), called directly; any other cell goes to
+            // the out-of-line helper, so this path needs no frame.
+            let direct = self.builder.create_block();
+            let other = self.builder.create_block();
+            let code = self.builder.icmp_imm_s(IntCC::SignedGreaterThan, cell, 0);
+            self.builder.brif(code, direct, &[], other, &[]);
+            self.builder.switch_to_block(direct);
+            let results =
+                self.handler_call(handler, pointer, None, cell, payload_values, resume_values);
+            self.jump(join, &results);
+            self.builder.switch_to_block(other);
+            let mut arguments = vec![cell];
+            arguments.extend(payload_values.iter().copied());
+            arguments.extend(resume_values.iter().copied());
+            let results = self.function_call(helper, arguments);
+            self.jump(join, &results);
+            self.builder.switch_to_block(join);
+            return self.builder.block_params(join).to_vec();
+        }
         // A handler is either a copyable noncapturing `fn` (no environment
         // word in its ABI) or an owning `once` handler (an environment
         // word); its frame records which. `fn_block` takes the code,
@@ -7285,15 +7309,16 @@ impl<E: Emit> Generator<'_, E> {
         let once_environment = self.builder.append_block_param(once_block, I64);
         let search = self.builder.create_block();
         if let Some(cell) = cell {
-            // FND-HANDLERS-ONE-CELLS: the cell of a noncapturing `fn` is its
-            // code address with the sign bit set, called directly; a frame
-            // (bit clear) or zero goes through the runtime.
+            // FND-HANDLERS-ONE: the cell of a noncapturing `fn` is its code
+            // address (positive), called here directly; a frame (sign bit
+            // set) or zero goes through the runtime.
             let direct = self.builder.create_block();
-            let tagged = self.builder.icmp_imm_s(IntCC::SignedLessThan, cell, 0);
-            self.builder.brif(tagged, direct, &[], search, &[]);
+            let code = self.builder.icmp_imm_s(IntCC::SignedGreaterThan, cell, 0);
+            self.builder.brif(code, direct, &[], search, &[]);
             self.builder.switch_to_block(direct);
-            let code = self.builder.band_imm_s(cell, i64::MAX);
-            self.builder.jump(fn_block, &[code]);
+            let results =
+                self.handler_call(handler, pointer, None, cell, payload_values, resume_values);
+            self.jump(join, &results);
         } else {
             self.builder.jump(search, &[]);
         }
@@ -7311,38 +7336,55 @@ impl<E: Emit> Generator<'_, E> {
         let once = self.builder.load(I64, ir::MemFlagsData::new(), out, 16);
         self.builder
             .brif(once, once_block, &[code, environment], fn_block, &[code]);
-        let Some(join) = self.join(result) else {
-            unreachable!("a declared effect result is never Never")
-        };
-        for (call_once, block, code) in [(false, fn_block, fn_code), (true, once_block, once_code)]
-        {
+        for (environment, block, code) in [
+            (None, fn_block, fn_code),
+            (Some(once_environment), once_block, once_code),
+        ] {
             self.builder.switch_to_block(block);
-            let mut values = Vec::new();
-            if let Some(pointer) = pointer {
-                values.push(pointer);
-            }
-            if call_once {
-                values.push(once_environment);
-            }
-            values.extend(payload_values.iter().copied());
-            values.extend(resume_values.iter().copied());
-            let signature = self.indirect_signature_mode(handler, call_once);
-            let signature = self.builder.import_signature(signature);
-            let call = self.builder.call_indirect(signature, code, &values);
-            self.test_panic();
-            let results = match pointer {
-                Some(pointer) => (0..self.program.width(result))
-                    .map(|i| {
-                        self.builder
-                            .load(I64, ir::MemFlagsData::new(), pointer, (i * 8) as i32)
-                    })
-                    .collect::<Vec<_>>(),
-                None => self.builder.inst_results(call).to_vec(),
-            };
+            let results = self.handler_call(
+                handler,
+                pointer,
+                environment,
+                code,
+                payload_values,
+                resume_values,
+            );
             self.jump(join, &results);
         }
         self.builder.switch_to_block(join);
         self.builder.block_params(join).to_vec()
+    }
+    /// Call a handler of arrow `handler` at `code`: a noncapturing `fn`, or
+    /// an owning `once` handler given its `environment`. An aggregate
+    /// result comes back through `pointer`.
+    fn handler_call(
+        &mut self,
+        handler: usize,
+        pointer: Option<Value>,
+        environment: Option<Value>,
+        code: Value,
+        payload_values: &[Value],
+        resume_values: &[Value],
+    ) -> Words {
+        let result = self.program.function_types[handler].result;
+        let mut values = Vec::new();
+        values.extend(pointer);
+        values.extend(environment);
+        values.extend(payload_values.iter().copied());
+        values.extend(resume_values.iter().copied());
+        let signature = self.indirect_signature_mode(handler, environment.is_some());
+        let signature = self.builder.import_signature(signature);
+        let call = self.builder.call_indirect(signature, code, &values);
+        self.test_panic();
+        match pointer {
+            Some(pointer) => (0..self.program.width(result))
+                .map(|i| {
+                    self.builder
+                        .load(I64, ir::MemFlagsData::new(), pointer, (i * 8) as i32)
+                })
+                .collect(),
+            None => self.builder.inst_results(call).to_vec(),
+        }
     }
     /// `Vec.map` in place: apply the callbacks `codes` (of function types
     /// `types`, inlined where `plans` has a plan) in order to every element
