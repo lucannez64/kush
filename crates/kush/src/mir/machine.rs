@@ -927,11 +927,24 @@ impl Machine<'_, '_> {
             }
             Rvalue::Map(op, operands) => {
                 let handle = self.scalar(operands[0])?;
-                let callbacks = operands[1..]
+                let values = operands[1..]
                     .iter()
                     .map(|callback| self.scalar(*callback))
                     .collect::<Run<Vec<_>>>()?;
-                self.vec_map(op, handle, callbacks)
+                let (callbacks, capabilities) = values.split_at(op.functions.len());
+                // Each callback's capabilities follow its element.
+                let mut rest = capabilities.iter().copied();
+                let capabilities = operands[1..=op.functions.len()]
+                    .iter()
+                    .map(|callback| {
+                        let count = match body.operand_ty(*callback) {
+                            Type::Fn(id) => self.program.function_types[id].parameters.len() - 1,
+                            _ => 0,
+                        };
+                        rest.by_ref().take(count).collect()
+                    })
+                    .collect();
+                self.vec_map(op, handle, callbacks.to_vec(), capabilities)
             }
             Rvalue::Task(op, operands) => self.task_op(*op, operands, ty),
             _ => Ok(Flow::Done(self.rvalue(body, rvalue, ty, span)?)),

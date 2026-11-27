@@ -808,7 +808,11 @@ impl<E: Emit> Generator<'_, E> {
             }
             Rvalue::Map(op, operands) => {
                 let handle = self.mir_scalar(operands[0]);
-                let callbacks = &operands[1..];
+                let callbacks = &operands[1..=op.functions.len()];
+                let capabilities = operands[1 + op.functions.len()..]
+                    .iter()
+                    .map(|capability| self.mir_scalar(*capability))
+                    .collect::<Vec<_>>();
                 let codes = callbacks
                     .iter()
                     .map(|callback| self.mir_scalar(*callback))
@@ -830,7 +834,14 @@ impl<E: Emit> Generator<'_, E> {
                     })
                     .collect::<Vec<_>>();
                 Some(vec![self.vec_map(
-                    handle, &codes, &types, &plans, op.source, op.target, op.grow,
+                    handle,
+                    &codes,
+                    &types,
+                    &plans,
+                    op.source,
+                    op.target,
+                    op.grow,
+                    &capabilities,
                 )])
             }
             Rvalue::Runtime(op, operands) => {

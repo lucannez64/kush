@@ -319,6 +319,20 @@ and the removal itself.
   answers as missing there (the frame lies outside the task's frames and
   owns an environment).
 
+### As built: HANDLERS-ONE-CALLBACKS
+
+- `VecMap` carries the capabilities its callbacks take (`capabilities`, in
+  callback order; a callback takes as many as its arrow's parameters beyond
+  the element). The map loops of both backends pass them after the element,
+  so vector callback arrows are no longer kept on the dynamic stack.
+- No other builtin takes a callable: the `Target` builtins take data, and
+  foreign and staged entries restrict their argument types.
+- A handler pushed for a declared operation can only have the operation's
+  built-in effects, so no pushed handler's row names a resumptive declared
+  operation. What rule 6 leaves are abortive operations in the rows of
+  handlers that abort through their token (E-ABORT-ENTRIES); they go with
+  the other abort cases in HANDLERS-ONE-DELETE.
+
 ## 8. Decisions (user, 2026-11-27)
 
 - **D1. A function value gets its handler at the call.** It is today's

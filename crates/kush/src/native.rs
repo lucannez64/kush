@@ -7375,6 +7375,7 @@ impl<E: Emit> Generator<'_, E> {
         source: Type,
         target: Type,
         grow: bool,
+        capabilities: &[Value],
     ) -> Value {
         let source_width = self.program.width(source);
         let target_width = self.program.width(target);
@@ -7409,9 +7410,18 @@ impl<E: Emit> Generator<'_, E> {
         // currently in the slot still has the source width until the
         // first callback consumes it.
         let mut current = self.load_words(address, 16, source_width);
+        // Each callback's capabilities follow its element
+        // (FND-HANDLERS-ONE-CALLBACKS).
+        let mut rest = capabilities.iter().copied();
         for ((code, ty), plan) in codes.iter().zip(types).zip(plans) {
+            let taken = match *ty {
+                Type::Fn(id) => self.program.function_types[id].parameters.len() - 1,
+                _ => 0,
+            };
+            let own = rest.by_ref().take(taken).collect::<Vec<_>>();
             if let Some(plan) = plan
                 && current.len() == 1
+                && own.is_empty()
             {
                 current = vec![plan.emit(&mut self.builder, current[0])];
                 continue;
@@ -7435,6 +7445,7 @@ impl<E: Emit> Generator<'_, E> {
                 values.push(pointer);
             }
             values.extend(current.iter().copied());
+            values.extend(own);
             let signature = self.indirect_signature(id);
             let signature = self.builder.import_signature(signature);
             let call = self.builder.call_indirect(signature, *code, &values);

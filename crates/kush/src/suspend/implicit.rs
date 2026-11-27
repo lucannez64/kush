@@ -254,6 +254,18 @@ impl Pass<'_> {
                 let operations = self.value_operations(callee.ty).to_vec();
                 arguments.extend(self.supply(&operations, scope, expr.span));
             }
+            // FND-HANDLERS-ONE-CALLBACKS: the map loop passes each callback
+            // the capabilities its arrow takes, after the element.
+            ExprKind::VecMap {
+                callbacks,
+                capabilities,
+                ..
+            } => {
+                for callback in callbacks.iter() {
+                    let operations = self.value_operations(callback.ty).to_vec();
+                    capabilities.extend(self.supply(&operations, scope, callback.span));
+                }
+            }
             ExprKind::Call(Target::DynCall { spec }, arguments)
                 if !self.dyn_calls[*spec].is_empty() =>
             {
@@ -561,11 +573,6 @@ fn value_operations(program: &Executable, caps: &BTreeSet<usize>) -> Vec<Vec<usi
             ExprKind::Suspend { call, .. } => {
                 if let ExprKind::CallIndirect { callee, .. } = &call.kind {
                     pin(callee.ty);
-                }
-            }
-            ExprKind::VecMap { callbacks, .. } => {
-                for callback in callbacks {
-                    pin(callback.ty);
                 }
             }
             // A task body takes its capabilities as captures, which needs a

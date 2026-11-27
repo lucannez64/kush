@@ -1156,6 +1156,7 @@ impl Builder<'_> {
                 source,
                 target,
                 grow,
+                capabilities,
             } => {
                 let functions = callbacks
                     .iter()
@@ -1172,8 +1173,11 @@ impl Builder<'_> {
                     grow: *grow,
                     functions,
                 };
+                // Operands: the vector, the callbacks, then each callback's
+                // capabilities in order.
                 let mut children = vec![(&**vector, true)];
                 children.extend(callbacks.iter().map(|callback| (callback, true)));
+                children.extend(capabilities.iter().map(|capability| (capability, true)));
                 return self.operation(expr, &children, |values| Rvalue::Map(op, values));
             }
             ExprKind::DynArrayNew { element, capacity } => {

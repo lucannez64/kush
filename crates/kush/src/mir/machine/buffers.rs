@@ -432,7 +432,13 @@ impl Machine<'_, '_> {
     /// `Vec.map` in place (native's `vec_map`): restride once when the
     /// elements widen or narrow, then apply the callbacks to each element.
     /// The callbacks run as frames on the stack, one at a time.
-    pub(super) fn vec_map(&mut self, op: &MapOp, handle: i64, callbacks: Vec<i64>) -> Run<Flow> {
+    pub(super) fn vec_map(
+        &mut self,
+        op: &MapOp,
+        handle: i64,
+        callbacks: Vec<i64>,
+        capabilities: Vec<Vec<i64>>,
+    ) -> Run<Flow> {
         let source = self.width(op.source);
         let target = self.width(op.target);
         let mut handle = handle;
@@ -471,6 +477,7 @@ impl Machine<'_, '_> {
                 pending: false,
                 callback: 0,
                 callbacks,
+                capabilities,
                 current: Vec::new(),
                 source,
                 stride,
@@ -1040,6 +1047,8 @@ struct Mapping {
     pending: bool,
     callback: usize,
     callbacks: Vec<i64>,
+    /// The capabilities each callback takes after its element.
+    capabilities: Vec<Vec<i64>>,
     current: Words,
     /// The elements' widths before and after, and the stride they are
     /// read at, in words.
@@ -1054,7 +1063,12 @@ fn map_step(machine: &mut Machine<'_, '_>, mut state: Mapping) -> Run<Flow> {
         if state.pending {
             if state.callback < state.callbacks.len() {
                 let function = code_function(state.callbacks[state.callback])?;
-                let args = vec![std::mem::take(&mut state.current)];
+                let mut args = vec![std::mem::take(&mut state.current)];
+                args.extend(
+                    state.capabilities[state.callback]
+                        .iter()
+                        .map(|capability| vec![*capability]),
+                );
                 return Ok(Flow::Call {
                     function,
                     args,

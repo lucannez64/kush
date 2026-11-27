@@ -1358,6 +1358,10 @@ pub(crate) enum ExprKind {
         source: Type,
         target: Type,
         grow: bool,
+        /// The capabilities each callback takes after its element, in
+        /// callback order (FND-HANDLERS-ONE-CALLBACKS): as many as its
+        /// arrow's parameters beyond the first.
+        capabilities: Vec<Expr>,
     },
     /// Construct an empty runtime-sized inline array with zeroed capacity.
     DynArrayNew {
@@ -1813,10 +1817,13 @@ impl Expr {
                 }
             }
             ExprKind::VecMap {
-                vector, callbacks, ..
+                vector,
+                callbacks,
+                capabilities,
+                ..
             } => {
                 f(vector);
-                for callback in callbacks {
+                for callback in callbacks.iter().chain(capabilities) {
                     f(callback);
                 }
             }
@@ -2061,10 +2068,13 @@ impl Expr {
                 }
             }
             ExprKind::VecMap {
-                vector, callbacks, ..
+                vector,
+                callbacks,
+                capabilities,
+                ..
             } => {
                 f(vector);
-                for callback in callbacks.iter_mut() {
+                for callback in callbacks.iter_mut().chain(capabilities.iter_mut()) {
                     f(callback);
                 }
             }

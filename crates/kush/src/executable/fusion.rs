@@ -607,6 +607,7 @@ pub(super) fn fuse_expr(
             source,
             target: _,
             grow,
+            ..
         } => {
             fuse_expr(vector, types, signatures, safety, fusions);
             for callback in callbacks.iter_mut() {
@@ -663,6 +664,7 @@ pub(super) fn fuse_expr(
                     source: inner_source,
                     target: inner_target,
                     grow: inner_grow,
+                    ..
                 } = old.kind
                 else {
                     unreachable!("checked compatible map")
@@ -683,6 +685,7 @@ pub(super) fn fuse_expr(
                             source: inner_source,
                             target: inner_target,
                             grow: inner_grow,
+                            capabilities: vec![],
                         },
                         ty: old_ty,
                         span: old_span,

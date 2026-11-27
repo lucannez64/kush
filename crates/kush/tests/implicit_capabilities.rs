@@ -300,3 +300,25 @@ fn a_capturing_handler_is_reached_through_its_cell() {
     assert!(!debug.contains("<capability trampoline>"));
     assert!(!function(&debug, "tick::capabilities").contains("cell: None"));
 }
+
+#[test]
+fn vector_callbacks_receive_their_capabilities() {
+    // FND-HANDLERS-ONE-CALLBACKS: the map loop passes `bump` its
+    // capability after each element, a named function and a lambda alike.
+    let source = format!(
+        "{CALLEES}
+         fn bump(x: i64) -> i64 ! {{Ask}} {{ leaf(x) }}
+         fn main() -> i64 ! {{alloc}} {{
+             handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{
+                 k(x + 10)
+             }} {{
+                 let v: Vec<i64> = [1, 2, 3];
+                 let w = Vec.map_in_place(v, bump);
+                 let u = Vec.map_in_place(w, fn(x: i64) -> i64 ! {{Ask}} {{ perform Ask(x) * 2 }});
+                 Vec.get(&u, 0) + Vec.get(&u, 1) + Vec.get(&u, 2)
+             }}
+         }}"
+    );
+    // bump: 12, 13, 14; then (x + 10) * 2: 44, 46, 48.
+    agrees(&source, 44 + 46 + 48);
+}
