@@ -298,7 +298,6 @@ fn a_catch_needs_std_task() {
              match Task.catch(fn() -> i64 ! {} { 1 }) { Result.Ok(v) => v, Result.Err(_) => 0 }
          }",
     )
-    .err()
-    .expect("accepted");
+    .expect_err("accepted");
     assert!(error.contains("std.task.Panic"), "{error}");
 }

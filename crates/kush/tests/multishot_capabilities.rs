@@ -732,19 +732,16 @@ fn an_abort_leaves_through_a_token_that_names_it() {
     agrees(&aborting("20"), 24 ^ 1024, "2\n");
     // In a loop, so a leftover continuation environment would accumulate.
     agrees(
-        &format!(
-            "{}",
-            aborting("20")
-                .replace("fn main()", "fn once()")
-                .replace("effect Fail: i64 -> Never;", "")
-                + "effect Fail: i64 -> Never;
+        &(aborting("20")
+            .replace("fn main()", "fn once()")
+            .replace("effect Fail: i64 -> Never;", "")
+            + "effect Fail: i64 -> Never;
                    fn main() -> i64 ! {io, alloc} {
                        let mut total = 0;
                        let mut i = 0;
                        while i < 50 { total = total + once(); i = i + 1; }
                        total & 255
-                   }"
-        ),
+                   }"),
         (50 * (24 ^ 1024)) & 255,
         &"2\n".repeat(50),
     );
