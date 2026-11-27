@@ -3368,6 +3368,8 @@ struct KushTask {
     int scope_depth;
     /* Allocated on first use; the root task uses the static root context. */
     struct KushHandlerContext *handlers;
+    /* FIBER-RUNTIME: the fiber running in this task, if any (innermost). */
+    struct KushFiber *fiber;
     void *stack_base;
     size_t stack_total;
     /* WEB-REACTOR: a task parked in kush_sys_wait_ready. wait_fd is its own
@@ -3447,12 +3449,38 @@ typedef struct KushHandlerContext {
 } kush_handler_context;
 /* The root task's context, also used before the task runtime starts. */
 static kush_handler_context kush_root_handlers;
+/* ---- Fibers (FIBER-RUNTIME, docs/tasks-on-handlers.md) --------------------
+   A fiber runs a closure on its own stack inside the task that made it.
+   Resuming it switches to it until it suspends with a request word or
+   finishes; it can be resumed only from its task. The handler chain and the
+   multishot continuation stack are nested per stack, so a fiber has its own
+   (kush_handlers). A task's scopes, catch bodies and no-unwind regions are
+   nested too: a fiber may suspend only with as many open as when it was
+   resumed. */
+enum { KUSH_FIBER_NEW, KUSH_FIBER_RUNNING, KUSH_FIBER_SUSPENDED, KUSH_FIBER_FINISHED };
+typedef struct KushFiber KushFiber;
+struct KushFiber {
+    KushContext context; /* the fiber, while it is not running */
+    KushContext resumer; /* whoever resumed it, while it runs */
+    KushFiber *parent;   /* the fiber that resumed it; NULL for the task */
+    KushTask *task;
+    uint64_t wrapper, code, env;
+    void *result;
+    size_t result_size;
+    void *stack_base;
+    size_t stack_total;
+    uint64_t word; /* the request it suspended with, or the reply */
+    int state, discontinued, panicked;
+    int scope_depth, catch_depth, nounwind_depth; /* when it was resumed */
+    kush_handler_context handlers;
+};
 #ifdef KUSH_HAS_THREADS
 /* A child OS thread has its own handler stack (it inherits no frames). */
 static KUSH_TLS kush_handler_context *kush_thread_handlers = NULL;
 #endif
 static kush_handler_context *kush_handlers(void) {
     KushTask *task = kush_current;
+    if (task != NULL && task->fiber != NULL) return &task->fiber->handlers;
     if (task == NULL || task->id == 0) {
 #ifdef KUSH_HAS_THREADS
         /* A thread's root (its body) uses the thread's stack; the tasks it
@@ -4109,7 +4137,9 @@ static int kush_panic_unwinds(void) {
     if (kush_in_thread) return kush_thread_nounwind_depth == 0;
     if (!kush_initialized || kush_current == NULL || kush_current->state != KUSH_RUNNING) return 0;
     if (kush_current->nounwind_depth > 0) return 0;
-    return kush_current->id != 0 || kush_current->catch_depth > 0;
+    /* A fiber is a boundary, as a task is: its resumer gets the panic. */
+    return kush_current->id != 0 || kush_current->catch_depth > 0
+        || kush_current->fiber != NULL;
 #else
     return 0;
 #endif
@@ -4350,6 +4380,136 @@ uint64_t kush_thread_join(uint64_t handle, void *out) {
     return t->panicked ? 2 : 0;
 }
 #endif
+/* Fibers (see KushFiber). A handle is the control block's address. */
+static int kush_fiber_catch_depth(void) {
+    return kush_in_thread ? kush_thread_catch_depth : kush_current->catch_depth;
+}
+static int kush_fiber_nounwind_depth(void) {
+#ifdef KUSH_UNWIND
+    return kush_in_thread ? kush_thread_nounwind_depth : kush_current->nounwind_depth;
+#else
+    return 0;
+#endif
+}
+/* Leave the running fiber for its resumer. */
+static void kush_fiber_leave(KushFiber *f) {
+    kush_current->fiber = f->parent;
+    kush_context_switch(&f->context, &f->resumer);
+}
+static void kush_fiber_entry(void) {
+    KushFiber *f = kush_current->fiber;
+    if (f->discontinued) {
+        /* Discontinued before it started: the closure never runs, and its
+           environment is dropped here. */
+        if (f->env != 0) {
+            void (*drop)(void *) = *(void (**)(void *))(uintptr_t)f->env;
+            drop((void *)(uintptr_t)f->env);
+        }
+    } else {
+        ((void (*)(uint64_t, uint64_t, uint64_t))(uintptr_t)f->wrapper)(
+            f->code, f->env, (uint64_t)(uintptr_t)f->result);
+    }
+#ifdef KUSH_UNWIND
+    if (*kush_panic_word() == 1) {
+        *kush_panic_word() = 0;
+        f->panicked = 1;
+    }
+#endif
+    f->state = KUSH_FIBER_FINISHED;
+    kush_fiber_leave(f);
+    abort();
+}
+/* A fiber that will run `wrapper(code, env, result)`, as a task does, with a
+   result buffer of `result_size` bytes. It starts at its first resume. */
+uint64_t kush_fiber_new(uint64_t wrapper, uint64_t code, uint64_t env, uint64_t result_size) {
+    kush_task_init();
+    KushFiber *f = (KushFiber *)(uintptr_t)kush_alloc(sizeof(KushFiber));
+    memset(f, 0, sizeof(*f));
+    f->task = kush_current;
+    f->wrapper = wrapper; f->code = code; f->env = env;
+    f->result_size = result_size == 0 ? 8 : (size_t)result_size;
+    f->result = (void *)(uintptr_t)kush_alloc(f->result_size);
+    void *base; size_t total;
+    void *stack = kush_stack_alloc(KUSH_TASK_STACK, &base, &total);
+    f->stack_base = base; f->stack_total = total;
+    kush_context_make(&f->context, stack, KUSH_TASK_STACK, kush_fiber_entry);
+    f->state = KUSH_FIBER_NEW;
+    return (uint64_t)(uintptr_t)f;
+}
+/* Switch to the fiber with `reply` until it suspends (0: its request is
+   kush_fiber_request) or finishes (1: its result is kush_fiber_result).
+   A panic that unwound the fiber is raised again here. */
+uint64_t kush_fiber_resume(uint64_t handle, uint64_t reply) {
+    KushFiber *f = (KushFiber *)(uintptr_t)handle;
+    kush_task_init();
+    if (f == NULL || f->task != kush_current
+        || (f->state != KUSH_FIBER_NEW && f->state != KUSH_FIBER_SUSPENDED))
+        kush_panic();
+    f->word = reply;
+    f->parent = kush_current->fiber;
+    f->scope_depth = kush_current->scope_depth;
+    f->catch_depth = kush_fiber_catch_depth();
+    f->nounwind_depth = kush_fiber_nounwind_depth();
+    f->state = KUSH_FIBER_RUNNING;
+    kush_current->fiber = f;
+    kush_context_switch(&f->resumer, &f->context);
+    if (f->state != KUSH_FIBER_FINISHED) return 0;
+    if (f->panicked && !f->discontinued) {
+        f->panicked = 0;
+        KUSH_FAIL(1);
+    }
+    return 1;
+}
+/* From inside a fiber: give `request` to the resumer and wait for the
+   reply. A discontinued fiber panics here instead, which unwinds it. */
+uint64_t kush_fiber_suspend(uint64_t request) {
+    KushFiber *f = kush_initialized && kush_current != NULL ? kush_current->fiber : NULL;
+    if (f == NULL) kush_panic();
+    /* A scope, catch body or no-unwind region opened in the fiber and left
+       open would be nested wrongly in the resumer. */
+    if (kush_current->scope_depth != f->scope_depth || kush_fiber_catch_depth() != f->catch_depth
+        || kush_fiber_nounwind_depth() != f->nounwind_depth)
+        kush_panic();
+    f->word = request;
+    f->state = KUSH_FIBER_SUSPENDED;
+    kush_fiber_leave(f);
+    if (f->discontinued) KUSH_FAIL(0);
+    return f->word;
+}
+uint64_t kush_fiber_request(uint64_t handle) {
+    KushFiber *f = (KushFiber *)(uintptr_t)handle;
+    if (f == NULL || f->state != KUSH_FIBER_SUSPENDED) kush_panic();
+    return f->word;
+}
+uint64_t kush_fiber_result(uint64_t handle) {
+    KushFiber *f = (KushFiber *)(uintptr_t)handle;
+    if (f == NULL || f->state != KUSH_FIBER_FINISHED || f->panicked) kush_panic();
+    return (uint64_t)(uintptr_t)f->result;
+}
+/* Release a finished fiber: its stack, result buffer and control block. The
+   result's contents belong to whoever read them. */
+void kush_fiber_free(uint64_t handle) {
+    KushFiber *f = (KushFiber *)(uintptr_t)handle;
+    if (f == NULL || f->state != KUSH_FIBER_FINISHED) kush_panic();
+    kush_stack_free(f->stack_base, f->stack_total);
+    kush_kstack_drain(&f->handlers);
+    kush_free((uint64_t)(uintptr_t)f->result);
+    kush_free((uint64_t)(uintptr_t)f);
+}
+/* End a fiber that will not be resumed. One that never ran drops its
+   closure; a suspended one panics at its suspension point, which unwinds
+   its frames (they free what they own), and is not raised in the caller.
+   Without unwinding support that panic aborts the process. */
+void kush_fiber_discontinue(uint64_t handle) {
+    KushFiber *f = (KushFiber *)(uintptr_t)handle;
+    if (f == NULL || f->task != kush_current
+        || (f->state != KUSH_FIBER_NEW && f->state != KUSH_FIBER_SUSPENDED))
+        kush_panic();
+    f->discontinued = 1;
+    (void)kush_fiber_resume(handle, 0);
+    if (f->state != KUSH_FIBER_FINISHED) kush_panic();
+    kush_fiber_free(handle);
+}
 #ifndef KUSH_NO_MAIN
 #ifdef KUSH_MAIN_STACK
 /* `#[stack_size(N)]` on main: the program runs on a thread with a stack of

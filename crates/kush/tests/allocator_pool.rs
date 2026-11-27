@@ -496,7 +496,10 @@ fn task_blocks_use_the_same_header_aware_path_and_stats_are_unchanged() {
     );
     assert_eq!(pool.releases, 0, "nothing is too large for the pool");
     assert_eq!(pool.drained, 3, "a result buffer and two control blocks");
-    assert!(pool.peak_retained <= 1024);
+    assert!(
+        pool.peak_retained <= 3 * 1024,
+        "three pooled blocks, each at most the pool's 1 KiB limit"
+    );
 }
 
 #[test]

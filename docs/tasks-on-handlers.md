@@ -193,6 +193,35 @@ options, decision T3:
 Steps 1 and 2 are useful whatever the decisions below. Step 3 is the
 language change.
 
+### As built: FIBER-RUNTIME
+
+- Context switch: on x86-64 a context is a saved stack pointer and
+  `kush_switch` (a naked function) saves six registers and the SSE and x87
+  control words. The C task scheduler uses it in place of `swapcontext`,
+  whose signal-mask system calls were almost all of a task switch:
+  `benchmarks/tasks` went from 921 to 32 ns per yield and 2,418 to 100 ns
+  per spawn and join. Other targets keep `ucontext`.
+- `kush_fiber_new(wrapper, code, env, result_size)`, `kush_fiber_resume`
+  (0 suspended, 1 finished), `kush_fiber_suspend(request) -> reply`,
+  `kush_fiber_request`, `kush_fiber_result`, `kush_fiber_free`,
+  `kush_fiber_discontinue`. Requests and replies are one word; wider values
+  go through memory the lowering owns.
+- A fiber belongs to the task that made it and is resumed only from it.
+  It has its own handler chain and multishot continuation stack, and the
+  task records the fiber running in it, so task switches inside fibers
+  work. A fiber may suspend only with the task scopes, catch bodies and
+  no-unwind regions that were open when it was resumed (otherwise: panic).
+- A fiber is an unwinding boundary: a panic in it unwinds to its entry and
+  is raised again in the resumer. `discontinue` resumes a suspended fiber
+  with a flag that makes its suspension panic, which unwinds its frames;
+  a fiber that never ran has its closure environment dropped. Without
+  unwinding support that panic aborts.
+- Limit: a capturing one-shot handler installed outside a fiber answers as
+  missing inside it (its frame belongs to another handler chain), as it
+  does in another task.
+- Tests: `tests/fiber_runtime.rs` drives the C API from a C harness. The
+  evaluator gets fibers with FIBER-HANDLERS, the first code that makes them.
+
 ## 8. Decisions (user, 2026-11-27)
 
 Each recommendation below was accepted: T1 fibers, T2 shallow resumption

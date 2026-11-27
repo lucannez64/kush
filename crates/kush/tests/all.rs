@@ -72,6 +72,8 @@ mod enums;
 mod executable;
 #[path = "ffi.rs"]
 mod ffi;
+#[path = "fiber_runtime.rs"]
+mod fiber_runtime;
 #[path = "field_privacy.rs"]
 mod field_privacy;
 #[path = "floats.rs"]
