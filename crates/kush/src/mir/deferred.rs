@@ -237,10 +237,13 @@ impl Analysis<'_> {
                             (Some(Kind::Length), Some(Container::Vec(element)))
                         }
                         Target::Bytes(BytesOp::Len) => (Some(Kind::Length), Some(Container::Bytes)),
-                        // Only checked reads: a proved, unchecked read
-                        // (`at`) may owe its proof to a deferred operation
-                        // not having overflowed.
-                        Target::Slice(SliceOp::Get, element) if scalar(element) => {
+                        // A proved read (`at`) may owe its proof to a
+                        // deferred operation not having overflowed. It is
+                        // an access like any other: the chunk runs only if
+                        // its exact counter range keeps the index in
+                        // bounds, and the ordinary-checks copy, which
+                        // defers nothing, keeps the original proof.
+                        Target::Slice(SliceOp::Get | SliceOp::At, element) if scalar(element) => {
                             (Some(Kind::Load), Some(Container::Slice(element)))
                         }
                         Target::Vec(VecOp::Get, element) if scalar(element) => {

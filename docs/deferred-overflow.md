@@ -121,7 +121,8 @@ loop costs compile time. So a loop is deferred only if all of these hold
   integer and float builtins, and `Slice`/`Vec`/`Bytes` length and element
   reads, plus `Slice.set` through an exclusive view. No calls, I/O,
   allocation, drops, borrows, effects, division or remainder (x86 has no
-  64-bit vector division), or proved unchecked reads (`Slice.at`, `Vec.at`).
+  64-bit vector division), or proved unchecked reads other than `Slice.at`
+  (`Vec.at`, `Bytes.at`).
 - On baseline x86-64 (SSE2), also no store or checked arithmetic under a
   condition and no byte-buffer reads. These vectorize, but SSE2's blends and
   its widening of bytes to words cost more than the checks they replace
@@ -211,10 +212,13 @@ wrong values. Four properties make that harmless.
    one differ by at most a fraction of a millisecond of work.
 2. **No access depends on a deferred value.** The checker's proofs may use
    "this operation did not overflow" or "this value has its type's range" as
-   hypotheses. A deferred operation breaks exactly those, so a loop
-   containing a proved unchecked read (`at`) is not deferred. Every access in
-   a deferred chunk is checked, either at run time per element or, as
-   described under "Bounds checks", once per chunk from exact values.
+   hypotheses. A deferred operation breaks exactly those, so a proved
+   unchecked read (`Slice.at`) cannot keep its proof inside a chunk. It does
+   not need it: every access in a deferred chunk follows the counter and is
+   checked once per chunk from exact values, as described under "Bounds
+   checks", `at` included. A chunk whose range check fails does not run; the
+   ordinary-checks copy, which defers nothing, runs instead, and there the
+   proof holds.
 3. **Values stay canonical.** A deferred narrow operation yields its wrapped
    result, and arithmetic the checker proved in range is wrapped as well
    inside a deferred loop. Every narrow value therefore keeps the
@@ -325,5 +329,5 @@ all. `--no-deferred-overflow` gives the plain checked code.
 
 Not covered: `loop`/nested loops as a unit, `Vec.map_in_place` callbacks with
 checked arithmetic, reductions over narrow or unsigned kinds (they use exact
-mode and stay scalar), loops with proved unchecked reads, and loops
+mode and stay scalar), loops with proved `Vec.at` or `Bytes.at` reads, and loops
 containing calls, even to pure functions.

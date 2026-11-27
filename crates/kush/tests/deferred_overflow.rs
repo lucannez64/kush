@@ -648,6 +648,22 @@ fn planned_loops_carry_a_certificate_and_rejected_ones_do_not() {
             print_i64(target[1]);
         }}"
     )));
+    // A proved read is checked per chunk like a checked one.
+    assert!(certified(
+        "fn sum(values: &[i64]) -> i64 ! {} {
+            let mut acc = 0;
+            let mut i = 0;
+            while i < Slice.len(values) {
+                acc = acc + Slice.at(values, i, _);
+                i = i + 1;
+            }
+            acc
+        }
+        fn main() -> Unit ! {io} {
+            let values: [i64; 2] = [1, 2];
+            print_i64(sum(&values[..]));
+        }"
+    ));
     // Output inside the loop, and a loop that is not counted.
     assert!(!certified(
         "fn main() -> Unit ! {io} {
@@ -690,6 +706,39 @@ fn main() -> Unit ! {io} {
 }
 "#,
     );
+}
+
+/// A proved read in a deferred loop: in range per chunk, it runs deferred;
+/// when the counter runs past the view the chunk's range check fails and the
+/// ordinary-checks copy, where the guard proves the read, runs instead.
+#[test]
+fn proved_reads_defer_or_fall_back_to_their_proof() {
+    let source = |values: &str| {
+        format!(
+            r#"
+fn f(view: &[i64], n: i64) -> i64 ! {{}} {{
+    let mut acc = 0;
+    let mut i = 0;
+    while i < n {{
+        if i < Slice.len(view) {{
+            acc = acc + Slice.at(view, i, _);
+        }}
+        i = i + 1;
+    }}
+    acc
+}}
+fn main() -> Unit ! {{io}} {{
+    let xs: [i64; 4] = {values};
+    print_i64(f(&xs[..], 4));
+    print_i64(f(&xs[..], 1000));
+    print_i64(f(&xs[..3], 3));
+}}
+"#
+        )
+    };
+    native_modes_agree(&source("[1, -2, 3, 40]"));
+    native_modes_agree(&source("[9223372036854775807, -2, 3, 40]"));
+    native_modes_agree(&source("[9223372036854775807, 1, -3, 40]"));
 }
 
 /// Review finding: a wrapped narrow value stored and reloaded stays in range.
