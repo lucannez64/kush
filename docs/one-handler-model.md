@@ -296,6 +296,29 @@ and grades. It does not change the checker: it works on the checked IR.
   still become dynamic `AbortPerform`s, as do performs in code without
   capabilities. Both go away with the stack in HANDLERS-ONE-DELETE.
 
+### As built: HANDLERS-ONE-CELLS
+
+DELETE was split into CELLS, EXPLICIT (written `cap` parameters), CALLBACKS
+(vector callbacks, builtin function arguments and handlers whose rows name
+declared operations, which the user chose to support rather than reject),
+and the removal itself.
+
+- The cell of an activation is, for now, its frame: `kush_handler_push`
+  returns the frame's address (the evaluator gives each frame a
+  machine-wide id), and `HandlerPush::cell` is an `i64` local holding it.
+- Implicit capabilities are `i64` cells. A perform by name with a
+  capability stays a `DynamicPerform` naming the cell; `RuntimeOp::Perform`
+  takes it as a third operand and `kush_handler_perform` uses that frame
+  without a search (zero still searches). Capturing handlers need no
+  trampoline, and the pass no longer makes any.
+- Native code calls a cell's handler directly when its frame holds a
+  noncapturing `fn` (`once` word zero), with one load and a branch more than
+  a code-pointer capability: `dynamic-perform-in-callee` 4.73 to 4.77 ns
+  against 4.64 to 4.67 ns at 7b23900 (tsar-bomba-2, two runs each).
+- D3: a task does not use another task's capturing handler; its cell
+  answers as missing there (the frame lies outside the task's frames and
+  owns an environment).
+
 ## 8. Decisions (user, 2026-11-27)
 
 - **D1. A function value gets its handler at the call.** It is today's

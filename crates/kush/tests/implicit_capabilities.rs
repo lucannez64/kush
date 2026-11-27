@@ -62,7 +62,7 @@ fn direct_calls_perform_through_hidden_capabilities() {
     let debug = format!("{:?}", check(&source).unwrap());
     for name in ["leaf::capabilities", "middle::capabilities"] {
         let copy = function(&debug, name);
-        assert!(!copy.contains("DynamicPerform"), "{copy}");
+        assert!(!copy.contains("cell: None"), "{copy}");
         assert!(copy.contains("parameter_slots: Some("), "{copy}");
     }
     assert!(function(&debug, "main").contains("Call(Function("));
@@ -85,7 +85,7 @@ fn a_non_tail_handler_resumes_copies_through_their_capability() {
     agrees(&source, 2050);
     let debug = format!("{:?}", check(&source).unwrap());
     assert!(debug.contains("middle::capabilities::resumable"));
-    assert!(!function(&debug, "middle::capabilities::resumable").contains("DynamicPerform"));
+    assert!(!function(&debug, "middle::capabilities::resumable").contains("cell: None"));
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn lambdas_perform_through_their_hidden_capability() {
     agrees(&source, 33 + 36);
     let debug = format!("{:?}", check(&source).unwrap());
     let copy = function(&debug, "lambda::capabilities");
-    assert!(!copy.contains("DynamicPerform"), "{copy}");
+    assert!(!copy.contains("cell: None"), "{copy}");
 }
 
 #[test]
@@ -198,7 +198,7 @@ fn trait_object_members_take_the_capabilities_of_their_key() {
     );
     agrees(&source, 112 + 1);
     let debug = format!("{:?}", check(&source).unwrap());
-    assert!(!function(&debug, "ask::capabilities").contains("DynamicPerform"));
+    assert!(!function(&debug, "ask::capabilities").contains("cell: None"));
 }
 
 #[test]
@@ -279,4 +279,24 @@ fn abortive_performs_address_the_scope_through_its_capability() {
     let debug = format!("{:?}", check(source).unwrap());
     let copy = function(&debug, "check::capabilities");
     assert!(copy.contains("capability: Some("), "{copy}");
+}
+
+#[test]
+fn a_capturing_handler_is_reached_through_its_cell() {
+    // FND-HANDLERS-ONE-CELLS: the capability is the activation's cell, so a
+    // capturing handler needs no trampoline into the dynamic stack.
+    let source = "effect Tick: i64 -> i64;
+        fn tick(x: i64) -> i64 ! {Tick} { perform Tick(x) }
+        fn main() -> i64 ! {alloc} {
+            let mut total = 0;
+            let r = handle Tick: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
+                total = total + x;
+                k(total)
+            } { tick(1) + tick(2) + tick(3) };
+            r + total * 100
+        }";
+    agrees(source, 10 + 600);
+    let debug = format!("{:?}", check(source).unwrap());
+    assert!(!debug.contains("<capability trampoline>"));
+    assert!(!function(&debug, "tick::capabilities").contains("cell: None"));
 }

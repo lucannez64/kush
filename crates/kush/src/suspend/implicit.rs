@@ -1,36 +1,33 @@
 //! Declared operations as hidden capability parameters
-//! (FND-HANDLERS-ONE-PARAMS and -VALUES, docs/one-handler-model.md section 2).
+//! (FND-HANDLERS-ONE-PARAMS to -CELLS, docs/one-handler-model.md section 2).
 //!
-//! A function that may perform declared operations it does not handle gets a
-//! copy taking one more `cap Op` parameter per such operation, after its
-//! written parameters and in operation-id order. In that copy a perform by
-//! name with no enclosing `handle Op` of its own calls the parameter, and a
-//! direct call passes, per operation of the callee, the innermost enclosing
-//! `handle Op` of the caller or the caller's own parameter. Code that has
-//! neither (task bodies, entry points) keeps the original function, which
-//! still performs through the dynamic stack; so does a handler that is
-//! capturing, which is reached through the dynamic frame by a trampoline. An
-//! await point under a handler with code after `resume` then resumes the copy
-//! through its capability parameter.
+//! A capability is an `i64`: the cell of a `handle` activation (its frame),
+//! or the payload buffer of an abortive one. A function that may perform
+//! declared operations it does not handle gets a copy taking one more
+//! capability per such operation, after its written parameters and in
+//! operation-id order. A perform by name names the innermost enclosing
+//! `handle`'s cell or the hidden parameter, and the frame is used without a
+//! search; a direct call passes, per operation of the callee, the same.
+//! Code that has neither (entry points, arrows kept on the dynamic stack)
+//! keeps the original function, whose performs still search. An await point
+//! under a handler with code after `resume` resumes the copy through its
+//! capability parameter.
 //!
 //! A function value takes the capabilities its arrow's row names the same
 //! way (decision D1: bound at each call): its function is a copy for those
 //! operations, the arrow gains the parameters, and every indirect call passes
-//! them. Arrows whose values reach code that calls them without capabilities
-//! (handlers, task and callback builtins, foreign functions) keep the dynamic
-//! stack until HANDLERS-ONE-BUILTINS.
+//! them. Task bodies capture them where the builtin is called (rule 8).
+//! Arrows whose values reach code that calls them without capabilities
+//! (handlers, callback builtins, foreign functions) keep the dynamic stack
+//! until HANDLERS-ONE-CALLBACKS.
 use super::{Result, performs_with};
 use crate::executable::{Block, Executable, Expr, ExprKind, Local, Statement, Target, Type};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// How the capability for an operation is supplied at a call.
-#[derive(Clone, Copy)]
-enum Capability {
-    /// A local holding a noncapturing handler or a capability parameter.
-    Local(usize, Type),
-    /// The enclosing handler is capturing: perform through the dynamic stack.
-    Dynamic,
-}
+/// The `i64` local holding an operation's capability in some scope: the
+/// cell of an enclosing `handle` (FND-HANDLERS-ONE-CELLS), the payload
+/// buffer of an enclosing abortive `handle`, or a hidden parameter.
+type Capability = usize;
 
 /// A function the pass adds.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -49,13 +46,8 @@ struct Pass<'a> {
     /// Operations each original function needs a capability for, in id
     /// order; empty for functions that are not copied.
     needs: &'a [Vec<usize>],
-    /// Handler arrow of each declared resumptive operation.
-    arrows: &'a BTreeMap<usize, usize>,
-    /// Capability type of each operation that gets one: the handler arrow
-    /// of a resumptive operation, `i64` (a payload buffer address) for an
-    /// abortive one.
-    caps: &'a BTreeMap<usize, Type>,
-    function_types: &'a [crate::runtime_types::FunctionType],
+    /// Operations that get capabilities: those performed by name.
+    caps: &'a BTreeSet<usize>,
     /// Operations whose capabilities a function value of each arrow type
     /// takes; empty for arrows that keep the dynamic stack.
     values: &'a [Vec<usize>],
@@ -73,8 +65,6 @@ struct Pass<'a> {
     /// Operations of each arrow's row, also for arrows that keep the
     /// dynamic stack.
     rows: &'a [Vec<usize>],
-    /// Trampolines through the dynamic stack, by operation.
-    trampolines: &'a BTreeMap<usize, (usize, Type)>,
 }
 
 impl Pass<'_> {
@@ -111,65 +101,30 @@ impl Pass<'_> {
         }
     }
 
-    /// The capability arguments for `operations` at this point.
+    /// The capability of `operation` at this point.
+    fn capability(scope: &Scope, operation: usize) -> Option<Capability> {
+        scope
+            .capabilities
+            .get(&operation)
+            .or_else(|| scope.hidden.get(&operation))
+            .copied()
+    }
+
+    /// The capability arguments for `operations` at this point. Without
+    /// one, zero: the perform searches the dynamic stack.
     fn supply(&self, operations: &[usize], scope: &Scope, span: crate::Span) -> Vec<Expr> {
         operations
             .iter()
-            .map(|operation| {
-                let capability = scope.capabilities.get(operation).copied().or_else(|| {
-                    scope
-                        .hidden
-                        .get(operation)
-                        .map(|&slot| Capability::Local(slot, self.caps[operation]))
-                });
-                match capability {
-                    Some(Capability::Local(slot, ty)) => Expr {
-                        kind: ExprKind::Local(slot),
-                        ty,
-                        span,
-                        resource: None,
-                    },
-                    // An abortive operation without a capability aborts
-                    // through the dynamic stack.
-                    Some(Capability::Dynamic) | None if !self.arrows.contains_key(operation) => {
-                        Expr {
-                            kind: ExprKind::Constant(0),
-                            ty: Type::I64,
-                            span,
-                            resource: None,
-                        }
-                    }
-                    Some(Capability::Dynamic) | None => {
-                        let (function, ty) = self.trampolines[operation];
-                        Expr {
-                            kind: ExprKind::FnValue {
-                                function,
-                                captures: vec![],
-                            },
-                            ty,
-                            span,
-                            resource: None,
-                        }
-                    }
-                }
+            .map(|&operation| Expr {
+                kind: match Self::capability(scope, operation) {
+                    Some(slot) => ExprKind::Local(slot),
+                    None => ExprKind::Constant(0),
+                },
+                ty: Type::I64,
+                span,
+                resource: None,
             })
             .collect()
-    }
-
-    /// The handler local of a `HandlerPush` as a capability, when it can be
-    /// called directly with the operation's arrow.
-    fn pushed(&self, handler: &Expr, operation: usize) -> Capability {
-        let arrow = self.arrows[&operation];
-        match (&handler.kind, handler.ty) {
-            (ExprKind::Local(slot), Type::Fn(found))
-                if self.function_types[found].parameters
-                    == self.function_types[arrow].parameters
-                    && self.function_types[found].result == self.function_types[arrow].result =>
-            {
-                Capability::Local(*slot, Type::Fn(arrow))
-            }
-            _ => Capability::Dynamic,
-        }
     }
 
     fn block(&mut self, block: &mut Block, scope: &Scope) {
@@ -186,10 +141,10 @@ impl Pass<'_> {
     fn expr(&mut self, expr: &mut Expr, scope: &Scope) {
         // Rule 8: the runtime calls a task body without capabilities. The
         // checker requires a written lambda there, which captures them where
-        // the builtin is called; a spawned task thereby keeps each
-        // noncapturing handler, and a capturing one's trampoline finds no
-        // frame in the new task (decision D3). The builtin receives the
-        // lambda at its arrow without capability parameters.
+        // the builtin is called. A spawned task thereby keeps each
+        // noncapturing handler (decision D3); the runtime treats the cell of
+        // another task's capturing handler as missing. The builtin receives
+        // the lambda at its arrow without capability parameters.
         if let ExprKind::TaskScope { body, .. } | ExprKind::TaskSpawn { body, .. } = &mut expr.kind
             && let Type::Once(arrow) = body.ty
             && let Some(&bare) = self.split.get(&arrow)
@@ -210,14 +165,17 @@ impl Pass<'_> {
             operation,
             handler,
             body,
+            cell,
             ..
         } = &mut expr.kind
         {
             self.expr(handler, scope);
             let mut inner = scope.clone();
-            if self.arrows.contains_key(operation) {
-                let capability = self.pushed(handler, *operation);
-                inner.capabilities.insert(*operation, capability);
+            if self.caps.contains(operation) {
+                match cell {
+                    Some(cell) => inner.capabilities.insert(*operation, *cell),
+                    None => inner.capabilities.remove(operation),
+                };
             }
             self.block(body, &inner);
             return;
@@ -234,51 +192,36 @@ impl Pass<'_> {
         {
             self.expr(handler, scope);
             let mut inner = scope.clone();
-            if self.caps.contains_key(operation) {
-                inner
-                    .capabilities
-                    .insert(*operation, Capability::Local(*slot, Type::I64));
+            if self.caps.contains(operation) {
+                inner.capabilities.insert(*operation, *slot);
             }
             self.block(body, &inner);
             return;
         }
         expr.for_each_child_mut(&mut |child| self.expr(child, scope));
         match &mut expr.kind {
-            ExprKind::DynamicPerform { operation, .. } => {
-                let Some(&slot) = scope.hidden.get(operation) else {
-                    return;
-                };
-                if scope.capabilities.contains_key(operation) {
-                    return;
-                }
-                let arrow = self.arrows[operation];
-                let ExprKind::DynamicPerform {
-                    payload, resume, ..
-                } = std::mem::replace(&mut expr.kind, ExprKind::Constant(0))
-                else {
-                    unreachable!()
-                };
-                expr.kind = ExprKind::CallIndirect {
-                    callee: Box::new(Expr {
+            // A perform by name uses its operation's capability: the
+            // innermost enclosing `handle`'s cell or the hidden parameter.
+            ExprKind::DynamicPerform {
+                operation,
+                cell: cell @ None,
+                ..
+            } => {
+                if let Some(slot) = Self::capability(scope, *operation) {
+                    *cell = Some(Box::new(Expr {
                         kind: ExprKind::Local(slot),
-                        ty: Type::Fn(arrow),
+                        ty: Type::I64,
                         span: expr.span,
                         resource: None,
-                    }),
-                    arguments: vec![*payload, *resume],
-                };
+                    }));
+                }
             }
             ExprKind::AbortPerform {
                 operation,
                 capability: capability @ None,
                 ..
             } => {
-                let found = match scope.capabilities.get(operation) {
-                    Some(Capability::Local(slot, _)) => Some(*slot),
-                    Some(Capability::Dynamic) => None,
-                    None => scope.hidden.get(operation).copied(),
-                };
-                if let Some(slot) = found {
+                if let Some(slot) = Self::capability(scope, *operation) {
                     *capability = Some(Box::new(Expr {
                         kind: ExprKind::Local(slot),
                         ty: Type::I64,
@@ -357,15 +300,19 @@ struct Scope {
 /// Hidden capability parameter slot of each copy, by operation.
 pub(super) type Hidden = BTreeMap<usize, BTreeMap<usize, usize>>;
 
+/// Handler arrow of each resumptive declared operation performed by name.
+pub(super) type Arrows = BTreeMap<usize, usize>;
+
 /// Add the copies and redirect direct calls and function values to them.
-pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
+/// Returns the copies' capability slots and the operations' handler arrows.
+pub(super) fn add(program: &mut Executable) -> Result<(Hidden, Arrows)> {
     let mut arrows = BTreeMap::new();
-    let mut caps = BTreeMap::new();
+    let mut caps = BTreeSet::new();
     for function in &program.functions {
         collect_arrows(&function.body, &mut arrows, &mut caps);
     }
     if caps.is_empty() {
-        return Ok(Hidden::new());
+        return Ok((Hidden::new(), arrows));
     }
     let performs = performs_with(program, true);
     let mut needs = (0..program.functions.len())
@@ -380,7 +327,7 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
             performs[index]
                 .iter()
                 .copied()
-                .filter(|operation| caps.contains_key(operation))
+                .filter(|operation| caps.contains(operation))
                 .collect()
         })
         .collect::<Vec<Vec<usize>>>();
@@ -394,7 +341,7 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
             if needs[function].is_empty()
                 && performs[function]
                     .iter()
-                    .any(|operation| caps.contains_key(operation))
+                    .any(|operation| caps.contains(operation))
             {
                 return vec![];
             }
@@ -419,11 +366,7 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
         .map(|spec| members(&mut spec.members.iter().map(|member| member.2)))
         .collect::<Vec<_>>();
     if needs.iter().all(Vec::is_empty) && values.iter().all(Vec::is_empty) {
-        return Ok(Hidden::new());
-    }
-    let mut trampolines = BTreeMap::new();
-    for (&operation, &arrow) in &arrows {
-        trampolines.insert(operation, trampoline(program, operation, arrow));
+        return Ok((Hidden::new(), arrows));
     }
     let originals = program.functions.len();
     needs.resize(originals, vec![]);
@@ -446,12 +389,9 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
     // Copies start from the bodies as checked: the originals' calls get the
     // dynamic trampoline where a copy passes its own parameter.
     let sources = program.functions.clone();
-    let function_types = program.function_types.clone();
     let mut pass = Pass {
         needs: &needs,
-        arrows: &arrows,
         caps: &caps,
-        function_types: &function_types,
         values: &values,
         rows: &rows,
         split: &split,
@@ -460,7 +400,6 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
         originals,
         copies: BTreeMap::new(),
         order: Vec::new(),
-        trampolines: &trampolines,
     };
     for function in &mut program.functions[..originals] {
         pass.block(&mut function.body, &Scope::default());
@@ -510,7 +449,7 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
             let position = first + offset;
             let slot = copy.locals.len();
             copy.locals.push(Local {
-                ty: caps[&operation],
+                ty: Type::I64,
                 mutable: false,
                 linear: false,
                 pinned: false,
@@ -556,9 +495,9 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
     for (id, operations) in values.iter().enumerate() {
         let arrow = &mut program.function_types[id];
         let written = arrow.parameters.len();
-        for &operation in operations {
-            arrow.parameters.push(caps[&operation]);
-        }
+        arrow
+            .parameters
+            .extend(operations.iter().map(|_| Type::I64));
         if arrow.parameter_grades.len() == written {
             arrow.parameter_grades.resize(arrow.parameters.len(), None);
         }
@@ -575,15 +514,14 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
                 .resize(arrow.parameters.len(), vec![]);
         }
     }
-    Ok(copies)
+    Ok((copies, arrows))
 }
 
 /// The resumptive declared operations performed by name somewhere that the
 /// row of arrow `id` names, in id order.
-fn row_operations(program: &Executable, arrows: &BTreeMap<usize, Type>, id: usize) -> Vec<usize> {
+fn row_operations(program: &Executable, caps: &BTreeSet<usize>, id: usize) -> Vec<usize> {
     let effects = program.function_types[id].effects;
-    arrows
-        .keys()
+    caps.iter()
         .copied()
         .filter(|&operation| {
             program
@@ -601,12 +539,12 @@ fn row_operations(program: &Executable, arrows: &BTreeMap<usize, Type>, id: usiz
 /// foreign function, or a function whose layout cannot take more parameters.
 /// Coercions between arrows with different sets go through checked adapters,
 /// so arrows with one set agree.
-fn value_operations(program: &Executable, arrows: &BTreeMap<usize, Type>) -> Vec<Vec<usize>> {
+fn value_operations(program: &Executable, caps: &BTreeSet<usize>) -> Vec<Vec<usize>> {
     let operations = |ty: Type| -> Option<Vec<usize>> {
         let (Type::Fn(id) | Type::Once(id) | Type::Multi(id)) = ty else {
             return None;
         };
-        let found = row_operations(program, arrows, id);
+        let found = row_operations(program, caps, id);
         (!found.is_empty()).then_some(found)
     };
     let mut pinned = BTreeSet::new();
@@ -710,21 +648,17 @@ fn collect_task_bodies(block: &Block, rows: &[Vec<usize>], split: &mut BTreeMap<
 
 /// The handler arrow of each resumptive operation performed by name, and
 /// the capability type of every operation performed by name.
-fn collect_arrows(
-    block: &Block,
-    arrows: &mut BTreeMap<usize, usize>,
-    caps: &mut BTreeMap<usize, Type>,
-) {
-    fn walk(expr: &Expr, arrows: &mut BTreeMap<usize, usize>, caps: &mut BTreeMap<usize, Type>) {
+fn collect_arrows(block: &Block, arrows: &mut BTreeMap<usize, usize>, caps: &mut BTreeSet<usize>) {
+    fn walk(expr: &Expr, arrows: &mut BTreeMap<usize, usize>, caps: &mut BTreeSet<usize>) {
         match &expr.kind {
             ExprKind::DynamicPerform {
                 operation, handler, ..
             } => {
                 arrows.entry(*operation).or_insert(*handler);
-                caps.entry(*operation).or_insert(Type::Fn(*handler));
+                caps.insert(*operation);
             }
             ExprKind::AbortPerform { operation, .. } => {
-                caps.entry(*operation).or_insert(Type::I64);
+                caps.insert(*operation);
             }
             _ => {}
         }
@@ -738,72 +672,4 @@ fn collect_arrows(
     if let Some(tail) = &block.tail {
         walk(tail, arrows, caps);
     }
-}
-
-/// A noncapturing `fn(P, token) -> R` performing `operation` through the
-/// dynamic stack: the capability of a handler that lives in its frame.
-fn trampoline(program: &mut Executable, operation: usize, arrow: usize) -> (usize, Type) {
-    let parameters = program.function_types[arrow].parameters.clone();
-    let result = program.function_types[arrow].result;
-    let span = program.functions[0].span;
-    let local = |slot: usize| Expr {
-        kind: ExprKind::Local(slot),
-        ty: parameters[slot],
-        span,
-        resource: None,
-    };
-    let body = Block {
-        statements: vec![],
-        tail: Some(Box::new(Expr {
-            kind: ExprKind::DynamicPerform {
-                operation,
-                payload: Box::new(local(0)),
-                resume: Box::new(local(1)),
-                handler: arrow,
-            },
-            ty: result,
-            span,
-            resource: None,
-        })),
-        ty: result,
-    };
-    let mut function = program.functions[0].clone();
-    function.name = "<capability trampoline>".to_owned();
-    function.parameters = parameters.len();
-    function.closure = None;
-    function.capture_refs = vec![];
-    function.capture_writes = vec![];
-    function.locals = parameters
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| Local {
-            ty: *ty,
-            mutable: false,
-            linear: index == 1,
-            pinned: false,
-            grade: None,
-            span,
-        })
-        .collect();
-    function.result = result;
-    function.body = body;
-    function.span = span;
-    function.resources = vec![];
-    function.local_resources = vec![None; parameters.len()];
-    function.parameter_grades = vec![None; parameters.len()];
-    function.result_grade = None;
-    function.parameter_lifetimes = vec![None; parameters.len()];
-    function.result_lifetime = None;
-    function.lifetime_bounds = BTreeSet::new();
-    function.declared_lifetimes = BTreeSet::new();
-    function.index_relations = BTreeSet::new();
-    function.parameter_slots = None;
-    function.local_borrowed = vec![];
-    function.local_copyable = vec![];
-    function.capability_parameters = vec![];
-    function.shared_environment = false;
-    let index = program.functions.len();
-    program.functions.push(function);
-    program.foreign_functions.push(None);
-    (index, Type::Fn(arrow))
 }

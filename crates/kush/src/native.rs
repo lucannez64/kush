@@ -1908,6 +1908,8 @@ fn lower(
     handler_push_sig
         .params
         .extend((0..4).map(|_| AbiParam::new(I64)));
+    // The pushed frame is the activation's cell (FND-HANDLERS-ONE-CELLS).
+    handler_push_sig.returns.push(AbiParam::new(I64));
     let handler_push = module
         .declare_function("kush_handler_push", Linkage::Import, &handler_push_sig)
         .map_err(error)?;
@@ -1921,6 +1923,14 @@ fn lower(
     handler_lookup_sig.returns.push(AbiParam::new(I64));
     let handler_lookup = module
         .declare_function("kush_handler_lookup", Linkage::Import, &handler_lookup_sig)
+        .map_err(error)?;
+    let mut handler_perform_sig = module.make_signature();
+    handler_perform_sig
+        .params
+        .extend((0..3).map(|_| AbiParam::new(I64)));
+    handler_perform_sig.returns.push(AbiParam::new(I64));
+    let handler_perform = module
+        .declare_function("kush_handler_perform", Linkage::Import, &handler_perform_sig)
         .map_err(error)?;
     let mut handler_redirect_sig = module.make_signature();
     handler_redirect_sig.params.push(AbiParam::new(I64));
@@ -2222,6 +2232,7 @@ fn lower(
             handler_push,
             handler_pop,
             handler_lookup,
+            handler_perform,
             handler_redirect,
             handler_base: None,
             task_wrappers: &task_wrappers,
@@ -4186,6 +4197,9 @@ struct Generator<'b, E: Emit> {
     handler_push: FuncId,
     handler_pop: FuncId,
     handler_lookup: FuncId,
+    /// `kush_handler_perform(operation, cell, out)`: the frame `cell`, or
+    /// the innermost one for `operation` when `cell` is zero.
+    handler_perform: FuncId,
     handler_redirect: FuncId,
     /// Entry handler-stack depth for this function; every return restores it so
     /// an early `return` cannot leave a dynamic handler frame visible.
@@ -7244,23 +7258,58 @@ impl<E: Emit> Generator<'_, E> {
         self.builder.switch_to_block(join);
         self.builder.block_params(join).to_vec()
     }
-    /// Perform `operation` through the innermost dynamic handler frame,
-    /// whose callable has signature `handler`; a missing handler panics.
+    /// Perform `operation` through the activation `cell`, or the innermost
+    /// dynamic handler frame without one; its callable has signature
+    /// `handler`. A missing handler panics.
     fn dynamic_perform(
         &mut self,
         operation: usize,
         handler: usize,
         payload_values: &[Value],
         resume_values: &[Value],
+        cell: Option<Value>,
     ) -> Words {
+        // `(code, environment, once)` of the handler to call.
+        let chosen = self.builder.create_block();
+        for _ in 0..3 {
+            self.builder.append_block_param(chosen, I64);
+        }
+        let search = self.builder.create_block();
+        if let Some(cell) = cell {
+            // FND-HANDLERS-ONE-CELLS: a cell whose frame holds a noncapturing
+            // `fn` (`once` word zero) is called without the runtime. Frame
+            // words: operation, code, environment, once, consumed.
+            let probe = self.builder.create_block();
+            let direct = self.builder.create_block();
+            self.builder.brif(cell, probe, &[], search, &[]);
+            self.builder.switch_to_block(probe);
+            let once = self.builder.load(I64, ir::MemFlagsData::new(), cell, 24);
+            self.builder.brif(once, search, &[], direct, &[]);
+            self.builder.switch_to_block(direct);
+            let code = self.builder.load(I64, ir::MemFlagsData::new(), cell, 8);
+            let zero = self.constant(0);
+            self.builder.jump(chosen, &[code, zero, zero]);
+        } else {
+            self.builder.jump(search, &[]);
+        }
+        self.builder.switch_to_block(search);
         let out = self.stack_words(3);
         let op = self.constant(operation as i64);
-        let found = self.runtime_call(self.handler_lookup, &[op, out]);
+        let found = match cell {
+            Some(cell) => self.runtime_call(self.handler_perform, &[op, cell, out]),
+            None => self.runtime_call(self.handler_lookup, &[op, out]),
+        };
         let missing = self.builder.icmp_imm_s(IntCC::Equal, found, 0);
         self.guard(missing);
         let code = self.builder.load(I64, ir::MemFlagsData::new(), out, 0);
         let environment = self.builder.load(I64, ir::MemFlagsData::new(), out, 8);
         let once = self.builder.load(I64, ir::MemFlagsData::new(), out, 16);
+        self.builder.jump(chosen, &[code, environment, once]);
+        self.builder.switch_to_block(chosen);
+        let (code, environment, once) = {
+            let params = self.builder.block_params(chosen);
+            (params[0], params[1], params[2])
+        };
         let signature = self.program.function_types[handler].clone();
         let result = signature.result;
         let pointer = if aggregate_result(self.program, result) {

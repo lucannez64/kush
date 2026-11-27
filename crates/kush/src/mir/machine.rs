@@ -303,6 +303,9 @@ struct Machine<'p, 'o> {
     closure_types: Vec<Vec<Type>>,
     /// The dynamic handler stack.
     handlers: Vec<effects::HandlerFrame>,
+    /// The next activation cell id: a capability names its frame by it, in
+    /// any task (FND-HANDLERS-ONE-CELLS).
+    next_cell: i64,
     /// Nonzero while an abort travels to its handler: the payload buffer
     /// of the activation it addresses.
     abort_word: i64,
@@ -422,6 +425,7 @@ impl<'p, 'o> Machine<'p, 'o> {
             closure_types: Vec::new(),
             handlers: Vec::new(),
             abort_word: 0,
+            next_cell: 1,
             kstack: effects::KStack::default(),
             nested: 0,
             tasks: Vec::new(),
@@ -915,7 +919,11 @@ impl Machine<'_, '_> {
             Rvalue::Runtime(RuntimeOp::Perform { operation, .. }, operands) => {
                 let payload = self.operand(operands[0])?;
                 let resume = self.operand(operands[1])?;
-                self.perform(*operation, payload, resume, span)
+                let cell = match operands.get(2) {
+                    Some(cell) => self.scalar(*cell)?,
+                    None => 0,
+                };
+                self.perform(*operation, payload, resume, cell, span)
             }
             Rvalue::Map(op, operands) => {
                 let handle = self.scalar(operands[0])?;

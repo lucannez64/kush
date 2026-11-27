@@ -3509,16 +3509,20 @@ void kush_handler_restore(int64_t depth) {
         kush_handler_drop_frame(&handlers->frames[handlers->depth]);
     }
 }
-void kush_handler_push(int64_t operation, int64_t code, int64_t environment,
-                       int64_t once) {
+/* Returns the pushed frame: the activation's cell, which a capability names
+   (FND-HANDLERS-ONE-CELLS). A task's frames never move. */
+int64_t kush_handler_push(int64_t operation, int64_t code, int64_t environment,
+                          int64_t once) {
     kush_handler_context *handlers = kush_handlers();
     if (handlers->depth >= KUSH_HANDLER_MAX) kush_panic();
-    handlers->frames[handlers->depth].operation = operation;
-    handlers->frames[handlers->depth].code = code;
-    handlers->frames[handlers->depth].environment = environment;
-    handlers->frames[handlers->depth].once = once;
-    handlers->frames[handlers->depth].consumed = 0;
+    kush_handler_frame *frame = &handlers->frames[handlers->depth];
+    frame->operation = operation;
+    frame->code = code;
+    frame->environment = environment;
+    frame->once = once;
+    frame->consumed = 0;
     handlers->depth += 1;
+    return (int64_t)(uintptr_t)frame;
 }
 void kush_handler_pop(void) {
     kush_handler_context *handlers = kush_handlers();
@@ -3546,6 +3550,34 @@ int64_t kush_handler_redirect(int64_t target) {
     }
     return before;
 }
+/* What a perform takes from `frame`: its code, environment and whether the
+   call owns the environment. */
+static int64_t kush_handler_take(kush_handler_frame *frame, int64_t *out) {
+    /* A consumed once frame still discharges its operation: a later
+       perform must not fall through to an outer handler. */
+    if (frame->consumed) return 0;
+    out[0] = frame->code;
+    out[1] = frame->environment;
+    out[2] = frame->once;
+    if (frame->once == 2) {
+        /* A reusable handler (all captures copyable) keeps its
+           environment; each call owns and frees a fresh copy. */
+        KushAllocHeader *header =
+            (KushAllocHeader *)(uintptr_t)frame->environment - 1;
+        uint64_t copy = kush_alloc(header->usable);
+        memcpy((void *)(uintptr_t)copy,
+               (const void *)(uintptr_t)frame->environment,
+               (size_t)header->usable);
+        out[1] = (int64_t)copy;
+        out[2] = 1;
+    } else if (frame->once) {
+        /* A once handler transfers its environment to this call. The
+           callee frees it, so the frame must never drop it again. */
+        frame->consumed = 1;
+        frame->environment = 0;
+    }
+    return 1;
+}
 int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
     kush_handler_context *handlers = kush_handlers();
     for (int64_t index = handlers->depth - 1; index >= 0; --index) {
@@ -3555,32 +3587,20 @@ int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
             continue;
         }
         if (frame->operation != operation) continue;
-        /* A consumed once frame still discharges its operation: a later
-           perform must not fall through to an outer handler. */
-        if (frame->consumed) return 0;
-        out[0] = frame->code;
-        out[1] = frame->environment;
-        out[2] = frame->once;
-        if (frame->once == 2) {
-            /* A reusable handler (all captures copyable) keeps its
-               environment; each call owns and frees a fresh copy. */
-            KushAllocHeader *header =
-                (KushAllocHeader *)(uintptr_t)frame->environment - 1;
-            uint64_t copy = kush_alloc(header->usable);
-            memcpy((void *)(uintptr_t)copy,
-                   (const void *)(uintptr_t)frame->environment,
-                   (size_t)header->usable);
-            out[1] = (int64_t)copy;
-            out[2] = 1;
-        } else if (frame->once) {
-            /* A once handler transfers its environment to this call. The
-               callee frees it, so the frame must never drop it again. */
-            frame->consumed = 1;
-            frame->environment = 0;
-        }
-        return 1;
+        return kush_handler_take(frame, out);
     }
     return 0;
+}
+/* A perform through a capability: the activation `cell` when nonzero. A
+   task does not get another task's capturing handler (decision D3): its
+   cell answers as missing there. */
+int64_t kush_handler_perform(int64_t operation, int64_t cell, int64_t *out) {
+    if (cell == 0) return kush_handler_lookup(operation, out);
+    kush_handler_frame *frame = (kush_handler_frame *)(uintptr_t)cell;
+    kush_handler_context *handlers = kush_handlers();
+    int own = frame >= handlers->frames && frame < handlers->frames + KUSH_HANDLER_MAX;
+    if (!own && frame->once != 0) return 0;
+    return kush_handler_take(frame, out);
 }
 /* Freed task stacks are kept for reuse (a server spawns a task per
    request): mmap, mprotect and munmap cost more than the request. */

@@ -56,9 +56,10 @@ enum Step {
 
 pub(crate) fn lower(program: &mut Executable) -> Result<()> {
     check_task_tokens(program)?;
-    let hidden = implicit::add(program)?;
+    let (hidden, arrows) = implicit::add(program)?;
     let mut context = Context {
         hidden,
+        arrows,
         performs: performs(program),
         capability_performs: capability_performs(program),
         entries: BTreeMap::new(),
@@ -173,13 +174,18 @@ fn passes_slot(expr: &Expr, slot: usize) -> bool {
 }
 
 /// Whether `expr` is a perform through the capability in `slot`: an
-/// indirect call of that local with the payload and a token.
+/// indirect call of that local with the payload and a token, or a perform
+/// naming that local as its activation cell (FND-HANDLERS-ONE-CELLS).
 fn performs_through(expr: &Expr, slot: usize) -> bool {
-    matches!(
-        &expr.kind,
-        ExprKind::CallIndirect { callee, arguments }
-            if arguments.len() == 2 && passes_slot(callee, slot)
-    )
+    match &expr.kind {
+        ExprKind::CallIndirect { callee, arguments } => {
+            arguments.len() == 2 && passes_slot(callee, slot)
+        }
+        ExprKind::DynamicPerform {
+            cell: Some(cell), ..
+        } => passes_slot(cell, slot),
+        _ => false,
+    }
 }
 
 /// Capability parameters each function may perform through: directly, or by
@@ -343,6 +349,9 @@ struct Context {
     parameter_slots: Vec<Option<Vec<usize>>>,
     /// Hidden capability parameter slots of the copies made by `implicit`.
     hidden: implicit::Hidden,
+    /// Handler arrow of each resumptive operation: the answer type of a
+    /// cell capability's resumable entry.
+    arrows: implicit::Arrows,
 }
 
 /// The entry key of an await of `callee` in a body resumable for `key`. A
@@ -646,9 +655,9 @@ impl Live {
             ExprKind::AbortPerform {
                 value, capability, ..
             } => {
-                let after = capability
-                    .as_ref()
-                    .map_or_else(Slots::new, |capability| self.expr(capability, &Slots::new()));
+                let after = capability.as_ref().map_or_else(Slots::new, |capability| {
+                    self.expr(capability, &Slots::new())
+                });
                 self.expr(value, &after)
             }
             ExprKind::AbortCall { call, exits, .. } => {
@@ -2719,7 +2728,12 @@ fn performs_with(program: &Executable, spawns: bool) -> Vec<BTreeSet<usize>> {
                     found.extend(operations.difference(masked).copied());
                 };
                 match &expr.kind {
-                    ExprKind::DynamicPerform { operation, .. }
+                    // A perform through a cell is not dynamic.
+                    ExprKind::DynamicPerform {
+                        operation,
+                        cell: None,
+                        ..
+                    }
                     | ExprKind::AbortPerform { operation, .. } => {
                         add(&BTreeSet::from([*operation]));
                     }
@@ -3565,10 +3579,24 @@ fn resumable_entry(
             check_unresumable_paths(program, context, &body, operation)?;
         }
         EntryKey::Capability(slot) => {
-            let Type::Fn(arrow) = source.locals[slot].ty else {
-                unreachable!("a capability parameter is a handler arrow")
+            let answer = match source.locals[slot].ty {
+                Type::Fn(arrow) => program.function_types[arrow].result,
+                // A cell: the hidden parameter of a copy, for an operation
+                // whose handler arrow `implicit` recorded.
+                _ => {
+                    let arrow = context
+                        .hidden
+                        .get(&function)
+                        .and_then(|hidden| {
+                            hidden
+                                .iter()
+                                .find(|(_, cell)| **cell == slot)
+                                .and_then(|(operation, _)| context.arrows.get(operation))
+                        })
+                        .expect("a cell capability belongs to a copy's operation");
+                    program.function_types[*arrow].result
+                }
             };
-            let answer = program.function_types[arrow].result;
             capability_token = if multi {
                 Type::Multi(multi_function_type(program, answer, result))
             } else {

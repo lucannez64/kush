@@ -1337,8 +1337,13 @@ impl Builder<'_> {
                 payload,
                 resume,
                 handler,
+                cell,
             } => {
-                let Some(values) = self.operands(&[payload, resume])? else {
+                // FND-HANDLERS-ONE-CELLS: a third operand names the
+                // activation's cell (zero: search the stack).
+                let mut operands = vec![&**payload, &**resume];
+                operands.extend(cell.as_deref());
+                let Some(values) = self.operands(&operands)? else {
                     return Ok(None);
                 };
                 self.consume(payload);
@@ -1384,6 +1389,7 @@ impl Builder<'_> {
                 handler,
                 body,
                 reusable,
+                cell,
             } => {
                 let Some(callable) = self.expr(handler)? else {
                     return Ok(None);
@@ -1393,7 +1399,11 @@ impl Builder<'_> {
                     operation: *operation,
                     reusable: *reusable,
                 };
-                self.runtime(op, vec![callable], Type::Unit, span);
+                // The push answers the activation's cell.
+                let pushed = self.runtime(op, vec![callable], Type::I64, span);
+                if let Some(cell) = cell {
+                    self.assign(*cell, Rvalue::Use(Operand::Copy(Place::local(pushed))), span);
+                }
                 let Some(value) = self.block(body)? else {
                     return Ok(None);
                 };

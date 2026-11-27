@@ -860,8 +860,7 @@ impl<E: Emit> Generator<'_, E> {
                                 (self.constant(0), self.constant(0))
                             };
                         let op = self.constant(operation as i64);
-                        self.runtime_void(self.handler_push, &[op, code, environment, once]);
-                        unit(self)
+                        vec![self.runtime_call(self.handler_push, &[op, code, environment, once])]
                     }
                     RuntimeOp::HandlerPop => {
                         self.runtime_void(self.handler_pop, &[]);
@@ -871,13 +870,14 @@ impl<E: Emit> Generator<'_, E> {
                         vec![self.runtime_call(self.handler_redirect, &[words[0][0]])]
                     }
                     RuntimeOp::Perform { operation, handler } => {
-                        self.dynamic_perform(operation, handler, &words[0], &words[1])
+                        let cell = words.get(2).map(|cell| cell[0]);
+                        self.dynamic_perform(operation, handler, &words[0], &words[1], cell)
                     }
                     RuntimeOp::AbortBuffer { words } => vec![self.stack_words(words)],
                     RuntimeOp::AbortHandlerPush { operation } => {
                         let op = self.constant(operation as i64);
                         let zero = self.constant(0);
-                        self.runtime_void(self.handler_push, &[op, words[0][0], zero, zero]);
+                        self.runtime_call(self.handler_push, &[op, words[0][0], zero, zero]);
                         unit(self)
                     }
                     RuntimeOp::AbortRaise { operation } => {

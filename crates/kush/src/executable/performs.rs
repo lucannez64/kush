@@ -1009,6 +1009,7 @@ impl Checker<'_, '_> {
                 payload: Box::new(payload),
                 resume: Box::new(resume),
                 handler,
+                cell: None,
             },
             ty: declared.result,
             span,

@@ -28,6 +28,8 @@ pub(super) struct HandlerFrame {
     consumed: bool,
     /// An abort frame (its code is the payload buffer).
     abort: bool,
+    /// The activation's cell id (0 for abort and redirect frames).
+    cell: i64,
 }
 
 /// The continuation stack: its chunks, innermost last, as `(allocation,
@@ -41,6 +43,10 @@ pub(super) struct KStack {
 }
 
 const NO_HANDLER: &str = "no dynamically active handler for this operation";
+
+/// What a perform takes from a frame: `(code, environment, once)`, or
+/// nothing for a consumed `once` frame.
+type Taken = Option<(i64, i64, i64)>;
 
 impl Machine<'_, '_> {
     pub(super) fn runtime_op(
@@ -74,6 +80,8 @@ impl Machine<'_, '_> {
                     ),
                     _ => (0, 0),
                 };
+                let cell = self.next_cell;
+                self.next_cell += 1;
                 self.handlers.push(HandlerFrame {
                     operation: operation as i64,
                     code: words[0][0],
@@ -81,8 +89,9 @@ impl Machine<'_, '_> {
                     once,
                     consumed: false,
                     abort: false,
+                    cell,
                 });
-                vec![0]
+                vec![cell]
             }
             RuntimeOp::HandlerPop => {
                 if !self.handlers.is_empty() {
@@ -100,6 +109,7 @@ impl Machine<'_, '_> {
                         once: 1,
                         consumed: true,
                         abort: false,
+                        cell: 0,
                     });
                 }
                 vec![before]
@@ -124,6 +134,7 @@ impl Machine<'_, '_> {
                     once: 0,
                     consumed: false,
                     abort: true,
+                    cell: 0,
                 });
                 vec![0]
             }
@@ -161,9 +172,15 @@ impl Machine<'_, '_> {
         operation: usize,
         payload: Words,
         resume: Words,
+        cell: i64,
         span: Span,
     ) -> Run<Flow> {
-        let Some((code, environment, once)) = self.lookup(operation as i64)? else {
+        let taken = if cell == 0 {
+            self.lookup(operation as i64)?
+        } else {
+            self.take_cell(cell)?
+        };
+        let Some((code, environment, once)) = taken else {
             return panic_at(span, NO_HANDLER);
         };
         Ok(Flow::Call {
@@ -222,27 +239,61 @@ impl Machine<'_, '_> {
             if frame.operation != operation {
                 continue;
             }
-            if frame.consumed {
-                return Ok(None);
+            let (taken, frame) = self.take(frame)?;
+            self.handlers[index] = frame;
+            return Ok(taken);
+        }
+        Ok(None)
+    }
+
+    /// `kush_handler_take`: what a perform takes from `frame`, as
+    /// `(code, environment, once)`, and the frame afterwards. A consumed
+    /// `once` frame answers with nothing.
+    fn take(&mut self, mut frame: HandlerFrame) -> Run<(Taken, HandlerFrame)> {
+        if frame.consumed {
+            return Ok((None, frame));
+        }
+        let taken = match frame.once {
+            2 => {
+                // A reusable handler keeps its environment; each call owns
+                // a fresh copy.
+                let bytes = self.memory.size(frame.environment)?;
+                let copy = self.memory.allocate(bytes, true);
+                let data = self.memory.load_bytes(frame.environment, bytes)?;
+                self.memory.store_bytes(copy, &data)?;
+                (frame.code, copy, 1)
             }
-            return Ok(Some(match frame.once {
-                2 => {
-                    // A reusable handler keeps its environment; each call
-                    // owns a fresh copy.
-                    let bytes = self.memory.size(frame.environment)?;
-                    let copy = self.memory.allocate(bytes, true);
-                    let data = self.memory.load_bytes(frame.environment, bytes)?;
-                    self.memory.store_bytes(copy, &data)?;
-                    (frame.code, copy, 1)
+            1 => {
+                frame.consumed = true;
+                (frame.code, std::mem::take(&mut frame.environment), 1)
+            }
+            _ => (frame.code, frame.environment, 0),
+        };
+        Ok((Some(taken), frame))
+    }
+
+    /// `kush_handler_perform` with a cell: the frame of that activation, in
+    /// this task or (for a capability a spawned task carries) another. A
+    /// task does not get another task's capturing handler (decision D3).
+    fn take_cell(&mut self, cell: i64) -> Run<Option<(i64, i64, i64)>> {
+        if let Some(index) = self.handlers.iter().rposition(|frame| frame.cell == cell) {
+            let (taken, frame) = self.take(self.handlers[index])?;
+            self.handlers[index] = frame;
+            return Ok(taken);
+        }
+        for task in 0..self.tasks.len() {
+            if let Some(index) = self.tasks[task]
+                .handlers
+                .iter()
+                .rposition(|frame| frame.cell == cell)
+            {
+                if self.tasks[task].handlers[index].once != 0 {
+                    return Ok(None);
                 }
-                1 => {
-                    let frame = &mut self.handlers[index];
-                    frame.consumed = true;
-                    let environment = std::mem::take(&mut frame.environment);
-                    (frame.code, environment, 1)
-                }
-                _ => (frame.code, frame.environment, 0),
-            }));
+                let (taken, frame) = self.take(self.tasks[task].handlers[index])?;
+                self.tasks[task].handlers[index] = frame;
+                return Ok(taken);
+            }
         }
         Ok(None)
     }

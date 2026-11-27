@@ -1376,6 +1376,10 @@ pub(crate) enum ExprKind {
         /// serves any number of performs (stateful front ends write through
         /// by-reference captures).
         reusable: bool,
+        /// An `i64` local set to the activation's cell (its frame), the
+        /// operation's capability in the body (FND-HANDLERS-ONE-CELLS).
+        /// Unread until `crate::suspend` passes it.
+        cell: Option<usize>,
     },
     /// `perform` resolved through the dynamic handler stack. The handler
     /// contract is pure; a copyable function is reusable, while a capturing
@@ -1385,6 +1389,10 @@ pub(crate) enum ExprKind {
         payload: Box<Expr>,
         resume: Box<Expr>,
         handler: usize,
+        /// The activation's cell when the perform has the operation's
+        /// capability: the frame is used without a search. Zero or `None`
+        /// searches the dynamic stack.
+        cell: Option<Box<Expr>>,
     },
     /// A handled body whose handler is not statically tail-resumptive and
     /// that performs its operation outside the body's tail. Produced by the
@@ -1736,6 +1744,7 @@ impl Expr {
             | ExprKind::DynamicPerform {
                 payload: a,
                 resume: b,
+                cell: None,
                 ..
             }
             | ExprKind::DynArrayPush {
@@ -1863,6 +1872,16 @@ impl Expr {
                 f(handler);
                 block(body, f);
             }
+            ExprKind::DynamicPerform {
+                payload,
+                resume,
+                cell: Some(cell),
+                ..
+            } => {
+                f(payload);
+                f(resume);
+                f(cell);
+            }
             ExprKind::Slice {
                 base, start, end, ..
             } => {
@@ -1973,6 +1992,7 @@ impl Expr {
             | ExprKind::DynamicPerform {
                 payload: a,
                 resume: b,
+                cell: None,
                 ..
             }
             | ExprKind::DynArrayPush {
@@ -2099,6 +2119,16 @@ impl Expr {
             ExprKind::HandlerPush { handler, body, .. } => {
                 f(handler);
                 block(body, f);
+            }
+            ExprKind::DynamicPerform {
+                payload,
+                resume,
+                cell: Some(cell),
+                ..
+            } => {
+                f(payload);
+                f(resume);
+                f(cell);
             }
             ExprKind::Slice {
                 base, start, end, ..

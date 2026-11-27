@@ -429,6 +429,7 @@ impl Checker<'_, '_> {
                     body: Box::new(inner),
                     // A multishot frame serves every perform of every branch.
                     reusable: reusable || multi_framed,
+                    cell: Some(self.fresh_local(span, Type::I64)?),
                 },
                 ty,
                 span,
@@ -511,6 +512,7 @@ impl Checker<'_, '_> {
                     payload: Box::new(local(0)),
                     resume: Box::new(local(1)),
                     handler: arrow,
+                    cell: None,
                 },
                 ty: result,
                 span,
