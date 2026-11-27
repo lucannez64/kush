@@ -799,10 +799,6 @@ fn block_children<'a>(
             on_expr(handler);
             on_block(body);
         }
-        ExprKind::HandlerRedirect { depth, body } => {
-            on_expr(depth);
-            on_block(body);
-        }
         ExprKind::ContinuationScope { body } => on_block(body),
         ExprKind::Suspendable(suspendable) => on_block(&suspendable.body),
         ExprKind::Region { body, finish, .. } => {
@@ -1823,9 +1819,6 @@ struct Spec {
     finish: Option<usize>,
     /// Resumable entry index and continuation token type per awaited callee.
     entries: BTreeMap<(usize, Option<usize>), (usize, Type)>,
-    /// The handle is for a declared operation: resumed continuations hide
-    /// frames the handler pushes (see `ExprKind::HandlerRedirect`).
-    redirect: bool,
     /// The handler, when it is a known noncapturing function that only calls
     /// its resumption directly: multishot points with captured values call a
     /// specialization of it.
@@ -2091,13 +2084,9 @@ fn build(
         .copied()
         .filter(|point| spec.multishot && !multi_tokens && !captures[point].is_empty())
         .collect::<Vec<_>>();
-    // A one-shot continuation records the
-    // handler-stack depth at its point and resumes under a redirect, so
-    // frames the handler pushes around `resume` stay invisible to it.
-    let redirects = |point: usize| spec.redirect && matches!(tokens[&point], Type::Once(_));
-    let allocates = order.iter().any(|point| {
-        (!captures[point].is_empty() || redirects(*point)) && !specialized.contains(point)
-    });
+    let allocates = order
+        .iter()
+        .any(|point| !captures[point].is_empty() && !specialized.contains(point));
     effects_check(allocates)?;
     let function_of = |point: usize| {
         first_function + order.iter().position(|p| *p == point).expect("known point")
@@ -2167,12 +2156,6 @@ fn build(
                             span,
                             resource: None,
                         })
-                        .chain(redirects(*point).then_some(Expr {
-                            kind: ExprKind::HandlerDepth,
-                            ty: Type::I64,
-                            span,
-                            resource: None,
-                        }))
                         .collect(),
                 },
                 ty: token_ty,
@@ -2219,10 +2202,8 @@ fn build(
         let slots = &captures[point];
         let (input_resource, input_ty) = inputs[point];
         let input_slot = locals.len();
-        let redirect = redirects(*point);
-        let depth_slot = input_slot + 1;
         let mut zipper = Zipper {
-            next_local: input_slot + 1 + usize::from(redirect),
+            next_local: input_slot + 1,
             flags: Vec::new(),
             span: spec.span,
         };
@@ -2244,16 +2225,6 @@ fn build(
             grade: None,
             span: spec.span,
         });
-        if redirect {
-            cont_locals.push(Local {
-                ty: Type::I64,
-                mutable: false,
-                linear: false,
-                pinned: false,
-                grade: None,
-                span: spec.span,
-            });
-        }
         cont_locals.extend(zipper.flags);
         let mut cont_resources = host.resources.clone();
         let mut cont_local_resources = host.local_resources.clone();
@@ -2265,9 +2236,6 @@ fn build(
         }
         cont_local_resources.resize(cont_locals.len(), None);
         let mut parameter_slots = slots.clone();
-        if redirect {
-            parameter_slots.push(depth_slot);
-        }
         let environment = parameter_slots.len();
         parameter_slots.push(input_slot);
         let parameters = parameter_slots.len();
@@ -2280,28 +2248,7 @@ fn build(
             span: spec.span,
             resource: None,
         };
-        let body = if redirect {
-            Expr {
-                kind: ExprKind::HandlerRedirect {
-                    depth: Box::new(Expr {
-                        kind: ExprKind::Local(depth_slot),
-                        ty: Type::I64,
-                        span: spec.span,
-                        resource: None,
-                    }),
-                    body: Block {
-                        statements: vec![],
-                        tail: Some(Box::new(region)),
-                        ty: spec.result,
-                    },
-                },
-                ty: spec.result,
-                span: spec.span,
-                resource: None,
-            }
-        } else {
-            region
-        };
+        let body = region;
         continuations.push(Function {
             name: format!("{}::resume#{point}", host.name),
             parameters,
@@ -2449,46 +2396,6 @@ fn lower_one(
                 .flatten(),
         )
     };
-    // A known handler that installs no dynamic handler and only calls its
-    // token directly cannot hide frames from the resumed code, so its
-    // continuations need no redirect (and stay capture-free when possible).
-    let handler_is_transparent = {
-        let handler = find_in_block(&program.functions[index].body, target)
-            .and_then(|suspendable| suspendable.handler_function);
-        handler.is_some_and(|handler| {
-            !context.lowering.contains(&handler) && {
-                let function = &program.functions[handler];
-                let pushes = {
-                    fn pushes(expr: &Expr) -> bool {
-                        if matches!(
-                            expr.kind,
-                            ExprKind::HandlerPush { .. }
-                                | ExprKind::HandlerRedirect { .. }
-                                | ExprKind::AbortScope {
-                                    operation: Some(_),
-                                    ..
-                                }
-                        ) {
-                            return true;
-                        }
-                        let mut found = false;
-                        expr.for_each_child(&mut |child| found |= pushes(child));
-                        found
-                    }
-                    function
-                        .body
-                        .statements
-                        .iter()
-                        .any(|statement| match statement {
-                            Statement::Let(_, value) | Statement::Expr(value) => pushes(value),
-                            Statement::Declare(_) => false,
-                        })
-                        || function.body.tail.as_deref().is_some_and(pushes)
-                };
-                !pushes && multishot_handler(program, handler).is_some()
-            }
-        })
-    };
     // A multishot handler is specialized from its lowered body.
     let multishot_handler = match multishot {
         Some(handler) if !context.lowering.contains(&handler) => {
@@ -2580,7 +2487,6 @@ fn lower_one(
             awaited_allocates,
             finish: None,
             entries: entries.clone(),
-            redirect: !handler_is_transparent,
             multishot_handler: multishot_handler.clone(),
             span,
         };
@@ -3042,10 +2948,10 @@ pub(crate) fn mark_abort_calls(program: &mut Executable) -> Result<()> {
             }
             let mut exits = Vec::new();
             let mut propagates = false;
-            // A resumption token runs its continuation under a redirect that
-            // hides frames pushed after the suspension, so an abort coming
-            // back through it may address a handle outside this function even
-            // when one for the same operation encloses the call here.
+            // A resumption token runs code that holds the capabilities it had
+            // at the suspension, so an abort coming back through it may
+            // address a handle outside this function even when one for the
+            // same operation encloses the call here.
             let token_call = match &expr.kind {
                 ExprKind::CallIndirect { callee, .. } => self.token_like(callee.ty),
                 _ => false,
@@ -3701,7 +3607,6 @@ fn resumable_entry(
         awaited_allocates,
         finish: Some(k),
         entries,
-        redirect: true,
         multishot_handler: None,
         span: source.span,
     };

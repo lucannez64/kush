@@ -202,8 +202,6 @@ pub(super) fn fusion_expr_safe(
         | ExprKind::Suspend { .. }
         | ExprKind::Region { .. }
         | ExprKind::RegionExit { .. }
-        | ExprKind::HandlerDepth
-        | ExprKind::HandlerRedirect { .. }
         | ExprKind::ContinuationScope { .. }
         | ExprKind::TryExit { .. }
         // An abort leaves code that a fused stage would have to resume.
@@ -464,12 +462,7 @@ pub(super) fn fuse_expr(
             fuse_block(body, types, signatures, safety, fusions);
             fuse_expr(handler, types, signatures, safety, fusions);
         }
-        ExprKind::HandlerDepth => {}
         ExprKind::ContinuationScope { body } => {
-            fuse_block(body, types, signatures, safety, fusions);
-        }
-        ExprKind::HandlerRedirect { depth, body } => {
-            fuse_expr(depth, types, signatures, safety, fusions);
             fuse_block(body, types, signatures, safety, fusions);
         }
         ExprKind::AllocBoxNew { allocator, value }

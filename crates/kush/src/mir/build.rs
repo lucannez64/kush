@@ -1359,11 +1359,6 @@ impl Builder<'_> {
                 let result = self.runtime(op, values, expr.ty, span);
                 Operand::Move(Place::local(result))
             }
-            ExprKind::HandlerDepth => {
-                let temp = self.temp(expr.ty);
-                self.assign(temp, Rvalue::Runtime(RuntimeOp::HandlerDepth, vec![]), span);
-                Operand::Move(Place::local(temp))
-            }
             ExprKind::ContinuationScope { body } => {
                 let mark = self.runtime(RuntimeOp::ContinuationMark, vec![], Type::I64, span);
                 let Some(value) = self.block(body)? else {
@@ -1372,20 +1367,6 @@ impl Builder<'_> {
                 let value = self.settle(value, expr.ty, span);
                 let mark = Operand::Copy(Place::local(mark));
                 self.runtime(RuntimeOp::ContinuationRestore, vec![mark], Type::Unit, span);
-                value
-            }
-            ExprKind::HandlerRedirect { depth, body } => {
-                let Some(target) = self.expr(depth)? else {
-                    return Ok(None);
-                };
-                let before =
-                    self.runtime(RuntimeOp::HandlerRedirect, vec![target], Type::I64, span);
-                let Some(value) = self.block(body)? else {
-                    return Ok(None);
-                };
-                let value = self.settle(value, expr.ty, span);
-                let before = Operand::Copy(Place::local(before));
-                self.runtime(RuntimeOp::HandlerRestore, vec![before], Type::Unit, span);
                 value
             }
             ExprKind::HandlerPush {

@@ -353,6 +353,33 @@ and the removal itself.
   still search: aborts that leave through continuations and multishot
   resumptions (HANDLERS-ONE-DELETE).
 
+### As built: HANDLERS-ONE-DELETE
+
+- No perform searches for a handler. Abort exits carry their scope's
+  capability (`AbortExit::capability`), so a continuation that takes one
+  away still addresses that scope; abortive scopes give capabilities for
+  lexically performed operations too; lexical handlers whose rows name
+  abortive operations receive them at each suspension, while resumption
+  token arrows keep their shape. With every by-name lookup made to fault,
+  the whole suite passed before the machinery went.
+- Removed: the by-name lookup (`kush_handler_lookup` answers "missing", as
+  does the evaluator), redirect frames (`ExprKind::HandlerRedirect`,
+  `ExprKind::HandlerDepth`, `RuntimeOp::HandlerRedirect`,
+  `kush_handler_redirect`, the continuations' depth captures), and copying
+  frames into spawned tasks. A perform without a capability panics.
+- D2 holds by construction: resumed code performs through the capabilities
+  it captured (reference chapter 7 shows it). D3: a task gets the cells its
+  body captured; a capturing handler's cell answers as missing in another
+  task.
+- Kept, as an as-built deviation from section 6: the per-task frame array
+  holds the cells. `HandlerPush`/`HandlerPop` and the depth restores at
+  function exits and region exits allocate and release cells and drop a
+  capturing handler's environment on every exit path; giving that job to
+  stack slots would need the ownership pass to track handler environments
+  across consumption by a perform. The checker still generates capability
+  trampolines and private operation ids as placeholders, which the pass
+  replaces with cells; they are dead code after it.
+
 ## 8. Decisions (user, 2026-11-27)
 
 - **D1. A function value gets its handler at the call.** It is today's

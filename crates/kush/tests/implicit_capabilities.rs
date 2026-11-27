@@ -322,3 +322,28 @@ fn vector_callbacks_receive_their_capabilities() {
     // bump: 12, 13, 14; then (x + 10) * 2: 44, 46, 48.
     agrees(&source, 44 + 46 + 48);
 }
+
+#[test]
+fn resumed_code_keeps_its_handlers_under_multishot_tokens() {
+    // Decision D2: the multishot handler re-handles `Tag` around each
+    // `resume`, but the resumed body calls `tag` with the capability it
+    // had when it suspended: the outer handler (+10) on both branches.
+    // (With the dynamic stack it saw the inner one, +20.)
+    let source = "effect Tag: i64 -> i64;
+        fn tag(x: i64) -> i64 ! {Tag} { perform Tag(x) }
+        fn main() -> i64 ! {alloc} {
+            handle Tag: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
+                k(x + 10)
+            } {
+                handle Choose: i64 -> i64 with fn(x: i64, k: fn(i64) -> i64 ! {}) -> i64 ! {} {
+                    handle Tag: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
+                        r(y + 20)
+                    } { k(x) + k(x + 1) }
+                } {
+                    let a = perform Choose(5);
+                    tag(a)
+                }
+            }
+        }";
+    agrees(source, 15 + 16);
+}

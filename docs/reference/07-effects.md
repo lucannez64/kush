@@ -1,7 +1,8 @@
 # 7. Effects
 
-Planned changes (decided): handlers will move to one capability model and
-tasks to a library on handlers (FND-HANDLERS-ONE, FND-TASKS-ON-HANDLERS).
+Every handler is reached through a capability (one handler model,
+[one-handler-model.md](../one-handler-model.md)). Planned change
+(decided): tasks move to a library on handlers (FND-TASKS-ON-HANDLERS).
 
 ## Effect rows
 
@@ -171,10 +172,41 @@ state machine.
 ### Declared operations
 
 `effect Op: P -> R;` declares an operation that called functions may
-perform. It becomes a row entry; a `handle Op` discharges it. A called
-function performs through the innermost `handle Op` active where it was
-called. A handler's own
+perform. It becomes a row entry; a `handle Op` discharges it. A function
+whose row names `Op` receives the capability of `Op` from its caller, as a
+parameter the program does not write: the innermost `handle Op` around the
+call, or the caller's own. A handler's own
 effects are declared on the operation: `effect Log: i64 -> Unit ! {io};`.
+
+Resumed code keeps the capabilities it had when it suspended: a handle the
+handler installs around `resume` does not reach it, with one-shot and
+multishot tokens alike. Here both resumptions call `tag` under the outer
+`Tag` (+10), not the one around `k` (+20):
+
+```kush eval
+effect Tag: i64 -> i64;
+fn tag(x: i64) -> i64 ! {Tag} { perform Tag(x) }
+
+fn main() -> Unit ! {io, alloc} {
+    let r = handle Tag: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
+        k(x + 10)
+    } {
+        handle Choose: i64 -> i64 with fn(x: i64, k: fn(i64) -> i64 ! {}) -> i64 ! {} {
+            handle Tag: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
+                r(y + 20)
+            } { k(x) + k(x + 1) }
+        } {
+            let a = perform Choose(5);
+            tag(a)
+        }
+    };
+    print_i64(r);
+}
+```
+
+```output
+31
+```
 
 Nothing calls `main` inside a handler, so its row cannot name a declared
 operation:
@@ -234,7 +266,7 @@ fn main() -> i64 ! {} { 0 }
 | `resume: fn(R) -> R ! {}` | multishot: resume zero or more times; live values must be copyable |
 | `resume: multi fn(R) -> R ! {}` | multishot token that may carry state across calls |
 | `effect Fail: i64 -> Never;` | abortive: the handler takes no token and its result becomes the `handle`'s value; the code between the perform and the handle is discarded and its owned values dropped |
-| `handle Op: P -> R as op with h { ... }` and `op: cap Op ! {e}` | a capability: pass `op` explicitly and `perform op(x)` calls exactly that handler, without a dynamic lookup |
+| `handle Op: P -> R as op with h { ... }` and `op: cap Op ! {e}` | a named capability: pass `op` explicitly and `perform op(x)` calls exactly that handler |
 
 ```kush eval
 effect Fail: i64 -> Never;
@@ -273,8 +305,10 @@ fn main() -> Unit ! {io} {
 ```
 
 A capability is second-class: it can be passed and forwarded, not stored,
-returned or captured by a task. A spawned task inherits only copyable
-non-capturing handler frames.
+returned or captured by a task. A spawned task keeps the handler of each
+operation in its body's row whose handler is a noncapturing `fn`, whatever
+else is installed between; performing an operation whose handler captures
+state panics in the task.
 
 Details and costs: [effect-handlers.md](../effect-handlers.md),
 [effect-state-machines.md](../effect-state-machines.md),

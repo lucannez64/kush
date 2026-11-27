@@ -3531,25 +3531,6 @@ void kush_handler_pop(void) {
         kush_handler_drop_frame(&handlers->frames[handlers->depth]);
     }
 }
-/* A resumed continuation of a declared-operation handle hides the frames its
-   handler pushed around `resume`: a redirect frame (operation -1) sends the
-   lookup below `code`, the depth recorded at the suspension. It is pushed
-   only when such frames exist, owns nothing, and is a task-inheritance
-   barrier. Returns the depth to restore after the continuation. */
-int64_t kush_handler_redirect(int64_t target) {
-    kush_handler_context *handlers = kush_handlers();
-    int64_t before = handlers->depth;
-    if (before > target) {
-        if (handlers->depth >= KUSH_HANDLER_MAX) kush_panic();
-        handlers->frames[handlers->depth].operation = -1;
-        handlers->frames[handlers->depth].code = target;
-        handlers->frames[handlers->depth].environment = 0;
-        handlers->frames[handlers->depth].once = 1;
-        handlers->frames[handlers->depth].consumed = 1;
-        handlers->depth += 1;
-    }
-    return before;
-}
 /* What a perform takes from `frame`: its code, environment and whether the
    call owns the environment. */
 static int64_t kush_handler_take(kush_handler_frame *frame, int64_t *out) {
@@ -3578,17 +3559,11 @@ static int64_t kush_handler_take(kush_handler_frame *frame, int64_t *out) {
     }
     return 1;
 }
+/* A perform without a capability finds nothing: performs reach handlers
+   through their activations' cells (FND-HANDLERS-ONE-DELETE). */
 int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
-    kush_handler_context *handlers = kush_handlers();
-    for (int64_t index = handlers->depth - 1; index >= 0; --index) {
-        kush_handler_frame *frame = &handlers->frames[index];
-        if (frame->operation == -1) {
-            index = frame->code;
-            continue;
-        }
-        if (frame->operation != operation) continue;
-        return kush_handler_take(frame, out);
-    }
+    (void)operation;
+    (void)out;
     return 0;
 }
 /* A perform through a capability: the activation `cell` when nonzero. A
@@ -3852,40 +3827,8 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
                 (unsigned int)(pointer & 0xffffffffu),
                 (unsigned int)(pointer >> 32));
     t->state = KUSH_READY;
-    /* Inherit the parent's copyable noncapturing dynamic handler frames.
-       A capturing or one-shot frame is a task boundary: its environment is
-       owned by the parent's dynamic extent, so only the longest inheritable
-       innermost contiguous suffix crosses. Frames below a barrier must not
-       become visible to a child merely because their shadowing frame cannot
-       be inherited. */
-    {
-        kush_handler_context *parent = kush_handlers();
-        /* Walk the frames visible to the parent: a redirect frame (pushed by
-           a resumed continuation) skips the frames its handler pushed. */
-        static KUSH_TLS int64_t picked[KUSH_HANDLER_MAX];
-        int64_t count = 0;
-        int64_t index = parent->depth - 1;
-        while (index >= 0) {
-            kush_handler_frame *frame = &parent->frames[index];
-            if (frame->operation == -1) {
-                index = frame->code - 1;
-                continue;
-            }
-            if (frame->environment != 0 || frame->once) break;
-            picked[count++] = index;
-            index -= 1;
-        }
-        if (count > 0) {
-            kush_handler_context *child =
-                (kush_handler_context *)calloc(1, sizeof(kush_handler_context));
-            if (child == NULL) kush_panic();
-            for (int64_t i = count - 1; i >= 0; --i) {
-                child->frames[child->depth] = parent->frames[picked[i]];
-                child->depth += 1;
-            }
-            t->handlers = child;
-        }
-    }
+    /* A task reaches its handlers through the cells its body captured
+       (FND-HANDLERS-ONE-DELETE, decision D3): no frame is copied. */
     kush_ready_push(t);
     int depth = kush_current->scope_depth - 1;
     t->parent = kush_current; t->parent_depth = depth;

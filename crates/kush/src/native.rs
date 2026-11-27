@@ -902,7 +902,6 @@ pub(crate) fn block_installs_handler(block: &ex::Block) -> bool {
         if matches!(
             expr.kind,
             ExprKind::HandlerPush { .. }
-                | ExprKind::HandlerRedirect { .. }
                 | ExprKind::AbortScope {
                     operation: Some(_),
                     ..
@@ -1932,16 +1931,6 @@ fn lower(
     let handler_perform = module
         .declare_function("kush_handler_perform", Linkage::Import, &handler_perform_sig)
         .map_err(error)?;
-    let mut handler_redirect_sig = module.make_signature();
-    handler_redirect_sig.params.push(AbiParam::new(I64));
-    handler_redirect_sig.returns.push(AbiParam::new(I64));
-    let handler_redirect = module
-        .declare_function(
-            "kush_handler_redirect",
-            Linkage::Import,
-            &handler_redirect_sig,
-        )
-        .map_err(error)?;
     let abort_word = module
         .declare_data("kush_abort_word", Linkage::Import, true, false)
         .map_err(error)?;
@@ -2233,7 +2222,6 @@ fn lower(
             handler_pop,
             handler_lookup,
             handler_perform,
-            handler_redirect,
             handler_base: None,
             task_wrappers: &task_wrappers,
             task_pointer_drops: &task_pointer_drops,
@@ -4197,10 +4185,9 @@ struct Generator<'b, E: Emit> {
     handler_push: FuncId,
     handler_pop: FuncId,
     handler_lookup: FuncId,
-    /// `kush_handler_perform(operation, cell, out)`: the frame `cell`, or
-    /// the innermost one for `operation` when `cell` is zero.
+    /// `kush_handler_perform(operation, cell, out)`: what a perform takes
+    /// from the frame `cell`; zero (no capability) answers as missing.
     handler_perform: FuncId,
-    handler_redirect: FuncId,
     /// Entry handler-stack depth for this function; every return restores it so
     /// an early `return` cannot leave a dynamic handler frame visible.
     handler_base: Option<Variable>,

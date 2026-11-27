@@ -365,11 +365,10 @@ pub(crate) enum RuntimeOp {
         reusable: bool,
     },
     HandlerPop,
-    /// Perform as if at a depth (operand 0); yields the previous depth.
-    HandlerRedirect,
     /// Perform `operation` with a payload and a resume value (operands 0
-    /// and 1) through the innermost dynamic handler frame, whose callable
-    /// has signature `handler`.
+    /// and 1) through the activation cell in operand 2, whose callable has
+    /// signature `handler`. Without a cell (or a zero one) there is no
+    /// handler: the perform panics.
     Perform {
         operation: usize,
         handler: usize,

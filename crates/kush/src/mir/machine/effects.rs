@@ -21,14 +21,11 @@ const KCHUNK: i64 = 64 * 1024;
 
 #[derive(Clone, Copy)]
 pub(super) struct HandlerFrame {
-    operation: i64,
     code: i64,
     environment: i64,
     once: i64,
     consumed: bool,
-    /// An abort frame (its code is the payload buffer).
-    abort: bool,
-    /// The activation's cell id (0 for abort and redirect frames).
+    /// The activation's cell id (0 for abort frames).
     cell: i64,
 }
 
@@ -69,10 +66,7 @@ impl Machine<'_, '_> {
                 }
                 vec![0]
             }
-            RuntimeOp::HandlerPush {
-                operation,
-                reusable,
-            } => {
+            RuntimeOp::HandlerPush { reusable, .. } => {
                 let (environment, once) = match body.operand_ty(operands[0]) {
                     Type::Once(_) => (
                         words[0].get(1).copied().unwrap_or(0),
@@ -83,12 +77,10 @@ impl Machine<'_, '_> {
                 let cell = self.next_cell;
                 self.next_cell += 1;
                 self.handlers.push(HandlerFrame {
-                    operation: operation as i64,
                     code: words[0][0],
                     environment,
                     once,
                     consumed: false,
-                    abort: false,
                     cell,
                 });
                 vec![cell]
@@ -98,21 +90,6 @@ impl Machine<'_, '_> {
                     self.pop_handler()?;
                 }
                 vec![0]
-            }
-            RuntimeOp::HandlerRedirect => {
-                let (target, before) = (words[0][0], self.handlers.len() as i64);
-                if before > target {
-                    self.handlers.push(HandlerFrame {
-                        operation: -1,
-                        code: target,
-                        environment: 0,
-                        once: 1,
-                        consumed: true,
-                        abort: false,
-                        cell: 0,
-                    });
-                }
-                vec![before]
             }
             RuntimeOp::Perform { .. } => {
                 return fault("a perform outside statement_flow");
@@ -126,14 +103,12 @@ impl Machine<'_, '_> {
                     .push(buffer);
                 vec![buffer]
             }
-            RuntimeOp::AbortHandlerPush { operation } => {
+            RuntimeOp::AbortHandlerPush { .. } => {
                 self.handlers.push(HandlerFrame {
-                    operation: operation as i64,
                     code: words[0][0],
                     environment: 0,
                     once: 0,
                     consumed: false,
-                    abort: true,
                     cell: 0,
                 });
                 vec![0]
@@ -192,26 +167,10 @@ impl Machine<'_, '_> {
         })
     }
 
-    /// The frames a spawned task inherits: the innermost visible ones that
-    /// are copyable `fn` handlers, down to the first that is not (a
-    /// capturing, `once` or abort frame is a task boundary).
+    /// The frames a spawned task inherits: none. A task reaches its handlers
+    /// through the cells its body captured (FND-HANDLERS-ONE-DELETE).
     pub(super) fn inheritable_handlers(&self) -> Vec<HandlerFrame> {
-        let mut inherited = Vec::new();
-        let mut index = self.handlers.len();
-        while index > 0 {
-            index -= 1;
-            let frame = self.handlers[index];
-            if frame.operation == -1 {
-                index = frame.code.max(0) as usize;
-                continue;
-            }
-            if frame.environment != 0 || frame.once != 0 || frame.abort {
-                break;
-            }
-            inherited.push(frame);
-        }
-        inherited.reverse();
-        inherited
+        Vec::new()
     }
 
     /// Pop the innermost handler frame, dropping an environment it still
@@ -224,25 +183,9 @@ impl Machine<'_, '_> {
         Ok(())
     }
 
-    /// `kush_handler_lookup`: the innermost frame for `operation`, as
-    /// `(code, environment, once)`. A consumed `once` frame still answers
-    /// for its operation, with nothing.
-    fn lookup(&mut self, operation: i64) -> Run<Option<(i64, i64, i64)>> {
-        let mut index = self.handlers.len();
-        while index > 0 {
-            index -= 1;
-            let frame = self.handlers[index];
-            if frame.operation == -1 {
-                index = frame.code.max(0) as usize;
-                continue;
-            }
-            if frame.operation != operation {
-                continue;
-            }
-            let (taken, frame) = self.take(frame)?;
-            self.handlers[index] = frame;
-            return Ok(taken);
-        }
+    /// `kush_handler_lookup`: a perform without a capability finds nothing;
+    /// performs reach handlers through cells (FND-HANDLERS-ONE-DELETE).
+    fn lookup(&mut self, _operation: i64) -> Run<Option<(i64, i64, i64)>> {
         Ok(None)
     }
 

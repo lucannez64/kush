@@ -1494,21 +1494,10 @@ pub(crate) enum ExprKind {
         /// (FND-HANDLERS-ONE-DELETE). Set by `crate::suspend`.
         capability: Option<Box<Expr>>,
     },
-    /// Lowered form only: the current depth of the dynamic handler stack.
-    HandlerDepth,
     /// Lowered form only: run `body` (a multishot `handle` whose tokens are
     /// `multi fn`) and release whatever it pushed on the continuation stack
     /// (docs/multishot-capabilities.md section 6.2).
     ContinuationScope {
-        body: Block,
-    },
-    /// Lowered form only: run `body` with dynamic handler lookups that skip
-    /// the frames above `depth` that were pushed before entering it. A
-    /// resumed continuation of a declared-operation handle uses it so that
-    /// frames its handler pushed around `resume` stay invisible (deep
-    /// semantics). A redirect frame is pushed only when such frames exist.
-    HandlerRedirect {
-        depth: Box<Expr>,
         body: Block,
     },
     /// Lowered form only: `?` inside a resumable function entry. The `Err`
@@ -1678,7 +1667,6 @@ impl Expr {
             | ExprKind::Peek(_)
             | ExprKind::ArenaNew
             | ExprKind::TaskYield
-            | ExprKind::HandlerDepth
             | ExprKind::TaskCheckCancel
             | ExprKind::DynArrayNew { .. }
             | ExprKind::Break(None, _)
@@ -1869,10 +1857,6 @@ impl Expr {
                     f(capability);
                 }
             }
-            ExprKind::HandlerRedirect { depth, body } => {
-                f(depth);
-                block(body, f);
-            }
             ExprKind::If(condition, yes, no) => {
                 f(condition);
                 block(yes, f);
@@ -1941,7 +1925,6 @@ impl Expr {
             | ExprKind::Peek(_)
             | ExprKind::ArenaNew
             | ExprKind::TaskYield
-            | ExprKind::HandlerDepth
             | ExprKind::TaskCheckCancel
             | ExprKind::DynArrayNew { .. }
             | ExprKind::Break(None, _)
@@ -2131,10 +2114,6 @@ impl Expr {
                 if let Some(capability) = capability {
                     f(capability);
                 }
-            }
-            ExprKind::HandlerRedirect { depth, body } => {
-                f(depth);
-                block(body, f);
             }
             ExprKind::If(condition, yes, no) => {
                 f(condition);

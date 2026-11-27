@@ -877,9 +877,6 @@ impl<E: Emit> Generator<'_, E> {
                         self.runtime_void(self.handler_pop, &[]);
                         unit(self)
                     }
-                    RuntimeOp::HandlerRedirect => {
-                        vec![self.runtime_call(self.handler_redirect, &[words[0][0]])]
-                    }
                     RuntimeOp::Perform { operation, handler } => {
                         let cell = words.get(2).map(|cell| cell[0]);
                         self.dynamic_perform(operation, handler, &words[0], &words[1], cell)
