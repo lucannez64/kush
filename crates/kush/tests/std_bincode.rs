@@ -142,7 +142,10 @@ fn decodes_bincode_legacy_vectors() {
             .map(|b| b.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        decls.push_str(&format!("let a{index}: [i64; {}] = [{array}];\n", chunk.len()));
+        decls.push_str(&format!(
+            "let a{index}: [i64; {}] = [{array}];\n",
+            chunk.len()
+        ));
         fills.push_str(&format!("b = fill(b, &a{index}[..]);\n"));
     }
     let output = agrees(&format!(
@@ -319,7 +322,10 @@ fn round_trips_a_user_record() {
     e.push(1);
     e.push(200);
     let mut expected = lines(&e);
-    expected.push_str(&format!("{}\n3\n-1\n1000000\n7\n200\n0\n", 0x0102030405060708u64));
+    expected.push_str(&format!(
+        "{}\n3\n-1\n1000000\n7\n200\n0\n",
+        0x0102030405060708u64
+    ));
     assert_eq!(output, expected);
 }
 
@@ -329,7 +335,7 @@ fn round_trips_a_user_record() {
 #[test]
 fn reports_malformed_input() {
     let cases: [(&str, Vec<u8>); 6] = [
-        ("take_u64", vec![1, 2, 3]),                    // truncated u64
+        ("take_u64", vec![1, 2, 3]), // truncated u64
         ("take_bytes", {
             let mut v = (1u64 << 62).to_le_bytes().to_vec(); // length > remaining
             v.push(0);
@@ -339,10 +345,10 @@ fn reports_malformed_input() {
         ("take_char", 0xD800u32.to_le_bytes().to_vec()), // surrogate
         ("take_str", {
             let mut v = 1u64.to_le_bytes().to_vec();
-            v.push(255);                                 // invalid UTF-8
+            v.push(255); // invalid UTF-8
             v
         }),
-        ("finish", vec![1, 2]),                          // trailing bytes
+        ("finish", vec![1, 2]), // trailing bytes
     ];
     for (index, (call, data)) in cases.iter().enumerate() {
         let array = data
@@ -393,7 +399,11 @@ fn reports_malformed_input() {
             data.len(),
             data.len()
         ));
-        let expected_code = if *call == "finish" { 6 } else { index as i64 + 1 };
+        let expected_code = if *call == "finish" {
+            6
+        } else {
+            index as i64 + 1
+        };
         assert_eq!(output, format!("{expected_code}\n"), "case {call}");
     }
 }

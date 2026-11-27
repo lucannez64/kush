@@ -937,7 +937,11 @@ impl Builder<'_> {
                             None => return Ok(None),
                         },
                     };
-                    let bounds = start.iter().chain(end).map(|bound| &**bound).collect::<Vec<_>>();
+                    let bounds = start
+                        .iter()
+                        .chain(end)
+                        .map(|bound| &**bound)
+                        .collect::<Vec<_>>();
                     let Some(values) = self.operands(&bounds)? else {
                         return Ok(None);
                     };
@@ -2487,11 +2491,8 @@ impl Builder<'_> {
                 let required = (prefix.len() + suffix.len()) as i64;
                 if *rest {
                     let enough = self.temp(Type::Bool);
-                    let at_least = Rvalue::Binary(
-                        BinOp::Ge,
-                        length,
-                        Operand::Constant(required, Type::I64),
-                    );
+                    let at_least =
+                        Rvalue::Binary(BinOp::Ge, length, Operand::Constant(required, Type::I64));
                     self.assign(enough, at_least, span);
                     let enough = Operand::Move(Place::local(enough));
                     self.expect_word(enough, 0, false, fail, span);
@@ -2733,7 +2734,8 @@ impl Builder<'_> {
                         prefix: prefix.len(),
                         suffix: suffix.len(),
                     };
-                    let array = Operand::Copy(self.array_part(subject, offset, *element, *capacity));
+                    let array =
+                        Operand::Copy(self.array_part(subject, offset, *element, *capacity));
                     self.assign(*slot, Rvalue::Array(op, vec![array]), span);
                 }
             }

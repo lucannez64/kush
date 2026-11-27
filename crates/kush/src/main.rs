@@ -139,7 +139,13 @@ fn mir_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, Strin
         if args[index] == "--stats" {
             stats = true;
         } else if !codegen_argument(args, &mut index, &mut codegen, "mir")? {
-            return Err((2, format!("unknown option '{}'\n{USAGE}", args[index].to_string_lossy())));
+            return Err((
+                2,
+                format!(
+                    "unknown option '{}'\n{USAGE}",
+                    args[index].to_string_lossy()
+                ),
+            ));
         }
         index += 1;
     }

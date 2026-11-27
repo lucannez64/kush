@@ -10,7 +10,9 @@
 //! as `NaN`, `inf`, `-inf`, `0`, and `-0`.
 use crate::{Diagnostic, Span, lexer::Kind};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum FloatKind {
     F32,
     F64,
@@ -144,7 +146,9 @@ pub(crate) fn negate(kind: FloatKind, word: i64) -> i64 {
 }
 
 /// Arithmetic forms of the explicit float builtins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum FloatOp {
     Abs(FloatKind),
     Sqrt(FloatKind),

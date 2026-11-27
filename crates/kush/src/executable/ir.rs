@@ -4,7 +4,9 @@
 //! Split from `executable.rs` (FND-SPLIT-EXEC).
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum Type {
     I64,
     /// A fixed-width integer other than `i64` (which keeps its own variant).
@@ -622,7 +624,9 @@ pub(crate) enum Target {
     Gpu(GpuOp, Type),
 }
 /// GPU-SUBSET: device-side buffer operations (docs/gpu.md).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum GpuOp {
     /// `GpuBuf.len(b) -> u32`.
     Len,
@@ -669,7 +673,9 @@ pub(crate) enum HostPayload {
 /// Linux errno on failure, and writes the success payload through `out`.
 /// Borrowed `&Bytes` parameters arrive as pointers to the caller's buffer
 /// handle; owned `Bytes` parameters arrive as the handle itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum HostOp {
     FsRead,
     FsWrite,
@@ -871,7 +877,9 @@ impl HostOp {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum BytesOp {
     WithCapacity,
     Len,
@@ -922,7 +930,9 @@ impl BytesOp {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum StringOp {
     /// Byte length (`String.len`).
     Len,
@@ -951,7 +961,9 @@ impl StringOp {
 /// `String.substr`, `Str.substr`, and `view[start..end]`) lowers to the same
 /// checked range expression as slice views, so only the reads and the explicit
 /// owning copy need a builtin target here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum StrOp {
     /// UTF-8 byte length of the view.
     Len,
@@ -973,7 +985,9 @@ pub(crate) enum StrOp {
     SetScalar,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum VecOp {
     WithCapacity,
     /// Consume and return the same vector allocation, dropping every element
@@ -1008,7 +1022,9 @@ pub(crate) enum VecOp {
     /// an inline store with no check.
     SetProved,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum SliceOp {
     Len,
     /// Checked read; the reference evaluator/native lowering panics out of bounds.
@@ -1044,7 +1060,9 @@ pub(crate) enum SliceOp {
     },
     ChannelClose,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum AllocVecOp {
     /// Live element count.
     Len,
@@ -1064,7 +1082,9 @@ pub(crate) enum AllocVecOp {
     /// Drop every element and retain the block and metadata.
     Clear,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum DynArrayOp {
     /// Runtime length stored in word zero.
     Len,
