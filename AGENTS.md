@@ -1,8 +1,7 @@
 # Kush workspace instructions
 
-Builds and tests run on this computer; there is no remote build machine (Boat
-is no longer available, so do not use `scripts/boat-check.sh`). Keep the
-computer responsive: check available RAM, CPU load and free disk space first,
+Builds and tests run on this computer; there is no remote build machine. Keep
+the computer responsive: check available RAM, CPU load and free disk space first,
 and use conservative build concurrency (start with two jobs).
 
 - Prefer `mbx build` / `mbx test` / `mbx clippy` (Mr. Boxington, installed in
