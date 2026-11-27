@@ -369,6 +369,10 @@ fn run(command: &mut Command, compiler: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Compiler flags that give each runtime function and object its own
+/// section; the program link passes `--gc-sections`.
+const RUNTIME_SECTIONS: [&str; 2] = ["-ffunction-sections", "-fdata-sections"];
+
 pub(super) fn compile(runtime: &str, defines: &[String], scratch: &Scratch) -> Result<PathBuf> {
     let compiler = Path::new("cc");
     let object = scratch.path().join("runtime.o");
@@ -379,7 +383,8 @@ pub(super) fn compile(runtime: &str, defines: &[String], scratch: &Scratch) -> R
         .as_ref()
         .and_then(|_| compiler_identity(compiler, &source, defines, true, None));
     let cache = directory.zip(identity);
-    let mut key = b"kush-c-runtime-v1\0-std=c11\0-O2\0".to_vec();
+    let mut key =
+        b"kush-c-runtime-v2\0-std=c11\0-O2\0-ffunction-sections\0-fdata-sections\0".to_vec();
     key.extend_from_slice(runtime.as_bytes());
     key.extend_from_slice(format!("{defines:?}").as_bytes());
     if let Some((_, identity)) = &cache {
@@ -395,6 +400,9 @@ pub(super) fn compile(runtime: &str, defines: &[String], scratch: &Scratch) -> R
     run(
         Command::new(compiler)
             .args(["-std=c11", "-O2"])
+            // One section per function and object, so the link drops the
+            // parts of the runtime a program does not use (FND-RUNTIME-GC).
+            .args(RUNTIME_SECTIONS)
             .args(defines)
             .arg("-c")
             .arg(&source)
@@ -446,7 +454,7 @@ pub(super) fn compile_llvm(
     let cache = directory.zip(identity);
     let entry = |artifact: &str| {
         let mut key =
-            format!("kush-c-runtime-llvm-v5\0{artifact}\0-std=c11\0-O2\0-fPIC\0").into_bytes();
+            format!("kush-c-runtime-llvm-v6\0{artifact}\0-std=c11\0-O2\0-fPIC\0-ffunction-sections\0-fdata-sections\0").into_bytes();
         // How the runtime is split is part of what the artifacts are.
         key.extend_from_slice(super::llvm::INLINABLE.join(",").as_bytes());
         key.push(0);
@@ -500,6 +508,7 @@ pub(super) fn compile_llvm(
     run(
         Command::new(clang)
             .args(["-O2", "-fPIC", "-c", "-Wno-override-module"])
+            .args(RUNTIME_SECTIONS)
             .arg(&exported)
             .arg("-o")
             .arg(&object),

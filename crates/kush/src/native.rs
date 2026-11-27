@@ -641,6 +641,9 @@ pub fn build_with_codegen(
         command.arg(format!("-l{name}"));
     }
     command.arg("-o").arg(&binary_path).arg("-lm");
+    // Drop the sections nothing reaches: unused runtime and program
+    // functions (FND-RUNTIME-GC).
+    command.arg("-Wl,--gc-sections");
     if program.uses_threads || program.main_stack.is_some() {
         command.arg("-pthread");
     }
@@ -824,7 +827,11 @@ fn llvm_objects(
             None => program_ir,
         };
         let mut command = Command::new(&tools.clang);
-        command.arg(level).arg("-fPIC").arg("-c");
+        command
+            .arg(level)
+            .arg("-fPIC")
+            .args(["-ffunction-sections", "-fdata-sections"])
+            .arg("-c");
         if codegen.native_cpu {
             command.arg("-march=native");
         }
@@ -1305,10 +1312,12 @@ fn lower(
         .map_err(error)?
         .finish(settings::Flags::new(flags))
         .map_err(error)?;
+    let mut builder = ObjectBuilder::new(isa, "kush", default_libcall_names()).map_err(error)?;
+    // One section per function, so the link drops functions nothing calls
+    // (FND-RUNTIME-GC).
+    builder.per_function_section(true);
     let mut module = CodeModule {
-        object: ObjectModule::new(
-            ObjectBuilder::new(isa, "kush", default_libcall_names()).map_err(error)?,
-        ),
+        object: ObjectModule::new(builder),
         llvm: llvm.map(llvm::LlvmModule::new),
         failure: None,
         referenced: std::collections::BTreeSet::new(),
