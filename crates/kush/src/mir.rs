@@ -567,6 +567,9 @@ pub(crate) enum Bound {
     Constant(u32),
     /// The magnitude word at this index of the certificate's words.
     Word(usize),
+    /// The word at this index ORs `v + 2^k` over the values (`k` is the
+    /// second field): see `LoopOp::Magnitude`.
+    Biased(usize, u32),
     Sum(Box<Bound>, Box<Bound>),
     Product(Box<Bound>, Box<Bound>),
     /// Every prefix sum of a reduction: its entry magnitude word (by
@@ -577,8 +580,11 @@ pub(crate) enum Bound {
 /// A computation of a deferred loop's frame.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum LoopOp {
-    /// `v ^ (v << 1)` of the operand: its magnitude word.
-    Magnitude,
+    /// The operand's magnitude word: `v ^ (v << 1)`, or `v + 2^k` with a
+    /// bias `k`. ORed over a chunk, the biased word bounds every value by
+    /// `2^k` when they all are in `[-2^k, 2^k)`, at one operation instead
+    /// of two.
+    Magnitude { bias: Option<u32> },
     /// Where a chunk starting at the counter value (operand 0) stops: the
     /// bound (1), or `CHUNK` steps on if that comes first.
     ChunkLimit {

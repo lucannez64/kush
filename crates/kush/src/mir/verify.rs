@@ -205,7 +205,7 @@ pub(crate) fn verify(program: &Executable, body: &Body) -> Result<(), String> {
                         operand(*value).map_err(here)?;
                     }
                     match op {
-                        LoopOp::Magnitude => Type::I64,
+                        LoopOp::Magnitude { .. } => Type::I64,
                         LoopOp::ChunkLimit { .. } => match values.first() {
                             Some(start) => body.operand_ty(*start),
                             None => return Err(here("a chunk limit without a start".into())),

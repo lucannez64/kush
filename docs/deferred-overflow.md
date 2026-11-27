@@ -59,6 +59,17 @@ u(a * b) = u(a) + u(b)
 u(prefix sums of acc) = max(u(acc at entry), u(step operands)) + bits(step count)
 ```
 
+Most leaves use a cheaper word, `v + 2^k`, one operation instead of two.
+`k` is the largest `u` the leaf can have for every obligation it is part of
+to hold in a full chunk (45 for a plain sum, 43 for `acc + s[i] * 3`). If no
+biased word is negative, every value is in `[-2^k, 2^b - 2^k)` for `b` the
+OR's bit length, so `u = k` when `b <= k + 1` and `u = b` otherwise. A value
+below `-2^k`, or one whose biased word wraps past `MAX`, makes the OR
+negative and the certificate fail. Any `k` is sound; it only decides when
+the certificate holds, and values in `[-2^k, 2^k)` get the same `u = k`
+either way. A leaf multiplied by another tracked value has no such `k` of
+its own and keeps `v ^ (v << 1)`.
+
 If every certified result has `u <= 62` and no exact-mode operation of the
 chunk set the sticky word, nothing overflowed (the sticky word is tested
 after the certificate, so the argument is about the first overflow of
@@ -237,8 +248,9 @@ faster with ordinary checks, so it keeps them.
 ## What it costs and gains
 
 Per iteration, exact mode adds three bit operations to an add or subtract;
-certified mode adds two operations and an OR per tracked operand, and nothing
-per arithmetic operation. A failed certificate costs one wasted chunk, after
+certified mode adds an add and an OR per tracked operand (two operations and
+an OR for an operand multiplied by another tracked one), and nothing per
+arithmetic operation. A failed certificate costs one wasted chunk, after
 which the loop runs at the speed of ordinary checks. Operands near `2^62`, or
 long reductions of large values, take that path; values whose magnitude
 times the trip count stays far below `2^63` never do.

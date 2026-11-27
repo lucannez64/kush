@@ -183,6 +183,31 @@ fn large_cancelling_operands_take_the_exact_replay() {
 }
 
 #[test]
+fn biased_magnitude_words_hold_at_their_edges() {
+    // SUM's leaf ORs `v + 2^45`. Down to -2^45 the certificate holds; below
+    // it, and for a `v` whose biased word wraps past MAX, it fails and the
+    // checked replay gives the same result.
+    agrees(
+        &format!(
+            "{SUM}
+            fn main() -> Unit ! {{io}} {{
+                let values: [i64; 10] = [
+                    -35184372088832, 35184372088831, 35184372088832, 70368744177664,
+                    -35184372088833, 3, -9223372036854775807, 9223372036854775807,
+                    9223372036854775800, -9223372036854775800,
+                ];
+                print_i64(sum(&values[..2]));
+                print_i64(sum(&values[..4]));
+                print_i64(sum(&values[4..6]));
+                print_i64(sum(&values[6..8]));
+                print_i64(sum(&values[8..]));
+            }}"
+        ),
+        Some(&[-1, 105_553_116_266_495, -35_184_372_088_830, 0, 0]),
+    );
+}
+
+#[test]
 fn a_prefix_overflow_panics_even_when_the_acc_fits() {
     agrees(
         &format!(

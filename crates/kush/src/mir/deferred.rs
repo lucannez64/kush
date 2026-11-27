@@ -733,11 +733,117 @@ fn reductions(analysis: &Analysis<'_>, deferred: &BTreeSet<At>) -> BTreeMap<Loca
         .collect()
 }
 
+/// Chooses each leaf's magnitude word and rewrites its bounds to match.
+///
+/// A leaf gets the bias `k`: the largest bound it can have for every
+/// obligation it is part of to hold in the longest chunk. Values in
+/// `[-2^k, 2^k)`, the common case, then cost one operation each instead of
+/// two and lose nothing: their bound is `k` either way. Larger positive
+/// values are still bounded by their bits; a value below `-2^k` fails the
+/// certificate (any `k` is sound; it only decides how often it holds). A
+/// leaf multiplied by another tracked value has no such `k` of its own, so
+/// it keeps the exact word.
+fn bias_leaves(obligations: &mut [Bound], leaves: usize, accumulating: i64) -> Vec<Option<u32>> {
+    use crate::native::deferred::{CHUNK, LIMIT};
+    // The most terms a chunk's reductions take in: see `LoopOp::Certificate`.
+    let count = (CHUNK + 1) * accumulating.max(1);
+    let count_bits = i64::from(u64::BITS - count.leading_zeros());
+    fn walk(
+        bound: &Bound,
+        limit: i64,
+        exact: bool,
+        count_bits: i64,
+        out: &mut [Option<i64>],
+        exacts: &mut [bool],
+    ) {
+        match bound {
+            Bound::Constant(_) | Bound::Biased(..) => {}
+            Bound::Word(at) => {
+                if exact {
+                    exacts[*at] = true;
+                } else {
+                    out[*at] = Some(out[*at].map_or(limit, |known| known.min(limit)));
+                }
+            }
+            Bound::Sum(left, right) => {
+                walk(left, limit - 1, exact, count_bits, out, exacts);
+                walk(right, limit - 1, exact, count_bits, out, exacts);
+            }
+            Bound::Product(left, right) => match (&**left, &**right) {
+                (other, Bound::Constant(bits)) | (Bound::Constant(bits), other) => {
+                    walk(
+                        other,
+                        limit - i64::from(*bits),
+                        exact,
+                        count_bits,
+                        out,
+                        exacts,
+                    );
+                }
+                _ => {
+                    walk(left, limit, true, count_bits, out, exacts);
+                    walk(right, limit, true, count_bits, out, exacts);
+                }
+            },
+            Bound::Accumulated { operands, .. } => {
+                for operand in operands {
+                    walk(operand, limit - count_bits, exact, count_bits, out, exacts);
+                }
+            }
+        }
+    }
+    let mut limits = vec![None; leaves];
+    let mut exacts = vec![false; leaves];
+    for obligation in obligations.iter() {
+        walk(
+            obligation,
+            LIMIT,
+            false,
+            count_bits,
+            &mut limits,
+            &mut exacts,
+        );
+    }
+    let biases = limits
+        .iter()
+        .zip(&exacts)
+        .map(|(limit, exact)| match limit {
+            Some(limit) if !exact && *limit >= 0 => Some(*limit as u32),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    fn rewrite(bound: &mut Bound, biases: &[Option<u32>]) {
+        match bound {
+            Bound::Word(at) => {
+                if let Some(bias) = biases[*at] {
+                    *bound = Bound::Biased(*at, bias);
+                }
+            }
+            Bound::Constant(_) | Bound::Biased(..) => {}
+            Bound::Sum(left, right) | Bound::Product(left, right) => {
+                rewrite(left, biases);
+                rewrite(right, biases);
+            }
+            Bound::Accumulated { operands, .. } => {
+                for operand in operands {
+                    rewrite(operand, biases);
+                }
+            }
+        }
+    }
+    for obligation in obligations.iter_mut() {
+        rewrite(obligation, &biases);
+    }
+    biases
+}
+
 /// Everything the transform needs for one loop.
 struct Plan {
     counted: Counted,
     modes: BTreeMap<At, DeferMode>,
     leaves: Vec<Leaf>,
+    /// Each leaf's magnitude word bias (`LoopOp::Magnitude`).
+    biases: Vec<Option<u32>>,
     obligations: Vec<Bound>,
     accumulators: Vec<LocalId>,
     replay: Vec<LocalId>,
@@ -960,11 +1066,18 @@ fn plan(
             }
         }
     }
+    let accumulating = modes
+        .values()
+        .filter(|mode| **mode == DeferMode::Accumulate)
+        .count() as i64;
+    let mut obligations = certificate.obligations;
+    let biases = bias_leaves(&mut obligations, certificate.leaves.len(), accumulating);
     Ok(Plan {
         counted,
         modes,
         leaves: certificate.leaves,
-        obligations: certificate.obligations,
+        biases,
+        obligations,
         accumulators: certificate.accumulators,
         replay,
         disjoint,
@@ -1247,7 +1360,10 @@ fn transform(body: &mut Body, lp: &Loop, plan: Plan) {
         .map(|local| {
             emit.value(
                 Type::I64,
-                Rvalue::Loop(LoopOp::Magnitude, vec![Operand::Copy(Place::local(*local))]),
+                Rvalue::Loop(
+                    LoopOp::Magnitude { bias: None },
+                    vec![Operand::Copy(Place::local(*local))],
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -1367,9 +1483,12 @@ fn transform(body: &mut Body, lp: &Loop, plan: Plan) {
         otherwise: copies[&counted.body],
     };
     // Deferred arithmetic and leaf tracking in the copy.
-    let mut tracked: BTreeMap<At, Vec<(usize, LocalId)>> = BTreeMap::new();
-    for ((at, position), tracker) in plan.leaves.iter().zip(&trackers) {
-        tracked.entry(*at).or_default().push((*position, *tracker));
+    let mut tracked: BTreeMap<At, Vec<(usize, LocalId, Option<u32>)>> = BTreeMap::new();
+    for (((at, position), tracker), bias) in plan.leaves.iter().zip(&trackers).zip(&plan.biases) {
+        tracked
+            .entry(*at)
+            .or_default()
+            .push((*position, *tracker, *bias));
     }
     let blocks = plan
         .modes
@@ -1385,7 +1504,7 @@ fn transform(body: &mut Body, lp: &Loop, plan: Plan) {
             if let Some(leaves) = tracked.get(&(block, at)) {
                 let StatementKind::Assign(_, rvalue) = &statement.kind;
                 let operands = super::drop_flags::rvalue_operands(rvalue);
-                for (position, tracker) in leaves {
+                for (position, tracker, bias) in leaves {
                     let read = match operands[*position] {
                         Operand::Move(place) => Operand::Copy(place),
                         other => other,
@@ -1399,7 +1518,7 @@ fn transform(body: &mut Body, lp: &Loop, plan: Plan) {
                     rewritten.push(Statement {
                         kind: StatementKind::Assign(
                             Place::local(word),
-                            Rvalue::Loop(LoopOp::Magnitude, vec![read]),
+                            Rvalue::Loop(LoopOp::Magnitude { bias: *bias }, vec![read]),
                         ),
                         span: statement.span,
                     });

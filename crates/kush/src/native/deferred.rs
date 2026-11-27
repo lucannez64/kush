@@ -18,7 +18,8 @@
 //! **Certified.** Signed 64-bit `+`, `-` and `*` simply wrap, with no
 //! per-operation test at all (an exact test would keep multiplications
 //! scalar, and the test of a reduction `acc = acc + e` depends on the running
-//! sum, which serializes the loop). Instead the loop ORs a magnitude word for
+//! sum, which serializes the loop). Instead the loop ORs a magnitude word
+//! (`v ^ (v << 1)`, or `v + 2^k` with a bias chosen by the MIR pass) for
 //! every *leaf* operand, i.e. every operand that is not itself a certified
 //! operation, and counts reduction steps. After the loop those give, for each
 //! leaf, a `u` with `|leaf| <= 2^u` over all iterations, and bounds follow
@@ -76,7 +77,7 @@ pub(super) enum Mode {
 }
 
 /// A certified result may be at most `2^LIMIT` in absolute value.
-pub(super) const LIMIT: i64 = 62;
+pub(crate) const LIMIT: i64 = 62;
 
 /// A deferred loop reports after at most this many iterations.
-pub(super) const CHUNK: i64 = 1 << 16;
+pub(crate) const CHUNK: i64 = 1 << 16;

@@ -287,7 +287,10 @@ impl<E: Emit> Generator<'_, E> {
     fn mir_loop(&mut self, op: &LoopOp, words: &[Words]) -> Value {
         let scalar = |at: usize| words[at][0];
         match op {
-            LoopOp::Magnitude => self.magnitude(scalar(0)),
+            LoopOp::Magnitude { bias: None } => self.magnitude(scalar(0)),
+            LoopOp::Magnitude { bias: Some(bias) } => {
+                self.builder.iadd_imm_s(scalar(0), 1i64 << bias)
+            }
             LoopOp::ChunkLimit {
                 comparison,
                 unsigned,
@@ -374,6 +377,7 @@ impl<E: Emit> Generator<'_, E> {
         match bound {
             Bound::Constant(bits) => self.constant(i64::from(*bits)),
             Bound::Word(at) => self.magnitude_bound(words[*at]),
+            Bound::Biased(at, bias) => self.biased_bound(words[*at], *bias),
             Bound::Sum(left, right) => {
                 let left = self.mir_bound(left, words, count);
                 let right = self.mir_bound(right, words, count);

@@ -30,7 +30,7 @@ use std::{
 
 mod both;
 mod builder;
-mod deferred;
+pub(crate) mod deferred;
 mod emit;
 mod from_mir;
 mod llvm;
@@ -6644,6 +6644,21 @@ impl<E: Emit> Generator<'_, E> {
         let one = self.constant(1);
         let floor = self.builder.umax(bits, one);
         self.builder.iadd_imm_s(floor, -1)
+    }
+    /// The least tracked `u` with `|v| <= 2^u` for a word that ORs
+    /// `v + 2^bias`: with `b` its bit length (64 if any sum was negative,
+    /// that is, some `v` below `-2^bias`), every `v` is in
+    /// `[-2^bias, 2^b - 2^bias)`, so `u = bias` when `b <= bias + 1` and
+    /// `u = b` otherwise.
+    fn biased_bound(&mut self, word: Value, bias: u32) -> Value {
+        let zeros = self.leading_zeros(word);
+        let sixty_four = self.constant(64);
+        let bits = self.builder.isub(sixty_four, zeros);
+        let small =
+            self.builder
+                .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, bits, i64::from(bias) + 1);
+        let floor = self.constant(i64::from(bias));
+        self.builder.select(small, floor, bits)
     }
     /// Whether an index `counter + offset` with `offset` in one of the
     /// `(length, least, most)` ranges could fall outside `0..length` while
