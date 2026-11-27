@@ -19,7 +19,7 @@
 //! them. Arrows whose values reach code that calls them without capabilities
 //! (handlers, task and callback builtins, foreign functions) keep the dynamic
 //! stack until HANDLERS-ONE-BUILTINS.
-use super::{Result, performs};
+use super::{Result, performs_with};
 use crate::executable::{Block, Executable, Expr, ExprKind, Local, Statement, Target, Type};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,15 +49,27 @@ struct Pass<'a> {
     originals: usize,
     /// Copy index of each copied original and its capability operations,
     /// in request order.
-    copies: BTreeMap<(usize, Vec<usize>), usize>,
-    order: Vec<(usize, Vec<usize>)>,
+    /// `true` in a key: the copy receives the capabilities as closure
+    /// captures instead of parameters.
+    copies: BTreeMap<(usize, Vec<usize>, bool), usize>,
+    order: Vec<(usize, Vec<usize>, bool)>,
+    /// Operations of each arrow's row, also for arrows that keep the
+    /// dynamic stack.
+    rows: &'a [Vec<usize>],
+    /// Functions that can receive capabilities as extra captures: closures
+    /// with an ordinary layout.
+    capturable: &'a [bool],
     /// Trampolines through the dynamic stack, by operation.
     trampolines: &'a BTreeMap<usize, (usize, Type)>,
 }
 
 impl Pass<'_> {
     fn copy_of(&mut self, function: usize, operations: &[usize]) -> usize {
-        let key = (function, operations.to_vec());
+        self.copy_with(function, operations, false)
+    }
+
+    fn copy_with(&mut self, function: usize, operations: &[usize], captured: bool) -> usize {
+        let key = (function, operations.to_vec(), captured);
         if let Some(copy) = self.copies.get(&key) {
             return *copy;
         }
@@ -205,6 +217,30 @@ impl Pass<'_> {
                 let operations = self.value_operations(callee.ty).to_vec();
                 arguments.extend(self.supply(&operations, scope, expr.span));
             }
+            // Rule 8: a task body runs within the builtin's extent (a scope) or
+            // in a task of its own (a spawn); the runtime calls it without
+            // capabilities. A lambda written there captures them at the call
+            // instead. A spawned task keeps a noncapturing handler's
+            // capability; a capturing one stays behind and the trampoline
+            // finds no frame in the new task (decision D3).
+            ExprKind::TaskScope { body, .. } | ExprKind::TaskSpawn { body, .. } => {
+                let operations = match body.ty {
+                    Type::Once(id) => self.rows[id].clone(),
+                    _ => return,
+                };
+                if operations.is_empty() {
+                    return;
+                }
+                let span = body.span;
+                let supplied = self.supply(&operations, scope, span);
+                if let ExprKind::FnValue { function, captures } = &mut body.kind
+                    && *function < self.originals
+                    && self.capturable[*function]
+                {
+                    *function = self.copy_with(*function, &operations, true);
+                    captures.extend(supplied);
+                }
+            }
             ExprKind::Call(Target::DynCall { spec }, arguments)
                 if !self.dyn_calls[*spec].is_empty() =>
             {
@@ -260,7 +296,7 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
     if arrows.is_empty() {
         return Ok(Hidden::new());
     }
-    let performs = performs(program);
+    let performs = performs_with(program, true);
     let mut needs = (0..program.functions.len())
         .map(|index| {
             let function = &program.functions[index];
@@ -320,6 +356,14 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
     }
     let originals = program.functions.len();
     needs.resize(originals, vec![]);
+    let rows = (0..program.function_types.len())
+        .map(|id| row_operations(program, &arrows, id))
+        .collect::<Vec<_>>();
+    let capturable = program
+        .functions
+        .iter()
+        .map(|function| function.closure.is_some() && function.parameter_slots.is_none())
+        .collect::<Vec<_>>();
     // Copies start from the bodies as checked: the originals' calls get the
     // dynamic trampoline where a copy passes its own parameter.
     let sources = program.functions.clone();
@@ -329,6 +373,8 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
         arrows: &arrows,
         function_types: &function_types,
         values: &values,
+        rows: &rows,
+        capturable: &capturable,
         dyn_calls: &dyn_calls,
         union_calls: &union_calls,
         originals,
@@ -362,13 +408,20 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
     let mut copies = Hidden::new();
     let mut next = 0;
     while next < pass.order.len() {
-        let (original, operations) = pass.order[next].clone();
+        let (original, operations, captured) = pass.order[next].clone();
         let mut copy = sources[original].clone();
         let mut slots = (0..copy.parameters).collect::<Vec<_>>();
         let mut hidden = BTreeMap::new();
         copy.parameter_grades.resize(copy.parameters, None);
         copy.parameter_lifetimes.resize(copy.parameters, None);
-        for &operation in &operations {
+        // Captured capabilities follow the closure's own captures.
+        let first = if captured {
+            copy.closure.unwrap_or(0)
+        } else {
+            copy.parameters
+        };
+        for (offset, &operation) in operations.iter().enumerate() {
+            let position = first + offset;
             let slot = copy.locals.len();
             copy.locals.push(Local {
                 ty: Type::Fn(arrows[&operation]),
@@ -387,11 +440,16 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
             if !copy.local_copyable.is_empty() {
                 copy.local_copyable.push(true);
             }
-            copy.parameter_grades.push(None);
-            copy.parameter_lifetimes.push(None);
+            copy.parameter_grades.insert(position, None);
+            copy.parameter_lifetimes.insert(position, None);
             copy.capability_parameters.push(slot);
-            slots.push(slot);
+            slots.insert(position, slot);
             copy.parameters += 1;
+            if captured {
+                copy.closure = Some(copy.closure.unwrap_or(0) + 1);
+                copy.capture_refs.push(false);
+                copy.capture_writes.push(false);
+            }
             hidden.insert(operation, slot);
         }
         copy.parameter_slots = Some(slots);
@@ -434,6 +492,22 @@ pub(super) fn add(program: &mut Executable) -> Result<Hidden> {
     Ok(copies)
 }
 
+/// The resumptive declared operations performed by name somewhere that the
+/// row of arrow `id` names, in id order.
+fn row_operations(program: &Executable, arrows: &BTreeMap<usize, usize>, id: usize) -> Vec<usize> {
+    let effects = program.function_types[id].effects;
+    arrows
+        .keys()
+        .copied()
+        .filter(|&operation| {
+            program
+                .effect_bits
+                .get(operation)
+                .is_some_and(|bit| *bit != 0 && effects & bit != 0)
+        })
+        .collect()
+}
+
 /// The resumptive declared operations whose capabilities a value of each
 /// arrow type takes after its written parameters (rule 4). An arrow keeps the
 /// dynamic stack when a value with its set of operations reaches code that
@@ -446,17 +520,7 @@ fn value_operations(program: &Executable, arrows: &BTreeMap<usize, usize>) -> Ve
         let (Type::Fn(id) | Type::Once(id) | Type::Multi(id)) = ty else {
             return None;
         };
-        let effects = program.function_types[id].effects;
-        let found = arrows
-            .keys()
-            .copied()
-            .filter(|&operation| {
-                program
-                    .effect_bits
-                    .get(operation)
-                    .is_some_and(|bit| *bit != 0 && effects & bit != 0)
-            })
-            .collect::<Vec<_>>();
+        let found = row_operations(program, arrows, id);
         (!found.is_empty()).then_some(found)
     };
     let mut pinned = BTreeSet::new();

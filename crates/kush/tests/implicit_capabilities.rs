@@ -200,3 +200,33 @@ fn trait_object_members_take_the_capabilities_of_their_key() {
     let debug = format!("{:?}", check(&source).unwrap());
     assert!(!function(&debug, "ask::capabilities").contains("DynamicPerform"));
 }
+
+#[test]
+fn a_spawned_task_keeps_each_noncapturing_handler() {
+    // Decision D3: the capturing `Log` handler installed inside `Ask`'s
+    // handle no longer hides `Ask` from the task (it was a barrier on the
+    // dynamic stack, so this panicked).
+    let source = "use std.task.TaskExit;
+        effect Ask: i64 -> i64;
+        effect Log: i64 -> Unit;
+        fn main() -> i64 ! {alloc, suspend} {
+            let mut logged = 0;
+            handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
+                k(x + 10)
+            } {
+                handle Log: i64 -> Unit with fn(x: i64, k: linear once fn(Unit) -> Unit ! {}) -> Unit ! {} {
+                    logged = logged + x;
+                    k(())
+                } {
+                    Task.scope(fn() -> i64 ! {Ask, alloc, suspend} {
+                        let t: Task<i64> = Task.spawn(fn() -> i64 ! {Ask, suspend} { perform Ask(1) });
+                        match Task.join(t) {
+                            TaskExit.Completed(v) => v,
+                            TaskExit.Cancelled => 0,
+                        }
+                    })
+                }
+            }
+        }";
+    agrees(source, 11);
+}

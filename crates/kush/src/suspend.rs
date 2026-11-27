@@ -2670,6 +2670,12 @@ fn function_type(program: &mut Executable, input: Type, result: Type) -> usize {
 /// Operations each function may perform dynamically without handling them
 /// itself: a least fixed point over the call graph of the checked IR.
 fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
+    performs_with(program, false)
+}
+
+/// `performs`, also counting the rows of the tasks each function spawns when
+/// `spawns` is set: they need the spawning function's capabilities.
+fn performs_with(program: &Executable, spawns: bool) -> Vec<BTreeSet<usize>> {
     let bits = &program.effect_bits;
     let row_operations = |effects: u16| {
         bits.iter()
@@ -2687,6 +2693,7 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
         let mut changed = false;
         for (index, function) in program.functions.iter().enumerate() {
             let mut found = BTreeSet::new();
+            #[allow(clippy::too_many_arguments)]
             fn walk(
                 expr: &Expr,
                 masked: &BTreeSet<usize>,
@@ -2695,6 +2702,7 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
                 row_operations: &dyn Fn(u16) -> BTreeSet<usize>,
                 callable_effects: &dyn Fn(Type) -> u16,
                 found: &mut BTreeSet<usize>,
+                spawns: bool,
             ) {
                 let mut add = |operations: &BTreeSet<usize>| {
                     found.extend(operations.difference(masked).copied());
@@ -2726,6 +2734,9 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
                     ExprKind::TaskScope { body, .. } => {
                         add(&row_operations(callable_effects(body.ty)))
                     }
+                    ExprKind::TaskSpawn { body, .. } if spawns => {
+                        add(&row_operations(callable_effects(body.ty)))
+                    }
                     ExprKind::VecMap { callbacks, .. } => {
                         for callback in callbacks {
                             add(&row_operations(callable_effects(callback.ty)));
@@ -2754,6 +2765,7 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
                         row_operations,
                         callable_effects,
                         found,
+                        spawns,
                     )
                 });
             }
@@ -2769,6 +2781,7 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
                         &row_operations,
                         &callable_effects,
                         &mut found,
+                        spawns,
                     );
                 }
             }
@@ -2781,6 +2794,7 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
                     &row_operations,
                     &callable_effects,
                     &mut found,
+                    spawns,
                 );
             }
             if found != result[index] {
