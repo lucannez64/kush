@@ -119,7 +119,8 @@ subtract: `! {e - io}`.
 ## Panics
 
 Any function may panic: `panic()`, checked arithmetic, bounds checks, a
-missing dynamic handler. A panic aborts the program with a message; by
+perform with no active handler (in a spawned task that did not inherit it,
+or a second perform of a consumed `once` handler). A panic aborts the program with a message; by
 default there is no unwinding and destructors do not run. A program that
 uses `Task.catch` (see [chapter 8](08-concurrency.md)) unwinds panics to that
 boundary instead, running cleanup. A panic inside an unwind cleanup
@@ -170,10 +171,20 @@ state machine.
 ### Declared operations
 
 `effect Op: P -> R;` declares an operation that called functions may
-perform. It becomes a row entry; a `handle Op` discharges it. The handler
-active at run time is found on a per-task handler stack; with none active,
-the perform panics. A handler's own
+perform. It becomes a row entry; a `handle Op` discharges it. A called
+function performs through the innermost `handle Op` active where it was
+called. A handler's own
 effects are declared on the operation: `effect Log: i64 -> Unit ! {io};`.
+
+Nothing calls `main` inside a handler, so its row cannot name a declared
+operation:
+
+```kush reject
+effect Ask: i64 -> i64;
+fn ask() -> i64 ! {Ask} { perform Ask(1) }
+fn main() -> i64 ! {Ask} { ask() }
+// error: main declares the operation 'Ask' in its row, but nothing can handle it there
+```
 
 ```kush eval
 effect Next: Unit -> i64 ! {};

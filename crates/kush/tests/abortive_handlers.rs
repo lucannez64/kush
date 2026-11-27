@@ -596,24 +596,15 @@ fn owned_payloads_and_results_on_the_abort_path() {
 }
 
 #[test]
-fn a_missing_handler_aborts_the_program() {
-    let source = "effect Fail: i64 -> Never;
+fn a_missing_handler_is_a_compile_error() {
+    // Decision D4 (docs/one-handler-model.md): nothing can handle an
+    // operation in main's row.
+    rejects(
+        "effect Fail: i64 -> Never;
          fn fail() -> i64 ! {Fail} { perform Fail(1) }
-         fn main() -> i64 ! {Fail} { fail() }";
-    let program = check(source).unwrap();
-    let error = program.evaluate(&mut Vec::new()).unwrap_err();
-    assert!(
-        error.message.contains("no dynamically active handler"),
-        "{error:?}"
+         fn main() -> i64 ! {Fail} { fail() }",
+        "main declares the operation 'Fail' in its row, but nothing can handle it there",
     );
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
-        let binary = scratch.path().join("abortive-missing");
-        kush::native::build(&program, &binary).unwrap();
-        let native = std::process::Command::new(&binary).output().unwrap();
-        assert!(!native.status.success(), "{native:?}");
-    }
     rejects(
         "effect Fail: i64 -> Never;
          fn fail() -> i64 ! {Fail} { perform Fail(1) }
@@ -724,12 +715,13 @@ fn aborts_cannot_cross_tasks_callbacks_or_non_tail_handlers() {
     // A dynamic abortive perform inside such a body.
     rejects(
         "effect Fail: i64 -> Never;
-         fn main() -> i64 ! {Fail} {
+         fn run() -> i64 ! {Fail} {
              handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { k(x) + 1 } {
                  let a = perform Ask(1);
                  perform Fail(a)
              }
-         }",
+         }
+         fn main() -> i64 ! {} { 0 }",
         "cannot leave the body of 'handle Ask'",
     );
     // A function resumed by a non-tail handler cannot abort out of itself.
@@ -963,27 +955,16 @@ fn review_regressions_for_abortive_handlers() {
         ),
         "cannot be called inside a 'handle' for the same abortive operation",
     );
-    // The payload is evaluated before the handler lookup in both backends.
-    let source = "effect Fail: i64 -> Never;
+    // The payload is evaluated before the abort leaves, in both backends.
+    agrees(
+        "effect Fail: i64 -> Never;
          fn fail() -> i64 ! {Fail, io} { perform Fail({ print_i64(5); 1 }) }
-         fn main() -> i64 ! {Fail, io} { fail() }";
-    let program = check(source).unwrap();
-    let mut output = Vec::new();
-    let error = program.evaluate(&mut output).unwrap_err();
-    assert!(
-        error.message.contains("no dynamically active handler"),
-        "{error:?}"
+         fn main() -> i64 ! {io} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c + 10 } { fail() }
+         }",
+        11,
+        "5\n",
     );
-    assert_eq!(String::from_utf8(output).unwrap(), "5\n");
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
-        let binary = scratch.path().join("abortive-order");
-        kush::native::build(&program, &binary).unwrap();
-        let native = std::process::Command::new(&binary).output().unwrap();
-        assert!(!native.status.success());
-        assert_eq!(String::from_utf8_lossy(&native.stdout), "5\n");
-    }
 }
 
 #[test]
@@ -1100,13 +1081,14 @@ fn aborts_through_entries_stay_checked() {
     rejects(
         &format!(
             "use std.task.TaskExit; {both}
-             fn main() -> i64 ! {{Fail, alloc, suspend}} {{
+             fn run() -> i64 ! {{Fail, alloc, suspend}} {{
                  {handler} {{
                      Task.scope(fn() -> i64 ! {{Ask, alloc, suspend}} {{
                          handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {{}} {{ c }} {{ both(1) }}
                      }})
                  }}
-             }}"
+             }}
+             fn main() -> i64 ! {{}} {{ 0 }}"
         ),
         "cannot be resumed",
     );

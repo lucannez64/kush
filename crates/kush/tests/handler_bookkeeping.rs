@@ -66,10 +66,13 @@ fn installer_early_return_cannot_leak_a_handler_into_unguarded_caller() {
         r#"
     effect Op:i64->i64;
     fn install()->i64 ! {} {
-        handle Op:i64->i64 with fn(x:i64,resume:linear once fn(i64)->i64 ! {})->i64 ! {} {resume(x)} {return 1;}
+        handle Op:i64->i64 with fn(x:i64,resume:linear once fn(i64)->i64 ! {})->i64 ! {} {resume(x+100)} {return 1;}
     }
-    fn main()->i64 ! {Op} {let x=install();x+perform Op(2)}
+    fn after()->i64 ! {Op} {let x=install();x+perform Op(2)}
+    fn main()->i64 ! {} {
+        handle Op:i64->i64 with fn(x:i64,resume:linear once fn(i64)->i64 ! {})->i64 ! {} {resume(x)} {after()}
+    }
     "#,
-        None,
+        Some(3),
     );
 }

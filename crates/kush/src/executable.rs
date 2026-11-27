@@ -2530,6 +2530,24 @@ fn check_program_pass(
                     "main cannot carry a result usage contract; its process result has no caller to transfer or erase it",
                 ));
             }
+            // Decision D4 (docs/one-handler-model.md): nothing calls main
+            // inside a handler, so a declared operation in its row could
+            // never be handled.
+            let unhandled = resolution
+                .effect_bits
+                .iter()
+                .filter(|(_, bit)| sig.effects & **bit != 0)
+                .map(|(name, _)| format!("'{name}'"))
+                .collect::<Vec<_>>();
+            if !unhandled.is_empty() {
+                return Err(Diagnostic::new(
+                    sig.span,
+                    format!(
+                        "main declares the operation {} in its row, but nothing can handle it there; handle it inside main with 'handle'",
+                        unhandled.join(", ")
+                    ),
+                ));
+            }
             entry = Some(index);
         }
         functions.checking = index;

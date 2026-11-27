@@ -908,16 +908,21 @@ fn declared_effects_reach_handlers_through_called_functions() {
                 return next();
             }
         }
-        fn main() -> i64 ! {Op} {
+        fn run() -> i64 ! {Op} {
             let x = scoped();
             perform Op(2) + x
+        }
+        fn main() -> i64 ! {} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x + 10) } { run() }
         }"#;
-    let program = check(restored).unwrap();
-    let error = program.evaluate(&mut Vec::new()).unwrap_err();
-    assert!(
-        error.message.contains("no dynamically active handler"),
-        "{error:?}"
-    );
+    // The early return leaves `scoped`'s handler behind: the later perform
+    // reaches main's (2 + 10), plus scoped's 1.
+    assert_eq!(value(restored), 13);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(restored, 13);
     rejects(
         r#"
         effect Op: i64 -> i64;
