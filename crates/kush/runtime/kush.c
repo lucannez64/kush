@@ -3059,6 +3059,79 @@ uint64_t kush_vec_restride(uint64_t handle, int64_t source_width, int64_t target
 /* Stackful cooperative tasks. One OS thread; strict handoff. */
 #include <ucontext.h>
 #include <sys/mman.h>
+/* FIBER-RUNTIME (docs/tasks-on-handlers.md): a saved execution context and
+   the switch between two. On x86-64 a context is a stack pointer and the
+   switch saves the callee-saved registers and the SSE and x87 control
+   words on the stack it leaves: no system call, where swapcontext also
+   saves and restores the signal mask (a sigprocmask call each way, and
+   almost all of a task switch's time). Elsewhere it stays a ucontext. A
+   context's start function takes no arguments and never returns. */
+#if defined(__x86_64__)
+typedef struct { void *sp; } KushContext;
+/* Save the running context in *from (%rdi) and continue the context at
+   `to` (%rsi). A naked function, not module-level assembly: the LLVM
+   backend copies parts of the runtime into the program's module, and a
+   module-level definition would then be linked twice. */
+__attribute__((naked, noinline)) static void kush_switch(
+    __attribute__((unused)) void **from, __attribute__((unused)) void *to) {
+    __asm__ volatile(
+        "    pushq %rbp\n"
+        "    pushq %rbx\n"
+        "    pushq %r12\n"
+        "    pushq %r13\n"
+        "    pushq %r14\n"
+        "    pushq %r15\n"
+        "    subq $8, %rsp\n"
+        "    stmxcsr (%rsp)\n"
+        "    fnstcw 4(%rsp)\n"
+        "    movq %rsp, (%rdi)\n"
+        "    movq %rsi, %rsp\n"
+        "    ldmxcsr (%rsp)\n"
+        "    fldcw 4(%rsp)\n"
+        "    addq $8, %rsp\n"
+        "    popq %r15\n"
+        "    popq %r14\n"
+        "    popq %r13\n"
+        "    popq %r12\n"
+        "    popq %rbx\n"
+        "    popq %rbp\n"
+        "    ret\n");
+}
+static void kush_context_switch(KushContext *from, KushContext *to) {
+    kush_switch(&from->sp, to->sp);
+}
+/* A context that starts `start` on the stack [stack, stack + size): the
+   frame kush_switch pops, returning into `start` with the stack pointer as
+   a call would leave it (16-byte aligned plus the return address slot),
+   and the control words of the creating context. */
+static void kush_context_make(KushContext *context, void *stack, size_t size,
+                              void (*start)(void)) {
+    uintptr_t top = ((uintptr_t)stack + size) & ~(uintptr_t)15;
+    uint64_t *sp = (uint64_t *)top;
+    *--sp = 0;                          /* start's return address: none */
+    *--sp = (uint64_t)(uintptr_t)start; /* where kush_switch returns */
+    for (int i = 0; i < 6; ++i) *--sp = 0; /* rbp, rbx, r12-r15 */
+    uint32_t mxcsr;
+    uint16_t control;
+    __asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+    __asm__ volatile("fnstcw %0" : "=m"(control));
+    *--sp = (uint64_t)mxcsr | ((uint64_t)control << 32);
+    context->sp = sp;
+}
+#else
+typedef ucontext_t KushContext;
+static void kush_context_switch(KushContext *from, KushContext *to) {
+    if (swapcontext(from, to) != 0) kush_panic();
+}
+static void kush_context_make(KushContext *context, void *stack, size_t size,
+                              void (*start)(void)) {
+    if (getcontext(context) != 0) kush_panic();
+    context->uc_stack.ss_sp = stack;
+    context->uc_stack.ss_size = size;
+    context->uc_link = NULL;
+    makecontext(context, start, 0);
+}
+#endif
 /* These tables are emitted by native/staging.rs. Graph bytes never supply
    machine code, relocation offsets, or native symbol addresses. */
 typedef struct {
@@ -3279,7 +3352,7 @@ enum { KUSH_READY = 0, KUSH_RUNNING = 1, KUSH_BLOCKED = 2, KUSH_FINISHED = 3 };
 typedef struct KushTask KushTask;
 struct KushHandlerContext;
 struct KushTask {
-    ucontext_t context;
+    KushContext context;
     uint64_t id, handle, wrapper, code, env;
     void *result;
     size_t result_size;
@@ -3323,7 +3396,7 @@ static KUSH_TLS int kush_free_count = 0;
 static KUSH_TLS int kush_task_capacity = 0;
 static KUSH_TLS int kush_task_count = 0;
 static KUSH_TLS KushTask *kush_current = NULL;
-static KUSH_TLS ucontext_t kush_scheduler_context;
+static KUSH_TLS KushContext kush_scheduler_context;
 static KUSH_TLS void *kush_scheduler_stack = NULL;
 static KUSH_TLS size_t kush_scheduler_stack_total = 0;
 static KUSH_TLS int kush_initialized = 0;
@@ -3791,10 +3864,10 @@ static void kush_scheduler(void) {
         if (t == NULL || t->state == KUSH_FINISHED) continue;
         t->state = KUSH_RUNNING;
         kush_current = t;
-        swapcontext(&kush_scheduler_context, &t->context);
+        kush_context_switch(&kush_scheduler_context, &t->context);
     }
 }
-static void kush_task_entry(unsigned int low, unsigned int high);
+static void kush_task_entry(void);
 static void kush_task_init(void) {
     if (kush_initialized) return;
     KushTask *root = (KushTask *)(uintptr_t)kush_alloc(sizeof(KushTask));
@@ -3807,11 +3880,7 @@ static void kush_task_init(void) {
     void *base; size_t total;
     void *stack = kush_stack_alloc(KUSH_TASK_STACK, &base, &total);
     kush_scheduler_stack = base; kush_scheduler_stack_total = total;
-    if (getcontext(&kush_scheduler_context) != 0) kush_panic();
-    kush_scheduler_context.uc_stack.ss_sp = stack;
-    kush_scheduler_context.uc_stack.ss_size = KUSH_TASK_STACK;
-    kush_scheduler_context.uc_link = NULL;
-    makecontext(&kush_scheduler_context, kush_scheduler, 0);
+    kush_context_make(&kush_scheduler_context, stack, KUSH_TASK_STACK, kush_scheduler);
     kush_initialized = 1;
 }
 uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
@@ -3835,14 +3904,9 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
     void *base; size_t total;
     void *stack = kush_stack_alloc(KUSH_TASK_STACK, &base, &total);
     t->stack_base = base; t->stack_total = total;
-    if (getcontext(&t->context) != 0) kush_panic();
-    t->context.uc_stack.ss_sp = stack;
-    t->context.uc_stack.ss_size = KUSH_TASK_STACK;
-    t->context.uc_link = NULL;
-    uintptr_t pointer = (uintptr_t)t;
-    makecontext(&t->context, (void (*)(void))kush_task_entry, 2,
-                (unsigned int)(pointer & 0xffffffffu),
-                (unsigned int)(pointer >> 32));
+    /* The scheduler sets kush_current to the task before it first switches
+       to it; kush_task_entry starts from there. */
+    kush_context_make(&t->context, stack, KUSH_TASK_STACK, kush_task_entry);
     t->state = KUSH_READY;
     /* A task reaches its handlers through the cells its body captured
        (FND-HANDLERS-ONE-DELETE, decision D3): no frame is copied. */
@@ -3856,10 +3920,8 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
     kush_tasks[id] = t;
     return t->handle;
 }
-static void kush_task_entry(unsigned int low, unsigned int high) {
-    uintptr_t pointer = ((uintptr_t)high << 32) | (uintptr_t)low;
-    KushTask *t = (KushTask *)pointer;
-    kush_current = t;
+static void kush_task_entry(void) {
+    KushTask *t = kush_current;
     ((void (*)(uint64_t, uint64_t, uint64_t))(uintptr_t)t->wrapper)(
         t->code, t->env, (uint64_t)(uintptr_t)t->result);
     t->completed = (t->cancelled && !t->preserve) ? 0 : 1;
@@ -3879,7 +3941,7 @@ static void kush_task_entry(unsigned int low, unsigned int high) {
         kush_ready_push(t->waiter);
         t->waiter = NULL;
     }
-    swapcontext(&t->context, &kush_scheduler_context);
+    kush_context_switch(&t->context, &kush_scheduler_context);
     abort();
 }
 uint64_t kush_task_join(uint64_t handle, void *out) {
@@ -3890,7 +3952,7 @@ uint64_t kush_task_join(uint64_t handle, void *out) {
     while (t->state != KUSH_FINISHED) {
         kush_current->state = KUSH_BLOCKED;
         t->waiter = kush_current;
-        swapcontext(&kush_current->context, &kush_scheduler_context);
+        kush_context_switch(&kush_current->context, &kush_scheduler_context);
     }
     int completed = t->completed;
     int panicked = t->panicked;
@@ -3918,7 +3980,7 @@ uint64_t kush_task_yield(void) {
     KushTask *t = kush_current;
     t->state = KUSH_READY;
     kush_ready_push(t);
-    swapcontext(&t->context, &kush_scheduler_context);
+    kush_context_switch(&t->context, &kush_scheduler_context);
     return (uint64_t)(t->cancelled != 0);
 }
 uint64_t kush_task_check_cancel(void) {
@@ -4033,7 +4095,7 @@ int64_t kush_sys_wait_ready(int64_t fd, int64_t events, int64_t timeout_ms, int6
     if (kush_waiting != NULL) kush_waiting->wait_previous = t;
     kush_waiting = t;
     t->state = KUSH_BLOCKED;
-    swapcontext(&t->context, &kush_scheduler_context);
+    kush_context_switch(&t->context, &kush_scheduler_context);
     if (t->wait_result < 0) return ECANCELED;
     *out = t->wait_result;
     return 0;

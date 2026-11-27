@@ -25,9 +25,9 @@ HERE = Path(__file__).resolve().parent
 
 # name -> (rounds, kernel argument, operations per round, operation)
 KERNELS = {
-    "yield": (300000, "0", 2, "yield"),
-    "spawn-join": (250000, "1", 1, "spawn and join"),
-    "spawn-scope": (300032, "2", 1, "spawn, scope join"),
+    "yield": (3000000, "0", 2, "yield"),
+    "spawn-join": (2500000, "1", 1, "spawn and join"),
+    "spawn-scope": (3000000, "2", 1, "spawn, scope join"),
     "echo": (25000, "3", 1, "round trip"),
 }
 

@@ -487,12 +487,16 @@ fn task_blocks_use_the_same_header_aware_path_and_stats_are_unchanged() {
     assert_eq!(stats.peak_live, 5);
     assert_eq!(stats.buffer_growths, 0);
     let pool = pool_line(&run).expect("missing allocator-pool line");
+    // A task control block holds a saved stack pointer, not a ucontext
+    // (FIBER-RUNTIME), so it is small enough for the pool: the second task
+    // reuses the first one's control block and result buffer.
     assert!(
-        pool.hits >= 1,
-        "the second task result buffer reuses the first class"
+        pool.hits >= 2,
+        "the second task reuses the first one's blocks"
     );
-    assert_eq!(pool.drained, 1);
-    assert_eq!(pool.peak_retained, 32, "one task result class block");
+    assert_eq!(pool.releases, 0, "nothing is too large for the pool");
+    assert_eq!(pool.drained, 3, "a result buffer and two control blocks");
+    assert!(pool.peak_retained <= 1024);
 }
 
 #[test]
