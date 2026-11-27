@@ -9,7 +9,11 @@
 //! - temporaries known to hold a local's value, a slice local's length, or
 //!   the result of `local < len(view)`;
 //! - facts `index < len(view)`, made on the nonzero edge of a switch on such
-//!   a comparison.
+//!   a comparison;
+//! - facts `len(view) <= len(other)`, made the same way from a comparison of
+//!   two length words (slice-layout versioning tests them before a loop
+//!   over `view` that also indexes `other`), so that `index < len(view)`
+//!   also gives `index < len(other)`.
 //!
 //! An assignment to a local forgets everything that mentions it. Locals
 //! whose address the body takes are never tracked, since a store through a
@@ -28,13 +32,17 @@ enum Known {
     Length(LocalId),
     /// Whether `index < len(view)`.
     Below(LocalId, LocalId),
+    /// Whether `len(view) <= len(other)`.
+    Covers(LocalId, LocalId),
 }
 
 impl Known {
     fn mentions(self, local: LocalId) -> bool {
         match self {
             Known::Copy(other) | Known::Length(other) => other == local,
-            Known::Below(index, view) => index == local || view == local,
+            Known::Below(left, right) | Known::Covers(left, right) => {
+                left == local || right == local
+            }
         }
     }
 }
@@ -44,6 +52,9 @@ struct State {
     known: BTreeMap<LocalId, Known>,
     /// `(index, view)`: `index < len(view)` holds.
     facts: BTreeSet<(LocalId, LocalId)>,
+    /// `(view, other)`: `len(view) <= len(other)` holds, so an index below
+    /// the first length is below the second.
+    covers: BTreeSet<(LocalId, LocalId)>,
 }
 
 impl State {
@@ -51,12 +62,24 @@ impl State {
         self.known
             .retain(|local, known| other.known.get(local) == Some(known));
         self.facts.retain(|fact| other.facts.contains(fact));
+        self.covers.retain(|fact| other.covers.contains(fact));
     }
     fn kill(&mut self, local: LocalId) {
         self.known
             .retain(|temp, known| *temp != local && !known.mentions(local));
         self.facts
             .retain(|(index, view)| *index != local && *view != local);
+        self.covers
+            .retain(|(view, other)| *view != local && *other != local);
+    }
+    /// Whether `index < len(view)` holds, directly or through a view at
+    /// most as long.
+    fn below(&self, index: LocalId, view: LocalId) -> bool {
+        self.facts.contains(&(index, view))
+            || self
+                .facts
+                .iter()
+                .any(|(known, shorter)| *known == index && self.covers.contains(&(*shorter, view)))
     }
 }
 
@@ -89,6 +112,20 @@ impl Analysis<'_> {
         }
         state.known.get(&place.local).copied()
     }
+    /// The slice local whose length word (`view.1`) an operand reads.
+    fn length_word(&self, operand: Operand) -> Option<LocalId> {
+        let place = operand.place()?;
+        let local = place.local;
+        (!place.deref
+            && place.field.is_some_and(|field| field.offset == 1)
+            && self.tracked[local]
+            && !self.body.locals[local].temporary
+            && matches!(
+                self.body.locals[local].ty,
+                Type::Slice(_) | Type::SliceMut(_)
+            ))
+        .then_some(local)
+    }
     fn statement(&self, state: &mut State, statement: &Statement) {
         let StatementKind::Assign(place, rvalue) = &statement.kind;
         if place.deref {
@@ -101,11 +138,20 @@ impl Analysis<'_> {
         let known = match rvalue {
             Rvalue::Use(operand) => self
                 .known(state, *operand)
-                .filter(|known| !matches!(known, Known::Below(..)))
-                .or_else(|| self.local(state, *operand).map(Known::Copy)),
+                .filter(|known| !matches!(known, Known::Below(..) | Known::Covers(..)))
+                .or_else(|| self.local(state, *operand).map(Known::Copy))
+                .or_else(|| self.length_word(*operand).map(Known::Length)),
             Rvalue::Binary(BinOp::Lt, left, right) => {
                 match (self.local(state, *left), self.known(state, *right)) {
                     (Some(index), Some(Known::Length(view))) => Some(Known::Below(index, view)),
+                    _ => None,
+                }
+            }
+            Rvalue::Binary(BinOp::Le, left, right) => {
+                match (self.known(state, *left), self.known(state, *right)) {
+                    (Some(Known::Length(view)), Some(Known::Length(other))) => {
+                        Some(Known::Covers(view, other))
+                    }
                     _ => None,
                 }
             }
@@ -159,12 +205,17 @@ impl Analysis<'_> {
                 otherwise,
             } => {
                 let zero = targets.iter().all(|(case, _)| *case == 0);
-                if zero
-                    && target == *otherwise
-                    && targets.iter().all(|(_, other)| *other != target)
-                    && let Some(Known::Below(index, view)) = self.known(state, *value)
+                if zero && target == *otherwise && targets.iter().all(|(_, other)| *other != target)
                 {
-                    out.facts.insert((index, view));
+                    match self.known(state, *value) {
+                        Some(Known::Below(index, view)) => {
+                            out.facts.insert((index, view));
+                        }
+                        Some(Known::Covers(view, other)) => {
+                            out.covers.insert((view, other));
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -241,7 +292,7 @@ pub(crate) fn mark(body: &mut Body) -> usize {
         ) else {
             continue;
         };
-        if end.facts.contains(&(position, view)) {
+        if end.below(position, view) {
             marks.push(block);
         }
     }

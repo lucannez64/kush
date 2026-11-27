@@ -22,7 +22,11 @@ const BUDGET: usize = 96;
 
 /// The view and its element type, when `lp` is a small innermost loop
 /// testing `i < v.len()` with `v` unchanged in the loop.
-fn candidate(body: &Body, lp: &loops::Loop, all: &[loops::Loop]) -> Option<(LocalId, Type)> {
+fn candidate(
+    body: &Body,
+    lp: &loops::Loop,
+    all: &[loops::Loop],
+) -> Option<(LocalId, Type, Vec<(LocalId, Type)>)> {
     if !loops::innermost(lp, all) {
         return None;
     }
@@ -46,7 +50,84 @@ fn candidate(body: &Body, lp: &loops::Loop, all: &[loops::Loop]) -> Option<(Loca
     {
         return None;
     }
-    Some((view, element))
+    Some((view, element, companions(body, lp, index, view)))
+}
+
+/// At most this many other views get a length test.
+const COMPANIONS: usize = 4;
+
+/// The other views the loop reads or writes at the counter (`w[i]`), unchanged
+/// in the loop, with their element types. The copy also requires
+/// `len(view) <= len(w)` for each, so the bounds pass drops their upper
+/// checks there as it does the view's own (FND-MIR-BOUNDS-VERSION).
+fn companions(
+    body: &Body,
+    lp: &loops::Loop,
+    index: LocalId,
+    view: LocalId,
+) -> Vec<(LocalId, Type)> {
+    let assigned = loops::assigned(body, &lp.blocks);
+    // The plain local an operand reads, through a temporary copied from
+    // it in the loop.
+    let source = |operand: Operand| -> Option<LocalId> {
+        let place = operand.place()?;
+        if place.deref || place.field.is_some() {
+            return None;
+        }
+        if !body.locals[place.local].temporary {
+            return Some(place.local);
+        }
+        lp.blocks.iter().find_map(|block| {
+            body.blocks[*block]
+                .statements
+                .iter()
+                .find_map(|statement| match &statement.kind {
+                    StatementKind::Assign(
+                        target,
+                        Rvalue::Use(Operand::Copy(copied) | Operand::Move(copied)),
+                    ) if *target == Place::local(place.local)
+                        && !copied.deref
+                        && copied.field.is_none()
+                        && !body.locals[copied.local].temporary =>
+                    {
+                        Some(copied.local)
+                    }
+                    _ => None,
+                })
+        })
+    };
+    let mut found: Vec<(LocalId, Type)> = Vec::new();
+    for block in &lp.blocks {
+        let TerminatorKind::Call {
+            callee: Callee::Builtin { index: builtin, .. },
+            args,
+            ..
+        } = &body.blocks[*block].terminator.kind
+        else {
+            continue;
+        };
+        let Target::Slice(SliceOp::Get | SliceOp::Set | SliceOp::TryGet { .. }, element) =
+            body.builtins.0[*builtin]
+        else {
+            continue;
+        };
+        let (Some(other), Some(position)) = (
+            args.first().and_then(|operand| source(*operand)),
+            args.get(1).and_then(|operand| source(*operand)),
+        ) else {
+            continue;
+        };
+        if other != view
+            && position == index
+            && matches!(body.locals[other].ty, Type::Slice(_) | Type::SliceMut(_))
+            && !assigned.contains(&other)
+            && !found.iter().any(|(known, _)| *known == other)
+            && found.len() < COMPANIONS
+        {
+            found.push((other, element));
+        }
+    }
+    found
 }
 
 /// Version every candidate loop of `body` except those with a header in
@@ -63,74 +144,138 @@ pub(crate) fn version(
         .filter(|lp| !skip.contains(&lp.header))
         .filter_map(|lp| candidate(body, lp, &all).map(|found| (lp.clone(), found)))
         .collect::<Vec<_>>();
-    for (lp, (view, element)) in &candidates {
-        let stride = (program.width(*element) * 8) as i64;
+    for (lp, (view, element, companions)) in &candidates {
+        let views = std::iter::once((*view, *element))
+            .chain(companions.iter().copied())
+            .map(|(local, element)| (local, (program.width(element) * 8) as i64))
+            .collect::<Vec<_>>();
         let entry = loops::preheader(body, lp);
         let span = body.blocks[entry].terminator.span;
-        let mut temp = |ty: Type| {
-            body.locals.push(LocalDecl {
-                ty,
-                mutable: false,
-                temporary: true,
-            });
-            body.locals.len() - 1
-        };
-        let (strided, flat) = (temp(Type::Bool), temp(Type::Bool));
-        let word = |offset: usize| Operand::Copy(Place::field(*view, offset, Type::I64));
+        let word =
+            |local: LocalId, offset: usize| Operand::Copy(Place::field(local, offset, Type::I64));
         let assign = |local: LocalId, rvalue: Rvalue| Statement {
             kind: StatementKind::Assign(Place::local(local), rvalue),
             span,
         };
-        let store = |offset: usize, value: i64| Statement {
+        let store = |local: LocalId, offset: usize, value: i64| Statement {
             kind: StatementKind::Assign(
-                Place::field(*view, offset, Type::I64),
+                Place::field(local, offset, Type::I64),
                 Rvalue::Use(Operand::Constant(value, Type::I64)),
             ),
             span,
         };
-        let first = assign(
-            strided,
-            Rvalue::Binary(BinOp::Eq, word(2), Operand::Constant(stride, Type::I64)),
-        );
-        let copies = loops::version(
-            body,
-            lp,
-            entry,
-            vec![first],
-            Operand::Move(Place::local(strided)),
-        );
-        // The entry goes on to test the second word, then to the copy
-        // through a block that stores the constants.
-        let fast = body.blocks.len();
-        body.blocks.push(BasicBlock {
-            statements: vec![store(2, stride), store(3, 0)],
-            terminator: Terminator {
-                kind: TerminatorKind::Goto(copies[&lp.header]),
-                span,
-            },
-            unwind: None,
-        });
-        let second = body.blocks.len();
-        body.blocks.push(BasicBlock {
-            statements: vec![assign(
+        // Each test is statements and the flag they set. Every view holds
+        // whole consecutive elements; then, after the copy's constants are
+        // stored (the bounds pass forgets what it knew about a view whose
+        // words are assigned), every companion is at least as long as the
+        // view the loop runs over.
+        let mut layout = Vec::new();
+        let mut stores = Vec::new();
+        for (local, stride) in &views {
+            let strided = temp(body, Type::Bool);
+            layout.push((
+                vec![assign(
+                    strided,
+                    Rvalue::Binary(
+                        BinOp::Eq,
+                        word(*local, 2),
+                        Operand::Constant(*stride, Type::I64),
+                    ),
+                )],
+                strided,
+            ));
+            let flat = temp(body, Type::Bool);
+            layout.push((
+                vec![assign(
+                    flat,
+                    Rvalue::Binary(BinOp::Eq, word(*local, 3), Operand::Constant(0, Type::I64)),
+                )],
                 flat,
-                Rvalue::Binary(BinOp::Eq, word(3), Operand::Constant(0, Type::I64)),
-            )],
+            ));
+            stores.push(store(*local, 2, *stride));
+            stores.push(store(*local, 3, 0));
+        }
+        let mut lengths = Vec::new();
+        for (other, _) in companions {
+            let (short, long, covers) = (
+                temp(body, Type::I64),
+                temp(body, Type::I64),
+                temp(body, Type::Bool),
+            );
+            lengths.push((
+                vec![
+                    assign(short, Rvalue::Use(word(*view, 1))),
+                    assign(long, Rvalue::Use(word(*other, 1))),
+                    assign(
+                        covers,
+                        Rvalue::Binary(
+                            BinOp::Le,
+                            Operand::Copy(Place::local(short)),
+                            Operand::Copy(Place::local(long)),
+                        ),
+                    ),
+                ],
+                covers,
+            ));
+        }
+        let mut layout = layout.into_iter();
+        let (first, flag) = layout.next().expect("a layout test");
+        let copies = loops::version(body, lp, entry, first, Operand::Move(Place::local(flag)));
+        // The entry goes on through the other tests, in a chain of blocks
+        // with the stores between the two kinds, to the copy.
+        let tests = layout.collect::<Vec<_>>();
+        let base = body.blocks.len();
+        let count = tests.len() + 1 + lengths.len();
+        let next = |at: usize| {
+            if at + 1 < count {
+                base + at + 1
+            } else {
+                copies[&lp.header]
+            }
+        };
+        let test = |at: usize, (statements, flag): (Vec<Statement>, LocalId)| BasicBlock {
+            statements,
             terminator: Terminator {
                 kind: TerminatorKind::Switch {
-                    value: Operand::Move(Place::local(flat)),
+                    value: Operand::Move(Place::local(flag)),
                     targets: vec![(0, lp.header)],
-                    otherwise: fast,
+                    otherwise: next(at),
                 },
                 span,
             },
             unwind: None,
+        };
+        let mut chain = Vec::with_capacity(count);
+        for test_data in tests {
+            chain.push(test(chain.len(), test_data));
+        }
+        chain.push(BasicBlock {
+            statements: stores,
+            terminator: Terminator {
+                kind: TerminatorKind::Goto(next(chain.len())),
+                span,
+            },
+            unwind: None,
         });
+        for test_data in lengths {
+            chain.push(test(chain.len(), test_data));
+        }
+        body.blocks.extend(chain);
         if let TerminatorKind::Switch { otherwise, .. } = &mut body.blocks[entry].terminator.kind {
-            *otherwise = second;
+            *otherwise = base;
         }
     }
     candidates.len()
+}
+
+/// A new temporary of `ty`.
+fn temp(body: &mut Body, ty: Type) -> LocalId {
+    body.locals.push(LocalDecl {
+        ty,
+        mutable: false,
+        temporary: true,
+    });
+    body.locals.len() - 1
 }
 
 #[cfg(test)]
@@ -174,6 +319,25 @@ mod tests {
         // The copy's entry stores the constant layout.
         let printed = text::print(&body);
         assert!(printed.contains("_0.2:i64 = const 8: i64"), "{printed}");
+    }
+
+    #[test]
+    fn a_second_view_at_the_counter_gets_a_length_test() {
+        let source = "fn f(xs: &[i64], ys: &[i64]) -> i64 {
+                let mut i = 0;
+                let mut total = 0;
+                while i < xs.len() { total = total + xs[i] * ys[i]; i = i + 1; }
+                total
+            }
+            fn main() -> Unit ! {io} { print_i64(0); }";
+        let (mut body, count) = versioned(source);
+        assert_eq!(count, 1);
+        let printed = text::print(&body);
+        assert!(printed.contains("_1.2:i64 = const 8: i64"), "{printed}");
+        assert!(printed.contains("Le("), "{printed}");
+        // In the copy both reads lose their upper check; in the original
+        // loop only the read of the view it runs over does.
+        assert_eq!(super::super::bounds::mark(&mut body), 3);
     }
 
     #[test]

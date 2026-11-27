@@ -409,6 +409,13 @@ it and tests can check it without compiling.
 - Status: `mir/slice_layout.rs` versions loops in `Speed` builds. The
   guard is two chained switches, and the copy's entry is a block that
   stores the constants.
+- Other views indexed at the counter (FND-MIR-BOUNDS-VERSION). Up to four
+  views `w` the loop does not assign and reads or writes as `w[i]` join
+  the guard. Each needs the same layout test and, after the stores, a test
+  `v.length <= w.length`. The bounds pass turns that test into a fact
+  `len(v) <= len(w)`, and with `i < len(v)` it marks `w[i]` `below`
+  too. Without this, `dot`'s `right[i]` kept a compare per element because
+  only `left`'s length bounds the loop.
 
 **Push shadows (FND-MIR-PUSH-SHADOWS).**
 - Applies to vector locals that a loop touches only as
