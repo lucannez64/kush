@@ -60,6 +60,10 @@ fn error(message: impl std::fmt::Display) -> Diagnostic {
 }
 /// The C runtime linked into every native executable (FND-RUNTIME-C).
 const RUNTIME: &str = include_str!("../runtime/kush.c");
+/// A word access: every Kush word in memory (stack slots, heap blocks,
+/// buffer elements, environments) is word-aligned, so the LLVM backend may
+/// say `align 8` (FND-LLVM-TYPED-SLICES).
+const WORD: ir::MemFlagsData = ir::MemFlagsData::new().with_aligned();
 
 /// Extra inputs for the native link step. Every path is passed to `cc` as one
 /// argument (no shell interpolation); library names are validated identifiers
@@ -5288,19 +5292,14 @@ impl<E: Emit> Generator<'_, E> {
     }
     fn store_words(&mut self, pointer: Value, values: &[Value]) {
         for (i, v) in values.iter().enumerate() {
-            self.builder
-                .store(ir::MemFlagsData::new(), *v, pointer, (i * 8) as i32);
+            self.builder.store(WORD, *v, pointer, (i * 8) as i32);
         }
     }
     fn load_words(&mut self, pointer: Value, offset: i32, words: usize) -> Words {
         (0..words)
             .map(|i| {
-                self.builder.load(
-                    I64,
-                    ir::MemFlagsData::new(),
-                    pointer,
-                    offset + (i * 8) as i32,
-                )
+                self.builder
+                    .load(I64, WORD, pointer, offset + (i * 8) as i32)
             })
             .collect()
     }
@@ -5737,12 +5736,8 @@ impl<E: Emit> Generator<'_, E> {
         let address = self.builder.iadd(handle, offset);
         self.memory_class(llvm::MemoryClass::BufferElements, |g| {
             for (word, value) in words.iter().enumerate() {
-                g.builder.store(
-                    ir::MemFlagsData::new(),
-                    *value,
-                    address,
-                    (16 + word * 8) as i32,
-                );
+                g.builder
+                    .store(WORD, *value, address, (16 + word * 8) as i32);
             }
         });
         self.memory_class(llvm::MemoryClass::BufferHeader, |g| {

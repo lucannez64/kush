@@ -554,6 +554,7 @@ impl LlvmBuilder {
         memory: Option<(&str, &str)>,
         pointer: ir::Value,
         offset: Offset32,
+        align: u32,
     ) -> ir::Value {
         let address = self.address(pointer, i64::from(offset));
         let class = self.memory_class();
@@ -561,13 +562,13 @@ impl LlvmBuilder {
         let tyn = self.tyn(ty);
         match memory {
             None => self.line(format!(
-                "{} = load {tyn}, ptr {address}, align 1{class}",
+                "{} = load {tyn}, ptr {address}, align {align}{class}",
                 name(result)
             )),
             Some((memory, extend)) => {
                 let temp = self.temp();
                 self.line(format!(
-                    "{temp} = load {memory}, ptr {address}, align 1{class}"
+                    "{temp} = load {memory}, ptr {address}, align {align}{class}"
                 ));
                 self.line(format!(
                     "{} = {extend} {memory} {temp} to {tyn}",
@@ -584,6 +585,7 @@ impl LlvmBuilder {
         value: ir::Value,
         pointer: ir::Value,
         offset: Offset32,
+        align: u32,
     ) -> ir::Inst {
         let class = self.memory_class();
         let address = self.address(pointer, i64::from(offset));
@@ -594,11 +596,11 @@ impl LlvmBuilder {
                 let temp = self.temp();
                 self.line(format!("{temp} = trunc {ty} {operand} to {memory}"));
                 self.line(format!(
-                    "store {memory} {temp}, ptr {address}, align 1{class}"
+                    "store {memory} {temp}, ptr {address}, align {align}{class}"
                 ));
             }
             _ => self.line(format!(
-                "store {ty} {operand}, ptr {address}, align 1{class}"
+                "store {ty} {operand}, ptr {address}, align {align}{class}"
             )),
         }
         self.inst(Vec::new())
@@ -975,6 +977,17 @@ impl LlvmBuilder {
     }
 }
 
+/// The alignment a word access may assume: its size up to a word when the
+/// lowering marked it `aligned` (every Kush word in memory is word-aligned),
+/// else 1 (FND-LLVM-TYPED-SLICES).
+fn word_alignment(flags: MemFlagsData, ty: ir::Type) -> u32 {
+    if flags.aligned() {
+        ty.bytes().clamp(1, 8)
+    } else {
+        1
+    }
+}
+
 fn name(value: ir::Value) -> String {
     format!("%v{}", value.index())
 }
@@ -1250,11 +1263,12 @@ impl Emit for LlvmBuilder {
     fn load(
         &mut self,
         ty: ir::Type,
-        _flags: impl Into<MemFlagsData>,
+        flags: impl Into<MemFlagsData>,
         pointer: ir::Value,
         offset: impl Into<Offset32>,
     ) -> ir::Value {
-        self.load_as(ty, None, pointer, offset.into())
+        let align = word_alignment(flags.into(), ty);
+        self.load_as(ty, None, pointer, offset.into(), align)
     }
     fn uload8(
         &mut self,
@@ -1263,16 +1277,17 @@ impl Emit for LlvmBuilder {
         pointer: ir::Value,
         offset: impl Into<Offset32>,
     ) -> ir::Value {
-        self.load_as(ty, Some(("i8", "zext")), pointer, offset.into())
+        self.load_as(ty, Some(("i8", "zext")), pointer, offset.into(), 1)
     }
     fn store(
         &mut self,
-        _flags: impl Into<MemFlagsData>,
+        flags: impl Into<MemFlagsData>,
         value: ir::Value,
         pointer: ir::Value,
         offset: impl Into<Offset32>,
     ) -> ir::Inst {
-        self.store_as(None, value, pointer, offset.into())
+        let align = word_alignment(flags.into(), self.ty(value));
+        self.store_as(None, value, pointer, offset.into(), align)
     }
     fn istore8(
         &mut self,
@@ -1281,7 +1296,7 @@ impl Emit for LlvmBuilder {
         pointer: ir::Value,
         offset: impl Into<Offset32>,
     ) -> ir::Inst {
-        self.store_as(Some("i8"), value, pointer, offset.into())
+        self.store_as(Some("i8"), value, pointer, offset.into(), 1)
     }
     // Cranelift's atomics are sequentially consistent and need the natural
     // alignment LLVM requires of an atomic access.
