@@ -5845,22 +5845,40 @@
       "title": "Differential-privacy budgets as grades",
       "size": "M",
       "hard": false,
-      "deps": [],
+      "deps": [
+        "GRADE-ARROWS",
+        "GRADE-CARRIERS"
+      ],
       "status": "todo",
       "desc": "Sensitivity/epsilon grade algebra (Fuzz/Duet style) and a small private-metrics library. See docs/showcase-roadmap.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-24 18:48:20",
+          "who": "agent",
+          "text": "Gated by docs/foundations-review.md (2026-11-24)."
+        }
+      ]
     },
     {
       "id": "SEMVER-CONTRACTS",
       "title": "Semver checked by the compiler: types, effects, grades",
       "size": "M",
       "hard": false,
-      "deps": [],
+      "deps": [
+        "FND-EFFECT-DECIDE",
+        "FND-GRADE-DECIDE"
+      ],
       "status": "todo",
       "desc": "Extract public contracts; new signatures must be subtypes of old ones; kush semver and Kush.lock resolution enforce it. See docs/showcase-roadmap.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-24 18:48:21",
+          "who": "agent",
+          "text": "Gated by docs/foundations-review.md (2026-11-24)."
+        }
+      ]
     },
     {
       "id": "SEMVER-ENSURES",
@@ -5994,12 +6012,29 @@
       "hard": false,
       "deps": [
         "STAGING",
-        "GAMEBOY"
+        "GAMEBOY",
+        "GB-SCHED"
       ],
       "status": "todo",
       "desc": "First Futamura projection on the emulator. See docs/showcase-roadmap.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-24 18:02:16",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-24 18:24:05",
+          "who": "agent",
+          "text": "Spike (scratch): runtime-compiled ROM blocks keyed by physical ROM offset, with per-instruction peripheral ticks and bank guards. Correct: cpu_instrs, instr_timing pass with identical cycles; 2048 screenshot identical after 3600 frames. Not faster: cpu_instrs runs from WRAM (3.46s vs 3.76s), 2048 halts 99.5% of steps (4.65s vs 5.82s); CPU decode is ~21% of profile, peripherals ~65%. Waiting on GB-SCHED."
+        },
+        {
+          "time": "2026-11-27 12:32:42",
+          "who": "agent",
+          "text": "Paused: blocked on GB-SCHED's running half (chips are ~65% of the time, decode ~21%)"
+        }
+      ]
     },
     {
       "id": "GB-JIT",
@@ -6117,12 +6152,19 @@
       "size": "L",
       "hard": true,
       "deps": [
-        "CHANNEL-OWNED"
+        "CHANNEL-OWNED",
+        "FND-LINEAR-ONE"
       ],
       "status": "todo",
       "desc": "Protocols as linear channel types; violations are compile errors. See docs/showcase-roadmap.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-24 18:48:21",
+          "who": "agent",
+          "text": "Gated by docs/foundations-review.md (2026-11-24)."
+        }
+      ]
     },
     {
       "id": "SESSION-NET",
@@ -6160,10 +6202,16 @@
       "deps": [
         "GAMEBOY"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Run the dmg-acid2 PPU test ROM (build it with RGBDS or fetch the release ROM) and fix what it shows. See examples/gameboy/README.md, Not yet.",
-      "commit": null,
-      "log": []
+      "commit": "8cbccb7",
+      "log": [
+        {
+          "time": "2026-11-25 00:55:19",
+          "who": "agent",
+          "text": "done 8cbccb7"
+        }
+      ]
     },
     {
       "id": "GAMEBOY-HALT-BUG",
@@ -6173,10 +6221,21 @@
       "deps": [
         "GAMEBOY"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "HALT with IME=0 and a pending interrupt fails to increment PC on the next fetch. See examples/gameboy/README.md, Not yet.",
-      "commit": null,
-      "log": []
+      "commit": "d3c8dc3",
+      "log": [
+        {
+          "time": "2026-11-25 00:43:48",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 00:53:40",
+          "who": "agent",
+          "text": "done d3c8dc3"
+        }
+      ]
     },
     {
       "id": "LOGIC-ETA",
@@ -6582,22 +6641,38 @@
       "title": "Two-phase borrows for call arguments",
       "size": "M",
       "hard": false,
-      "deps": [],
+      "deps": [
+        "FND-BORROWCK"
+      ],
       "status": "todo",
       "desc": "f(k, read(&k.store)) is rejected: an argument lent exclusively (k: &mut Kernel) stays borrowed while later arguments are evaluated, even when they only read and finish before the call. Reserve the exclusive loan and activate it at the call, as Rust's two-phase borrows do; keep rejecting real overlap (a later argument that writes, or a returned view). Found in examples/kernel (normal.kush, check.kush hoist such reads into lets); see docs/kernel-in-kush.md section 6.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-24 18:48:21",
+          "who": "agent",
+          "text": "Gated by docs/foundations-review.md (2026-11-24)."
+        }
+      ]
     },
     {
       "id": "LANG-MATCH-SCRUTINEE-LOAN",
       "title": "End a match scrutinee's loan when its value holds no borrow",
       "size": "S",
       "hard": false,
-      "deps": [],
+      "deps": [
+        "FND-BORROWCK"
+      ],
       "status": "todo",
       "desc": "match check.normalize_closed(&mut k, t) { Ok(n) => printer.term_into(&k.store, ..) } is rejected: the &mut loan taken while evaluating the scrutinee stays live in the arms although the result (Result<i64, i64>) holds no borrow. End call-scoped loans after the scrutinee unless its type can carry one. Found in examples/kernel/tests/main.kush; see docs/kernel-in-kush.md section 6.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-24 18:48:21",
+          "who": "agent",
+          "text": "Gated by docs/foundations-review.md (2026-11-24)."
+        }
+      ]
     },
     {
       "id": "LANG-IMPORT-ALIAS",
@@ -6605,10 +6680,21 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "Two modules with the same last segment cannot both be imported (kernel.env clashed with std.env, so the kernel's state module is kernel.engine). Add 'use path as name' for modules and items: resolver, formatter, language server, editor grammars, docs. Found in examples/kernel; see docs/kernel-in-kush.md section 6.",
-      "commit": null,
-      "log": []
+      "commit": "e96d176",
+      "log": [
+        {
+          "time": "2026-11-25 00:04:38",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 00:18:38",
+          "who": "agent",
+          "text": "done e96d176"
+        }
+      ]
     },
     {
       "id": "LANG-STACK-SIZE",
@@ -7255,7 +7341,13 @@
       "status": "todo",
       "desc": "Typed field accessors on std.json values (required/optional, i64/text/bool/array) with errors that name the field, so hand-written decoders stay short until WEB-CODECS.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-25 00:44:24",
+          "who": "agent",
+          "text": "2026-11-25: blocked in practice: accessors need to read a field through &Value, but borrowing an enum (&Value, &Members) is rejected ('borrowing supports immutable &Box<T>, ... &Record ...'). A by-value API would consume and thread the tree on every lookup. Wait for FND-REF-POSITIONS (references to any type), or add it as a dependency."
+        }
+      ]
     },
     {
       "id": "WEB-CORE",
@@ -7301,12 +7393,19 @@
       "size": "M",
       "hard": false,
       "deps": [
-        "WEB-ROUTER"
+        "WEB-ROUTER",
+        "FND-HANDLERS-ONE"
       ],
       "status": "todo",
       "desc": "Services as declared operations (Db, CurrentUser, Log, Clock); middleware as handlers around a request: logging, timing, transaction commit after resume and rollback on abort. Check that a handler's row bounds what it can perform.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-24 18:48:21",
+          "who": "agent",
+          "text": "Gated by docs/foundations-review.md (2026-11-24)."
+        }
+      ]
     },
     {
       "id": "WEB-TEST-CLIENT",
@@ -8550,21 +8649,2596 @@
       ]
     },
     {
+      "id": "GB-SCHED",
+      "title": "Game Boy: batch the timer, picture and sound chips and fast-forward HALT",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "GAMEBOY"
+      ],
+      "status": "todo",
+      "desc": "Advance peripherals in bulk up to the next event instead of every instruction; skip halted time to the next interrupt. Blargg cpu_instrs/instr_timing and screenshots must stay identical. Prerequisite for GB-STAGED speedups (spike 2026-11-24: decode is ~21% of time, 2048 idles in HALT 99.5%).",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-24 18:24:05",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-24 18:50:05",
+          "who": "agent",
+          "text": "4aa4d30: halted CPU skips to the step before the next timer edge, display mode/line change or sound sample. 2048: 3600 frames 5.44s -> 2.10s (Cranelift), output, cycles and screenshot identical; cpu_instrs/instr_timing unchanged and identical. Test + fuzz entry compare full state and samples per frame against run_frame_reference; mutation checks confirm they catch off-by-one skips. Next: batch peripherals while the CPU runs (catch-up before I/O access)."
+        },
+        {
+          "time": "2026-11-27 12:32:42",
+          "who": "agent",
+          "text": "Paused: the halted half landed in 4aa4d30; batching the chips while the CPU runs (catch-up before I/O access) is still to do"
+        }
+      ]
+    },
+    {
+      "id": "FND-DOC-STALE",
+      "title": "Fix stale status lines in the docs",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "docs/foundations-review.md s9: effect-capabilities.md says nothing is implemented, spec-v0.1.md predates handlers/tasks/traits/staging, core-status.md mentions uncommitted work and Boat. Mark each with its true status.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-24 18:50:41",
+          "who": "agent",
+          "text": "Status lines fixed: effect-capabilities, unboxing-certificates, simd, web; stale banner on spec-v0.1; history note on core-status. Uncommitted."
+        }
+      ]
+    },
+    {
+      "id": "FND-DOC-REF",
+      "title": "One current language reference",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "FND-DOC-STALE"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s9: docs/reference/ describing the language as implemented today (syntax, types, ownership, effects, proofs, std), replacing spec-v0.1 as the source of truth. Updated by every later FND node.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-24 19:12:39",
+          "who": "agent",
+          "text": "Writing docs/reference/; every example is checked by scripts/check-reference.py against the compiler."
+        },
+        {
+          "time": "2026-11-24 19:21:29",
+          "who": "agent",
+          "text": "docs/reference/ chapters 1-12 written; 91 checked examples pass on the evaluator and natively (scripts/check-reference.py --native). README, spec banner and AGENTS.md point to it. Uncommitted."
+        },
+        {
+          "time": "2026-11-24 19:21:44",
+          "who": "agent",
+          "text": "Reference complete for today's language; kept current by the AGENTS.md rule and scripts/check-reference.py. Uncommitted."
+        },
+        {
+          "time": "2026-11-24 19:31:41",
+          "who": "agent",
+          "text": "Committed in 38155ce."
+        }
+      ]
+    },
+    {
+      "id": "FND-DOC-HISTORY",
+      "title": "Move milestone logs out of design docs",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-DOC-REF"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s9: test counts, gate runs and review narratives move to docs/history/; design docs keep rules and rationale.",
+      "commit": "a531cab",
+      "log": [
+        {
+          "time": "2026-11-24 22:14:28",
+          "who": "agent",
+          "text": "Design docs still describe panic as an effect in prose (arrays, slices, dynamic-arrays, places, lifetimes, borrowed-text, traits, executable, abortive-handlers, runtime-indices, ...); the reference and core effect docs were updated in f036297."
+        },
+        {
+          "time": "2026-11-24 23:16:24",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-24 23:18:28",
+          "who": "agent",
+          "text": "part 1 b477a6e: history docs and validation records moved; remaining: stale panic-effect and #[noalloc]/#[nosuspend] prose in design docs"
+        },
+        {
+          "time": "2026-11-24 23:20:19",
+          "who": "agent",
+          "text": "done a531cab"
+        }
+      ]
+    },
+    {
+      "id": "FND-RUNTIME-C",
+      "title": "Move the C runtime into its own file",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "docs/foundations-review.md s8: the 4,400-line RUNTIME string in native.rs becomes crates/kush/runtime/kush.c loaded with include_str!. No behavior change.",
+      "commit": "725381c",
+      "log": [
+        {
+          "time": "2026-11-24 23:00:33",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-24 23:13:51",
+          "who": "agent",
+          "text": "done 725381c"
+        }
+      ]
+    },
+    {
+      "id": "FND-SPLIT-EXEC",
+      "title": "Split executable.rs into modules",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "docs/foundations-review.md s8: types, declarations, traits, calls, patterns, effects, lambdas, lowering helpers in separate modules; break up expr_expected_unchecked (2,411 lines). Mechanical, no behavior change; full suite must pass unchanged.",
+      "commit": "81de3b0",
+      "log": [
+        {
+          "time": "2026-11-24 23:25:26",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 00:02:39",
+          "who": "agent",
+          "text": "done 81de3b0"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-DESIGN",
+      "title": "Design a typed control-flow-graph IR",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "FND-SPLIT-EXEC"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s8: basic blocks, places, explicit drops, loans and suspension points between checking and code generation. Must carry what the borrow checker (FND-BORROWCK), evaluator and both backends need. Approved by the user before FND-MIR.",
+      "commit": "25eb7f6",
+      "log": [
+        {
+          "time": "2026-11-25 01:15:52",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 01:15:52",
+          "who": "agent",
+          "text": "4cca03b: draft docs/mir-design.md; waiting for the user's decisions in its section 7 (unwind edges, MIR drop elaboration, places vs SSA, suspension on the CFG, text form)"
+        },
+        {
+          "time": "2026-11-25 08:39:27",
+          "who": "agent",
+          "text": "user approved all five recommendations"
+        },
+        {
+          "time": "2026-11-25 08:39:28",
+          "who": "agent",
+          "text": "done 25eb7f6"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR",
+      "title": "Build the CFG IR and lower native code from it",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-MIR-DESIGN",
+        "FND-MIR-DEFAULT"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s8: checked IR -> CFG IR -> Cranelift. Native output and the full suite unchanged.",
+      "commit": "89451a3",
+      "log": [
+        {
+          "time": "2026-11-25 08:39:28",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 08:51:52",
+          "who": "agent",
+          "text": "split into FND-MIR-CORE, -AGGREGATES, -OWNED, -REFS, -CALLABLES, -BUILTINS, -EFFECTS, -DEFAULT; FND-MIR closes with FND-MIR-DEFAULT"
+        },
+        {
+          "time": "2026-11-25 08:51:52",
+          "who": "agent",
+          "text": "reset"
+        },
+        {
+          "time": "2026-11-25 20:06:00",
+          "who": "agent",
+          "text": "done 89451a3"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-EVAL",
+      "title": "Reference evaluator runs the CFG IR",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "FND-MIR",
+        "FND-EVAL-SWITCH"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s8: one executable semantics; the evaluator stays the oracle but stops being a second implementation of each feature.",
+      "commit": "9bf5991",
+      "log": [
+        {
+          "time": "2026-11-25 20:07:17",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 20:11:47",
+          "who": "agent",
+          "text": "split into FND-EVAL-* nodes (docs/mir-design.md section 9)"
+        },
+        {
+          "time": "2026-11-26 17:16:47",
+          "who": "agent",
+          "text": "done 9bf5991"
+        }
+      ]
+    },
+    {
+      "id": "FND-LLVM-DIRECT",
+      "title": "Emit LLVM from the CFG IR",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "FND-MIR",
+        "FND-LLVM-SWITCH"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s8: typed LLVM with ownership/noalias facts instead of translating Cranelift IR. Same checks and evaluation order; benchmark against the current translator.",
+      "commit": "329801b",
+      "log": [
+        {
+          "time": "2026-11-26 17:16:50",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 17:18:47",
+          "who": "agent",
+          "text": "approach decided by the user: one lowering behind an instruction-builder trait (docs/mir-design.md section 10, decision 8); split into FND-LLVM-EMIT, -GENERIC, -BUILDER, -FACTS, -SWITCH"
+        },
+        {
+          "time": "2026-11-26 20:36:09",
+          "who": "agent",
+          "text": "done 329801b"
+        },
+        {
+          "time": "2026-11-26 20:36:09",
+          "who": "agent",
+          "text": "All children done: EMIT e9825e0, GENERIC 52e82ef, BUILDER 639a632, FACTS a425616, SWITCH 329801b. The translator is gone; the LLVM backend builds typed IR from the one lowering."
+        }
+      ]
+    },
+    {
+      "id": "FND-REF-DESIGN",
+      "title": "Design one reference type with lifetimes in types",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "FND-MIR-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s1: &'a T / &'a mut T with T possibly [E] or str replaces Slice/SliceMut/Str/StrMut/Ref/RefMut; lifetime variables as type parameters; loan dataflow on the CFG IR. Maps every trace of borrow-model-contract.md. Approved by the user before implementation.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-REF-TYPE",
+      "title": "One reference type constructor in the checker",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-REF-DESIGN",
+        "FND-SPLIT-EXEC"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s1: replace the six reference variants of Type with one constructor carrying mutability, lifetime and pointee; existing programs check unchanged.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-BORROWCK",
+      "title": "Borrow checker as loan dataflow on the CFG IR",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-MIR",
+        "FND-REF-TYPE"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s1: replaces the capability-ancestry walk in ownership.rs; all borrow-model-contract.md traces and existing borrowing tests keep their outcomes, or each difference is reported to the user.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-REF-POSITIONS",
+      "title": "References in tuples, generics, enums, closures and tasks",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "FND-BORROWCK"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s1: delete the per-position rejection diagnostics; Option<&T>, (&T, i64), pick::<&str>, Vec<&'a T> work through ordinary substitution.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-REF-CLEANUP",
+      "title": "Delete the old reference machinery and merge its docs",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-REF-POSITIONS"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s1: remove capability ancestry, reference_labels and per-feature borrowing code; lifetimes/borrowing-extensions/borrowed-records/borrowed-text docs merge into the reference.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-CLOSURE-DESIGN",
+      "title": "Design reusable capturing closures",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-REF-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s2: a callable kind called many times; copied copyable captures first, borrowed captures bounded by a lifetime later. Relation to fn / once fn / linear once fn / multi fn.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-CLOSURE-COPY",
+      "title": "Reusable closures with copied captures",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-CLOSURE-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s2: map(v, fn(x) { x + k }) with k: i64 checks and runs on both backends.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-CLOSURE-BORROW",
+      "title": "Reusable closures with borrowed captures",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "FND-CLOSURE-COPY",
+        "FND-REF-POSITIONS"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s2: closures borrowing their environment may be passed and returned within their lifetime instead of being call-scoped.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-INFER-DESIGN",
+      "title": "Design bidirectional inference with unification variables",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "FND-SPLIT-EXEC"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s6: expected types flow into call arguments and constructors; generic arguments become unification variables solved across the call.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-INFER-ARGS",
+      "title": "Expected types reach call arguments",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-INFER-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s6: let v: Vec<i64> = Vec.push(Vec.new(), 7) and generic constructors inside blocks check without ::<>.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-INFER-REFS",
+      "title": "Infer generic arguments from reference arguments",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-INFER-ARGS",
+        "FND-REF-POSITIONS"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s6: pick(s.as_str()) infers T = &str.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-EFFECT-DECIDE",
+      "title": "Decide the effect simplifications",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "FND-DOC-STALE"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s3 decisions E1-E5: infer private rows, panic in rows, #[noalloc]/#[nosuspend], one handler-lookup model, tasks on handlers. User decision.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-24 18:54:10",
+          "who": "agent",
+          "text": "User decided 2026-11-24: E1 infer private rows, E2 panic leaves rows, E3 remove #[noalloc]/#[nosuspend], E4 lexical capabilities as the one model, E5 tasks as a std library on handlers. Recorded in docs/foundations-review.md s3."
+        }
+      ]
+    },
+    {
+      "id": "FND-EFFECT-ROWS",
+      "title": "Apply the row decisions (E1-E3)",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-ROWS-ATTRS",
+        "FND-ROWS-PANIC",
+        "FND-ROWS-INFER"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s3: private row inference, panic rule and attribute change as decided; migrate std and examples.",
+      "commit": "b46555e",
+      "log": [
+        {
+          "time": "2026-11-24 19:22:34",
+          "who": "agent",
+          "text": "Split into FND-ROWS-ATTRS, FND-ROWS-PANIC, FND-ROWS-INFER (2026-11-24); this node closes when all three are done."
+        },
+        {
+          "time": "2026-11-24 23:00:30",
+          "who": "agent",
+          "text": "done b46555e"
+        }
+      ]
+    },
+    {
+      "id": "FND-HANDLERS-ONE",
+      "title": "One handler-lookup model (E4)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-EFFECT-DECIDE",
+        "FND-MIR"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s3: reduce lexical/dynamic/cap/multishot/abortive lookup to the decided model; keep existing programs' observed handlers.",
+      "commit": "673736e",
+      "log": [
+        {
+          "time": "2026-11-26 20:45:03",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 20:45:04",
+          "who": "agent",
+          "text": "Design drafted in docs/one-handler-model.md (24302cc); waiting for the user's decisions D1-D4 before implementation."
+        },
+        {
+          "time": "2026-11-27 11:05:22",
+          "who": "agent",
+          "text": "User accepted the recommended D1-D4 (2026-11-27). Implementation split into FND-HANDLERS-ONE-PARAMS/-VALUES/-BUILTINS/-ABORT/-DELETE."
+        },
+        {
+          "time": "2026-11-27 11:05:26",
+          "who": "agent",
+          "text": "Design accepted (24302cc, 673736e); implementation continues in FND-HANDLERS-ONE-* nodes."
+        }
+      ]
+    },
+    {
+      "id": "FND-TASKS-ON-HANDLERS",
+      "title": "Tasks as a library on handlers (E5)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-HANDLERS-ONE",
+        "FND-HANDLERS-ONE-DELETE"
+      ],
+      "status": "in_progress",
+      "desc": "docs/foundations-review.md s3: if E5 is accepted, Task.scope/spawn/yield/join/cancel move to std over handlers and suspend becomes a handled effect.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-27 20:12:10",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 20:12:11",
+          "who": "agent",
+          "text": "Design drafted: docs/tasks-on-handlers.md. Today's CPS handlers cannot hold a scheduler (token cannot outlive the handler, no borrows/return/calls through values across a perform); proposes fiber handlers with a linear first-class Resume, std scheduler, steps TASKS-BENCH, FIBER-RUNTIME, FIBER-HANDLERS, STD-SCHEDULER, TASKS-SWITCH, TASKS-DELETE. Waiting on user decisions T1-T5."
+        },
+        {
+          "time": "2026-11-27 20:23:16",
+          "who": "agent",
+          "text": "User accepted the recommendations T1-T5 (fibers, shallow Resume for fiber handlers, T3-A, captured handlers, cost budget). Sub-nodes TASKS-BENCH .. TASKS-DELETE."
+        }
+      ]
+    },
+    {
+      "id": "FND-PROOF-DECIDE",
+      "title": "Decide the proof surface and trust base",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "FND-DOC-STALE"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s4 decision P1. User decision.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-24 18:54:10",
+          "who": "agent",
+          "text": "User asked for extended documentation on both proof systems before deciding (2026-11-24)."
+        },
+        {
+          "time": "2026-11-24 19:00:52",
+          "who": "agent",
+          "text": "Decision input written: docs/proof-systems.md (options P-A..P-D, recommends P-A staged)."
+        },
+        {
+          "time": "2026-11-24 19:08:59",
+          "who": "agent",
+          "text": "User chose P-A (docs/proof-systems.md) 2026-11-24."
+        }
+      ]
+    },
+    {
+      "id": "FND-PROOF-TRUST",
+      "title": "The kernel checks the solver's certificates (P-A stage 4)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "PROOF-REFINE-KERNEL"
+      ],
+      "status": "todo",
+      "desc": "docs/proof-systems.md s5 P-A step 3: translate each Farkas/cut/branch certificate into a kernel proof term, or write the certificate checker as a total fn proved sound once (reflection), whichever measures better; facts::verify then leaves the trusted base. Fact collection stays trusted and is documented as such.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-GRADE-DECIDE",
+      "title": "Decide copyable grades and one linearity mechanism",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "FND-DOC-STALE"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s5 decisions G1-G2. User decision.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-24 18:54:10",
+          "who": "agent",
+          "text": "User asked whether grades are under-developed or truly not useful before deciding (2026-11-24)."
+        },
+        {
+          "time": "2026-11-24 19:00:52",
+          "who": "agent",
+          "text": "Decision input written: docs/grades-assessment.md (grades are under-built, not useless; options G-A..G-C, recommends G-A)."
+        },
+        {
+          "time": "2026-11-24 19:09:00",
+          "who": "agent",
+          "text": "User chose G-B, later (docs/grades-assessment.md) 2026-11-24. FND-GRADE-TRIM is now the G-B close, outside the FND close; FND-LINEAR-ONE waits on GRADE-MODAL-DESIGN."
+        }
+      ]
+    },
+    {
+      "id": "FND-GRADE-TRIM",
+      "title": "Close: graded modal types (G-B, after the foundations)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "GRADE-ARROWS",
+        "GRADE-CARRIERS",
+        "FND-LINEAR-ONE"
+      ],
+      "status": "todo",
+      "desc": "docs/grades-assessment.md s5-6 option G-B: ordered grades with subgrading, grades in types, grades on results, infinite carriers; the leak and at-most probes of s3 behave as intended. Scheduled after FND; not part of the FND close.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-LINEAR-ONE",
+      "title": "One linearity mechanism (G2)",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GRADE-MODAL-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s5: #[linear], @[1] on owners and linear once fn reduced to one spelling.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-STD-MUT",
+      "title": "Method syntax uses &mut collection methods",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-INFER-ARGS"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s7: v.push(3) mutates v in place; consuming forms keep explicit names; migrate std and examples.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-STD-TEXT",
+      "title": "Text API on &str and string equality",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-REF-POSITIONS"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s7: std.text on &str/String instead of &Bytes; == on String and &str.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-STD-ERRORS",
+      "title": "Typed errors in std",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-STD-TEXT"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md s7: error enums instead of Result<_, i64> codes.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND",
+      "title": "Close: foundations review addressed",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "FND-DOC-HISTORY",
+        "FND-MIR-EVAL",
+        "FND-LLVM-DIRECT",
+        "FND-REF-CLEANUP",
+        "FND-CLOSURE-BORROW",
+        "FND-INFER-REFS",
+        "FND-EFFECT-ROWS",
+        "FND-TASKS-ON-HANDLERS",
+        "FND-PROOF-TRUST",
+        "PROOF-LEMMAS",
+        "FND-STD-MUT",
+        "FND-STD-ERRORS",
+        "FND-RUNTIME-C"
+      ],
+      "status": "todo",
+      "desc": "docs/foundations-review.md: every section addressed; reference doc current.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PROOF-NAME-CHECKERS",
+      "title": "Name both trusted proof checkers in the docs (P-A stage 1)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "FND-PROOF-DECIDE"
+      ],
+      "status": "done",
+      "desc": "docs/proof-systems.md s6 stage 1: spec-v0.1 s5.2 and the proof docs say that facts::verify and fact collection are trusted beside the kernel until FND-PROOF-TRUST.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-24 19:09:15",
+          "who": "agent",
+          "text": "spec-v0.1 s5.2 and kernel.md s1 name facts::verify and fact collection as trusted beside the kernel. Uncommitted."
+        }
+      ]
+    },
+    {
+      "id": "PROOF-KERNEL-INT",
+      "title": "Integers in the kernel (P-A stage 2a)",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "PROOF-NAME-CHECKERS"
+      ],
+      "status": "done",
+      "desc": "docs/proof-systems.md s5 P-A step 1: Int built from the compact Nat, with +, -, scalar *, <=, <, and their basic lemmas; checked by both kernels (examples/kernel follows).",
+      "commit": "20eadcb",
+      "log": [
+        {
+          "time": "2026-11-25 00:55:49",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 01:14:50",
+          "who": "agent",
+          "text": "done 20eadcb"
+        }
+      ]
+    },
+    {
+      "id": "PROOF-REFINE-KERNEL",
+      "title": "Translate refinement propositions into kernel propositions (P-A stage 2b)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "PROOF-KERNEL-INT"
+      ],
+      "status": "todo",
+      "desc": "docs/proof-systems.md s5 P-A step 1: a { ... } proposition over machine values becomes a kernel proposition over Int, each machine variable's range a hypothesis; every existing obligation translates and checks.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PROOF-LEMMAS",
+      "title": "Kernel lemmas where the solver fails (P-A stage 3)",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "PROOF-REFINE-KERNEL"
+      ],
+      "status": "todo",
+      "desc": "docs/proof-systems.md s5 P-A step 2: a call may cite a total fn lemma instead of _ for an erased { ... } argument; a*a >= 0 and a % 8 < 8 (with % and products as kernel terms) become provable. Diagnostics suggest a lemma when the search fails.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GRADE-MODAL-DESIGN",
+      "title": "Design graded modal types (G-B)",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "FND-GRADE-DECIDE",
+        "FND-REF-DESIGN",
+        "FND-INFER-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "docs/grades-assessment.md s5: order and subgrading, a graded type former, grades on results and arrows, infinite carriers and their solver, interaction with ownership, borrowing, effects and erasure; also picks the single linearity spelling (G2). Approved by the user before implementation.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GRADE-ORDER",
+      "title": "Ordered grades: at-most semantics and joins",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GRADE-MODAL-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "docs/grades-assessment.md s5 item 1: algebras declare <=; @[g] means at most g; branches join; the at-most and branch probes of s3 are accepted.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GRADE-TYPES",
+      "title": "Grades in types: fields, type arguments, results",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "GRADE-ORDER",
+        "FND-REF-POSITIONS"
+      ],
+      "status": "todo",
+      "desc": "docs/grades-assessment.md s5 item 2: a graded type former with introduction and elimination rules; the secret-leak probe of s3 is rejected.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GRADE-ARROWS",
+      "title": "Result grades computed from argument grades",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GRADE-TYPES"
+      ],
+      "status": "todo",
+      "desc": "docs/grades-assessment.md s5 item 3: sensitivity-style propagation through calls and results.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GRADE-CARRIERS",
+      "title": "Infinite grade carriers",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "GRADE-ORDER"
+      ],
+      "status": "todo",
+      "desc": "docs/grades-assessment.md s5 item 4: ordered naturals, intervals, non-negative rationals and lattices, constraints solved by a decision procedure (reuse the facts.rs linear search) instead of enumeration.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STAGING-LLVM-TIER",
+      "title": "LLVM JIT tier for hot staged code (dlopen libLLVM, like the Vulkan loader)",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "STAGING-RUNTIME",
+        "GB-STAGED"
+      ],
+      "status": "todo",
+      "desc": "Embed each quotation's LLVM IR text with lift/splice markers; Code.compile keeps today's copy-and-patch recipes, and hot owners are recompiled on a background thread by LLJIT with lifts as constants and splices inlined, then swapped in. The runtime dlopens libLLVM and resolves the LLVM-C API with dlsym only when a program uses Code.compile (KUSH_HAS_STAGE_LLVM, like KUSH_HAS_GPU); without it nothing changes. Keep W^X and owner release via custom memory-manager callbacks; probe the LLVM version at load; cache compiled blocks. Measure on GB-STAGED's CPU-heavy ROMs.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STAGING-LLVM-RUNTIME",
+      "title": "Runtime staging in LLVM executables",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "STAGING-RUNTIME"
+      ],
+      "status": "done",
+      "desc": "LLVM builds carry Cranelift-compiled runtime recipes; LLVM data supports stored addresses.",
+      "commit": "2062a26",
+      "log": [
+        {
+          "time": "2026-11-24 19:18:55",
+          "who": "agent",
+          "text": "done 2062a26"
+        }
+      ]
+    },
+    {
+      "id": "LANG-FOR-LOOP",
+      "title": "for loops over ranges and views",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-SPLIT-EXEC"
+      ],
+      "status": "todo",
+      "desc": "docs/reference/02-syntax.md (Loops): there is no for loop. Add 'for i in a..b' and iteration over slice views, desugared to while with the same proof facts (i in range inside the body). Update the reject example.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LANG-VIEW-PATTERNS",
+      "title": "Match on slice and text views; rest patterns on arrays",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-BORROWCK"
+      ],
+      "status": "todo",
+      "desc": "docs/reference/02-syntax.md (Patterns): a slice or &str cannot be matched and inline array patterns need every element. Allow [a, .., z] on arrays and views, binding borrowed elements under the new borrow checker.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LANG-NAT-VALUE",
+      "title": "Read a Nat parameter as a run-time value",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "docs/reference/03-types.md (Inline arrays): N: Nat works as a length and index but not as a value ('while i < N' is rejected). Allow N as an i64 constant in bodies, with the fact N >= 0 for the prover.",
+      "commit": "77aaeee",
+      "log": [
+        {
+          "time": "2026-11-25 00:18:38",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 00:30:39",
+          "who": "agent",
+          "text": "done 77aaeee"
+        }
+      ]
+    },
+    {
+      "id": "LANG-BORROW-CLOSURE-STACK",
+      "title": "Borrowing closures without a heap environment",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-CLOSURE-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "docs/reference/04-functions.md (Borrowing closures): a scoped closure that only borrows still heap-allocates its environment and needs alloc. Keep scoped environments on the stack so they need no alloc.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FND-ROWS-ATTRS",
+      "title": "Remove #[noalloc] and #[nosuspend] (E3)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "FND-EFFECT-DECIDE"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s3 E3: the row is the contract. The attributes are rejected with a message pointing at the row; std, examples, tests and docs migrated.",
+      "commit": "a3d9dd2",
+      "log": [
+        {
+          "time": "2026-11-24 19:22:34",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-24 19:31:41",
+          "who": "agent",
+          "text": "25 affected test files pass; all examples/projects check; reference 92/92 on both backends."
+        }
+      ]
+    },
+    {
+      "id": "FND-ROWS-PANIC",
+      "title": "panic leaves effect rows (E2)",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "FND-ROWS-ATTRS"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s3 E2: any function may panic. 'panic' in a row is rejected (after migration); operations stop requiring it; GPU, cleanup and handler rules that relied on it are restated; std, examples, tests and docs migrated.",
+      "commit": "f036297",
+      "log": [
+        {
+          "time": "2026-11-24 19:31:41",
+          "who": "agent",
+          "text": "Design: PANIC becomes the empty bit set (no row contains it, every require(PANIC) holds); 'panic' in a row is an error; native tests the abort word after every indirect call, as it already does after direct calls."
+        },
+        {
+          "time": "2026-11-24 22:14:28",
+          "who": "agent",
+          "text": "done f036297"
+        }
+      ]
+    },
+    {
+      "id": "FND-ROWS-INFER",
+      "title": "Infer effect rows of private functions (E1)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-ROWS-PANIC"
+      ],
+      "status": "done",
+      "desc": "docs/foundations-review.md s3 E1: a non-pub function may omit '! {..}'; its row is the least fixed point over the call graph of its body's effects; pub functions, trait methods, foreign and exported functions still declare rows.",
+      "commit": "8d0c905",
+      "log": [
+        {
+          "time": "2026-11-24 22:24:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-24 22:47:32",
+          "who": "agent",
+          "text": "done 8d0c905"
+        }
+      ]
+    },
+    {
+      "id": "BUG-HANDLER-OWNING-CAPTURE",
+      "title": "Owning-capture handler performed in its own body",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "A pure one-shot handler of a declared operation that captures an owning value (e.g. a Box) and is performed in its own handle body, by name or through 'as op', is rejected with 'use after move': HandlerPush moves the handler into its dynamic frame while the lexical perform still reads the local. Pre-existing at HEAD before f036297; copyable captures now go through the frame. Repro: let k = Box.new(100); handle Ask ... with fn(x, resume) -> i64 ! {} { resume(Box.take(k)) } { perform Ask(1) }.",
+      "commit": "f9cfe7b",
+      "log": [
+        {
+          "time": "2026-11-24 23:13:51",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-24 23:25:26",
+          "who": "agent",
+          "text": "done f9cfe7b"
+        }
+      ]
+    },
+    {
+      "id": "ARRAY-INDEX-PROOF",
+      "title": "Prove inline array indexing in bounds",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "A dynamic index a[i] on an inline [T; N] always keeps its run-time check (index_expressions.rs lowers it to a whole-array view and SliceOp::Get, never calling prove_in_bounds) and is not counted in the bounds report. With LANG-NAT-VALUE, 'while i < N { a[i] }' should prove and drop the check, as Vec indexing does.",
+      "commit": "fda296a",
+      "log": [
+        {
+          "time": "2026-11-25 00:30:39",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 00:43:48",
+          "who": "agent",
+          "text": "done fda296a"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-CORE",
+      "title": "MIR core: scalar functions",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-DESIGN"
+      ],
+      "status": "done",
+      "desc": "docs/mir-design.md s6: Body/blocks/terminators, builder for scalar-only functions, verifier, stable text form with parser, kush mir, native lowering per function behind KUSH_MIR=1 with tree fallback.",
+      "commit": "81184f8",
+      "log": [
+        {
+          "time": "2026-11-25 08:51:53",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 09:15:13",
+          "who": "agent",
+          "text": "done 81184f8"
+        },
+        {
+          "time": "2026-11-25 09:15:14",
+          "who": "agent",
+          "text": "81184f8: full suite passes with and without KUSH_MIR=1 (2116); 62 of 339 example functions covered"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-AGGREGATES",
+      "title": "MIR: records, enums and places",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-MIR-CORE"
+      ],
+      "status": "done",
+      "desc": "Places with projections (Field, Variant, ConstIndex), records, tuples, enums and inline arrays in the MIR; match on variants; aggregate results and parameters on the native path.",
+      "commit": "3c21e19",
+      "log": [
+        {
+          "time": "2026-11-25 09:20:27",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 09:30:46",
+          "who": "agent",
+          "text": "done 3c21e19"
+        },
+        {
+          "time": "2026-11-25 09:30:46",
+          "who": "agent",
+          "text": "3c21e19: 97 of 339 example functions; owning/borrowing records wait for FND-MIR-OWNED and FND-MIR-REFS; inline arrays not yet covered"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-OWNED",
+      "title": "MIR: owned values, drops and cleanup blocks",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-MIR-AGGREGATES"
+      ],
+      "status": "done",
+      "desc": "Decisions 1 and 2: owned values (Box, Vec, Bytes, String, linear data) in the MIR with drop elaboration, drop flags for values moved on some paths, StorageLive/Dead, and explicit cleanup blocks on unwind edges.",
+      "commit": "2e5670a",
+      "log": [
+        {
+          "time": "2026-11-25 09:31:02",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 09:52:12",
+          "who": "agent",
+          "text": "done 2e5670a"
+        },
+        {
+          "time": "2026-11-25 09:52:12",
+          "who": "agent",
+          "text": "2e5670a: 111 of 339 example functions; flags are dynamic (FND-MIR-DROP-FLAGS removes static ones); Declare/InitOwner temporaries and Or-patterns over owned values still fall back"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-REFS",
+      "title": "MIR: references and views",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "FND-MIR-AGGREGATES"
+      ],
+      "status": "done",
+      "desc": "References, borrows (Ref with a Loan), slices and text views, pinned locals, element references in the MIR.",
+      "commit": "1c663e9",
+      "log": [
+        {
+          "time": "2026-11-25 09:52:20",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 10:08:56",
+          "who": "agent",
+          "text": "0de86d8: part 1, references, deref places, pinned locals (120 of 339); slices and text views remain"
+        },
+        {
+          "time": "2026-11-25 10:51:53",
+          "who": "agent",
+          "text": "done 1c663e9"
+        },
+        {
+          "time": "2026-11-25 10:51:53",
+          "who": "agent",
+          "text": "1c663e9: part 2, views, inline arrays, builtins via call_target (199 of 339); record-field and dynamic-array views stay on the tree path"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-CALLABLES",
+      "title": "MIR: closures, indirect calls, dyn",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-OWNED"
+      ],
+      "status": "done",
+      "desc": "Function values, closures and their environments, indirect calls, dyn objects and unions in the MIR.",
+      "commit": "270f270",
+      "log": [
+        {
+          "time": "2026-11-25 10:54:28",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 11:10:27",
+          "who": "agent",
+          "text": "done 270f270"
+        },
+        {
+          "time": "2026-11-25 11:10:27",
+          "who": "agent",
+          "text": "270f270: 266 of 339; multi fn values and continuations go to FND-MIR-EFFECTS"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-BUILTINS",
+      "title": "MIR: remaining builtins",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "FND-MIR-OWNED",
+        "FND-MIR-REFS"
+      ],
+      "status": "done",
+      "desc": "The remaining call targets (Vec/Slice/Bytes/String/Str ops, I/O, host, allocators, arenas, GPU, floats, staging) in the MIR.",
+      "commit": "1b5e665",
+      "log": [
+        {
+          "time": "2026-11-25 10:15:34",
+          "who": "agent",
+          "text": "most builtins already go through call_target (FND-MIR-REFS part 2); remaining: staging targets, dynamic arrays, record-field views, Try, union and dyn values"
+        },
+        {
+          "time": "2026-11-25 11:10:33",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 11:27:00",
+          "who": "agent",
+          "text": "done 1b5e665"
+        },
+        {
+          "time": "2026-11-25 11:27:00",
+          "who": "agent",
+          "text": "1b5e665: 313 of 339 example functions"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-EFFECTS",
+      "title": "MIR: handlers, aborts and tasks",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-MIR-CALLABLES"
+      ],
+      "status": "done",
+      "desc": "Handler frames (HandlerEnter/Exit), dynamic performs, abort scopes, tasks and lowered Suspendable regions in the MIR (suspension itself moves with FND-HANDLERS-ONE).",
+      "commit": "0b6a368",
+      "log": [
+        {
+          "time": "2026-11-25 14:47:20",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 14:56:31",
+          "who": "agent",
+          "text": "029b0b9: part 1, continuations, capability params, multi fn; suite fallbacks 1804; next: Region (553), TaskScope/TaskSpawn, handlers, aborts"
+        },
+        {
+          "time": "2026-11-25 15:05:02",
+          "who": "agent",
+          "text": "6dbad50: part 2, regions, calls to continuations; suite fallbacks 1300; next: TaskScope/Spawn/Yield, handler frames (HandlerPush/Redirect, DynamicPerform), aborts, ContinuationScope"
+        },
+        {
+          "time": "2026-11-25 15:16:00",
+          "who": "agent",
+          "text": "0e736c3: part 3, task operations; suite fallbacks 861; next: HandlerPush/Redirect/Depth, DynamicPerform, aborts, ContinuationScope"
+        },
+        {
+          "time": "2026-11-25 15:24:59",
+          "who": "agent",
+          "text": "68a7846: part 4, handler frames and depth; suite fallbacks 655; next: DynamicPerform, AbortScope/Call/Perform/Exit"
+        },
+        {
+          "time": "2026-11-25 15:34:39",
+          "who": "agent",
+          "text": "done 0b6a368"
+        },
+        {
+          "time": "2026-11-25 15:34:39",
+          "who": "agent",
+          "text": "0b6a368: all effect constructs covered; suite fallbacks 413, all FND-MIR-SHAPES items"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-DEFAULT",
+      "title": "MIR: default native path",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-BUILTINS",
+        "FND-MIR-EFFECTS",
+        "FND-MIR-SHAPES",
+        "FND-MIR-DROP-FLAGS",
+        "FND-MIR-BOUNDS",
+        "FND-MIR-SLICE-VERSION",
+        "FND-MIR-PUSH-SHADOWS",
+        "FND-MIR-DEFERRED"
+      ],
+      "status": "done",
+      "desc": "Every function builds; deferred-overflow and loop-versioning optimizations ported; MIR becomes the default native path and the tree lowering in native.rs is deleted.",
+      "commit": "89451a3",
+      "log": [
+        {
+          "time": "2026-11-25 17:55:18",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 18:12:00",
+          "who": "agent",
+          "text": "waits on the loop passes (FND-MIR-LOOPS and the four optimization nodes)"
+        },
+        {
+          "time": "2026-11-25 19:20:25",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 19:41:00",
+          "who": "agent",
+          "text": "step 1: MIR is the default native path (f196756); next: delete the tree lowering"
+        },
+        {
+          "time": "2026-11-25 20:06:00",
+          "who": "agent",
+          "text": "done 89451a3"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-DROP-FLAGS",
+      "title": "MIR: static drop-flag elimination",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-OWNED"
+      ],
+      "status": "done",
+      "desc": "docs/mir-design.md s6: a maybe-initialized dataflow over the MIR removes drop flags and drop switches whose state is known statically (most of them), and folds unwind cleanup per call site to the resources live there.",
+      "commit": "7b6a622",
+      "log": [
+        {
+          "time": "2026-11-25 14:47:09",
+          "who": "agent",
+          "text": "done 7b6a622"
+        },
+        {
+          "time": "2026-11-25 14:47:09",
+          "who": "agent",
+          "text": "7b6a622: normal paths folded; per-call-site cleanup specialization not done (cleanup chains keep dynamic tests)"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-TEXT-BUILTINS",
+      "title": "MIR text form: builtins in full",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "FND-MIR-REFS"
+      ],
+      "status": "done",
+      "desc": "docs/mir-design.md s6: print every builtin call target in full in the MIR text form and parse it back, so a body round-trips without the program's builtin table.",
+      "commit": "b952b6b",
+      "log": [
+        {
+          "time": "2026-11-25 14:09:54",
+          "who": "agent",
+          "text": "done b952b6b"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-SHAPES",
+      "title": "MIR: remaining expression shapes",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-BUILTINS"
+      ],
+      "status": "done",
+      "desc": "docs/mir-design.md s6: the non-effect shapes still lowered from the tree: temporary owners (Declare, InitOwner, BorrowInit), dynamic arrays and record-field views, or-patterns with bindings, VecMap, the BoxReuse family, erased locals and staging targets.",
+      "commit": "41ad1c5",
+      "log": [
+        {
+          "time": "2026-11-25 11:27:14",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 13:30:22",
+          "who": "agent",
+          "text": "723d458: temporary owners; KUSH_MIR_REPORT ranks fallbacks over the suite"
+        },
+        {
+          "time": "2026-11-25 13:58:13",
+          "who": "agent",
+          "text": "3eaba1c: handles, erasure, or-pattern bindings, element borrows; suite fallbacks 2232 -> 2011; left: dynamic arrays and runtime-length records, VecMap, BoxReuse family, arena/allocator constructors, staging, Erased"
+        },
+        {
+          "time": "2026-11-25 15:46:35",
+          "who": "agent",
+          "text": "2e5196a: allocators and arenas; left: dynamic arrays and runtime-length records, VecMap, BoxReuse family, BoxTryNew, BytesTryWithCapacity, BoxWrite, staging, Erased"
+        },
+        {
+          "time": "2026-11-25 17:21:51",
+          "who": "agent",
+          "text": "Box reuse, fallible allocation, box writes and erased arguments in the MIR (87651b0); fallbacks 413 -> 299: enum/ref locals, VecMap, staging, unions, StructEq remain."
+        },
+        {
+          "time": "2026-11-25 17:55:12",
+          "who": "agent",
+          "text": "done 41ad1c5"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-LOOPS",
+      "title": "MIR: loops, preheaders, counted loops and versioning",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-SHAPES"
+      ],
+      "status": "done",
+      "desc": "mir/loops.rs: dominators, natural loops, preheaders, counted-loop recognition and loop versioning (docs/mir-design.md section 8).",
+      "commit": "a614ee5",
+      "log": [
+        {
+          "time": "2026-11-25 18:11:57",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 18:28:27",
+          "who": "agent",
+          "text": "done a614ee5"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-BOUNDS",
+      "title": "MIR: upper-bound facts drop slice bound checks",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-LOOPS"
+      ],
+      "status": "done",
+      "desc": "Must-analysis of i < len(v) facts; slice element calls marked below (Speed).",
+      "commit": "a614ee5",
+      "log": [
+        {
+          "time": "2026-11-25 18:28:27",
+          "who": "agent",
+          "text": "done a614ee5"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-SLICE-VERSION",
+      "title": "MIR: slice-layout loop versioning",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-LOOPS"
+      ],
+      "status": "done",
+      "desc": "Version small counted loops over i < v.len() on v having whole consecutive elements (Speed).",
+      "commit": "4401ffb",
+      "log": [
+        {
+          "time": "2026-11-25 18:28:28",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 18:50:37",
+          "who": "agent",
+          "text": "done 4401ffb"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-PUSH-SHADOWS",
+      "title": "MIR: vector push shadows",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-LOOPS"
+      ],
+      "status": "done",
+      "desc": "Keep a push-only vector's length and capacity in variables across a loop (Speed + LLVM).",
+      "commit": "4401ffb",
+      "log": [
+        {
+          "time": "2026-11-25 18:50:37",
+          "who": "agent",
+          "text": "done 4401ffb"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-DEFERRED",
+      "title": "MIR: deferred overflow checks",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-LOOPS"
+      ],
+      "status": "done",
+      "desc": "Port native/deferred.rs analysis and lower_deferred_while to MIR passes (docs/mir-design.md section 8).",
+      "commit": "8a0ed4e",
+      "log": [
+        {
+          "time": "2026-11-25 18:50:37",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 19:20:25",
+          "who": "agent",
+          "text": "done 8a0ed4e"
+        }
+      ]
+    },
+    {
+      "id": "FND-EVAL-MACHINE",
+      "title": "Evaluator machine: memory, frames, scalars, calls, unwinding, boxes",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR"
+      ],
+      "status": "done",
+      "desc": "Word-level MIR machine core (docs/mir-design.md section 9) with a differential test against the tree evaluator.",
+      "commit": "db1be03",
+      "log": [
+        {
+          "time": "2026-11-25 20:11:47",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 20:30:33",
+          "who": "agent",
+          "text": "core landed (db1be03): 13 examples agree; KUSH_MACHINE_CHECK suite-wide differential with no disagreement. Unsupported by count: FnValue 552, View 344, Vec 194, Bytes 190, Coerce 136, Io 132, Array 124"
+        },
+        {
+          "time": "2026-11-25 20:30:33",
+          "who": "agent",
+          "text": "done db1be03"
+        }
+      ]
+    },
+    {
+      "id": "FND-EVAL-BUFFERS",
+      "title": "Evaluator machine: vectors, bytes, strings, slices, views",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-EVAL-MACHINE"
+      ],
+      "status": "done",
+      "desc": "Port the buffer builtins and their kush.c functions to the machine.",
+      "commit": "9fb42c3",
+      "log": [
+        {
+          "time": "2026-11-25 20:46:30",
+          "who": "agent",
+          "text": "next: View 360, Vec 212, Bytes 200, Array 124, Bytes builtins 108 (KUSH_MACHINE_REPORT on the suite); port kush.c buffer layouts and growth exactly (capacity class encoding, usable sizes)"
+        },
+        {
+          "time": "2026-11-26 08:46:18",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 08:54:11",
+          "who": "agent",
+          "text": "code written, not yet compiled: mir/machine/buffers.rs (Bytes, String, Str, Vec, Slice, DynArray builtins; View, Bytes, Array, Buffer, ByteAt, ElementAddress, Map rvalues; buffer drops; kush.c size classes for growth). Blocked: tsar-bomba-2 offline, so no build yet"
+        },
+        {
+          "time": "2026-11-26 09:16:29",
+          "who": "agent",
+          "text": "done 9fb42c3"
+        }
+      ]
+    },
+    {
+      "id": "FND-EVAL-CALLABLES",
+      "title": "Evaluator machine: function values, closures, dyn, unions",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-EVAL-MACHINE"
+      ],
+      "status": "done",
+      "desc": "",
+      "commit": "3f58404",
+      "log": [
+        {
+          "time": "2026-11-25 20:30:33",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 20:46:30",
+          "who": "agent",
+          "text": "done 3f58404"
+        }
+      ]
+    },
+    {
+      "id": "FND-EVAL-EFFECTS",
+      "title": "Evaluator machine: handlers, aborts, continuations, tasks",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-EVAL-CALLABLES"
+      ],
+      "status": "done",
+      "desc": "",
+      "commit": "681c18b",
+      "log": [
+        {
+          "time": "2026-11-26 09:16:29",
+          "who": "agent",
+          "text": "next: report after BUFFERS: Runtime 152, Io 146, task runtime 138 (std.web and others set uses_tasks: main runs as a task), Alloc 101, Foreign 57, Host 44, StageCompile 9"
+        },
+        {
+          "time": "2026-11-26 12:45:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 13:01:54",
+          "who": "agent",
+          "text": "part 1 e531b91: handlers, aborts, multishot continuations; 42 examples. Left: the task runtime (138: tasks, threads, channels, Task.catch)"
+        },
+        {
+          "time": "2026-11-26 14:17:09",
+          "who": "agent",
+          "text": "done 681c18b"
+        }
+      ]
+    },
+    {
+      "id": "FND-EVAL-RUNTIME",
+      "title": "Evaluator machine: allocators, arenas, I/O, host, staging",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-EVAL-BUFFERS"
+      ],
+      "status": "done",
+      "desc": "",
+      "commit": "72ae519",
+      "log": [
+        {
+          "time": "2026-11-26 09:16:40",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 11:37:15",
+          "who": "agent",
+          "text": "uncommitted: mir/machine/alloc.rs (box reuse, try ops, BoxWrite, arenas; passed check suite before BoxWrite), standard I/O with call-by-call replay of the tree's reads and writes (eval.rs Transcript; not yet compiled). Blocked: tsar-bomba-2 offline since 09:30"
+        },
+        {
+          "time": "2026-11-26 12:15:59",
+          "who": "agent",
+          "text": "part 1 e812595: box reuse/try ops, arenas, standard I/O with call-by-call replay. Left: user allocators (AllocatorNew 33, ContextNew 30, AllocVec), Host (EnvArgCount 20, EnvArg 18, ProcRun 3, Time 2, FsRead 1), StageCompile 10; Foreign 57 stays (the tree rejects foreign calls)"
+        },
+        {
+          "time": "2026-11-26 12:29:24",
+          "who": "agent",
+          "text": "part 2 9664c7c: allocators, contexts, AllocBox, AllocVec; tree context handle now freed at last release (peak-live matches native). Left: Host (EnvArgCount 20, EnvArg 18, ProcRun 3, Time 2, FsRead 1), StageCompile 10; Foreign 57 stays"
+        },
+        {
+          "time": "2026-11-26 12:37:41",
+          "who": "agent",
+          "text": "part 3 c11eaa3: host calls replayed in check mode. Left: Foreign 67 (std.sys kush_sys_* shims), StageCompile 10"
+        },
+        {
+          "time": "2026-11-26 12:44:49",
+          "who": "agent",
+          "text": "part 4 1980f6a: std.sys shims replayed (streams run on the machine). Left: StageCompile 10"
+        },
+        {
+          "time": "2026-11-26 12:45:22",
+          "who": "agent",
+          "text": "done 72ae519"
+        }
+      ]
+    },
+    {
+      "id": "FND-EVAL-SWITCH",
+      "title": "Evaluator: run the machine, delete eval.rs",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-EVAL-BUFFERS",
+        "FND-EVAL-CALLABLES",
+        "FND-EVAL-EFFECTS",
+        "FND-EVAL-RUNTIME",
+        "FND-EVAL-HOST",
+        "FND-EVAL-STAGING"
+      ],
+      "status": "done",
+      "desc": "",
+      "commit": "9bf5991",
+      "log": [
+        {
+          "time": "2026-11-26 15:11:30",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 16:40:23",
+          "who": "agent",
+          "text": "done 9bf5991"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-DIRECT-INIT",
+      "title": "MIR: build a value straight into the variable it initializes",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "FND-MIR-DEFAULT"
+      ],
+      "status": "done",
+      "desc": "When an owned temporary is created and immediately moved into a local (let x = Bytes.from(..)) with nothing that can panic in between, the builder writes the rvalue into the local and gives the temporary no resource: no cleanup copy (_4 = copy _5), no drop flag, no flag-testing cleanup blocks. Example: use std.io + Bytes.from + io.write makes 12 blocks in main today (MIR explorer).",
+      "commit": "e67d327",
+      "log": [
+        {
+          "time": "2026-11-25 20:57:06",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 21:06:05",
+          "who": "agent",
+          "text": "done e67d327"
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-COPY-PROP",
+      "title": "MIR: copy and destination propagation of moved temporaries",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-DIRECT-INIT"
+      ],
+      "status": "done",
+      "desc": "A MIR pass folding 'x = move t' into t's definition when t is used nowhere else, as Rust's DestinationPropagation does, and dropping single-use copies of locals into temporaries. Keeps drop elaboration, unwind cleanup and the loop passes' patterns (counted-loop and deferred analyses read temporaries) valid; text form and verifier unchanged.",
+      "commit": "1dd79c0",
+      "log": [
+        {
+          "time": "2026-11-25 21:06:05",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-25 21:17:53",
+          "who": "agent",
+          "text": "done 1dd79c0"
+        }
+      ]
+    },
+    {
       "id": "STD-BINCODE",
       "title": "std.bincode: bincode 1.x wire-compatible binary codec",
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "std/bincode.kush implementing the bincode 1.3 legacy wire format (little-endian fixed-width ints, u64 length prefixes, u8 option/result tags, u32 variant index) in Kush: put_* append to Bytes, take_* walk a Decoder returning Result<_, Error>. Byte-exact vectors vs to_le_bytes, round-trip and malformed-input tests in tests/std_bincode.rs. No floats (no bit access in the language) and no 128-bit ints (no such types).",
-      "commit": null,
+      "commit": "4e46167",
       "log": [
         {
           "time": "2026-11-25 21:15:59",
           "who": "agent",
           "text": "writing std/bincode.kush + tests"
+        },
+        {
+          "time": "2026-11-25 21:41:41",
+          "who": "agent",
+          "text": "std/bincode.kush: bincode 1.x legacy wire format; put_* on Bytes, take_* on &mut Decoder with Result<_, Error>; 5 tests byte-exact vs to_le_bytes on evaluator+native; full suite 2175 passed"
         }
       ]
+    },
+    {
+      "id": "FND-EVAL-HOST",
+      "title": "Evaluator machine: host and sys calls run natively",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-EVAL-RUNTIME"
+      ],
+      "status": "done",
+      "desc": "Run host calls and the std.sys foreign shims on the machine itself: move the tree's host layer (host_call, sys_call, Host, FileTable) out of eval.rs into a module on plain bytes that both evaluators call, so the machine needs no replay outside check mode.",
+      "commit": "480f155",
+      "log": [
+        {
+          "time": "2026-11-26 14:29:01",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 14:58:33",
+          "who": "agent",
+          "text": "done 480f155"
+        }
+      ]
+    },
+    {
+      "id": "FND-EVAL-STAGING",
+      "title": "Evaluator machine: runtime staging",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-EVAL-RUNTIME"
+      ],
+      "status": "done",
+      "desc": "Code.compile (StageCompile) and calls of compiled code on the machine. runtime_compile returns another Executable (the program plus generated functions, numbered independently per artifact), so a frame must carry the program whose functions and layouts it runs.",
+      "commit": "6491871",
+      "log": [
+        {
+          "time": "2026-11-26 14:18:29",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 14:29:01",
+          "who": "agent",
+          "text": "done 6491871"
+        }
+      ]
+    },
+    {
+      "id": "FND-LLVM-EMIT",
+      "title": "LLVM: the Emit instruction-builder trait, Cranelift implementation",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR"
+      ],
+      "status": "done",
+      "desc": "docs/mir-design.md section 10: the Emit trait (Cranelift names, associated handle types) and its Cranelift implementation; Generator and the helper builders call it. Generated code unchanged.",
+      "commit": "e9825e0",
+      "log": [
+        {
+          "time": "2026-11-26 17:18:47",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 17:33:13",
+          "who": "agent",
+          "text": "done e9825e0"
+        }
+      ]
+    },
+    {
+      "id": "FND-LLVM-GENERIC",
+      "title": "LLVM: lowering generic over Emit",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "FND-LLVM-EMIT"
+      ],
+      "status": "done",
+      "desc": "docs/mir-design.md section 10: Generator and the helper builders generic over Emit.",
+      "commit": "52e82ef",
+      "log": [
+        {
+          "time": "2026-11-26 17:33:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 17:42:26",
+          "who": "agent",
+          "text": "done 52e82ef"
+        },
+        {
+          "time": "2026-11-26 17:42:26",
+          "who": "agent",
+          "text": "Helper function creators (synthesize_drops, task wrappers, exports, closure/context drops) still use a local emit::Cranelift; FND-LLVM-BUILDER makes function creation generic."
+        }
+      ]
+    },
+    {
+      "id": "FND-LLVM-BUILDER",
+      "title": "LLVM: the typed LLVM builder",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "FND-LLVM-GENERIC"
+      ],
+      "status": "done",
+      "desc": "docs/mir-design.md section 10: a builder writing typed LLVM IR; --backend llvm uses it; both backends pass the suite and check-reference.",
+      "commit": "639a632",
+      "log": [
+        {
+          "time": "2026-11-26 17:42:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 18:16:53",
+          "who": "agent",
+          "text": "done 639a632"
+        },
+        {
+          "time": "2026-11-26 18:16:53",
+          "who": "agent",
+          "text": "Staging recipes and CLIF dumps still build Cranelift IR and use the translator; FND-LLVM-SWITCH must build recipes with both builders (Cranelift for the machine code the staging runtime copies, the LLVM builder for the module). Pointer facts do not flow through variables (allocas) or phis yet: FND-LLVM-FACTS. Under KUSH_BACKEND=llvm the 27 proof_fuzz tests fail because fuzz builds refuse non-Cranelift backends (pre-existing)."
+        }
+      ]
+    },
+    {
+      "id": "FND-LLVM-FACTS",
+      "title": "LLVM: typing and aliasing facts from the MIR",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-LLVM-BUILDER"
+      ],
+      "status": "done",
+      "desc": "docs/mir-design.md section 10: pointer provenance, noalias on &mut parameters and alias scopes from the MIR; benchmarks at least as fast as the translator.",
+      "commit": "a425616",
+      "log": [
+        {
+          "time": "2026-11-26 18:17:24",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 18:30:15",
+          "who": "agent",
+          "text": "58dd957: partition sizes ignore variable traffic, typed bodies defined in program order. Builder vs translator (ms): sum 64/60, dot 200/199, scale 189/190, pipeline 16/16, sha256 559/558. The sum loop differs only in the scheduling of two paddq inside the vectorized loop. Pointer forms still do not flow through variables or phis; next: SSA construction in the builder (no allocas) so pointer facts survive, then noalias/alias scopes from the MIR."
+        },
+        {
+          "time": "2026-11-26 20:18:41",
+          "who": "agent",
+          "text": "done 58dd957"
+        },
+        {
+          "time": "2026-11-26 20:18:41",
+          "who": "agent",
+          "text": "Variables SSA-renamed as Cranelift does; builder vs translator (ms): sum 59/59, dot 196/196, scale 187/187, pipeline 15/15, sha256 545/548. Facts in place: noalias on exclusive params from MIR signature types, memory classes as TBAA, pointer forms for slots/symbols/runtime pointers/exclusive params; single-value variables keep their value's pointer form. Non-trivial phis of pointers still go through integers (LLVM's instcombine folds integer phis of ptrtoint back to pointer phis)."
+        },
+        {
+          "time": "2026-11-26 20:18:55",
+          "who": "agent",
+          "text": "done a425616"
+        }
+      ]
+    },
+    {
+      "id": "FND-LLVM-SWITCH",
+      "title": "LLVM: delete the Cranelift-IR translator",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-LLVM-FACTS"
+      ],
+      "status": "done",
+      "desc": "docs/mir-design.md section 10: delete the Cranelift-to-LLVM translator; record benchmarks.",
+      "commit": "329801b",
+      "log": [
+        {
+          "time": "2026-11-26 20:24:34",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-26 20:36:03",
+          "who": "agent",
+          "text": "done 329801b"
+        },
+        {
+          "time": "2026-11-26 20:36:04",
+          "who": "agent",
+          "text": "Benchmarks LLVM vs Cranelift (ms, medians of 15, tsar-bomba-2): sum 60/296, dot 198/492, scale 191/886, pipeline 16/25, sha256 550/1493. Recipes and CLIF dumps lower once into both builders (native/both.rs)."
+        }
+      ]
+    },
+    {
+      "id": "FND-HANDLERS-ONE-PARAMS",
+      "title": "Hidden capability parameters for direct calls",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-HANDLERS-ONE"
+      ],
+      "status": "done",
+      "desc": "docs/one-handler-model.md s7: implicit cap params for direct calls of named functions; by-name performs through them; resumable entries keyed by capability only. Done: suite passes on both backends and the evaluator.",
+      "commit": "e7f0be1",
+      "log": [
+        {
+          "time": "2026-11-27 11:05:26",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 11:27:25",
+          "who": "agent",
+          "text": "Full suite 2172/2172 + 3 new tests on tsar-bomba-2; check-reference 99/99 native; clippy clean for the change (2 pre-existing test lints in multishot_capabilities.rs, panic_catch.rs)."
+        }
+      ]
+    },
+    {
+      "id": "FND-HANDLERS-ONE-VALUES",
+      "title": "Capabilities through function values (D1)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-HANDLERS-ONE-PARAMS"
+      ],
+      "status": "done",
+      "desc": "docs/one-handler-model.md s7: function values, closures, trait objects, row-variable specializations, widening adapters; call-time binding. Done: suite passes; section 3 probes give the Model column.",
+      "commit": "31e7566",
+      "log": [
+        {
+          "time": "2026-11-27 11:49:47",
+          "who": "agent",
+          "text": "Full suite 2179/2179 on tsar-bomba-2, check-reference 100/100 native. Probe p5 (function value under the callee's handler) pinned by implicit_capabilities::a_function_value_gets_the_handler_active_at_its_call; p3b (D2), p4 (D3) and p2 (D4) belong to BUILTINS/DELETE."
+        }
+      ]
+    },
+    {
+      "id": "FND-HANDLERS-ONE-BUILTINS",
+      "title": "Capabilities through builtins, tasks (D3), entry points (D4)",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "FND-HANDLERS-ONE-VALUES"
+      ],
+      "status": "done",
+      "desc": "docs/one-handler-model.md s7: callback builtins, Task.scope/spawn/catch, per-operation task inheritance, compile error for declared ops in entry-point rows.",
+      "commit": "85a3660",
+      "log": [
+        {
+          "time": "2026-11-27 11:49:47",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 12:03:23",
+          "who": "agent",
+          "text": "D4 done (d01e298): main with a declared operation in its row is rejected; test entry points were already covered (generated main has a fixed row), exports require an empty row. Remaining: adapters for callbacks/task bodies/handlers with declared rows, D3 task inheritance."
+        },
+        {
+          "time": "2026-11-27 12:18:40",
+          "who": "agent",
+          "text": "Task bodies (1508918): lambda bodies of Task.scope/catch/spawn capture the call site's capabilities; D3 probe p4 gives 11 (implicit_capabilities::a_spawned_task_keeps_each_noncapturing_handler). Still on the dynamic stack: task bodies held in variables, VecMap callbacks, fn arguments of other builtins, handler values whose rows name declared operations."
+        },
+        {
+          "time": "2026-11-27 12:48:13",
+          "who": "agent",
+          "text": "D4 d01e298, task bodies 1508918+85a3660; full suite 2181/2181, check-reference 101/101. A probe over the whole suite found no VecMap callback, builtin fn argument or handler value with a resumptive declared row kept on the dynamic stack (only abortive rows, which HANDLERS-ONE-ABORT handles). Those positions stay dynamic until DELETE, which must handle or reject them."
+        }
+      ]
+    },
+    {
+      "id": "FND-HANDLERS-ONE-ABORT",
+      "title": "Abortive performs through capabilities",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "FND-HANDLERS-ONE-BUILTINS"
+      ],
+      "status": "done",
+      "desc": "docs/one-handler-model.md s7: abortive performs via the handler cell abort word. Done: abortive tests pass with allocation balance.",
+      "commit": "7b23900",
+      "log": [
+        {
+          "time": "2026-11-27 12:48:13",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 13:03:00",
+          "who": "agent",
+          "text": "Full suite 2182/2182 (abortive tests with allocation balance), check-reference 101/101 native, clippy clean for the change."
+        }
+      ]
+    },
+    {
+      "id": "FND-HANDLERS-ONE-DELETE",
+      "title": "Delete the dynamic handler stack (D2)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-HANDLERS-ONE-ABORT",
+        "FND-HANDLERS-ONE-EXPLICIT",
+        "FND-HANDLERS-ONE-CALLBACKS"
+      ],
+      "status": "done",
+      "desc": "docs/one-handler-model.md s7: remove HandlerPush/Pop/Depth/Restore/Redirect/DynamicPerform, kush_handler_* runtime, evaluator handler vector; multishot rule D2; reference chapter 7. Done: suite and check-reference pass; benchmarks/effects and Game Boy frame time no slower.",
+      "commit": "83e7060",
+      "log": [
+        {
+          "time": "2026-11-27 13:03:00",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 13:11:52",
+          "who": "agent",
+          "text": "User: support VecMap callbacks, builtin fn args and handler rows instead of rejecting; go ahead. Split into CELLS, EXPLICIT, CALLBACKS before the removal itself."
+        },
+        {
+          "time": "2026-11-27 14:46:02",
+          "who": "agent",
+          "text": "Remaining by-name searches: aborts carried away by continuations and multishot resumptions (3 tests); then remove lookup, redirect, trampolines, private ids, task frame inheritance; D2; reference ch7; Game Boy timing."
+        },
+        {
+          "time": "2026-11-27 15:24:03",
+          "who": "agent",
+          "text": "5d560bb: no perform searches the stack in the suite (probe making every by-name lookup and abort search fault: 2184/2184 pass). Next: remove lookup machinery."
+        },
+        {
+          "time": "2026-11-27 16:45:44",
+          "who": "agent",
+          "text": "5d560bb, d989d35, 5c27852: no perform searches (lookup, redirect frames, HandlerRedirect/HandlerDepth, frame inheritance removed); D2 holds and is shown in reference ch7; noncapturing handlers' cells are tagged code addresses with no frame. Suite 2186/2186, check-reference 102/102. Timing vs 24302cc: by-name performs in callees 7.2->4.9 ns, resumptions 34->12.5 ns, Game Boy unchanged (12.19 vs 12.36 s); written-capability performs 4.42->4.75 ns and multishot performs 8.0->8.45 ns are slower. Open: capturing handlers' cells still live in the per-task frame array (push/pop/depth restores), and the checker still emits capability trampolines as placeholders. Not marked done: awaiting the user's call on those and the two slower paths."
+        },
+        {
+          "time": "2026-11-27 17:39:28",
+          "who": "agent",
+          "text": "5d560bb, d989d35, 5c27852, 83e7060. No lookup, no redirect frames, no frame inheritance, no frame array (capturing handlers' frames are stack slots linked per task for release on exit), no trampolines. Suite 2186/2186, check-reference 102/102. vs 24302cc: written-capability performs 4.28->4.30 ns, by-name performs in callees 6.9->4.3 ns, resumptions 33->11.9 ns, Game Boy unchanged; multishot perform 7.7->7.9 ns and multishot resume 23.8->24.3 ns remain within ~2%."
+        }
+      ]
+    },
+    {
+      "id": "FND-HANDLERS-ONE-CELLS",
+      "title": "Handler cells: capabilities are activation cells",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-HANDLERS-ONE-ABORT"
+      ],
+      "status": "done",
+      "desc": "docs/one-handler-model.md: each handle activation has a cell (today's frame); implicit capabilities are cell addresses and a perform through one needs no lookup; capturing handlers without trampolines; tasks carry noncapturing cells (D3).",
+      "commit": "91c3469",
+      "log": [
+        {
+          "time": "2026-11-27 13:11:53",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 13:45:12",
+          "who": "agent",
+          "text": "Full suite 2183/2183, check-reference 101/101 native, clippy clean for the change. Effects benchmarks vs 7b23900: within 0.1 ns (dynamic-perform-in-callee 4.75 vs 4.65)."
+        }
+      ]
+    },
+    {
+      "id": "FND-HANDLERS-ONE-EXPLICIT",
+      "title": "Explicit cap parameters as cells",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FND-HANDLERS-ONE-CELLS"
+      ],
+      "status": "done",
+      "desc": "docs/one-handler-model.md: written 'cap Op' parameters and 'handle .. as op' use cells; capability_thunk, private operation ids and framed capabilities go.",
+      "commit": "e1b675f",
+      "log": [
+        {
+          "time": "2026-11-27 13:45:12",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 14:46:02",
+          "who": "agent",
+          "text": "Full suite 2184/2184, check-reference 101/101. Lookup probe: only 3 abort-through-continuation tests still search."
+        }
+      ]
+    },
+    {
+      "id": "FND-HANDLERS-ONE-CALLBACKS",
+      "title": "Capabilities for callbacks and handler rows",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "FND-HANDLERS-ONE-CELLS"
+      ],
+      "status": "done",
+      "desc": "docs/one-handler-model.md: VecMap callbacks and builtin fn arguments take capability operands; handlers whose rows name declared operations carry their handle site's capabilities (rule 6). User chose support over rejection (2026-11-27).",
+      "commit": "1e47209",
+      "log": [
+        {
+          "time": "2026-11-27 13:57:14",
+          "who": "agent",
+          "text": "VecMap capabilities; no other builtin takes callables; pushed handlers cannot name resumptive declared operations (only built-in latent effects), abortive handler rows go to DELETE. Full suite 2184/2184, check-reference 101/101."
+        }
+      ]
+    },
+    {
+      "id": "FND-RUNTIME-GC",
+      "title": "Native: drop the unused runtime from every binary (--gc-sections)",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "The runtime (runtime/kush.c) is linked whole: hello world and the checked-loops program are both 84,880 bytes stripped. Compiling it with -ffunction-sections -fdata-sections and linking with -Wl,--gc-sections gives hello world 14,648 bytes, the size of C's (14,496), and it still runs (probe 2026-11-27, benchmarks/languages). Both backends; the runtime cache key must include the flags. Keeps binaries self-contained, unlike a shared libkush.",
+      "commit": "44b6604",
+      "log": [
+        {
+          "time": "2026-11-27 17:57:57",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 18:16:07",
+          "who": "agent",
+          "text": "Hello world 84,880 -> 14,624 (Cranelift) / 14,648 (LLVM) bytes stripped, runs; full suite 2186/2186, check-reference 102/102."
+        }
+      ]
+    },
+    {
+      "id": "FND-LLVM-PANIC-SHARE",
+      "title": "LLVM: one shared panic block per function",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Every check site emits its own 'call kush_panic; call llvm.trap; unreachable' block: 396 of them in the 715-line build-scale program, whose IR is 11,000 lines against 3,894 for the C version, with 1,523 calls against 145. clang -O3 takes 438 ms on it against 211 ms for clang -O2 on the C version (-O2 does not help Kush: 439 ms). Branch to one cold block per function (site id in a phi if the message needs it) and measure clang time with benchmarks/build-scale.",
+      "commit": "3135d7f",
+      "log": [
+        {
+          "time": "2026-11-27 18:16:12",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 18:30:26",
+          "who": "agent",
+          "text": "build-scale 12 units, LLVM: IR 10,999 -> 9,803 lines, kush_panic calls 396 -> 85, calls 1,523 -> 901; clang 452 -> 436 ms (3-5%, three rounds). Binary panic sites unchanged (22): -O3 already merged them. Full suite 2186/2186."
+        }
+      ]
+    },
+    {
+      "id": "FND-LLVM-TYPED-SLICES",
+      "title": "LLVM: typed pointers for slice element access",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Slices reach LLVM as four integers (address, length, stride, is-byte); each element read is a multiply by the stride, a byte-or-word branch, inttoptr and an align-1 load, and the slice-layout pass duplicates each function for stride 8. inttoptr hides provenance from alias analysis and the extra blocks cost clang time. Pass a ptr, emit getelementptr i64 with align 8 when the element type is known, and compare run time (benchmarks/languages) and clang time (build-scale).",
+      "commit": "349cb15",
+      "log": [
+        {
+          "time": "2026-11-27 18:31:34",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 18:46:11",
+          "who": "agent",
+          "text": "done 349cb15"
+        },
+        {
+          "time": "2026-11-27 18:46:11",
+          "who": "agent",
+          "text": "Measured: element reads were already gep i8 from the slice base; align 8 on word accesses is neutral on checked-loops (sum 137-148 vs 138-139 ms, dot ~490, scale ~445), pipeline (86-90 vs 80-87 ms) and build-scale clang (442-460 vs 445-470 ms). Typed ptr parameters skipped: they would remove one hoisted inttoptr per function, no measured cost."
+        }
+      ]
+    },
+    {
+      "id": "FND-LINK-FAST",
+      "title": "Native: link with lld or mold when available",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Linking is 21 ms of a 72 ms release build of hello world and 22 ms of the 715-line program (KUSH_TIME_PHASES=1, tsar-bomba-2), through cc with the system ld.bfd. Pass -fuse-ld=lld (or mold) when the tool is found, fall back otherwise.",
+      "commit": "0326cab",
+      "log": [
+        {
+          "time": "2026-11-27 18:16:07",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 18:16:07",
+          "who": "agent",
+          "text": "mold found on tsar-bomba-2: hello world link 22.5 -> 17.3 ms (Cranelift), 22.6 -> 16.3 ms (LLVM); fallback to the default linker when -fuse-ld fails. Gate as for FND-RUNTIME-GC."
+        }
+      ]
+    },
+    {
+      "id": "FND-MIR-BOUNDS-VERSION",
+      "title": "MIR: version loops on slice length to drop per-element bounds checks",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-DEFAULT"
+      ],
+      "status": "done",
+      "desc": "In checked-loops dot, right[i] keeps a compare per element because only left's length bounds the loop: Kush 441 ms, Rust checked 422 (same check), clang checked without bounds checks 330. A loop indexed by the counter of another slice's length can test len(right) >= len(left) once before the loop and run a copy without the check; that also lets deferred overflow apply. Extends mir/bounds.rs and mir/slice_layout.rs.",
+      "commit": "5e24b3b",
+      "log": [
+        {
+          "time": "2026-11-27 19:28:19",
+          "who": "agent",
+          "text": "done 5e24b3b"
+        },
+        {
+          "time": "2026-11-27 19:28:19",
+          "who": "agent",
+          "text": "dot 507-519 -> 480-495 ms; remaining: a stack reload of right's base inside the loop (regalloc in kush_entry), and overflow checks keep it scalar on baseline."
+        }
+      ]
+    },
+    {
+      "id": "FND-DEFER-SUM-COST",
+      "title": "Deferred overflow: cheaper overflow tracking in vectorized reductions",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "sum (4,096 elements x 200,001 rounds): Kush 133 ms, the fastest checked build (Rust, clang and Zig checked about 230), but 2.2x Rust without checks (61). The vector loop carries extra paddq per element to track overflow. Look for a cheaper certificate per chunk (wider accumulators, range bounds of the inputs, fewer chunk exits) and keep LLVM-DEFER-REVIEW's soundness argument.",
+      "commit": "2016fd5",
+      "log": [
+        {
+          "time": "2026-11-27 18:46:11",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 19:06:37",
+          "who": "agent",
+          "text": "done 2016fd5"
+        },
+        {
+          "time": "2026-11-27 19:06:37",
+          "who": "agent",
+          "text": "Biased leaf words (v + 2^k, k from the obligation budget): sum 136-143 -> 115-118 ms, scale 444-447 -> 395-401 ms (baseline x86-64; Rust unchecked sum 61). Remaining gap is load + add + or per element vs load + add. Dot unchanged in IR but +8% from a regalloc reload of the slice base inside the inlined loop (kush_entry); revisit with FND-MIR-BOUNDS-VERSION."
+        }
+      ]
+    },
+    {
+      "id": "FND-PIPELINE-INSNS",
+      "title": "Native: find the extra instructions in the feature pipeline",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "The fused feature-pipeline batch (2,097,152 x 16) runs 520M instructions against 353M for the checked C port (same page faults, 1.15x the cycles; 57 ms against 49 for clang checked). Find where (likely the Vec.push fill loop against C's direct stores) with perf annotate, and fix or file it.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-27 18:30:31",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 18:31:26",
+          "who": "agent",
+          "text": "Found: Vec.push fill loop is scalar with a per-element length store and capacity branch (~9 insns/element, ~230M of the 168M gap's excess, offset by Kush's vectorized checksum vs C's scalar jo loop). Kush 520.3M instructions / 326M cycles vs clang -O2 -DCHECKED 352.4M / 284M (tsar-bomba-2, perf stat). Filed as FND-PUSH-FILL."
+        }
+      ]
+    },
+    {
+      "id": "FND-DEFER-PROVED-READS",
+      "title": "Deferred overflow: allow loops with proved reads",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-MIR-DEFERRED"
+      ],
+      "status": "done",
+      "desc": "benchmarks/proofs (2026-11-27): sum over Slice.at runs 244 ms, the same loop with the proof's check kept (KUSH_KEEP_PROVED_CHECKS=1, so Slice.get) 147 ms: a loop with a proved unchecked read is never deferred (docs/deferred-overflow.md, rule 2), so the proof costs 1.66x. Rule 2 guards against a proof that rests on a deferred value. Defer such a loop when no proved read's certificate uses a value the deferral wraps (sum's rests only on the guard i < len and the counter, which is exact), keeping review_oob in tests/deferred_overflow.rs rejected.",
+      "commit": "cdefd1f",
+      "log": [
+        {
+          "time": "2026-11-27 19:06:37",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 19:28:19",
+          "who": "agent",
+          "text": "done cdefd1f"
+        }
+      ]
+    },
+    {
+      "id": "PROOFS-BENCH-BEYOND-LLVM",
+      "title": "benchmarks/proofs: kernels where LLVM cannot remove the checks",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "The three kernels of benchmarks/proofs use bounds LLVM finds itself (safe and unsafe Rust within 1% on sum and crc32), so proofs show no gain there. Add kernels where only a proof knows the bound: indices read from data and checked once (a permutation or lookup table validated up front), a length-refined field (Vec where len >= N) used across calls, an invariant-carried index; with Rust safe/unsafe, C and Zig equivalents.",
+      "commit": "afc22ea",
+      "log": [
+        {
+          "time": "2026-11-27 19:28:19",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 19:35:38",
+          "who": "agent",
+          "text": "done afc22ea"
+        },
+        {
+          "time": "2026-11-27 19:35:38",
+          "who": "agent",
+          "text": "follow shows the gain (402 vs 448 kept, = C). lookup: LLVM drops the table check everywhere; Kush proved 757 vs kept 444 with identical loop instructions, the slower binary's jo straddles a 32-byte boundary (alignment artifact). Data-derived indices validated up front are not expressible: no quantified facts."
+        }
+      ]
+    },
+    {
+      "id": "FND-PUSH-FILL",
+      "title": "Vec.push loops into a reserved vector: fill without per-element length stores",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FND-PIPELINE-INSNS"
+      ],
+      "status": "done",
+      "desc": "Found by FND-PIPELINE-INSNS (perf annotate, 2026-11-27): the feature pipeline's fill loop 'values = Vec.push(values, i & 65535)' into Vec.with_capacity(n) runs scalar, about 9 instructions per element: a capacity compare branching to the kush_vec_push grow call, the element store, and a store of the length every iteration (mov %rbp,(%r15), 30% of samples). C fills with vector stores. That is roughly 230M of the 520M instructions (C 352M); the map loop is vectorized and the checksum is vectorized with deferred overflow. Lower a counted push loop whose capacity covers the trip count to a check before the loop and a fill loop that writes the length once (or keep the length in a register and write it back on exit and before the grow call), so LLVM can vectorize it. Check with perf stat on benchmarks/languages pipeline.",
+      "commit": "c2fdb3c",
+      "log": [
+        {
+          "time": "2026-11-27 19:35:38",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 19:36:12",
+          "who": "agent",
+          "text": "Design (not started in code): the per-push length store is by design in push_shadows (memory never stale). LLVM cannot promote it: the grow call clobbers memory and header/elements share one buffer. Plan: version a counted push-only loop on capacity - length >= trip count in the preheader; the copy has no grow path, keeps the length in its shadow and writes it to the header on exit only. Limit to elements without drop glue (a stale length on unwind only leaks) and to loops whose in-loop Vec.len/Vec.get read the shadow or do not occur. Needs a MIR statement that stores a buffer header word (only Rvalue::Buffer reads exist): text, parse, verify, machine, native."
+        },
+        {
+          "time": "2026-11-27 20:09:49",
+          "who": "agent",
+          "text": "done c2fdb3c"
+        },
+        {
+          "time": "2026-11-27 20:09:49",
+          "who": "agent",
+          "text": "pipeline 520M -> 277M instructions, 326M -> 271M cycles (C checked 352M / 264M). Suite 2191/2191, check-reference 102/102, clippy clean."
+        }
+      ]
+    },
+    {
+      "id": "TASKS-BENCH",
+      "title": "Task benchmark: yield, spawn/join, reactor echo",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "docs/tasks-on-handlers.md step 1: yield ping-pong, spawn and join of 100k tasks, a reactor echo over a socket pair; sets the T5 budget for the move to std.",
+      "commit": "7860c9c",
+      "log": [
+        {
+          "time": "2026-11-27 20:23:16",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 20:27:29",
+          "who": "agent",
+          "text": "done 7860c9c"
+        },
+        {
+          "time": "2026-11-27 20:27:29",
+          "who": "agent",
+          "text": "Budget: yield 921 ns, spawn+join 2418 ns, scope child 1510 ns, echo 19.2 us (LLVM; Cranelift same). Yield is 99.9% kernel time (swapcontext's signal-mask syscall, by inference): a hand-written switch should remove most of it."
+        }
+      ]
+    },
+    {
+      "id": "FIBER-RUNTIME",
+      "title": "Fiber runtime: kush_fiber_* and evaluator fibers",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "TASKS-BENCH"
+      ],
+      "status": "done",
+      "desc": "docs/tasks-on-handlers.md step 2: new, switch, suspend, resume, discontinue, pooled guarded stacks, hand-written switch; evaluator fibers on its explicit stacks.",
+      "commit": "e84ca57",
+      "log": [
+        {
+          "time": "2026-11-27 20:27:29",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 20:47:19",
+          "who": "agent",
+          "text": "6564524: kush_switch (x86-64, naked function) replaces swapcontext in the C task scheduler: yield 921 -> 32 ns, spawn+join 2418 -> 100 ns, echo 19.2 -> 17.3 us. Suite 2191/2191 (allocator-pool task test updated: control blocks now pooled), clippy clean, check-reference 102/102. T5 reference is now these numbers. Remaining: kush_fiber_* API and evaluator fibers."
+        },
+        {
+          "time": "2026-11-27 20:58:43",
+          "who": "agent",
+          "text": "done e84ca57"
+        },
+        {
+          "time": "2026-11-27 20:58:43",
+          "who": "agent",
+          "text": "C fiber API done and tested from a C harness; evaluator fibers move to FIBER-HANDLERS (first code that creates fibers)."
+        }
+      ]
+    },
+    {
+      "id": "FIBER-HANDLERS",
+      "title": "Fiber handlers: with fiber fn, linear Resume, shallow Step",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FIBER-RUNTIME"
+      ],
+      "status": "in_progress",
+      "desc": "docs/tasks-on-handlers.md step 3 (T1, T2): surface, checker rules (linear Resume, not across threads), MIR and native lowering, effect-handlers.md and reference with kush reject examples.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-27 20:58:43",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-27 20:59:42",
+          "who": "agent",
+          "text": "Surface question for the user: the capability route (a built-in owned Fiber value handling a declared effect, resumed in place with Fiber.resume(&mut f, reply) -> Step) instead of handle .. with fiber fn(request, k: Resume). Vec cannot hold linear values and Kush has no user drop, so the handle must be a built-in affine type whose drop discontinues."
+        }
+      ]
+    },
+    {
+      "id": "STD-SCHEDULER",
+      "title": "std.task scheduler and std.sys reactor on fiber handlers",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "FIBER-HANDLERS"
+      ],
+      "status": "todo",
+      "desc": "docs/tasks-on-handlers.md step 4: run queue, join waiters, cancellation propagation, slot generations, epoll and timers in std.sys; tested next to the C runtime.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "TASKS-SWITCH",
+      "title": "Task.* and suspend go through std (T3-A, T4)",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "STD-SCHEDULER"
+      ],
+      "status": "todo",
+      "desc": "docs/tasks-on-handlers.md step 5: checked surface forms call std; tasks see captured handlers (T4); all task tests unchanged on both backends; benchmark against TASKS-BENCH within the T5 budget.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "TASKS-DELETE",
+      "title": "Delete kush_task_* and evaluator task threads",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "TASKS-SWITCH"
+      ],
+      "status": "todo",
+      "desc": "docs/tasks-on-handlers.md step 6: only once T5 is met.",
+      "commit": null,
+      "log": []
     }
   ]
 }
