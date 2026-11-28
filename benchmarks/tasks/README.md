@@ -54,3 +54,34 @@ yield and the spawns):
   Control blocks also became small enough for the allocator's pool.
 - The echo is dominated by the loopback round trip and `epoll`; it gained
   10%.
+
+## std.sched (STD-SCHED-BENCH)
+
+The yield and spawn-join kernels again, scheduled by `std.sched`, the
+scheduler written in Kush on fibers (same checksums). 2026-11-28,
+tsar-bomba-2, compiler at 2f4605a, same session as the first four rows:
+
+| Kernel | Operation | LLVM ms | LLVM ns/op | Cranelift ms | Cranelift ns/op |
+| --- | --- | ---: | ---: | ---: | ---: |
+| yield | yield | 181 | 30 | 176 | 29 |
+| spawn-join | spawn and join | 231 | 92 | 229 | 91 |
+| sched-yield | yield (std.sched) | 413 | 69 | 450 | 75 |
+| sched-spawn-join | spawn and join (std.sched) | 700 | 280 | 761 | 304 |
+
+`std.sched` is 2.3 times the C scheduler for a yield and 3 times for a
+spawn and join, far from the T5 budget (10% and 20%). `perf` on the LLVM
+build: the switch itself is 11-14% of the time; the rest is the Kush side.
+
+| Where | yield | spawn-join |
+| --- | ---: | ---: |
+| `run`'s loop (match, queue, bookkeeping) | 19% | 18% |
+| `kush_vec_set` and `kush_vec_get` (out-of-line calls) | 15% | 20% |
+| `kush_switch` | 14% | 11% |
+| `kush_fiber_suspend`, `_resume`, the fiber handler | 24% | 12% |
+| libc `memcpy` | 6% | 8% |
+| `kush_fiber_new`, block claim and release | | 12% |
+
+To get within budget: `Vec.get`/`Vec.set` compiled inline, the per-slot
+vectors folded into one record per slot, the step and reply passed in
+registers rather than through copied slots, and a fiber stack reused with
+its slot.

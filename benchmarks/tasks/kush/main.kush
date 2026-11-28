@@ -6,10 +6,13 @@ use std.text;
 use std.net;
 use std.net.Conn;
 use std.net.Listener;
+use std.sched;
+use std.sched.Sched;
 
 // What the task runtime costs (TASKS-BENCH, docs/tasks-on-handlers.md):
 // the budget the move of tasks to std on fiber handlers is measured against.
-// Arguments: rounds, kernel (0 yield, 1 spawn-join, 2 spawn-scope, 3 echo).
+// Arguments: rounds, kernel (0 yield, 1 spawn-join, 2 spawn-scope, 3 echo,
+// 4 yield on std.sched, 5 spawn-join on std.sched).
 
 fn argument(index: i64) -> i64 ! {io, alloc} {
     let bytes = match ENV.arg(index, Bytes.with_capacity(64)) { Ok(value) => value, Err(_) => { return -1; } };
@@ -73,6 +76,42 @@ fn spawn_scope(rounds: i64) -> i64 ! {alloc, suspend} {
         batches = batches + 1;
     }
     batches * 64
+}
+
+// The yield kernel on std.sched (STD-SCHED-BENCH): the same two tasks,
+// scheduled by Kush code on fibers.
+fn sched_yields(rounds: i64) -> i64 ! {io, alloc} {
+    sched.run(Fiber.new::<Sched>(fn() -> i64 ! {Sched, io, alloc} {
+        let other = sched.spawn(Fiber.new::<Sched>(fn() -> i64 ! {Sched, io, alloc} {
+            let mut count = 0;
+            while count < rounds {
+                sched.yield_now();
+                count = count + 1;
+            }
+            count
+        }));
+        let mut count = 0;
+        while count < rounds {
+            sched.yield_now();
+            count = count + 1;
+        }
+        count + sched.join(other)
+    }))
+}
+
+// The spawn-join kernel on std.sched.
+fn sched_spawn_join(rounds: i64) -> i64 ! {io, alloc} {
+    sched.run(Fiber.new::<Sched>(fn() -> i64 ! {Sched, io, alloc} {
+        let mut total = 0;
+        let mut round = 0;
+        while round < rounds {
+            let seed = round;
+            let child = sched.spawn(Fiber.new::<Sched>(fn() -> i64 ! {Sched, io, alloc} { seed * 3 + 1 }));
+            total = total + sched.join(child);
+            round = round + 1;
+        }
+        total
+    }))
 }
 
 // Wait for one byte on the connection through the reactor: 1 when it came.
@@ -147,15 +186,19 @@ fn echo(rounds: i64) -> i64 ! {io, alloc, suspend} {
 fn main() -> i64 ! {io, alloc, suspend} {
     let rounds = argument(1);
     let kernel = argument(2);
-    if rounds < 1 || rounds > 100000000 || kernel < 0 || kernel > 3 { return 2; }
+    if rounds < 1 || rounds > 100000000 || kernel < 0 || kernel > 5 { return 2; }
     let result = if kernel == 0 {
         yields(rounds)
     } else if kernel == 1 {
         spawn_join(rounds)
     } else if kernel == 2 {
         spawn_scope(rounds)
-    } else {
+    } else if kernel == 3 {
         echo(rounds)
+    } else if kernel == 4 {
+        sched_yields(rounds)
+    } else {
+        sched_spawn_join(rounds)
     };
     print_i64(result);
     0

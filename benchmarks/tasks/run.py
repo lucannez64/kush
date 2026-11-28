@@ -29,6 +29,9 @@ KERNELS = {
     "spawn-join": (2500000, "1", 1, "spawn and join"),
     "spawn-scope": (3000000, "2", 1, "spawn, scope join"),
     "echo": (25000, "3", 1, "round trip"),
+    # STD-SCHED-BENCH: the first two on std.sched, the scheduler in Kush.
+    "sched-yield": (3000000, "4", 2, "yield (std.sched)"),
+    "sched-spawn-join": (2500000, "5", 1, "spawn and join (std.sched)"),
 }
 
 VARIANTS = {
