@@ -263,6 +263,34 @@ shallow form of T2 with the continuation kept inside an owned value:
   one; the runtime also checks the thread.
 - Not done here: moving `Task.*` onto fibers (STD-SCHEDULER, TASKS-SWITCH).
 
+### As built: STD-SCHED-CORE (first part of STD-SCHEDULER)
+
+- `std.sched` (`crates/kush/std/sched.kush`) is the scheduler loop in Kush:
+  `run(root)` resumes fibers of type `Job = Fiber<Request, i64, once fn() ->
+  i64 ! {io, alloc}>` from a FIFO ring of slots; tasks perform
+  `Sched: Request -> i64` with `Yield`, `Spawn(Job)` or `Join(handle)`. The
+  order is rules 2-5 of async.md. A handle is a slot and its generation; a
+  joined task's slot is reused, and assigning the new fiber into it drops the
+  finished one (its stack is freed). Tests: `tests/std_sched.rs`.
+- What the language lacked on the way, and how this works around it:
+  `Vec.pop` is not available (the free list keeps a count), and a body's row
+  must match the `Job` row exactly (fiber types are not covariant in the
+  body's effects), so every task body is written `! {Sched, io, alloc}`.
+- Open for TASKS-SWITCH, where the checked `Task.*` forms lower to this
+  scheduler (to be settled before that step):
+  - tasks of different result types in one queue: the compiler would make
+    each task's fiber a `once fn() -> Unit` wrapper that moves the result
+    into the `Task<T>` handle (T3-A);
+  - a task body may borrow views from outside its scope and perform the
+    declared operations it captured, which `Fiber.new` rejects: the
+    compiler-made task fibers would skip those two checks, since the scope
+    rules already confine the task;
+  - a yield inside a fiber the task runs (a generator) has to suspend the
+    whole task: `suspend` would target the task's fiber, carrying the
+    nested fibers along, as the C runtime's tasks do today;
+  - `main` and each thread would run as the root task of a scheduler from
+    the runtime prologue.
+
 ## 8. Decisions (user, 2026-11-27)
 
 Each recommendation below was accepted: T1 fibers, T2 shallow resumption

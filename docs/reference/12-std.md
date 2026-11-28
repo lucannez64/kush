@@ -20,6 +20,7 @@ codes.
 | `std.net`, `std.http`, `std.http1`, `std.url`, `std.web` | TCP (`Listener`, `Conn`), a minimal HTTP client, HTTP/1.1 parsing, URL decoding, the web server core |
 | `std.sys` | thin Linux system calls used by the modules above |
 | `std.task` | `TaskExit<T>`, `Panic` |
+| `std.fiber`, `std.sched` | `FiberStep<A, T>` ([chapter 8](08-concurrency.md#fibers)); a task scheduler written on fibers (`run`, `spawn`, `yield_now`, `join`) |
 | `std.text`, `std.ascii` | byte-string helpers (`eq`, `find`, `split_part`, `trim`, `parse_i64`, `format_i64`, …) and ASCII classes |
 | `std.json` | owned JSON values, parser and writer |
 | `std.bincode` | binary codec on the bincode 1.x wire format (little-endian fixed-width integers, u64 length prefixes); `put_*` append to `Bytes`, `take_*` walk a `Decoder` and return `Result<_, Error>` |

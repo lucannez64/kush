@@ -1566,12 +1566,8 @@ impl<'a> Types<'a> {
         let index = self.enums.len();
         self.enums.push(Enum {
             definition,
-            name: format!(
-                "Fiber<{}, {}, {}>",
-                self.name(request),
-                self.name(reply),
-                self.name(body)
-            ),
+            // The type printer adds the arguments.
+            name: "Fiber".into(),
             arguments: vec![request, reply, body],
             consts: Vec::new(),
             lifetimes: Vec::new(),

@@ -185,6 +185,51 @@ fn main() -> Unit ! {alloc} { let _f = Fiber.new::<Stop>(fn() -> i64 ! {Stop} { 
 // error: the abortive operation 'Stop' cannot suspend a fiber
 ```
 
+### A scheduler on fibers: `std.sched`
+
+`std.sched` is a task scheduler written in Kush on fibers, with the
+scheduling rules of `Task`: one FIFO ready queue, `spawn` queues the new task
+and the parent goes on, `yield_now` queues the running task, `join` waits
+until the target finishes. A task is a `std.sched.Job`, a fiber whose body
+performs `Sched` and has the row `{Sched, io, alloc}`; its result is an
+`i64`. `sched.run(root)` runs the tasks until none is ready and returns the
+root's result.
+
+```kush eval
+use std.sched;
+use std.sched.Sched;
+
+fn worker(id: i64) -> i64 ! {io, Sched} {
+    print_i64(id * 10 + 1);
+    sched.yield_now();
+    print_i64(id * 10 + 2);
+    id
+}
+
+fn main() -> Unit ! {io, alloc} {
+    let root = sched.run(Fiber.new::<Sched>(fn() -> i64 ! {Sched, io, alloc} {
+        let a = sched.spawn(Fiber.new::<Sched>(fn() -> i64 ! {Sched, io, alloc} { worker(1) }));
+        let b = sched.spawn(Fiber.new::<Sched>(fn() -> i64 ! {Sched, io, alloc} { worker(2) }));
+        sched.join(a) + sched.join(b)
+    }));
+    print_i64(root);
+}
+```
+
+```output
+11
+21
+12
+22
+3
+```
+
+A handle is joined once, from another task; a bad join panics. A task that
+yields inside a fiber of its own (a generator it runs) cannot reach the
+scheduler: that fiber's body performs only its own operation. Cancellation,
+I/O waits and the panic of a task raised at its join are not in `std.sched`
+yet; the built-in `Task` has them.
+
 ## Threads
 
 `Thread.scope` / `Thread.spawn` / `Thread.join` have the shape of the task

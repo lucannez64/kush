@@ -1,0 +1,216 @@
+module std.sched;
+
+// A cooperative task scheduler written in Kush on fibers (STD-SCHEDULER,
+// docs/tasks-on-handlers.md). It follows the scheduling rules of
+// docs/async.md: one FIFO ready queue; a spawned task is appended to it and
+// the parent goes on; a yield appends the task; a join blocks until the
+// target finishes, which appends the waiter.
+//
+// A task is a fiber whose body performs `Sched`; `run` is the scheduler
+// loop. Task results are `i64` here. The checked `Task.*` forms will lower
+// to this scheduler later (TASKS-SWITCH).
+use std.fiber.FiberStep;
+
+/// A task: a fiber that asks the scheduler for things through `Sched`.
+pub type Job = Fiber<Request, i64, once fn() -> i64 ! {io, alloc}>;
+
+/// What a task asks the scheduler for.
+pub enum Request {
+    /// Let the other ready tasks run first; replies 0.
+    Yield,
+    /// Run a new task; replies its handle.
+    Spawn(Job),
+    /// Wait for a task to finish; replies its result.
+    Join(i64),
+}
+
+pub effect Sched: Request -> i64;
+
+/// Let the other ready tasks run first.
+pub fn yield_now() -> Unit ! {Sched} {
+    perform Sched(Request.Yield);
+}
+
+/// Run `task` after the tasks that are ready now; its handle.
+pub fn spawn(task: Job) -> i64 ! {Sched} {
+    perform Sched(Request.Spawn(task))
+}
+
+/// Wait until the task behind `handle` finishes; its result. A handle is
+/// joined at most once.
+pub fn join(handle: i64) -> i64 ! {Sched} {
+    perform Sched(Request.Join(handle))
+}
+
+/// A FIFO of task slots, a ring that doubles when full.
+struct Queue {
+    items: Vec<i64>,
+    head: i64,
+    count: i64,
+}
+
+fn queue_new() -> Queue ! {alloc} {
+    let mut items: Vec<i64> = Vec.with_capacity(8);
+    let mut i = 0;
+    while i < 8 {
+        items = Vec.push(items, 0);
+        i = i + 1;
+    }
+    Queue { items: items, head: 0, count: 0 }
+}
+
+fn queue_push(queue: Queue, slot: i64) -> Queue ! {alloc} {
+    let Queue { items, head, count } = queue;
+    let size = Vec.len(&items);
+    let mut items = items;
+    let mut head = head;
+    if count == size {
+        // Full: copy into twice the room, oldest first.
+        let mut grown: Vec<i64> = Vec.with_capacity(size * 2);
+        let mut i = 0;
+        while i < size * 2 {
+            let value = if i < count { Vec.get(&items, (head + i) % size) } else { 0 };
+            grown = Vec.push(grown, value);
+            i = i + 1;
+        }
+        items = grown;
+        head = 0;
+    }
+    let size = Vec.len(&items);
+    items = Vec.set(items, (head + count) % size, slot);
+    Queue { items: items, head: head, count: count + 1 }
+}
+
+/// The oldest slot, or -1 when the queue is empty.
+fn queue_pop(queue: Queue) -> (Queue, i64) ! {} {
+    let Queue { items, head, count } = queue;
+    if count == 0 {
+        return (Queue { items: items, head: head, count: count }, -1);
+    }
+    let slot = Vec.get(&items, head);
+    let size = Vec.len(&items);
+    (Queue { items: items, head: (head + 1) % size, count: count - 1 }, slot)
+}
+
+/// A handle names a slot and the generation of the task in it, so a slot
+/// reused by a later task does not answer for an earlier one.
+fn handle_of(slot: i64, generation: i64) -> i64 ! {} {
+    generation * 4294967296 + slot
+}
+
+/// Run `root` and every task it spawns until none is ready; the root's
+/// result. A task still blocked then (a join that can never end) is
+/// dropped, which unwinds it.
+pub fn run(root: Job) -> i64 ! {io, alloc} {
+    let mut fibers: Vec<Job> = Vec.with_capacity(8);
+    fibers = Vec.push(fibers, root);
+    // Per slot: 0 not started, 1 started, 2 finished.
+    let mut states: Vec<i64> = Vec.with_capacity(8);
+    states = Vec.push(states, 0);
+    let mut generations: Vec<i64> = Vec.with_capacity(8);
+    generations = Vec.push(generations, 0);
+    let mut results: Vec<i64> = Vec.with_capacity(8);
+    results = Vec.push(results, 0);
+    let mut replies: Vec<i64> = Vec.with_capacity(8);
+    replies = Vec.push(replies, 0);
+    // The slot of the task waiting in a join of this one, or -1.
+    let mut waiters: Vec<i64> = Vec.with_capacity(8);
+    waiters = Vec.push(waiters, -1);
+    // Slots of joined tasks, for reuse: `free[0..free_count]`.
+    let mut free: Vec<i64> = Vec.with_capacity(8);
+    let mut free_count = 0;
+    let mut ready = queue_new();
+    ready = queue_push(ready, 0);
+    // A task that goes on at once (after a spawn, or a join of a task that
+    // has finished), ahead of the queue.
+    let mut current = -1;
+    let mut root_result = 0;
+    let mut running = true;
+    while running {
+        let mut slot = current;
+        current = -1;
+        if slot < 0 {
+            let (rest, next) = queue_pop(ready);
+            ready = rest;
+            slot = next;
+        }
+        if slot < 0 {
+            running = false;
+        } else {
+            let step = if Vec.get(&states, slot) == 0 {
+                states = Vec.set(states, slot, 1);
+                Fiber.start(&mut fibers[slot])
+            } else {
+                Fiber.resume(&mut fibers[slot], Vec.get(&replies, slot))
+            };
+            match step {
+                FiberStep.Performed(Request.Yield) => {
+                    replies = Vec.set(replies, slot, 0);
+                    ready = queue_push(ready, slot);
+                },
+                FiberStep.Performed(Request.Spawn(task)) => {
+                    let mut child = Vec.len(&fibers);
+                    if free_count > 0 {
+                        free_count = free_count - 1;
+                        child = Vec.get(&free, free_count);
+                        // Dropping the joined task's fiber frees its stack.
+                        fibers[child] = task;
+                        states = Vec.set(states, child, 0);
+                        let generation = Vec.get(&generations, child) + 1;
+                        generations = Vec.set(generations, child, generation);
+                        waiters = Vec.set(waiters, child, -1);
+                    } else {
+                        fibers = Vec.push(fibers, task);
+                        states = Vec.push(states, 0);
+                        generations = Vec.push(generations, 0);
+                        results = Vec.push(results, 0);
+                        replies = Vec.push(replies, 0);
+                        waiters = Vec.push(waiters, -1);
+                    }
+                    ready = queue_push(ready, child);
+                    replies = Vec.set(replies, slot, handle_of(child, Vec.get(&generations, child)));
+                    current = slot;
+                },
+                FiberStep.Performed(Request.Join(handle)) => {
+                    let target = handle % 4294967296;
+                    if target < 0
+                        || target >= Vec.len(&fibers)
+                        || target == slot
+                        || handle_of(target, Vec.get(&generations, target)) != handle
+                        || Vec.get(&waiters, target) >= 0
+                    {
+                        // A stale, foreign, self or second join.
+                        panic();
+                    }
+                    if Vec.get(&states, target) == 2 {
+                        replies = Vec.set(replies, slot, Vec.get(&results, target));
+                        free = push_free(free, free_count, target);
+                        free_count = free_count + 1;
+                        current = slot;
+                    } else {
+                        waiters = Vec.set(waiters, target, slot);
+                    }
+                },
+                FiberStep.Finished(value) => {
+                    states = Vec.set(states, slot, 2);
+                    results = Vec.set(results, slot, value);
+                    if slot == 0 {
+                        root_result = value;
+                    }
+                    let waiter = Vec.get(&waiters, slot);
+                    if waiter >= 0 {
+                        replies = Vec.set(replies, waiter, value);
+                        free = push_free(free, free_count, slot);
+                        free_count = free_count + 1;
+                        ready = queue_push(ready, waiter);
+                    }
+                },
+            }
+        }
+    }
+    root_result
+}
+
+fn push_free(free: Vec<i64>, count: i64, slot: i64) -> Vec<i64> ! {alloc} {
+    if count < Vec.len(&free) { Vec.set(free, count, slot) } else { Vec.push(free, slot) }
+}

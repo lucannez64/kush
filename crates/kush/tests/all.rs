@@ -274,6 +274,8 @@ mod std_natural;
 mod std_net_udp;
 #[path = "std_proc_net.rs"]
 mod std_proc_net;
+#[path = "std_sched.rs"]
+mod std_sched;
 #[path = "std_sys.rs"]
 mod std_sys;
 #[path = "stdio.rs"]
