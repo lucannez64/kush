@@ -78,6 +78,13 @@ pub(super) struct TaskRecord {
     pub(super) preserve: bool,
     /// The type of the task's result, to drop it.
     pub(super) result: Type,
+    /// FIBER-HANDLERS: the record is a fiber, never in the ready queue: it
+    /// runs when it is started or resumed, ahead of every ready task, and
+    /// its `waiter` is the task that resumed it.
+    pub(super) fiber: bool,
+    /// A fiber's request on its way to the resumer, or its reply on the way
+    /// back.
+    pub(super) exchange: Option<Words>,
     /// The control block and stack the stats count.
     pub(super) bookkeeping: [i64; 2],
 }
@@ -104,6 +111,8 @@ impl TaskRecord {
             preserve: false,
             result,
             bookkeeping,
+            fiber: false,
+            exchange: None,
         }
     }
 }
@@ -233,7 +242,12 @@ impl Machine<'_, '_> {
         }
         if let Some(waiter) = self.tasks[current].waiter.take() {
             self.tasks[waiter].state = State::Ready;
-            self.ready.push_back(waiter);
+            // A fiber's resumer goes on at once, as it does natively.
+            if self.tasks[current].fiber {
+                self.ready.push_front(waiter);
+            } else {
+                self.ready.push_back(waiter);
+            }
         }
         self.schedule().map_err(Raise::Stop)
     }
@@ -296,7 +310,133 @@ impl Machine<'_, '_> {
                 catch,
                 parallel,
             } => self.scope(&words[0], failure, catch, parallel, ty),
+            TaskOp::Fiber(op) => self.fiber_op(op, &words),
         }
+    }
+
+    /// FIBER-HANDLERS (docs/tasks-on-handlers.md): a fiber is a task record
+    /// that runs only when started or resumed.
+    fn fiber_op(&mut self, op: crate::executable::FiberOp, words: &[Words]) -> Run<Flow> {
+        use crate::executable::FiberOp;
+        match op {
+            FiberOp::New { result, .. } => {
+                let id = self.tasks.len();
+                let bookkeeping = self.task_bookkeeping();
+                let mut record = TaskRecord::new(false, result, bookkeeping);
+                record.start = Some((code_function(words[0][0])?, words[0][1]));
+                record.state = State::Blocked;
+                record.fiber = true;
+                self.tasks.push(record);
+                Ok(Flow::Done(vec![id as i64]))
+            }
+            FiberOp::Cell { .. } => Ok(Flow::Done(vec![FIBER_CELL])),
+            FiberOp::Start { step } => {
+                let fiber = self.memory.load(words[0][0], 1)?[0] as usize;
+                self.fiber_run(fiber, None, step)
+            }
+            FiberOp::Resume { step } => {
+                let fiber = self.memory.load(words[0][0], 1)?[0] as usize;
+                self.fiber_run(fiber, Some(words[1].clone()), step)
+            }
+        }
+    }
+
+    /// Run `fiber` ahead of every ready task until it suspends or ends, then
+    /// give the resumer its `FiberStep`.
+    fn fiber_run(
+        &mut self,
+        fiber: usize,
+        reply: Option<Words>,
+        step: crate::executable::FiberStepShape,
+    ) -> Run<Flow> {
+        let runnable = fiber < self.tasks.len()
+            && self.tasks[fiber].fiber
+            && self.tasks[fiber].outcome.is_none()
+            && self.tasks[fiber].waiter.is_none()
+            && self.tasks[fiber].start.is_some() == reply.is_none();
+        if !runnable {
+            return panic_at(
+                Span::default(),
+                "panic: a fiber was started twice, resumed before it started, or resumed after it finished",
+            );
+        }
+        let current = self.current;
+        self.tasks[fiber].exchange = reply;
+        self.tasks[fiber].waiter = Some(current);
+        self.tasks[fiber].state = State::Ready;
+        self.ready.push_front(fiber);
+        self.tasks[current].state = State::Blocked;
+        Ok(Flow::Suspend(Box::new(move |machine, _| {
+            match machine.tasks[fiber].outcome.clone() {
+                Some(Outcome::Completed(words, _)) => Ok(Flow::Done(machine.encode_variant(
+                    step.ty,
+                    step.finished_tag,
+                    words,
+                ))),
+                Some(Outcome::Failed(error)) => Ok(Flow::Panic(error)),
+                Some(Outcome::Cancelled) => fault("a fiber is never cancelled"),
+                None => {
+                    let Some(request) = machine.tasks[fiber].exchange.take() else {
+                        return fault("a fiber stopped without a request");
+                    };
+                    Ok(Flow::Done(machine.encode_variant(
+                        step.ty,
+                        step.performed_tag,
+                        request,
+                    )))
+                }
+            }
+        })))
+    }
+
+    /// A perform through a fiber's cell: hand the request to the resumer and
+    /// wait for the reply.
+    pub(super) fn fiber_suspend(&mut self, request: Words, span: Span) -> Run<Flow> {
+        let current = self.current;
+        if !self.tasks[current].fiber {
+            return panic_at(
+                span,
+                "panic: a fiber's operation performed outside the fiber",
+            );
+        }
+        // A scope or catch body opened in the fiber would be left open in
+        // the resumer natively.
+        if !self.tasks[current].scopes.is_empty() || self.tasks[current].catch_depth != 0 {
+            return panic_at(
+                span,
+                "panic: a fiber suspended inside a task scope or catch body it opened",
+            );
+        }
+        let Some(resumer) = self.tasks[current].waiter.take() else {
+            return fault("a running fiber without a resumer");
+        };
+        self.tasks[current].exchange = Some(request);
+        self.tasks[current].state = State::Blocked;
+        self.tasks[resumer].state = State::Ready;
+        self.ready.push_front(resumer);
+        Ok(Flow::Suspend(Box::new(move |machine, _| {
+            let Some(reply) = machine.tasks[current].exchange.take() else {
+                return fault("a fiber resumed without a reply");
+            };
+            Ok(Flow::Done(reply))
+        })))
+    }
+
+    /// The release of a `Fiber` value: its bookkeeping, and the closure of a
+    /// fiber that never ran. A suspended fiber would have to unwind, which
+    /// the machine cannot do from a drop.
+    pub(super) fn fiber_drop(&mut self, fiber: usize) -> Run<()> {
+        if fiber >= self.tasks.len() || !self.tasks[fiber].fiber {
+            return fault("a fiber handle that names no fiber");
+        }
+        if let Some((_, environment)) = self.tasks[fiber].start.take() {
+            if environment != 0 {
+                self.drop_environment(environment)?;
+            }
+        } else if self.tasks[fiber].outcome.is_none() {
+            return unsupported("dropping a fiber that has not finished");
+        }
+        self.release_bookkeeping(fiber)
     }
 
     /// `Task.spawn` / `Thread.spawn`: a new ready task running the `once`

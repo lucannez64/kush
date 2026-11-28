@@ -1506,6 +1506,168 @@ impl<'a> Types<'a> {
         self.opaque_code_type(callable, "CompiledCode", true, span)
     }
 
+    /// Intern `Fiber<request, reply, body>` (FIBER-HANDLERS,
+    /// docs/tasks-on-handlers.md): one word, the runtime fiber, released by
+    /// `kush_fiber_drop` (which discontinues a fiber that has not finished).
+    /// The body is the `once fn() -> T` the fiber runs, with the built-in
+    /// effects running it has; its operation is not in that row.
+    pub fn fiber_type(
+        &mut self,
+        request: Type,
+        reply: Type,
+        body: Type,
+        span: Span,
+    ) -> Result<Type> {
+        let Type::Once(signature) = body else {
+            return Err(Diagnostic::new(
+                span,
+                "a fiber's body type is a once callable with no parameters, as in once fn() -> i64 ! {}",
+            ));
+        };
+        let signature = self.function_types[signature].clone();
+        if !signature.parameters.is_empty() || signature.linear {
+            return Err(Diagnostic::new(
+                span,
+                "a fiber's body type is a once callable with no parameters, as in once fn() -> i64 ! {}",
+            ));
+        }
+        if signature.effects & !crate::executable::EFFECT_BITS != 0 {
+            return Err(Diagnostic::new(
+                span,
+                "a fiber's body type names only built-in effects; the operation the fiber handles is not part of it",
+            ));
+        }
+        for ty in [request, reply, signature.result] {
+            if ty == Type::Never || has_borrow(self, ty) {
+                return Err(Diagnostic::new(
+                    span,
+                    "a fiber's requests, replies and result cannot be Never or hold borrows: a fiber may outlive the frame that made it",
+                ));
+            }
+        }
+        let definition = self
+            .resolution
+            .bindings
+            .iter()
+            .position(|binding| binding.kind == BindingKind::Builtin && binding.name == "Fiber")
+            .expect("Fiber builtin is registered by name resolution");
+        let key = (
+            definition,
+            vec![request, reply, body],
+            Vec::new(),
+            Vec::new(),
+        );
+        if let Some(index) = self.cache.get(&key) {
+            return Ok(Type::Enum(*index));
+        }
+        if self.enums.len() >= 256 {
+            return Err(Diagnostic::new(span, "Fiber layout budget exhausted"));
+        }
+        let index = self.enums.len();
+        self.enums.push(Enum {
+            definition,
+            name: format!(
+                "Fiber<{}, {}, {}>",
+                self.name(request),
+                self.name(reply),
+                self.name(body)
+            ),
+            arguments: vec![request, reply, body],
+            consts: Vec::new(),
+            lifetimes: Vec::new(),
+            variants: vec![Variant {
+                name: "$fiber".into(),
+                fields: vec![Type::I64],
+                tuple: false,
+                names: vec!["$handle".into()],
+            }],
+            words: 1,
+            result: None,
+            record: true,
+            field_lifetimes: vec![None],
+            borrowed: false,
+            mutable_borrow: false,
+            linear: false,
+            array: None,
+            dynamic_array: None,
+            runtime_length: None,
+            tuple: false,
+            structural: false,
+            foreign: Some(ForeignResource {
+                release: "kush_fiber_drop".into(),
+            }),
+        });
+        self.cache.insert(key, index);
+        Ok(Type::Enum(index))
+    }
+
+    /// The request, reply and body types of a `Fiber` type.
+    pub fn fiber_parts(&self, ty: Type) -> Option<(Type, Type, Type)> {
+        let Type::Enum(index) = ty else {
+            return None;
+        };
+        let layout = &self.enums[index];
+        let binding = self.resolution.bindings.get(layout.definition)?;
+        if binding.kind != BindingKind::Builtin || binding.name != "Fiber" {
+            return None;
+        }
+        match layout.arguments.as_slice() {
+            [request, reply, body] => Some((*request, *reply, *body)),
+            _ => None,
+        }
+    }
+
+    /// `FiberStep<A, T>` from std.fiber, which `Fiber.start` and
+    /// `Fiber.resume` return.
+    pub fn fiber_step(
+        &mut self,
+        request: Type,
+        result: Type,
+        span: Span,
+    ) -> Result<crate::executable::FiberStepShape> {
+        let wrong = || {
+            Diagnostic::new(
+                span,
+                "Fiber.start and Fiber.resume need enum FiberStep<A, T> { Performed(A), Finished(T) }: add 'use std.fiber.FiberStep;'",
+            )
+        };
+        let id = self
+            .definitions
+            .iter()
+            .find(|(_, def)| def.name == "FiberStep")
+            .map(|(id, _)| *id)
+            .ok_or_else(wrong)?;
+        let ty = Type::Enum(self.instantiate(id, vec![request, result], vec![], vec![], span)?);
+        let Some(layout) = ty.layout() else {
+            unreachable!("FiberStep is an enum")
+        };
+        let enum_ = &self.enums[layout];
+        let tag = |name: &str| {
+            enum_
+                .variants
+                .iter()
+                .position(|variant| variant.name == name)
+        };
+        let (Some(performed), Some(finished)) = (tag("Performed"), tag("Finished")) else {
+            return Err(wrong());
+        };
+        if enum_.variants.len() != 2
+            || !enum_.variants[performed].tuple
+            || enum_.variants[performed].fields != [request]
+            || !enum_.variants[finished].tuple
+            || enum_.variants[finished].fields != [result]
+        {
+            return Err(wrong());
+        }
+        Ok(crate::executable::FiberStepShape {
+            performed_tag: performed,
+            finished_tag: finished,
+            request,
+            result,
+            ty,
+        })
+    }
+
     /// An unconstructible nominal type used only while validating a generic
     /// quotation. Give each binder its own identity and no copy permission.
     pub(crate) fn staging_type_parameter(&mut self, binding: BindingId) -> Type {
@@ -3497,6 +3659,21 @@ impl<'a> Types<'a> {
                     arguments[1],
                 )?;
                 return self.dynamic_array(element, capacity, ty.span);
+            }
+            // FIBER-HANDLERS: `Fiber<A, R, once fn() -> T ! {row}>`, an
+            // owned fiber that suspends with requests `A`, takes replies
+            // `R`, and finishes with `T`; the row is what running it does.
+            if b.kind == BindingKind::Builtin && b.name == "Fiber" {
+                if !lifetime_arguments.is_empty() || arguments.len() != 3 {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "Fiber expects a request type, a reply type and its body's type, as in Fiber<i64, i64, once fn() -> i64 ! {}>",
+                    ));
+                }
+                let request = self.lower(arguments[0], substitution, depth + 1)?;
+                let reply = self.lower(arguments[1], substitution, depth + 1)?;
+                let body = self.lower(arguments[2], substitution, depth + 1)?;
+                return self.fiber_type(request, reply, body, ty.span);
             }
             // A code value owns its serialized template graph. Its callable
             // argument is static identity, not a callable stored in the graph.

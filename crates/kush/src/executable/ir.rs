@@ -1347,6 +1347,11 @@ pub(crate) enum ExprKind {
         /// THREAD-SCOPE: `Thread.scope`, whose epilogue joins child threads.
         parallel: bool,
     },
+    /// A fiber operation on its operands (FIBER-HANDLERS); see `FiberOp`.
+    Fiber {
+        op: FiberOp,
+        operands: Vec<Expr>,
+    },
     /// Cooperative suspension point. The boolean result reports whether
     /// cancellation has been requested.
     TaskYield,
@@ -1664,6 +1669,36 @@ pub(crate) struct TaskExitShape {
     pub payload: Type,
     pub result: Type,
 }
+/// The checked `FiberStep<A, T>` layout `Fiber.start` and `Fiber.resume`
+/// return (FIBER-HANDLERS).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FiberStepShape {
+    pub performed_tag: usize,
+    pub finished_tag: usize,
+    pub request: Type,
+    pub result: Type,
+    /// The `FiberStep<A, T>` enum.
+    pub ty: Type,
+}
+/// A fiber operation (FIBER-HANDLERS, docs/tasks-on-handlers.md).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum FiberOp {
+    /// `Fiber.new::<Op>(body)`: a fiber running the body (operand 0), whose
+    /// performs of `operation` suspend it. `handler` is the operation's
+    /// handler arrow; `result` the body's result.
+    New {
+        operation: usize,
+        handler: usize,
+        result: Type,
+    },
+    /// The capability of a fiber's operation inside its body: the cell of
+    /// the handler that suspends the running fiber (no operands).
+    Cell { handler: usize },
+    /// `Fiber.start(&mut f)` (operand 0, the reference).
+    Start { step: FiberStepShape },
+    /// `Fiber.resume(&mut f, reply)` (operands 0 and 1).
+    Resume { step: FiberStepShape },
+}
 impl Expr {
     /// Visit every direct child expression, expanding blocks into their
     /// statements and tail. The match is exhaustive on purpose: a new
@@ -1819,6 +1854,9 @@ impl Expr {
             }
             ExprKind::Construct { fields: items, .. }
             | ExprKind::Call(_, items)
+            | ExprKind::Fiber {
+                operands: items, ..
+            }
             | ExprKind::FnValue {
                 captures: items, ..
             } => {
@@ -2077,6 +2115,9 @@ impl Expr {
             }
             ExprKind::Construct { fields: items, .. }
             | ExprKind::Call(_, items)
+            | ExprKind::Fiber {
+                operands: items, ..
+            }
             | ExprKind::FnValue {
                 captures: items, ..
             } => {

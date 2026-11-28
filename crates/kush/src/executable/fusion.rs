@@ -169,6 +169,7 @@ pub(super) fn fusion_expr_safe(
         // An opaque callable can select an effectful or divergent body.
         ExprKind::CallIndirect { .. } => false,
         ExprKind::TaskSpawn { .. }
+        | ExprKind::Fiber { .. }
         | ExprKind::TaskScope { .. }
         | ExprKind::TaskYield
         | ExprKind::TaskCheckCancel
@@ -542,7 +543,11 @@ pub(super) fn fuse_expr(
                 fuse_expr(field, types, signatures, safety, fusions);
             }
         }
-        ExprKind::Call(_, arguments) => {
+        ExprKind::Call(_, arguments)
+        | ExprKind::Fiber {
+            operands: arguments,
+            ..
+        } => {
             for argument in arguments {
                 fuse_expr(argument, types, signatures, safety, fusions);
             }

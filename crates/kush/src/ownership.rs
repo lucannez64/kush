@@ -6695,6 +6695,26 @@ impl Checker<'_> {
                 self.expr(reference)?;
                 self.loans = loans;
             }
+            // FIBER-HANDLERS: `Fiber.new` moves its body (which the checker
+            // allowed no borrowed captures); `start` and `resume` borrow the
+            // fiber for the call and move the reply.
+            ExprKind::Fiber { op, operands } => match op {
+                crate::executable::FiberOp::Start { .. }
+                | crate::executable::FiberOp::Resume { .. } => {
+                    let (reference, rest) = operands.split_at_mut(1);
+                    let loans = self.loans.clone();
+                    self.expr(&mut reference[0])?;
+                    self.loans = loans;
+                    for operand in rest {
+                        self.expr(operand)?;
+                    }
+                }
+                _ => {
+                    for operand in operands {
+                        self.expr(operand)?;
+                    }
+                }
+            },
             ExprKind::TaskJoin { task, .. } => {
                 let loans = self.loans.clone();
                 let task_value = through_coerce(task);
@@ -7929,6 +7949,11 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
                 walk(body, out);
             }
             ExprKind::TaskCancel(reference) => walk(reference, out),
+            ExprKind::Fiber { operands, .. } => {
+                for operand in operands {
+                    walk(operand, out);
+                }
+            }
             ExprKind::TaskJoin { task, .. } => walk(task, out),
             ExprKind::TaskYield | ExprKind::TaskCheckCancel => {}
             ExprKind::Unary(_, v)
@@ -8329,6 +8354,11 @@ fn expr_live(
         }
         ExprKind::TaskCancel(reference) => {
             live = expr_live(reference, live_after, views, heads, exits, out);
+        }
+        ExprKind::Fiber { operands, .. } => {
+            for operand in operands.iter().rev() {
+                live = expr_live(operand, &live, views, heads, exits, out);
+            }
         }
         ExprKind::TaskJoin { task, .. } => {
             live = expr_live(task, live_after, views, heads, exits, out);

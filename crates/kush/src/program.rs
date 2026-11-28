@@ -16,6 +16,7 @@ pub const STD: &[(&str, &str)] = &[
     ("std.ascii", include_str!("../std/ascii.kush")),
     ("std.math", include_str!("../std/math.kush")),
     ("std.task", include_str!("../std/task.kush")),
+    ("std.fiber", include_str!("../std/fiber.kush")),
     ("std.json", include_str!("../std/json.kush")),
     ("std.test", include_str!("../std/test.kush")),
     ("std.text", include_str!("../std/text.kush")),

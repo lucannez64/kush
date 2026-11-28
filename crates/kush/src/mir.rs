@@ -223,6 +223,8 @@ pub(crate) enum TaskOp {
         exit: crate::executable::TaskExitShape,
         parallel: bool,
     },
+    /// A fiber operation (FIBER-HANDLERS, `executable::FiberOp`).
+    Fiber(crate::executable::FiberOp),
 }
 
 /// A user-allocator or arena operation (the tree path's constructors).

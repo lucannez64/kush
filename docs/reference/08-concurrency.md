@@ -73,6 +73,118 @@ the process.
 suspend only the calling task on an epoll reactor. Other I/O (`std.io`,
 `std.fs`, `print_*`) blocks the whole thread.
 
+## Fibers
+
+A fiber is a body that runs on its own stack and can stop in the middle of
+any call, then go on later. `Fiber.new::<Op>(body)` makes one; `Op` is a
+declared operation (`effect Op: A -> R;`). A `perform Op(a)` anywhere in the
+body, including in functions it calls, suspends the fiber and hands `a` to
+whoever resumed it.
+
+| Call | Result | Effects |
+| --- | --- | --- |
+| `Fiber.new::<Op>(fn() -> T ! {Op, e} { ... })` | `Fiber<A, R, once fn() -> T ! {e}>`, not started | `alloc` |
+| `Fiber.start(&mut f)` | `FiberStep<A, T>` | `e` |
+| `Fiber.resume(&mut f, reply)` | `FiberStep<A, T>`; `reply: R` is the perform's result | `e` |
+
+`std.fiber.FiberStep<A, T>` is `Performed(A)` when the body suspended and
+`Finished(T)` when it returned. The resumer loops over the steps:
+
+```kush eval
+use std.fiber.FiberStep;
+
+effect Emit: i64 -> i64;
+
+fn count(limit: i64) -> i64 ! {Emit} {
+    let mut i = 0;
+    let mut total = 0;
+    while i < limit {
+        total = total + perform Emit(i * 10);
+        i = i + 1;
+    }
+    total
+}
+
+fn main() -> Unit ! {io, alloc} {
+    let mut f = Fiber.new::<Emit>(fn() -> i64 ! {Emit} { count(3) });
+    let mut step = Fiber.start(&mut f);
+    let mut done = false;
+    while !done {
+        match step {
+            FiberStep.Performed(request) => {
+                print_i64(request);
+                step = Fiber.resume(&mut f, request + 1);
+            },
+            FiberStep.Finished(total) => {
+                print_i64(total);
+                done = true;
+            },
+        }
+    }
+}
+```
+
+```output
+0
+10
+20
+33
+```
+
+A `Fiber` is an owned value: it may be moved, stored in a `Vec` or a record,
+and resumed from there, also by another task of the same OS thread. A thread
+body cannot capture or return one. Dropping a fiber that has not finished unwinds it as
+a panic would, so its frames free what they own; a fiber that never started
+has its body dropped. A panic inside a fiber unwinds to the fiber's entry and
+is raised again in the code that resumed it. A fiber may perform `suspend`
+(`Task.yield`, `Task.join`, task I/O) between its suspensions; that switches
+tasks as it would outside the fiber.
+
+Resuming a fiber that has finished panics. In `kush eval`, dropping a fiber
+that is suspended stops with an "unsupported" error; native programs unwind
+it.
+
+The operation is named explicitly:
+
+```kush reject
+effect Emit: i64 -> i64;
+fn main() -> Unit ! {alloc} { let _f = Fiber.new(fn() -> i64 ! {Emit} { 1 }); }
+// error: Fiber.new names the operation its body suspends with
+```
+
+The body may perform no other declared operation, since the handler of that
+operation could end before the fiber is resumed:
+
+```kush reject
+effect Emit: i64 -> i64;
+effect Other: i64 -> i64;
+fn main() -> Unit ! {alloc} {
+    let _f = Fiber.new::<Emit>(fn() -> i64 ! {Emit, Other} { perform Other(1) });
+}
+// error: a fiber's body may perform only 'Emit' among declared operations
+```
+
+A fiber may outlive the frame that made it, so its body captures no borrows,
+and its types hold none:
+
+```kush reject
+effect Emit: i64 -> i64;
+fn main() -> Unit ! {alloc} {
+    let values: [i64; 2] = [1, 2];
+    let view = &values[..];
+    let _f = Fiber.new::<Emit>(fn() -> i64 ! {Emit} { Slice.len(view) });
+}
+// error: a fiber's body cannot capture
+```
+
+An abortive operation (one whose result is `Never`) cannot suspend a fiber:
+
+```kush reject
+effect Stop: i64 -> Never;
+fn main() -> Unit ! {alloc} { let _f = Fiber.new::<Stop>(fn() -> i64 ! {Stop} { 1 }); }
+// error: the abortive operation 'Stop' cannot suspend a fiber
+```
+
 ## Threads
 
 `Thread.scope` / `Thread.spawn` / `Thread.join` have the shape of the task
@@ -103,8 +215,8 @@ fn main() -> Unit ! {io, alloc} {
 10
 ```
 
-A thread body cannot capture arenas, allocator contexts, closures or trait
-objects, and starts with an empty handler stack. Shared mutable state goes
+A thread body cannot capture arenas, allocator contexts, closures, trait
+objects or fibers, cannot return a fiber, and starts with an empty handler stack. Shared mutable state goes
 through atomics or channels, shared as views `&[Atomic]` / `&[Channel<T>]`:
 
 | Operation | Result |

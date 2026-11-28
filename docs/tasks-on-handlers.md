@@ -222,6 +222,47 @@ language change.
 - Tests: `tests/fiber_runtime.rs` drives the C API from a C harness. The
   evaluator gets fibers with FIBER-HANDLERS, the first code that makes them.
 
+### As built: FIBER-HANDLERS
+
+The surface is a fiber value rather than a `handle ... with fiber fn`
+clause (user, 2026-11-27: "go with the Fiber value surface"). It is the
+shallow form of T2 with the continuation kept inside an owned value:
+
+- `Fiber<A, R, once fn() -> T ! {e}>` is an opaque record (a foreign
+  resource whose release is `kush_fiber_drop`). `Fiber.new::<Op>(body)`
+  makes one; `Fiber.start(&mut f)` and `Fiber.resume(&mut f, reply)` run it
+  to its next `perform Op(a)` or to its end and return
+  `std.fiber.FiberStep<A, T>` (`Performed(a)` or `Finished(t)`). Reference:
+  chapter 8, "Fibers".
+- In place of the linear `Resume`, the `Fiber` itself is the suspended
+  continuation. It is affine, not linear: dropping a suspended fiber
+  discontinues it (unwinds its frames), and one that never started drops its
+  body. A scheduler keeps fibers in a `Vec` and resumes them by `&mut`.
+- Checker: `Op` is named explicitly and may not be abortive; the body is a
+  named function or a lambda with no parameters, performs no other declared
+  operation (another handler could end before the fiber is resumed), and
+  captures no borrows (a fiber may outlive its frame); `A`, `R` and `T` hold
+  no borrows. `Fiber.new` needs `alloc`; `start` and `resume` need the body's
+  built-in effects `e`.
+- Lowering: the capability pass gives the body, for `Op`, the cell of a
+  handler arrow synthesized per handler type (`FiberOp::Cell`). That handler
+  stores the request in a slot, calls `kush_fiber_suspend`, and loads the
+  reply from the slot address the resumer passed (0 means discontinued, so it
+  returns without a value and the suspension's panic unwinds). MIR has
+  `TaskOp::Fiber`; native code calls `kush_fiber_new` with the task wrapper
+  of the body, and `kush_fiber_step` (start with 0, resume with the reply's
+  address; misuse is a catchable panic), then `kush_fiber_request` or
+  `kush_fiber_result` to build the `FiberStep`.
+- Evaluator: a fiber is a task record (`fiber: true`) run in place of its
+  resumer; a perform of the fiber cell suspends it with the request as its
+  exchange. Limit: dropping a suspended fiber stops with "unsupported",
+  since a drop cannot unwind another task in the evaluator; native code does
+  it.
+- A fiber may be resumed by any task of the OS thread that made it (it
+  runs in the task that resumes it). A thread body cannot capture or return
+  one; the runtime also checks the thread.
+- Not done here: moving `Task.*` onto fibers (STD-SCHEDULER, TASKS-SWITCH).
+
 ## 8. Decisions (user, 2026-11-27)
 
 Each recommendation below was accepted: T1 fibers, T2 shallow resumption

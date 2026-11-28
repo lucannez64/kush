@@ -2125,6 +2125,13 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
+            ExprKind::Fiber { operands, .. } => {
+                for operand in operands {
+                    if !self.expr(operand, Grade::ONE)? {
+                        return Ok(false);
+                    }
+                }
+            }
             ExprKind::TaskJoin { task, .. } => {
                 if !self.expr(task, Grade::ONE)? {
                     return Ok(false);

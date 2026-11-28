@@ -28,6 +28,7 @@ mod concurrency;
 mod conditionals;
 mod construction_staging;
 mod expressions;
+mod fibers;
 mod fusion;
 mod handlers;
 mod impl_patterns;

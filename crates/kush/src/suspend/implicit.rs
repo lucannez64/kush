@@ -21,7 +21,9 @@
 //! (handlers, callback builtins, foreign functions) keep the dynamic stack
 //! until HANDLERS-ONE-CALLBACKS.
 use super::{Result, performs_with};
-use crate::executable::{Block, Executable, Expr, ExprKind, Local, Statement, Target, Type};
+use crate::executable::{
+    Block, Executable, Expr, ExprKind, FiberOp, Local, Statement, Target, Type,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The `i64` local holding an operation's capability in some scope: the
@@ -319,6 +321,49 @@ impl Pass<'_> {
             *function = self.copy_with(*function, &operations, true);
             captures.extend(supplied);
             body.ty = Type::Once(bare);
+            return;
+        }
+        // FIBER-HANDLERS: the same for a fiber's body, except that the
+        // fiber's own operation gets the cell of the handler that suspends
+        // the running fiber. The checker allowed no other declared
+        // operation in the body's row.
+        let span = expr.span;
+        if let ExprKind::Fiber {
+            op: FiberOp::New {
+                operation, handler, ..
+            },
+            operands,
+        } = &mut expr.kind
+            && let Type::Once(arrow) = operands[0].ty
+            && let Some(&bare) = self.split.get(&arrow)
+            && let ExprKind::FnValue { function, captures } = &mut operands[0].kind
+            && *function < self.originals
+        {
+            let operations = self.rows[arrow].clone();
+            let mut supplied = Vec::new();
+            for &needed in &operations {
+                if needed == *operation {
+                    supplied.push(Expr {
+                        kind: ExprKind::Fiber {
+                            op: FiberOp::Cell { handler: *handler },
+                            operands: vec![],
+                        },
+                        ty: Type::I64,
+                        span,
+                        resource: None,
+                    });
+                } else {
+                    supplied.extend(self.supply(&[needed], scope, span));
+                }
+            }
+            for capture in captures.iter_mut() {
+                self.expr(capture, scope);
+            }
+            *function = self.copy_with(*function, &operations, true);
+            captures.extend(supplied);
+            if let ExprKind::Fiber { operands, .. } = &mut expr.kind {
+                operands[0].ty = Type::Once(bare);
+            }
             return;
         }
         if let ExprKind::HandlerPush {
@@ -965,6 +1010,15 @@ fn value_operations(program: &Executable, caps: &BTreeSet<usize>) -> Vec<Vec<usi
             {
                 pin(body.ty)
             }
+            ExprKind::Fiber {
+                op: FiberOp::New { .. },
+                operands,
+            } if !matches!(&operands[0].kind, ExprKind::FnValue { function, .. }
+                    if program.functions[*function].closure.is_some()
+                        && program.functions[*function].parameter_slots.is_none()) =>
+            {
+                pin(operands[0].ty)
+            }
             ExprKind::Call(Target::Function(callee), arguments)
                 if program.foreign_functions[*callee].is_some() =>
             {
@@ -1065,9 +1119,27 @@ fn collect_tokens(block: &Block, program: &Executable, tokens: &mut BTreeSet<usi
 }
 
 /// Arrows of task bodies whose rows name operations with capabilities.
+/// The body of a `Fiber.new` (FIBER-HANDLERS), which the runtime calls
+/// without capabilities, as it calls a task body.
+fn fiber_body(expr: &Expr) -> Option<&Expr> {
+    match &expr.kind {
+        ExprKind::Fiber {
+            op: FiberOp::New { .. },
+            operands,
+        } => operands.first(),
+        _ => None,
+    }
+}
+
 fn collect_task_bodies(block: &Block, rows: &[Vec<usize>], split: &mut BTreeMap<usize, usize>) {
     fn walk(expr: &Expr, rows: &[Vec<usize>], split: &mut BTreeMap<usize, usize>) {
         if let ExprKind::TaskScope { body, .. } | ExprKind::TaskSpawn { body, .. } = &expr.kind
+            && let Type::Once(arrow) = body.ty
+            && !rows[arrow].is_empty()
+        {
+            split.insert(arrow, 0);
+        }
+        if let Some(body) = fiber_body(expr)
             && let Type::Once(arrow) = body.ty
             && !rows[arrow].is_empty()
         {

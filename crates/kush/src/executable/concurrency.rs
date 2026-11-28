@@ -719,21 +719,33 @@ impl Checker<'_, '_> {
     /// THREAD-SCOPE: types a thread may not receive, because they can reach
     /// allocator or environment state that is not thread-safe.
     pub(super) fn thread_unshareable(&self, ty: Type) -> bool {
+        self.reaches(ty, &|ty| {
+            matches!(
+                ty,
+                Type::Arena
+                    | Type::ArenaBox(_)
+                    | Type::AllocatorContext
+                    | Type::AllocBox(_)
+                    | Type::AllocVec(_)
+                    | Type::Once(_)
+                    | Type::Multi(_)
+                    | Type::DynObj(_)
+            ) || self.types.fiber_parts(ty).is_some()
+        })
+    }
+    /// Whether `ty` holds a value of a type `leaf` accepts, through owners,
+    /// references, enums and unions.
+    fn reaches(&self, ty: Type, leaf: &dyn Fn(Type) -> bool) -> bool {
         let mut pending = vec![ty];
         let mut seen = BTreeSet::new();
         while let Some(ty) = pending.pop() {
             if !seen.insert(ty) {
                 continue;
             }
+            if leaf(ty) {
+                return true;
+            }
             match ty {
-                Type::Arena
-                | Type::ArenaBox(_)
-                | Type::AllocatorContext
-                | Type::AllocBox(_)
-                | Type::AllocVec(_)
-                | Type::Once(_)
-                | Type::Multi(_)
-                | Type::DynObj(_) => return true,
                 Type::Box(p)
                 | Type::Vec(p)
                 | Type::Ref(p)
@@ -818,8 +830,18 @@ impl Checker<'_, '_> {
                 return Err(Diagnostic::new(
                     value.span,
                     format!(
-                        "a thread body cannot capture {}: arenas, user allocators, closures and trait objects may reach state another thread uses",
+                        "a thread body cannot capture {}: arenas, user allocators, closures, trait objects and fibers may reach state another thread uses",
                         self.types.name(ty)
+                    ),
+                ));
+            }
+            // A fiber runs only on the OS thread that made it.
+            if self.reaches(result, &|ty| self.types.fiber_parts(ty).is_some()) {
+                return Err(Diagnostic::new(
+                    value.span,
+                    format!(
+                        "a thread body cannot return {}: a fiber runs only on the thread that made it",
+                        self.types.name(result)
                     ),
                 ));
             }

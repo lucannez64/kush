@@ -54,6 +54,9 @@ fn fault<T>(what: impl Into<String>) -> Run<T> {
 const CODE: i64 = 1 << 62;
 /// A closure environment's first word: its drop glue, by index.
 const DROP: i64 = 1 << 61;
+/// The cell of a fiber's operation (FIBER-HANDLERS): a perform through it
+/// suspends the running fiber. Never a code word (it has the drop flag).
+const FIBER_CELL: i64 = CODE | DROP | 0xf1be;
 
 struct Allocation {
     bytes: Vec<u8>,
@@ -1964,6 +1967,9 @@ impl Machine<'_, '_> {
                     // artifact stays until the run ends.
                     if foreign.release == "kush_stage_release" {
                         return self.memory.free(words[0]);
+                    }
+                    if foreign.release == "kush_fiber_drop" {
+                        return self.fiber_drop(words[0] as usize);
                     }
                     return unsupported("a foreign resource");
                 }

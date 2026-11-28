@@ -1,0 +1,7 @@
+module std.fiber;
+
+/// What `Fiber.start` and `Fiber.resume` return (FIBER-HANDLERS,
+/// docs/tasks-on-handlers.md): the request a fiber suspended with, or the
+/// result its body finished with. A finished fiber cannot be resumed again.
+
+pub enum FiberStep<A, T> { Performed(A), Finished(T) }

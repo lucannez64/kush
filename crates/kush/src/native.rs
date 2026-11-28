@@ -1872,6 +1872,32 @@ fn lower(
     let task_scope_end = module
         .declare_function("kush_task_scope_end", Linkage::Import, &task_unary_sig)
         .map_err(error)?;
+    // FIBER-HANDLERS runtime entry points (docs/tasks-on-handlers.md).
+    let fiber_signature = |module: &CodeModule, parameters: usize| {
+        let mut signature = module.make_signature();
+        signature
+            .params
+            .extend((0..parameters).map(|_| AbiParam::new(I64)));
+        signature.returns.push(AbiParam::new(I64));
+        signature
+    };
+    let fiber_new_sig = fiber_signature(&module, 4);
+    let fiber_resume_sig = fiber_signature(&module, 2);
+    let fiber_unary_sig = fiber_signature(&module, 1);
+    let fibers = FiberFuncs {
+        new: module
+            .declare_function("kush_fiber_new", Linkage::Import, &fiber_new_sig)
+            .map_err(error)?,
+        resume: module
+            .declare_function("kush_fiber_step", Linkage::Import, &fiber_resume_sig)
+            .map_err(error)?,
+        request: module
+            .declare_function("kush_fiber_request", Linkage::Import, &fiber_unary_sig)
+            .map_err(error)?,
+        result: module
+            .declare_function("kush_fiber_result", Linkage::Import, &fiber_unary_sig)
+            .map_err(error)?,
+    };
     // THREAD-SCOPE runtime entry points (defined when built with threads).
     let thread_spawn = module
         .declare_function("kush_thread_spawn", Linkage::Import, &task_spawn_sig)
@@ -1989,6 +2015,7 @@ fn lower(
     let task_types = collect_task_types(program);
     let (task_wrappers, task_pointer_drops) =
         synthesize_task_wrappers(&mut module, program, &task_types, &drops)?;
+    let fiber_handlers = synthesize_fiber_handlers(&mut module, program)?;
     let mut ids = Vec::new();
     let mut foreign_ids = Vec::new();
     for (index, f) in program.functions.iter().enumerate() {
@@ -2267,6 +2294,8 @@ fn lower(
             handler_base: None,
             panic_block: None,
             task_wrappers: &task_wrappers,
+            fibers,
+            fiber_handlers: &fiber_handlers,
             task_pointer_drops: &task_pointer_drops,
             store_proved: false,
             index_below: false,
@@ -3888,10 +3917,165 @@ fn synthesize_drops(
     }
     Ok((ids, closure_ids))
 }
+/// The runtime's fiber entry points (FIBER-HANDLERS).
+#[derive(Clone, Copy)]
+struct FiberFuncs {
+    new: FuncId,
+    resume: FuncId,
+    request: FuncId,
+    result: FuncId,
+}
+/// The handler arrows whose fiber handler some `FiberOp::Cell` needs.
+fn collect_fiber_handlers(program: &Executable) -> Vec<usize> {
+    fn walk(node: &Expr, out: &mut Vec<usize>) {
+        if let ExprKind::Fiber {
+            op: ex::FiberOp::Cell { handler },
+            ..
+        } = &node.kind
+        {
+            out.push(*handler);
+        }
+        node.for_each_child(&mut |child| walk(child, out));
+    }
+    let mut ids = Vec::new();
+    for function in &program.functions {
+        for statement in &function.body.statements {
+            if let ex::Statement::Let(_, value) | ex::Statement::Expr(value) = statement {
+                walk(value, &mut ids);
+            }
+        }
+        if let Some(tail) = &function.body.tail {
+            walk(tail, &mut ids);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+/// For each handler arrow `fn(A, resume) -> R` a fiber's operation uses, the
+/// noncapturing handler a perform calls through the fiber's cell: it passes
+/// the request words to `kush_fiber_suspend` in a slot of its own frame,
+/// which stays alive while the fiber waits, and loads the reply from the
+/// slot the resumer passed back. The token is the identity token of an
+/// in-place perform, so it is not called. A zero reply means the fiber was
+/// discontinued and is unwinding: the result is never read.
+fn synthesize_fiber_handlers(
+    module: &mut CodeModule,
+    program: &Executable,
+) -> Result<BTreeMap<usize, FuncId>> {
+    let mut handlers = BTreeMap::new();
+    let arrows = collect_fiber_handlers(program);
+    if arrows.is_empty() {
+        return Ok(handlers);
+    }
+    let mut suspend_signature = module.make_signature();
+    suspend_signature.params.push(AbiParam::new(I64));
+    suspend_signature.returns.push(AbiParam::new(I64));
+    let suspend = module
+        .declare_function("kush_fiber_suspend", Linkage::Import, &suspend_signature)
+        .map_err(error)?;
+    for arrow in arrows {
+        let signature = &program.function_types[arrow];
+        let (request, reply) = (signature.parameters[0], signature.result);
+        let aggregate = aggregate_result(program, reply);
+        let mut handler_signature = module.make_signature();
+        if aggregate {
+            handler_signature.params.push(AbiParam::new(I64));
+        }
+        for parameter in &signature.parameters {
+            handler_signature
+                .params
+                .extend((0..program.width(*parameter)).map(|_| AbiParam::new(I64)));
+        }
+        if !aggregate {
+            handler_signature
+                .returns
+                .extend((0..program.width(reply)).map(|_| AbiParam::new(I64)));
+        }
+        let handler = module
+            .declare_function(
+                &format!("kush_fiber_handler_{arrow}"),
+                Linkage::Local,
+                &handler_signature,
+            )
+            .map_err(error)?;
+        let mut context = module.make_context();
+        let mut fc = FunctionBuilderContext::new();
+        let mut builder = module.function_builder(handler, &mut context, &mut fc);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let params = builder.block_params(entry).to_vec();
+        let (out, payload) = if aggregate {
+            (Some(params[0]), &params[1..])
+        } else {
+            (None, &params[..])
+        };
+        let request_width = program.width(request);
+        let slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            (request_width.max(1) * 8) as u32,
+            STACK_SLOT_ALIGN_SHIFT,
+        ));
+        let address = builder.stack_addr(I64, slot, 0);
+        for (index, word) in payload[..request_width].iter().enumerate() {
+            builder.store(ir::MemFlagsData::new(), *word, address, (index * 8) as i32);
+        }
+        let callee = builder.declare_func(module, suspend);
+        let call = builder.call(callee, &[address]);
+        let reply_address = builder.inst_results(call)[0];
+        let reply_width = program.width(reply);
+        let read = builder.create_block();
+        let unwinding = builder.create_block();
+        let missing = builder.icmp_imm_s(IntCC::Equal, reply_address, 0);
+        builder.brif(missing, unwinding, &[], read, &[]);
+        builder.switch_to_block(read);
+        let words = (0..reply_width)
+            .map(|index| {
+                builder.load(
+                    I64,
+                    ir::MemFlagsData::new(),
+                    reply_address,
+                    (index * 8) as i32,
+                )
+            })
+            .collect::<Vec<_>>();
+        match out {
+            Some(out) => {
+                for (index, word) in words.iter().enumerate() {
+                    builder.store(ir::MemFlagsData::new(), *word, out, (index * 8) as i32);
+                }
+                builder.return_(&[]);
+            }
+            None => {
+                builder.return_(&words);
+            }
+        }
+        builder.switch_to_block(unwinding);
+        if out.is_some() {
+            builder.return_(&[]);
+        } else {
+            let zero = builder.iconst(I64, 0);
+            builder.return_(&vec![zero; reply_width]);
+        }
+        builder.seal_all_blocks();
+        define_body!(module, handler, builder, context)?;
+        handlers.insert(arrow, handler);
+    }
+    Ok(handlers)
+}
 fn collect_task_types(program: &Executable) -> Vec<usize> {
     fn walk(node: &Expr, out: &mut Vec<usize>) {
         if let ExprKind::TaskSpawn { body, .. } = &node.kind
             && let Type::Once(id) = body.ty
+        {
+            out.push(id);
+        }
+        if let ExprKind::Fiber {
+            op: ex::FiberOp::New { .. },
+            operands,
+        } = &node.kind
+            && let Type::Once(id) = operands[0].ty
         {
             out.push(id);
         }
@@ -4106,6 +4290,9 @@ const FAILING_RUNTIME: &[&str] = &[
     "kush_alloc_vec_set",
     "kush_alloc_vec_pop",
     "kush_task_scope_begin",
+    // A panic that unwound a fiber is raised again in its resumer, and a
+    // fiber started twice or resumed before it started panics.
+    "kush_fiber_step",
     "kush_print_i64",
     "kush_print_u64",
     "kush_print_f64",
@@ -4242,6 +4429,10 @@ struct Generator<'b, E: Emit> {
     /// when no unwinding needs per-site cleanup (FND-LLVM-PANIC-SHARE).
     panic_block: Option<ir::Block>,
     task_wrappers: &'b BTreeMap<usize, FuncId>,
+    fibers: FiberFuncs,
+    /// The handler that suspends the running fiber, per handler arrow
+    /// (`FiberOp::Cell`).
+    fiber_handlers: &'b BTreeMap<usize, FuncId>,
     task_pointer_drops: &'b BTreeMap<Type, FuncId>,
     tracked: Vec<Tracked>,
     function_index: usize,
@@ -7184,6 +7375,91 @@ impl<E: Emit> Generator<'_, E> {
             spawn,
             &[wrapper, values[0], values[1], bytes, drop, preserve],
         )
+    }
+    /// A fiber operation (FIBER-HANDLERS) on its operands' words; `types`
+    /// are the operands' types.
+    fn fiber_op(&mut self, op: ex::FiberOp, words: &[Words], types: &[Type]) -> Words {
+        match op {
+            ex::FiberOp::New { result, .. } => {
+                let Type::Once(id) = types[0] else {
+                    unreachable!("a checked fiber body is once")
+                };
+                let wrapper = self.task_wrappers[&id];
+                let wrapper = self.builder.declare_func(self.module, wrapper);
+                let wrapper = self.builder.func_addr(I64, wrapper);
+                let bytes = self.constant((self.program.width(result).max(1) * 8) as i64);
+                vec![
+                    self.runtime_call(self.fibers.new, &[wrapper, words[0][0], words[0][1], bytes]),
+                ]
+            }
+            ex::FiberOp::Cell { handler } => {
+                let code = self
+                    .builder
+                    .declare_func(self.module, self.fiber_handlers[&handler]);
+                vec![self.builder.func_addr(I64, code)]
+            }
+            ex::FiberOp::Start { step } => self.fiber_step(words[0][0], None, step),
+            ex::FiberOp::Resume { step } => self.fiber_step(words[0][0], Some(&words[1]), step),
+        }
+    }
+    /// Run the fiber behind `reference` until it suspends or finishes, with
+    /// `reply` (in a slot of this frame, which the fiber reads before it
+    /// runs on) as the result of the perform it waits in, and build the
+    /// `FiberStep` from its request or its result.
+    fn fiber_step(
+        &mut self,
+        reference: Value,
+        reply: Option<&[Value]>,
+        step: ex::FiberStepShape,
+    ) -> Words {
+        let handle = self
+            .builder
+            .load(I64, ir::MemFlagsData::new(), reference, 0);
+        let reply = match reply {
+            Some(words) => {
+                // Never zero, even for a reply with no words: zero tells the
+                // fiber it was discontinued.
+                let slot = self.stack_words(words.len().max(1));
+                self.store_words(slot, words);
+                slot
+            }
+            None => self.constant(0),
+        };
+        let status = self.runtime_call(self.fibers.resume, &[handle, reply]);
+        let Some(join) = self.join(step.ty) else {
+            unreachable!("FiberStep is a value")
+        };
+        let performed = self.builder.create_block();
+        let finished = self.builder.create_block();
+        let done = self.builder.icmp_imm_s(IntCC::NotEqual, status, 0);
+        self.builder.brif(done, finished, &[], performed, &[]);
+        for (block, source, width, tag) in [
+            (
+                performed,
+                self.fibers.request,
+                self.program.width(step.request),
+                step.performed_tag,
+            ),
+            (
+                finished,
+                self.fibers.result,
+                self.program.width(step.result),
+                step.finished_tag,
+            ),
+        ] {
+            self.builder.switch_to_block(block);
+            let address = self.runtime_call(source, &[handle]);
+            let payload = (0..width)
+                .map(|index| {
+                    self.builder
+                        .load(I64, ir::MemFlagsData::new(), address, (index * 8) as i32)
+                })
+                .collect::<Vec<_>>();
+            let values = self.encode_variant(step.ty, tag, &payload);
+            self.jump(join, &values);
+        }
+        self.builder.switch_to_block(join);
+        self.builder.block_params(join).to_vec()
     }
     /// A task or thread scope (or `Task.catch`, a scope that is also a
     /// catch boundary) running the owned `once` body `values`; `ty` is the

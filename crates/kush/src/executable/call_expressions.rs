@@ -235,6 +235,9 @@ impl Checker<'_, '_> {
             if binding.kind == BindingKind::Builtin && binding.name.starts_with("GpuBuf.") {
                 return c.gpu_buf_call(&binding.name.clone(), explicit, arguments, expected, span);
             }
+            if binding.kind == BindingKind::Builtin && binding.name.starts_with("Fiber.") {
+                return c.fiber_call(&binding.name.clone(), explicit, arguments, expected, span);
+            }
             if binding.kind == BindingKind::Builtin
                 && (binding.name.starts_with("Task.") || binding.name.starts_with("Thread."))
             {

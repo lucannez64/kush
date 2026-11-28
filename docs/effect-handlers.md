@@ -342,6 +342,14 @@ reference evaluator.
   resumed by an outer handler; both are rejected under a non-tail handler;
 - `perform` cannot be used in an erased logical definition or a total function.
 
+Most of these limits come from the CPS lowering. A fiber
+(`Fiber.new::<Op>(body)`, reference chapter 8) does not use it: its body runs
+on its own stack, and a perform of `Op` in it or in a function it calls is a
+call of a handler that switches to the resumer's stack. The resumer gets the
+request as a `FiberStep` and continues the fiber with `Fiber.resume`, as an
+explicit loop rather than a handler clause. Design and lowering:
+docs/tasks-on-handlers.md.
+
 The tests in `crates/kush/tests/effect_state_machines.rs` and
 `crates/kush/tests/advanced_types_effects.rs` cover both backends with
 allocation balance: performs in loops, branches, expressions and called

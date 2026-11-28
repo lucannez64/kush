@@ -74,6 +74,8 @@ mod executable;
 mod ffi;
 #[path = "fiber_runtime.rs"]
 mod fiber_runtime;
+#[path = "fibers.rs"]
+mod fibers;
 #[path = "field_privacy.rs"]
 mod field_privacy;
 #[path = "floats.rs"]

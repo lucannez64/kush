@@ -143,6 +143,9 @@ impl Machine<'_, '_> {
         cell: i64,
         span: Span,
     ) -> Run<Flow> {
+        if cell == FIBER_CELL {
+            return self.fiber_suspend(payload, span);
+        }
         let taken = if cell == 0 {
             self.lookup(operation as i64)?
         } else {

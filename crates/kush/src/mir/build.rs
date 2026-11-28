@@ -1444,6 +1444,27 @@ impl Builder<'_> {
                 return self.task(expr, op, Some(body), true);
             }
             ExprKind::TaskYield => return self.task(expr, TaskOp::Yield, None, false),
+            // FIBER-HANDLERS: the body and the reply move into the fiber;
+            // the reference to a fiber is only read.
+            ExprKind::Fiber { op, operands } => {
+                let exprs = operands.iter().collect::<Vec<_>>();
+                let Some(values) = self.operands(&exprs)? else {
+                    return Ok(None);
+                };
+                for (at, operand) in operands.iter().enumerate() {
+                    let reference = matches!(
+                        op,
+                        crate::executable::FiberOp::Start { .. }
+                            | crate::executable::FiberOp::Resume { .. }
+                    ) && at == 0;
+                    if !reference {
+                        self.consume(operand);
+                    }
+                }
+                let temp = self.temp(expr.ty);
+                self.assign(temp, Rvalue::Task(TaskOp::Fiber(*op), values), expr.span);
+                Operand::Move(Place::local(temp))
+            }
             ExprKind::TaskCheckCancel => return self.task(expr, TaskOp::CheckCancel, None, false),
             ExprKind::TaskCancel(reference) => {
                 return self.task(expr, TaskOp::Cancel, Some(reference), false);

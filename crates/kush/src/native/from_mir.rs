@@ -982,6 +982,13 @@ impl<E: Emit> Generator<'_, E> {
                     TaskOp::Join { exit, parallel } => {
                         Some(self.task_join(words[0][0], exit, parallel))
                     }
+                    TaskOp::Fiber(op) => {
+                        let types = operands
+                            .iter()
+                            .map(|operand| body.operand_ty(*operand))
+                            .collect::<Vec<_>>();
+                        Some(self.fiber_op(op, &words, &types))
+                    }
                 }
             }
             Rvalue::Bytes(bytes) => {
