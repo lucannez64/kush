@@ -85,3 +85,33 @@ To get within budget: `Vec.get`/`Vec.set` compiled inline, the per-slot
 vectors folded into one record per slot, the step and reply passed in
 registers rather than through copied slots, and a fiber stack reused with
 its slot.
+
+### After the first STD-SCHED-FAST changes
+
+Same day, same machine (light desktop use, load average about 4), with:
+- `Vec.get`/`Vec.set` inline (both backends);
+- the ready ring a power of two (a mask instead of `%`), pushed inline;
+- `kush_fiber_step` running the resume directly;
+- a fiber's control block and result buffer in one allocation.
+
+| Kernel | Operation | LLVM ms | LLVM ns/op | Cranelift ms | Cranelift ns/op |
+| --- | --- | ---: | ---: | ---: | ---: |
+| yield | yield | 187 | 31 | 182 | 30 |
+| spawn-join | spawn and join | 221 | 89 | 232 | 93 |
+| sched-yield | yield (std.sched) | 266 | 44 | 311 | 52 |
+| sched-spawn-join | spawn and join (std.sched) | 355 | 142 | 463 | 185 |
+
+`std.sched` is now 1.4 (LLVM) to 1.7 (Cranelift) times the C scheduler
+for a yield and 1.6 to 2 times for a spawn and join: still outside T5. The
+context switch costs the same in both (8-9 ns of a yield). The rest is the
+layers a perform crosses that the C path does not have:
+- the synthesized handler arrow between `perform` and `kush_fiber_suspend`;
+- a 2-word request (the `Request` tag and payload) written to memory and read
+  back as a `FiberStep`;
+- `kush_fiber_step`'s checks;
+- for a spawn, a fiber, its stack and the closure environment from the
+  allocator.
+
+Closing that is part of TASKS-SWITCH, where the compiler makes the task
+fibers: `suspend` lowers to the runtime call itself, with a one-word
+request.

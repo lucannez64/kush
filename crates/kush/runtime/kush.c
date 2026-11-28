@@ -2949,12 +2949,24 @@ uint64_t kush_vec_with_capacity(int64_t capacity, int64_t width) {
     return (uint64_t)(uintptr_t)v;
 }
 int64_t kush_vec_len(uint64_t handle) { return (int64_t)((KushVec *)(uintptr_t)handle)->length; }
+/* The out-of-range paths of kush_vec_get and kush_vec_set, out of line and
+   cold: what is left of the two is small enough for LLVM to inline at every
+   call, where the copy has a constant width (STD-SCHED-FAST). */
+__attribute__((noinline, cold)) static void kush_vec_get_missed(uint64_t *out, uint64_t width) {
+    if (kush_panic_unwinds()) memset(out, 0, (size_t)(width * 8));
+    KUSH_FAIL_VOID();
+}
+__attribute__((noinline, cold)) static uint64_t kush_vec_set_missed(uint64_t handle, uint64_t *old, uint64_t width) {
+    /* The item stays with the caller's cleanup; the vector is unchanged. */
+    if (kush_panic_unwinds()) memset(old, 0, (size_t)(width * 8));
+    KUSH_FAIL(handle);
+}
 void kush_vec_get(uint64_t handle, int64_t index, uint64_t *out, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     KUSH_FUZZ_INDEX(index, v->length);
-    if (index < 0 || (uint64_t)index >= v->length) {
-        if (kush_panic_unwinds()) memset(out, 0, (size_t)(width * 8));
-        KUSH_FAIL_VOID();
+    if (__builtin_expect(index < 0 || (uint64_t)index >= v->length, 0)) {
+        kush_vec_get_missed(out, width);
+        return;
     }
     memcpy(out, v->data + (uint64_t)index * width, (size_t)(width * 8));
 }
@@ -2974,11 +2986,8 @@ uint64_t kush_vec_push(uint64_t handle, const uint64_t *item, uint64_t width) {
 uint64_t kush_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint64_t *old, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     KUSH_FUZZ_INDEX(index, v->length);
-    if (index < 0 || (uint64_t)index >= v->length) {
-        /* The item stays with the caller's cleanup; the vector is unchanged. */
-        if (kush_panic_unwinds()) memset(old, 0, (size_t)(width * 8));
-        KUSH_FAIL(handle);
-    }
+    if (__builtin_expect(index < 0 || (uint64_t)index >= v->length, 0))
+        return kush_vec_set_missed(handle, old, width);
     uint64_t *slot = v->data + (uint64_t)index * width;
     memcpy(old, slot, (size_t)(width * 8));
     memcpy(slot, item, (size_t)(width * 8));
@@ -4424,12 +4433,15 @@ static void kush_fiber_entry(void) {
    result buffer of `result_size` bytes. It starts at its first resume. */
 uint64_t kush_fiber_new(uint64_t wrapper, uint64_t code, uint64_t env, uint64_t result_size) {
     kush_task_init();
-    KushFiber *f = (KushFiber *)(uintptr_t)kush_alloc(sizeof(KushFiber));
+    /* One block: the control block, then the result buffer. */
+    size_t head = (sizeof(KushFiber) + 15) & ~(size_t)15;
+    size_t size = result_size == 0 ? 8 : (size_t)result_size;
+    KushFiber *f = (KushFiber *)(uintptr_t)kush_alloc(head + size);
     memset(f, 0, sizeof(*f));
     f->thread = &kush_in_thread;
     f->wrapper = wrapper; f->code = code; f->env = env;
-    f->result_size = result_size == 0 ? 8 : (size_t)result_size;
-    f->result = (void *)(uintptr_t)kush_alloc(f->result_size);
+    f->result_size = size;
+    f->result = (char *)f + head;
     void *base; size_t total;
     void *stack = kush_stack_alloc(KUSH_TASK_STACK, &base, &total);
     f->stack_base = base; f->stack_total = total;
@@ -4439,10 +4451,11 @@ uint64_t kush_fiber_new(uint64_t wrapper, uint64_t code, uint64_t env, uint64_t 
 }
 /* Switch to the fiber with `reply` until it suspends (0: its request is
    kush_fiber_request) or finishes (1: its result is kush_fiber_result).
-   A panic that unwound the fiber is raised again here. */
-uint64_t kush_fiber_resume(uint64_t handle, uint64_t reply) {
+   A panic that unwound the fiber is raised again here. Inlined into
+   kush_fiber_step, which program code calls for every step. */
+__attribute__((always_inline)) static inline uint64_t kush_fiber_run(uint64_t handle, uint64_t reply) {
     KushFiber *f = (KushFiber *)(uintptr_t)handle;
-    kush_task_init();
+    if (__builtin_expect(!kush_initialized, 0)) kush_task_init();
     if (f == NULL || f->thread != &kush_in_thread
         || (f->state != KUSH_FIBER_NEW && f->state != KUSH_FIBER_SUSPENDED))
         kush_panic();
@@ -4460,6 +4473,9 @@ uint64_t kush_fiber_resume(uint64_t handle, uint64_t reply) {
         KUSH_FAIL(1);
     }
     return 1;
+}
+uint64_t kush_fiber_resume(uint64_t handle, uint64_t reply) {
+    return kush_fiber_run(handle, reply);
 }
 /* From inside a fiber: give `request` to the resumer and wait for the
    reply. A discontinued fiber panics here instead, which unwinds it. */
@@ -4493,7 +4509,7 @@ uint64_t kush_fiber_step(uint64_t handle, uint64_t reply) {
     KushFiber *f = (KushFiber *)(uintptr_t)handle;
     if (f == NULL) kush_panic();
     if (f->state != (reply == 0 ? KUSH_FIBER_NEW : KUSH_FIBER_SUSPENDED)) KUSH_FAIL(0);
-    return kush_fiber_resume(handle, reply);
+    return kush_fiber_run(handle, reply);
 }
 uint64_t kush_fiber_request(uint64_t handle) {
     KushFiber *f = (KushFiber *)(uintptr_t)handle;
@@ -4512,7 +4528,6 @@ void kush_fiber_free(uint64_t handle) {
     if (f == NULL || f->state != KUSH_FIBER_FINISHED) kush_panic();
     kush_stack_free(f->stack_base, f->stack_total);
     kush_kstack_drain(&f->handlers);
-    kush_free((uint64_t)(uintptr_t)f->result);
     kush_free((uint64_t)(uintptr_t)f);
 }
 /* End a fiber that will not be resumed. One that never ran drops its

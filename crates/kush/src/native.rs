@@ -5974,6 +5974,29 @@ impl<E: Emit> Generator<'_, E> {
         self.builder.block_params(join)[0]
     }
 
+    /// Branch on whether `index` is inside the vector behind `handle`: the
+    /// in-range block, the out-of-range block, and a join block taking
+    /// `params` words.
+    fn vec_range_check(
+        &mut self,
+        handle: Value,
+        index: Value,
+        params: usize,
+    ) -> (ir::Block, ir::Block, ir::Block) {
+        let length = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+            g.builder.load(I64, ir::MemFlagsData::new(), handle, 0)
+        });
+        // Unsigned: a negative index is out of range too.
+        let inside = self.builder.icmp(IntCC::UnsignedLessThan, index, length);
+        let fast = self.builder.create_block();
+        let slow = self.builder.create_block();
+        let join = self.builder.create_block();
+        for _ in 0..params {
+            self.builder.append_block_param(join, I64);
+        }
+        self.builder.brif(inside, fast, &[], slow, &[]);
+        (fast, slow, join)
+    }
     fn slice_out_of_bounds(&mut self, index: Value, length: Value) -> Value {
         if self.index_below {
             // A dominating test already established `index < length`
@@ -6721,9 +6744,10 @@ impl<E: Emit> Generator<'_, E> {
             // Length, checked reads and copyable writes are inline: the header
             // is `{length, capacity}` followed by the elements (`KushVec`).
             // With speed optimization the length is an inline load (the header
-            // is `{length, capacity}`, `KushVec`). Checked reads and writes stay
-            // runtime calls: inlining them cost ~5-6% on the JSON benchmark
-            // (2026-11-06). Proved reads (`Vec.at`) are inline loads.
+            // is `{length, capacity}`, `KushVec`), and checked reads and writes
+            // are a range test, then a load or store, with the runtime call
+            // only when out of range (docs/native-optimizations.md, "Vector
+            // access"). Proved reads (`Vec.at`) are inline loads.
             VecOp::Len => {
                 let handle = self
                     .builder
@@ -6738,9 +6762,32 @@ impl<E: Emit> Generator<'_, E> {
                 let handle = self
                     .builder
                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                // Fuzz builds measure each index's margin in the runtime.
+                if self.codegen.optimization != Optimization::Speed
+                    || width == 0
+                    || self.fuzz.is_some()
+                {
+                    let out = self.stack_words(width);
+                    call(self, op, &[handle, values[1], out]);
+                    return self.load_words(out, 0, width);
+                }
+                // STD-SCHED-FAST: in range, a direct load; otherwise the
+                // runtime call, which panics.
+                let (fast, slow, join) = self.vec_range_check(handle, values[1], width);
+                self.builder.switch_to_block(fast);
+                let offset = self.builder.imul_imm_s(values[1], (width * 8) as i64);
+                let address = self.builder.iadd(handle, offset);
+                let words = self.memory_class(llvm::MemoryClass::BufferElements, |g| {
+                    g.load_words(address, 16, width)
+                });
+                self.jump(join, &words);
+                self.builder.switch_to_block(slow);
                 let out = self.stack_words(width);
                 call(self, op, &[handle, values[1], out]);
-                self.load_words(out, 0, width)
+                let words = self.load_words(out, 0, width);
+                self.jump(join, &words);
+                self.builder.switch_to_block(join);
+                self.builder.block_params(join).to_vec()
             }
             VecOp::At => {
                 // Proved in bounds: direct load after the 16-byte header.
@@ -6755,13 +6802,43 @@ impl<E: Emit> Generator<'_, E> {
                 vec![self.push_vector(values[0], &values[1..1 + width])]
             }
             VecOp::Set => {
+                let fast_path = self.codegen.optimization == Optimization::Speed
+                    && width > 0
+                    && self.fuzz.is_none();
+                let mut join = None;
+                if fast_path {
+                    // STD-SCHED-FAST: in range, a direct swap of the element.
+                    let (fast, slow, done) = self.vec_range_check(values[0], values[1], 1);
+                    self.builder.switch_to_block(fast);
+                    let offset = self.builder.imul_imm_s(values[1], (width * 8) as i64);
+                    let address = self.builder.iadd(values[0], offset);
+                    let previous = self.memory_class(llvm::MemoryClass::BufferElements, |g| {
+                        let previous = g.load_words(address, 16, width);
+                        for (word, value) in values[2..2 + width].iter().enumerate() {
+                            g.builder
+                                .store(WORD, *value, address, (16 + word * 8) as i32);
+                        }
+                        previous
+                    });
+                    self.drop_value(element, &previous);
+                    self.jump(done, &[values[0]]);
+                    self.builder.switch_to_block(slow);
+                    join = Some(done);
+                }
                 let item = self.stack_words(width);
                 self.store_words(item, &values[2..2 + width]);
                 let old = self.stack_words(width);
                 let handle = call(self, op, &[values[0], values[1], item, old]);
                 let previous = self.load_words(old, 0, width);
                 self.drop_value(element, &previous);
-                handle
+                match join {
+                    Some(done) => {
+                        self.jump(done, &handle);
+                        self.builder.switch_to_block(done);
+                        vec![self.builder.block_params(done)[0]]
+                    }
+                    None => handle,
+                }
             }
         }
     }

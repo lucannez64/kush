@@ -149,6 +149,21 @@ the same speed from proofs instead: `Vec.at` and `Bytes.at` with a proved
 index are plain loads, and `std.crc32` and `std.bytemap` are written that way
 (see [std-storage.md](std-storage.md)).
 
+Update (2026-11-28, STD-SCHED-FAST): checked `Vec.get` and `Vec.set` are now
+inline with speed optimization. The lowering emits the range test and the
+load or store, with the runtime call (which panics) only in the
+out-of-range block; fuzz builds keep the call, which measures each index's
+margin. For the LLVM backend the runtime's own `kush_vec_get`/`kush_vec_set`
+keep their out-of-range path in a cold out-of-line function, so the rest
+fits LLVM's inline budget (it was 325 against a threshold of 250). Effect:
+the `std.sched` yield went from 60 to 43 ns (LLVM) and 67 to 49 ns
+(Cranelift), and its spawn and join from 268 to 135 ns and 291 to 173 ns.
+`benchmarks/json-memory` (4096 × 15, mode 1, 21 interleaved runs against
+2f4605a) measured 58.2 against 59.1 ms (Cranelift) and 40.9 against 41.6 ms
+(LLVM), within the run-to-run spread of that session; mode 0 measured
+87.8 against 86.1 ms. The `checked-loops` and `feature-pipeline` LLVM
+kernels were unchanged.
+
 ## Runtime object cache and collection fast paths
 
 Native builds cache the compiled C runtime under

@@ -42,54 +42,36 @@ pub fn join(handle: i64) -> i64 ! {Sched} {
     perform Sched(Request.Join(handle))
 }
 
-/// A FIFO of task slots, a ring that doubles when full.
-struct Queue {
-    items: Vec<i64>,
-    head: i64,
-    count: i64,
-}
+// The ready queue is a ring of slots whose size is a power of two: the
+// `count` oldest are at `(head + k) & (size - 1)`. Growing keeps each slot at
+// `(head + k)` masked by the new size, so `head` never moves.
 
-fn queue_new() -> Queue ! {alloc} {
-    let mut items: Vec<i64> = Vec.with_capacity(8);
+fn ring_new() -> Vec<i64> ! {alloc} {
+    let mut ring: Vec<i64> = Vec.with_capacity(8);
     let mut i = 0;
     while i < 8 {
-        items = Vec.push(items, 0);
+        ring = Vec.push(ring, 0);
         i = i + 1;
     }
-    Queue { items: items, head: 0, count: 0 }
+    ring
 }
 
-fn queue_push(queue: Queue, slot: i64) -> Queue ! {alloc} {
-    let Queue { items, head, count } = queue;
-    let size = Vec.len(&items);
-    let mut items = items;
-    let mut head = head;
-    if count == size {
-        // Full: copy into twice the room, oldest first.
-        let mut grown: Vec<i64> = Vec.with_capacity(size * 2);
-        let mut i = 0;
-        while i < size * 2 {
-            let value = if i < count { Vec.get(&items, (head + i) % size) } else { 0 };
-            grown = Vec.push(grown, value);
-            i = i + 1;
-        }
-        items = grown;
-        head = 0;
+/// A full ring in twice the room.
+fn ring_grow(ring: Vec<i64>, head: i64) -> Vec<i64> ! {alloc} {
+    let size = Vec.len(&ring);
+    let mut grown: Vec<i64> = Vec.with_capacity(size * 2);
+    let mut i = 0;
+    while i < size * 2 {
+        grown = Vec.push(grown, 0);
+        i = i + 1;
     }
-    let size = Vec.len(&items);
-    items = Vec.set(items, (head + count) % size, slot);
-    Queue { items: items, head: head, count: count + 1 }
-}
-
-/// The oldest slot, or -1 when the queue is empty.
-fn queue_pop(queue: Queue) -> (Queue, i64) ! {} {
-    let Queue { items, head, count } = queue;
-    if count == 0 {
-        return (Queue { items: items, head: head, count: count }, -1);
+    let mut k = 0;
+    while k < size {
+        let slot = Vec.get(&ring, (head + k) & (size - 1));
+        grown = Vec.set(grown, (head + k) & (size * 2 - 1), slot);
+        k = k + 1;
     }
-    let slot = Vec.get(&items, head);
-    let size = Vec.len(&items);
-    (Queue { items: items, head: (head + 1) % size, count: count - 1 }, slot)
+    grown
 }
 
 /// A handle names a slot and the generation of the task in it, so a slot
@@ -119,8 +101,10 @@ pub fn run(root: Job) -> i64 ! {io, alloc} {
     // Slots of joined tasks, for reuse: `free[0..free_count]`.
     let mut free: Vec<i64> = Vec.with_capacity(8);
     let mut free_count = 0;
-    let mut ready = queue_new();
-    ready = queue_push(ready, 0);
+    let mut ready = ring_new();
+    ready = Vec.set(ready, 0, 0);
+    let mut head = 0;
+    let mut count = 1;
     // A task that goes on at once (after a spawn, or a join of a task that
     // has finished), ahead of the queue.
     let mut current = -1;
@@ -129,10 +113,10 @@ pub fn run(root: Job) -> i64 ! {io, alloc} {
     while running {
         let mut slot = current;
         current = -1;
-        if slot < 0 {
-            let (rest, next) = queue_pop(ready);
-            ready = rest;
-            slot = next;
+        if slot < 0 && count > 0 {
+            slot = Vec.get(&ready, head);
+            head = (head + 1) & (Vec.len(&ready) - 1);
+            count = count - 1;
         }
         if slot < 0 {
             running = false;
@@ -145,8 +129,13 @@ pub fn run(root: Job) -> i64 ! {io, alloc} {
             };
             match step {
                 FiberStep.Performed(Request.Yield) => {
-                    replies = Vec.set(replies, slot, 0);
-                    ready = queue_push(ready, slot);
+                    // `yield_now` ignores its reply.
+                    if count == Vec.len(&ready) {
+                        ready = ring_grow(ready, head);
+                    }
+                    let at = (head + count) & (Vec.len(&ready) - 1);
+                    ready = Vec.set(ready, at, slot);
+                    count = count + 1;
                 },
                 FiberStep.Performed(Request.Spawn(task)) => {
                     let mut child = Vec.len(&fibers);
@@ -167,12 +156,17 @@ pub fn run(root: Job) -> i64 ! {io, alloc} {
                         replies = Vec.push(replies, 0);
                         waiters = Vec.push(waiters, -1);
                     }
-                    ready = queue_push(ready, child);
+                    if count == Vec.len(&ready) {
+                        ready = ring_grow(ready, head);
+                    }
+                    let at = (head + count) & (Vec.len(&ready) - 1);
+                    ready = Vec.set(ready, at, child);
+                    count = count + 1;
                     replies = Vec.set(replies, slot, handle_of(child, Vec.get(&generations, child)));
                     current = slot;
                 },
                 FiberStep.Performed(Request.Join(handle)) => {
-                    let target = handle % 4294967296;
+                    let target = handle & 4294967295;
                     if target < 0
                         || target >= Vec.len(&fibers)
                         || target == slot
@@ -202,7 +196,12 @@ pub fn run(root: Job) -> i64 ! {io, alloc} {
                         replies = Vec.set(replies, waiter, value);
                         free = push_free(free, free_count, slot);
                         free_count = free_count + 1;
-                        ready = queue_push(ready, waiter);
+                        if count == Vec.len(&ready) {
+                            ready = ring_grow(ready, head);
+                        }
+                        let at = (head + count) & (Vec.len(&ready) - 1);
+                        ready = Vec.set(ready, at, waiter);
+                        count = count + 1;
                     }
                 },
             }

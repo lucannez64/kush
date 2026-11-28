@@ -187,7 +187,9 @@ pub(super) struct RuntimeSplit {
 
 /// Runtime functions whose bodies LLVM may inline into program code: reads,
 /// in-place writes and bookkeeping that never allocate, free or grow.
-pub(super) const INLINABLE: [&str; 23] = [
+pub(super) const INLINABLE: [&str; 25] = [
+    "kush_fiber_request",
+    "kush_fiber_result",
     "kush_vec_len",
     "kush_vec_get",
     "kush_vec_set",
