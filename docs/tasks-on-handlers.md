@@ -291,6 +291,50 @@ shallow form of T2 with the continuation kept inside an owned value:
   - `main` and each thread would run as the root task of a scheduler from
     the runtime prologue.
 
+### Decisions for TASKS-SWITCH (user, 2026-11-28)
+
+The user accepted the recommended option for each of the four points above
+("do 2. with recommended"). All four follow T3-A: the checked `Task.*`
+forms stay in the compiler, the scheduler is `std.sched`.
+
+- **D1, results of different types.** The compiler makes each task's
+  fiber from a wrapper `once fn() -> Unit` that runs the body and moves its
+  `T` into a result buffer the `Task<T>` handle owns (allocated at the
+  spawn, as `kush_task_spawn` does today). The queue holds one fiber type.
+  `Task.join` asks the scheduler to wait, then the compiler reads the
+  buffer; a cancelled task leaves it empty (`TaskExit.Cancelled`).
+- **D2, borrows and captured operations.** Task fibers made by the compiler
+  skip two checks of `Fiber.new`: borrowed captures, and declared operations
+  other than its own. The scope rules already make both safe: a `Task<T>`
+  cannot leave its scope, `spawn` is lexical, and the scope joins every
+  child before it returns. So what a task borrows from outside the scope,
+  and the handlers it captured (T4), outlive it. Fibers that user code
+  makes keep both checks.
+- **D3, a yield inside a nested fiber.** `suspend` stays a built-in row bit,
+  and its perform goes to the *task's* fiber, not the innermost one. The
+  runtime switches from the innermost stack straight to the scheduler and
+  keeps the chain of nested fibers linked, so resuming the task resumes that
+  innermost stack, as the C tasks do today. A user fiber's body may keep
+  `suspend` in its row, as now.
+- **D4, the root task.** The runtime prologue runs `main`, and each thread's
+  body, as the root task of a `std.sched` scheduler made for that OS thread.
+  `Task.scope` no longer makes a scheduler: it records its children and
+  joins them through the thread's scheduler at its end.
+- **Speed (T5).** A task's `suspend` perform lowers to the runtime call
+  itself: no synthesized handler arrow, and a one-word request (the kind in
+  the low bits, the payload above) that the scheduler reads without
+  building a `FiberStep` in memory. Spawn takes the stack from a per-slot
+  cache. TASKS-DELETE still waits for the T5 budget
+  (benchmarks/tasks/README.md).
+
+Order of work: the remaining STD-SCHEDULER nodes (STD-SCHED-CANCEL,
+STD-SCHED-PANIC, STD-SYS-EPOLL, EVAL-FIBER-DISCONTINUE), then TASKS-SWITCH
+in three steps:
+1. D3 and the one-word `suspend` in the runtime.
+2. D1 and D2 in the compiler, with `Task.*` lowered to `std.sched` behind a
+   flag, both paths tested.
+3. D4, then the default switches over.
+
 ## 8. Decisions (user, 2026-11-27)
 
 Each recommendation below was accepted: T1 fibers, T2 shallow resumption
