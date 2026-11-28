@@ -11185,9 +11185,9 @@
       "deps": [
         "FIBER-RUNTIME"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "docs/tasks-on-handlers.md step 3 (T1, T2): surface, checker rules (linear Resume, not across threads), MIR and native lowering, effect-handlers.md and reference with kush reject examples.",
-      "commit": null,
+      "commit": "2759636",
       "log": [
         {
           "time": "2026-11-27 20:58:43",
@@ -11198,6 +11198,21 @@
           "time": "2026-11-27 20:59:42",
           "who": "agent",
           "text": "Surface question for the user: the capability route (a built-in owned Fiber value handling a declared effect, resumed in place with Fiber.resume(&mut f, reply) -> Step) instead of handle .. with fiber fn(request, k: Resume). Vec cannot hold linear values and Kush has no user drop, so the handle must be a built-in affine type whose drop discontinues."
+        },
+        {
+          "time": "2026-11-27 21:31:32",
+          "who": "agent",
+          "text": "Paused (user), uncommitted WIP in the tree: Fiber<A,R,B> type (opaque foreign record, release kush_fiber_drop), std.fiber.FiberStep, checker executable/fibers.rs (Fiber.new::<Op>, start, resume), ExprKind::Fiber/FiberOp, capability pass gives the body the fiber cell, MIR TaskOp::Fiber, native lowering + per-arrow synthesized fiber handlers, evaluator fibers (suspended-fiber drop unsupported there). Generator works natively (both backends) and in eval. tests/fibers.rs: 3/7 pass; to fix: test programs (use std.task.TaskExit / Result imports; Vec<Fiber> closure capture of a mutable local gives a wrong count: expected output was mine, recheck; Box.get in fiber body: 'function values not supported' error in the Cranelift debug build path). Then docs/reference, full gate, commit."
+        },
+        {
+          "time": "2026-11-28 10:10:16",
+          "who": "agent",
+          "text": "All 9 fiber tests written; Fiber.start/resume misuse is a catchable panic (kush_fiber_step); fibers move between tasks of a thread, threads cannot capture/return them; discontinue during unwinding keeps the panic in flight. Reference ch. 8 Fibers, as-built in tasks-on-handlers.md."
+        },
+        {
+          "time": "2026-11-28 10:14:18",
+          "who": "agent",
+          "text": "done 2759636"
         }
       ]
     },
@@ -11237,6 +11252,17 @@
       ],
       "status": "todo",
       "desc": "docs/tasks-on-handlers.md step 6: only once T5 is met.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "BORROW-LET-WILDCARD",
+      "title": "let _ = f(&mut x) keeps the exclusive loan",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Two statements 'let _ = poke(&mut c);' in a row are rejected ('cannot borrow an owner while an exclusive &mut [T] view of it is live') for a plain fn taking &mut Record; 'let a = ...' and the statement form are accepted. Found while testing fibers (2026-11-28).",
       "commit": null,
       "log": []
     }
